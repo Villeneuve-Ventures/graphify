@@ -1,5 +1,6 @@
 """objc — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 from graphify.extractors.base import _file_stem, _make_id, _read_text, strict_aware
 from graphify.extractors.engine import _cpp_declarator_name, _semantic_reference_edge
@@ -52,7 +53,7 @@ def extract_objc(path: Path, *, strict: bool = False) -> dict:
     try:
         language = Language(tsobjc.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         # tree-sitter-objc cannot expand these argument-less annotation macros (no
         # trailing ';'), and their presence before @interface makes the parser fail to
         # emit a class_interface node (#1475). Blank them to equal-length spaces so byte

@@ -16,6 +16,8 @@ its own, separate from the multi-thousand-line ``extract`` module.
 
 from __future__ import annotations
 
+from graphify.source_io import current_source_io
+
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -64,6 +66,7 @@ def run_language_resolvers(
     *,
     resolvers: Sequence[LanguageResolver] | None = None,
     strict: bool = False,
+    scoped_resolvers: frozenset[Callable] = frozenset(),
 ) -> None:
     """Run every resolver whose suffix appears in ``paths``.
 
@@ -81,6 +84,9 @@ def run_language_resolvers(
     for resolver in active:
         if not (resolver.suffixes & suffixes_present):
             continue
+        scope = current_source_io()
+        if scope is not None and resolver.resolve not in scoped_resolvers:
+            scope.refuse("unadapted registered resolver: " + resolver.name)
         try:
             resolver.resolve(per_file, all_nodes, all_edges)
         except Exception as exc:

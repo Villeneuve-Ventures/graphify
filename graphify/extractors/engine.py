@@ -1,5 +1,6 @@
 """engine — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 import hashlib
 import importlib
@@ -2182,7 +2183,7 @@ def _extract_generic(
 
     try:
         parser = Parser(language)
-        source = path.read_bytes() if source_override is None else source_override
+        source = source_read_bytes(path) if source_override is None else source_override
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

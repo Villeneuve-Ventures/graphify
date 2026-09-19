@@ -14,6 +14,7 @@ Mirrors ``mcp_ingest``: recognized by filename, routed to the deterministic AST
 path (never the LLM), so a manifest is extracted exactly once.
 """
 from __future__ import annotations
+from graphify.source_io import source_read_text, source_stat
 
 import re
 import xml.etree.ElementTree as ET
@@ -51,9 +52,9 @@ def _pkg_id(name: str) -> str:
 def extract_package_manifest(path: Path) -> dict[str, Any]:
     """Parse a package manifest into a canonical package node + ``depends_on`` edges."""
     try:
-        if path.stat().st_size > _MAX_MANIFEST_BYTES:
+        if source_stat(path).st_size > _MAX_MANIFEST_BYTES:
             return {"nodes": [], "edges": [], "error": "manifest too large to index"}
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = source_read_text(path, encoding="utf-8", errors="replace")
     except OSError as exc:
         return {"nodes": [], "edges": [], "error": f"manifest read error: {exc}"}
 

@@ -1049,7 +1049,7 @@ def test_strict_source_identity_failure(tmp_path, monkeypatch, case):
         selected = case != "F061"
         frame = sys._getframe(1)
         while frame and not selected:
-            selected = frame.f_code.co_name == "extract" and "sym_remap" in frame.f_locals
+            selected = frame.f_code.co_name == "_extract_impl" and "sym_remap" in frame.f_locals
             frame = frame.f_back
         if path == source and selected:
             observed.append(path)

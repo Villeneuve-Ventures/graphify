@@ -1,5 +1,6 @@
 """pascal — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes, source_read_text
 
 import re
 from graphify.extractors.base import _file_stem, _make_id, strict_aware
@@ -233,7 +234,7 @@ def _extract_pascal_regex(path: Path, *, strict: bool = False) -> dict:
     is unavailable. Produces the same node/edge schema as the tree-sitter pass.
     """
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
+        raw = source_read_text(path, encoding="utf-8", errors="replace")
     except Exception as exc:
         return {"nodes": [], "edges": [], "error": str(exc)}
 
@@ -458,7 +459,7 @@ def extract_pascal(path: Path, *, strict: bool = False) -> dict:
     try:
         language = Language(tspascal.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception:

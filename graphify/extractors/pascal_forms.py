@@ -1,5 +1,6 @@
 """Pascal_forms extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes, source_read_text
 
 
 from pathlib import Path
@@ -30,7 +31,7 @@ def extract_lazarus_form(path: Path) -> dict:
     - component --references--> event handler (context: "event")
     """
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = source_read_text(path, encoding="utf-8", errors="replace")
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 
@@ -116,7 +117,7 @@ def extract_delphi_form(path: Path) -> dict:
     (`contains`) and event handler references (`references`, context "event").
     """
     try:
-        raw = path.read_bytes()
+        raw = source_read_bytes(path)
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 

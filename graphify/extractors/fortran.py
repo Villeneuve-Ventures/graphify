@@ -1,5 +1,6 @@
 """Fortran extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import current_source_io, source_read_bytes, source_resolve
 
 
 from pathlib import Path
@@ -22,16 +23,19 @@ def _cpp_preprocess(path: Path, *, strict: bool = False) -> bytes:
     relative or absolute include path it can read, which is a corpus-side
     file-exfiltration vector.
     """
+    scope = current_source_io()
+    if scope is not None:
+        scope.refuse('capital-F Fortran requires unaccounted external cpp inputs')
     import shutil
     import subprocess
     if not shutil.which("cpp"):
-        return path.read_bytes()
+        return source_read_bytes(path)
     try:
         # Pass an absolute path so a corpus file named like "-I/etc/x.F90" cannot
         # be parsed by cpp as an option (cpp does not accept a "--" end-of-options
         # terminator). An absolute path always begins with "/".
         result = subprocess.run(
-            ["cpp", "-w", "-P", "-nostdinc", "-I", "/dev/null", str(path.resolve())],
+            ["cpp", "-w", "-P", "-nostdinc", "-I", "/dev/null", str(source_resolve(path))],
             capture_output=True,
             timeout=30,
         )
@@ -43,7 +47,7 @@ def _cpp_preprocess(path: Path, *, strict: bool = False) -> bytes:
         if strict:
             raise
         pass
-    return path.read_bytes()
+    return source_read_bytes(path)
 
 @strict_aware
 def extract_fortran(path: Path, *, strict: bool = False) -> dict:
@@ -61,7 +65,7 @@ def extract_fortran(path: Path, *, strict: bool = False) -> dict:
     try:
         language = Language(tsfortran.language())
         parser = Parser(language)
-        source = _cpp_preprocess(path, strict=strict) if path.suffix in _FORTRAN_CPP_EXTS else path.read_bytes()
+        source = _cpp_preprocess(path, strict=strict) if path.suffix in _FORTRAN_CPP_EXTS else source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

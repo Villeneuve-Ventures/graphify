@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 
 from graphify.ids import make_id
+from graphify.source_io import current_source_io
 
 # Language built-in globals that AST may classify as call targets when used as
 # constructors or coercion functions (e.g. String(x), Number(x), Boolean(x)).
@@ -84,6 +85,9 @@ def call_with_strict(function, *args, strict=False):
 
 
 def _optional_stat(path, *, follow_symlinks=True):
+    scope = current_source_io()
+    if scope is not None:
+        return scope.probe(path)
     try:
         return os.stat(path, follow_symlinks=follow_symlinks)
     except OSError as exc:
@@ -93,18 +97,18 @@ def _optional_stat(path, *, follow_symlinks=True):
 
 
 def checked_exists(path: Path, *, strict=False):
-    return _optional_stat(path) is not None if strict else path.exists()
+    return _optional_stat(path) is not None if strict or current_source_io() else path.exists()
 
 
 def checked_is_file(path: Path, *, strict=False):
-    if not strict:
+    if not strict and current_source_io() is None:
         return path.is_file()
     info = _optional_stat(path)
     return info is not None and stat.S_ISREG(info.st_mode)
 
 
 def checked_is_dir(path: Path, *, strict=False):
-    if not strict:
+    if not strict and current_source_io() is None:
         return path.is_dir()
     info = _optional_stat(path)
     return info is not None and stat.S_ISDIR(info.st_mode)
@@ -118,7 +122,7 @@ def checked_glob(root: Path, pattern: str, *, strict=False):
     same stack order as Path.glob and do not recurse through symlink directories.
     Materialize each selected directory before yielding so a partial scan fails.
     """
-    if not strict:
+    if not strict and current_source_io() is None:
         return root.glob(pattern)
     pattern = os.fspath(pattern)
     drive, tail = os.path.splitdrive(pattern)
@@ -133,6 +137,9 @@ def checked_glob(root: Path, pattern: str, *, strict=False):
         parts.append("")
 
     def scan(path):
+        scope = current_source_io()
+        if scope is not None:
+            return [_ScopedEntry(p, mode) for p, mode in scope.listdir(path)]
         with os.scandir(path) as entries:
             return list(entries)
 
@@ -191,6 +198,22 @@ def checked_glob(root: Path, pattern: str, *, strict=False):
 
 
 def checked_rglob(root: Path, pattern: str, *, strict=False):
-    if not strict:
+    if not strict and current_source_io() is None:
         return root.rglob(pattern)
     return checked_glob(root, os.path.join("**", pattern), strict=True)
+
+
+class _ScopedEntry:
+    def __init__(self, path, mode):
+        self.path = str(path)
+        self.name = path.name
+        self.mode = mode
+
+    def is_symlink(self):
+        return stat.S_ISLNK(self.mode)
+
+    def stat(self, *, follow_symlinks=True):
+        info = current_source_io().probe(self.path)
+        if info is None:
+            current_source_io().refuse('listed entry disappeared')
+        return info

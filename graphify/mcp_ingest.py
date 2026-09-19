@@ -56,6 +56,7 @@ Cross-config emergent edges:
 """
 
 from __future__ import annotations
+from graphify.source_io import current_source_io, source_read_bytes
 
 import json
 import re
@@ -92,8 +93,11 @@ def extract_mcp_config(path: Path) -> dict[str, Any]:
         failure, oversize file, or missing ``mcpServers`` map
     """
     try:
-        with path.open("rb") as fh:
-            raw = fh.read(_MAX_BYTES + 1)
+        if current_source_io() is not None:
+            raw = source_read_bytes(path)
+        else:
+            with path.open("rb") as fh:
+                raw = fh.read(_MAX_BYTES + 1)
     except OSError as exc:
         return {"nodes": [], "edges": [], "error": f"mcp_ingest read error: {exc}"}
 

@@ -1,5 +1,6 @@
 """Terraform extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 
 from pathlib import Path
@@ -31,7 +32,7 @@ def extract_terraform(path: Path) -> dict:
     try:
         language = Language(tshcl.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

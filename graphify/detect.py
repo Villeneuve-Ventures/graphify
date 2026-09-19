@@ -1,5 +1,6 @@
 # file discovery, type classification, and corpus health checks
 from __future__ import annotations
+from graphify.source_io import engine_print, current_source_io, source_read_bytes, source_walk, engine_inputs, at_source_root, source_read_text, source_resolve, source_stat
 from graphify.extractors.base import checked_exists, checked_is_file, checked_is_dir, checked_glob
 import fnmatch
 import json
@@ -52,7 +53,7 @@ _OFFICE_MAX_COMPRESSION_RATIO = 200                 # uncompressed : compressed
 def _file_within_size_cap(path: Path, cap: int = _OFFICE_MAX_RAW_BYTES) -> bool:
     """True if *path* exists and its on-disk size is within *cap*."""
     try:
-        return path.stat().st_size <= cap
+        return source_stat(path).st_size <= cap
     except OSError:
         return False
 
@@ -213,7 +214,7 @@ def _looks_like_paper(path: Path) -> bool:
     """Heuristic: does this text file read like an academic paper?"""
     try:
         # Only scan first 3000 chars for speed
-        text = path.read_text(encoding="utf-8", errors="ignore")[:3000]
+        text = source_read_text(path, encoding="utf-8", errors="ignore")[:3000]
         hits = sum(1 for pattern in _PAPER_SIGNALS if pattern.search(text))
         return hits >= _PAPER_SIGNAL_THRESHOLD
     except Exception:
@@ -377,8 +378,11 @@ def _shebang_interpreter(path: Path, *, strict: bool = False) -> str | None:
     no shebang / the file is unreadable / parsing fails.
     """
     try:
-        with path.open("rb") as f:
-            first = f.read(256)
+        if current_source_io() is not None:
+            first = source_read_bytes(path)[:256]
+        else:
+            with path.open("rb") as f:
+                first = f.read(256)
         if not first.startswith(b"#!"):
             return None
         line = first.split(b"\n")[0].decode(errors="replace")[2:].strip()
@@ -696,7 +700,7 @@ _SKIP_DIRS = {
     "site-packages", "lib64",
     ".pytest_cache", ".mypy_cache", ".ruff_cache",
     ".tox", ".nox", ".eggs", "*.egg-info",  # nox is tox's successor, same .nox/ venv shape (#1804)
-    "graphify-out", GRAPHIFY_OUT_NAME,  # never treat own output as source input (#524); honour GRAPHIFY_OUT (#1423)
+    "graphify-out",  # configured ordinary output is handled by _is_noise_dir below
     # Coverage/test-artefact dirs — generated, never architecturally meaningful
     "coverage", "lcov-report",              # Vitest/Istanbul/nyc HTML reports (#870)
     "visual-tests", "visual-test",          # Playwright/visual-regression bundles (#869)
@@ -727,7 +731,7 @@ _JS_SNAPSHOT_TEST_ROOTS = frozenset({"__tests__", "__test__"})
 
 def _is_noise_dir(part: str, parent: "Path | None" = None, *, strict: bool = False) -> bool:
     """Return True if this directory name looks like a venv, cache, or dep dir."""
-    if part in _SKIP_DIRS:
+    if part in _SKIP_DIRS or (current_source_io() is None and part == GRAPHIFY_OUT_NAME):
         return True
     if part == "snapshots":
         # Prune only when it looks like an actual JS/Vitest snapshot dir.
@@ -784,13 +788,13 @@ def _parse_gitignore_line(raw: str) -> str:
 
 def _find_vcs_root(start: Path, *, strict: bool = False) -> Path | None:
     """Walk upward from start; return the first directory containing a VCS marker."""
-    current = start.resolve()
+    current = source_resolve(start)
     home = Path.home()
     while True:
         if any(checked_exists(current / m, strict=strict) for m in _VCS_MARKERS):
             return current
         parent = current.parent
-        if parent == current or current == home:
+        if parent == current or current == home or at_source_root(current):
             return None
         current = parent
 
@@ -812,7 +816,7 @@ def _git_info_exclude(vcs_root: Path, *, strict: bool = False) -> Path | None:
         git_dir = dot_git
     elif checked_is_file(dot_git, strict=strict):
         try:
-            content = dot_git.read_text(encoding="utf-8", errors="ignore").strip()
+            content = source_read_text(dot_git, encoding="utf-8", errors="ignore").strip()
         except OSError:
             if strict:
                 raise
@@ -820,21 +824,21 @@ def _git_info_exclude(vcs_root: Path, *, strict: bool = False) -> Path | None:
         if content.startswith("gitdir:"):
             gd = Path(content[len("gitdir:"):].strip())
             if not gd.is_absolute():
-                gd = (vcs_root / gd).resolve()
+                gd = source_resolve(vcs_root / gd)
             git_dir = gd
             # A linked worktree's gitdir holds a `commondir` file pointing at the
             # shared git dir, where info/exclude actually lives.
             commondir = gd / "commondir"
             if checked_exists(commondir, strict=strict):
                 try:
-                    cd_raw = commondir.read_text(encoding="utf-8", errors="ignore").strip()
+                    cd_raw = source_read_text(commondir, encoding="utf-8", errors="ignore").strip()
                 except OSError:
                     if strict:
                         raise
                     cd_raw = ""
                 if cd_raw:
                     cd = Path(cd_raw)
-                    git_dir = cd if cd.is_absolute() else (gd / cd).resolve()
+                    git_dir = cd if cd.is_absolute() else source_resolve(gd / cd)
     if git_dir is None:
         return None
     exclude = git_dir / "info" / "exclude"
@@ -861,7 +865,7 @@ def _load_dir_own_ignore(d: Path, *, strict: bool = False) -> list[tuple[Path, s
     for fname in (".gitignore", ".graphifyignore"):
         ignore_file = d / fname
         if checked_exists(ignore_file, strict=strict):
-            for raw in ignore_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for raw in source_read_text(ignore_file, encoding="utf-8", errors="ignore").splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
                     patterns.append((d, line))
@@ -882,7 +886,7 @@ def _load_graphifyignore(root: Path, *, strict: bool = False) -> list[tuple[Path
     scan root are picked up live during the os.walk in `detect()` instead,
     since they aren't known until the walk reaches them (#1206).
     """
-    root = root.resolve()
+    root = source_resolve(root)
     ceiling = _find_vcs_root(root, strict=strict) or root
 
     # Collect ancestor dirs from ceiling down to root (outer → inner)
@@ -903,7 +907,7 @@ def _load_graphifyignore(root: Path, *, strict: bool = False) -> list[tuple[Path
     # re-include still override it (#1810).
     info_exclude = _git_info_exclude(ceiling, strict=strict)
     if info_exclude is not None:
-        for raw in info_exclude.read_text(encoding="utf-8", errors="ignore").splitlines():
+        for raw in source_read_text(info_exclude, encoding="utf-8", errors="ignore").splitlines():
             line = _parse_gitignore_line(raw)
             if line:
                 patterns.append((ceiling, line))
@@ -1007,7 +1011,7 @@ def _load_graphifyinclude(root: Path, *, strict: bool = False) -> list[tuple[Pat
     files and hard-skipped noise directories are still excluded later.
     Uses the same VCS-root ceiling logic as _load_graphifyignore.
     """
-    root = root.resolve()
+    root = source_resolve(root)
     ceiling = _find_vcs_root(root, strict=strict) or root
 
     dirs: list[Path] = []
@@ -1023,7 +1027,7 @@ def _load_graphifyinclude(root: Path, *, strict: bool = False) -> list[tuple[Pat
     for d in dirs:
         include_file = d / ".graphifyinclude"
         if checked_exists(include_file, strict=strict):
-            for raw in include_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            for raw in source_read_text(include_file, encoding="utf-8", errors="ignore").splitlines():
                 line = _parse_gitignore_line(raw)
                 if line:
                     patterns.append((d, line))
@@ -1130,7 +1134,7 @@ def _auto_follow_symlinks(root: Path) -> bool:
 def _resolves_under_root(path: Path, root: Path, *, strict: bool = False) -> bool:
     """True when ``path`` resolves to a target inside ``root``."""
     try:
-        path.resolve().relative_to(root.resolve())
+        source_resolve(path).relative_to(source_resolve(root))
     except (OSError, RuntimeError, ValueError) as exc:
         if strict and not isinstance(exc, ValueError):
             raise
@@ -1138,11 +1142,39 @@ def _resolves_under_root(path: Path, root: Path, *, strict: bool = False) -> boo
     return True
 
 
-def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None, strict: bool = False) -> dict:
-    root = root.resolve()
+def detect(root, *, follow_symlinks=None, google_workspace=None, extra_excludes=None,
+           cache_root=None, strict=False, source_io=None, read_only=False,
+           quiet=False, ambient_output=True):
+    """Detect with optional scoped reads; no-write calls retain original Office inputs.
+
+    Scoped mode implies strict, read_only and ambient_output=False. Word counts
+    are unavailable (zero) there; no converter, provider or persistent cache runs.
+    Policy ancestor searches stop at the declared source root. External Git
+    routing requires explicit extra_roots; it never widens authority itself.
+    """
+    with engine_inputs(source_io, quiet=quiet):
+        scope = current_source_io()
+        if scope is not None:
+            if source_resolve(root) != scope.root:
+                scope.refuse('detector root differs from input scope')
+            if follow_symlinks:
+                scope.refuse('scoped detection cannot follow symlinks')
+            strict, read_only, ambient_output = True, True, False
+        result = _detect_impl(Path(root), follow_symlinks=follow_symlinks,
+                              google_workspace=google_workspace, extra_excludes=extra_excludes,
+                              cache_root=cache_root, strict=strict, read_only=read_only or not ambient_output,
+                              ambient_output=ambient_output)
+        if scope is not None and result['walk_errors']:
+            scope.refuse('partial enumeration: ' + repr(result['walk_errors']))
+        return result
+
+
+def _detect_impl(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None, strict: bool = False, read_only: bool = False, ambient_output: bool = True) -> dict:
+    root = source_resolve(root)
+    output_name = GRAPHIFY_OUT if ambient_output else "graphify-out"
     if follow_symlinks is None:
         follow_symlinks = False
-    google_workspace = google_workspace_enabled() if google_workspace is None else google_workspace
+    google_workspace = False if read_only else (google_workspace_enabled() if google_workspace is None else google_workspace)
     files: dict[FileType, list[str]] = {
         FileType.CODE: [],
         FileType.DOCUMENT: [],
@@ -1157,6 +1189,8 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         # PDFs/docx aren't re-parsed on every run just to size the corpus (#1656).
         # cache_root (when given, e.g. from `extract --out`) keeps this cache out
         # of the scanned corpus (#1747).
+        if read_only:
+            return 0
         from graphify import cache as _cache
         return _cache.cached_word_count(path, root, count_words, cache_root=cache_root)
 
@@ -1179,9 +1213,9 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
     include_patterns = _load_graphifyinclude(root, strict=strict)
 
     # Always include graphify-out/memory/ - query results filed back into the graph
-    memory_dir = root / GRAPHIFY_OUT / "memory"
+    memory_dir = root / output_name / "memory"
     scan_paths = [root]
-    if checked_exists(memory_dir, strict=strict):
+    if ambient_output and checked_exists(memory_dir, strict=strict):
         scan_paths.append(memory_dir)
 
     seen: set[Path] = set()
@@ -1195,21 +1229,21 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
     # so an incomplete enumeration is visible rather than silent.
     walk_errors: list[str] = []
     from graphify.transaction import _OperationalCorpusScan
-    operational_scan = _OperationalCorpusScan(root, GRAPHIFY_OUT)
+    operational_scan = _OperationalCorpusScan(root, output_name, source_io=current_source_io(), ambient_output=ambient_output)
 
     def _on_walk_error(err: OSError) -> None:
         import sys as _sys
         target = getattr(err, "filename", None) or "<unknown>"
         walk_errors.append(f"{target}: {err}")
-        print(
+        engine_print(
             f"[graphify] WARNING: could not scan {target} ({err}); "
             f"its files are missing from this run's enumeration.",
             file=_sys.stderr,
         )
 
     for scan_root in scan_paths:
-        in_memory_tree = checked_exists(memory_dir, strict=strict) and str(scan_root).startswith(str(memory_dir))
-        for dirpath, dirnames, filenames in os.walk(
+        in_memory_tree = ambient_output and checked_exists(memory_dir, strict=strict) and str(scan_root).startswith(str(memory_dir))
+        for dirpath, dirnames, filenames in source_walk(
             scan_root, followlinks=follow_symlinks, onerror=_on_walk_error
         ):
             dp = Path(dirpath)
@@ -1270,11 +1304,11 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
 
     all_files.sort(key=lambda p: str(p))
 
-    converted_dir = root / GRAPHIFY_OUT / "converted"
+    converted_dir = root / output_name / "converted"
 
     for p in all_files:
         # For memory dir files, skip hidden/noise filtering
-        in_memory = checked_exists(memory_dir, strict=strict) and str(p).startswith(str(memory_dir))
+        in_memory = ambient_output and checked_exists(memory_dir, strict=strict) and str(p).startswith(str(memory_dir))
         if not in_memory:
             # Skip files inside our own converted/ dir (avoid re-processing sidecars)
             if str(p).startswith(str(converted_dir)):
@@ -1288,6 +1322,8 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         if _is_sensitive(p):
             skipped_sensitive.append(str(p))
             continue
+        if current_source_io() is not None:
+            current_source_io().read_bytes(p)
         ftype = classify_file(p, strict=strict)
         if not ftype:
             # Considered but unclassifiable: an extension not in any supported set,
@@ -1298,6 +1334,10 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
             continue
         if ftype:
             if p.suffix.lower() in GOOGLE_WORKSPACE_EXTENSIONS:
+                if read_only:
+                    if current_source_io() is not None:
+                        current_source_io().refuse('unsupported comparison: Google Workspace shortcut')
+                    raise RuntimeError('unsupported comparison: Google Workspace shortcut')
                 if not google_workspace:
                     skipped_sensitive.append(
                         str(p)
@@ -1319,7 +1359,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                     skipped_sensitive.append(str(p) + " [Google Workspace export produced no readable text]")
                 continue
             # Office files: convert to markdown sidecar so subagents can read them
-            if p.suffix.lower() in OFFICE_EXTENSIONS:
+            if not read_only and p.suffix.lower() in OFFICE_EXTENSIONS:
                 md_path = convert_office_file(p, converted_dir)
                 if md_path:
                     if _is_ignored(md_path, root, ignore_patterns, _cache=ignore_cache):
@@ -1366,7 +1406,7 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         "walk_errors": walk_errors,
         "ignored": sorted(ignored),
         "graphifyignore_patterns": len(ignore_patterns),
-        "scan_root": str(root.resolve()),
+        "scan_root": str(source_resolve(root)),
     }
 
 

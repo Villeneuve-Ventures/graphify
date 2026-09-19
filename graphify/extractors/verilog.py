@@ -1,5 +1,6 @@
 """Verilog extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_read_bytes
 
 import re
 
@@ -215,7 +216,7 @@ def extract_verilog(path: Path) -> dict:
     try:
         language = Language(tsverilog.language())
         parser = Parser(language)
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         tree = parser.parse(source)
         root = tree.root_node
     except Exception as e:

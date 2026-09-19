@@ -1,5 +1,6 @@
 """resolution — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from graphify.source_io import source_ancestors, at_source_root, engine_print, source_read_bytes, source_read_text, source_resolve, source_stat
 from graphify.extractors.base import checked_exists, checked_is_file, checked_is_dir, checked_glob, checked_rglob
 
 from typing import Any, Callable
@@ -96,11 +97,11 @@ def _read_tsconfig_aliases(tsconfig: Path, base_dir: Path, seen: set, *, strict:
         return {}
     seen.add(str(tsconfig))
     try:
-        raw = tsconfig.read_text(encoding="utf-8")
+        raw = source_read_text(tsconfig, encoding="utf-8")
     except Exception as e:
         if strict:
             raise
-        print(f"  warning: could not read {tsconfig} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
+        engine_print(f"  warning: could not read {tsconfig} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
         return {}
     try:
         data = json.loads(raw)
@@ -110,12 +111,12 @@ def _read_tsconfig_aliases(tsconfig: Path, base_dir: Path, seen: set, *, strict:
         except json.JSONDecodeError as e:
             if strict:
                 raise
-            print(f"  warning: failed to parse {tsconfig} as JSON/JSONC ({e.msg} at line {e.lineno} col {e.colno})", file=sys.stderr, flush=True)
+            engine_print(f"  warning: failed to parse {tsconfig} as JSON/JSONC ({e.msg} at line {e.lineno} col {e.colno})", file=sys.stderr, flush=True)
             return {}
     except Exception as e:
         if strict:
             raise
-        print(f"  warning: failed to parse {tsconfig} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
+        engine_print(f"  warning: failed to parse {tsconfig} ({type(e).__name__}: {e})", file=sys.stderr, flush=True)
         return {}
 
     aliases: dict[str, list[str]] = {}
@@ -136,7 +137,7 @@ def _read_tsconfig_aliases(tsconfig: Path, base_dir: Path, seen: set, *, strict:
         # Skip scoped npm package configs (e.g. @tsconfig/svelte) — not on disk.
         if not ext or ext.startswith("@"):
             continue
-        extended_path = (base_dir / ext).resolve()
+        extended_path = source_resolve(base_dir / ext)
         if not extended_path.suffix:
             extended_path = extended_path.with_suffix(".json")
         if checked_exists(extended_path, strict=strict):
@@ -179,8 +180,8 @@ def _load_tsconfig_aliases(start_dir: Path, *, strict: bool = False) -> dict[str
     wildcard tokens remain intact for substitution during resolution (#927).
     Result is cached by tsconfig path string.
     """
-    current = start_dir.resolve()
-    for candidate in [current, *current.parents]:
+    current = source_resolve(start_dir)
+    for candidate in source_ancestors(current):
         tsconfig = candidate / "tsconfig.json"
         if checked_exists(tsconfig, strict=strict):
             key = str(tsconfig)
@@ -255,14 +256,14 @@ def _resolve_tsconfig_alias(raw: str, aliases: dict[str, list[str]], *, strict: 
     return first
 
 def _find_workspace_root(start_dir: Path, *, strict: bool = False) -> Path | None:
-    current = start_dir.resolve()
-    for candidate in [current, *current.parents]:
+    current = source_resolve(start_dir)
+    for candidate in source_ancestors(current):
         if checked_exists(candidate / "pnpm-workspace.yaml", strict=strict):
             return candidate
         package_json = candidate / "package.json"
         if checked_is_file(package_json, strict=strict):
             try:
-                data = json.loads(package_json.read_text(encoding="utf-8"))
+                data = json.loads(source_read_text(package_json, encoding="utf-8"))
             except Exception:
                 if strict:
                     raise
@@ -274,7 +275,7 @@ def _find_workspace_root(start_dir: Path, *, strict: bool = False) -> Path | Non
 def _pnpm_workspace_globs(workspace_file: Path) -> list[str]:
     globs: list[str] = []
     in_packages = False
-    for raw_line in workspace_file.read_text(encoding="utf-8", errors="replace").splitlines():
+    for raw_line in source_read_text(workspace_file, encoding="utf-8", errors="replace").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
@@ -297,7 +298,7 @@ def _workspace_globs(root: Path, *, strict: bool = False) -> list[str]:
 
     package_json = root / "package.json"
     try:
-        data = json.loads(package_json.read_text(encoding="utf-8"))
+        data = json.loads(source_read_text(package_json, encoding="utf-8"))
     except Exception:
         if strict:
             raise
@@ -317,7 +318,7 @@ def _load_workspace_packages(start_dir: Path, *, strict: bool = False) -> dict[s
     if root is None:
         return {}
     manifest_mtimes = tuple(
-        (name, (root / name).stat().st_mtime_ns)
+        (name, source_stat(root / name).st_mtime_ns)
         for name in _WORKSPACE_MANIFEST_NAMES
         if checked_is_file(root / name, strict=strict)
     )
@@ -333,7 +334,7 @@ def _load_workspace_packages(start_dir: Path, *, strict: bool = False) -> dict[s
             if not checked_is_file(manifest, strict=strict):
                 continue
             try:
-                data = json.loads(manifest.read_text(encoding="utf-8"))
+                data = json.loads(source_read_text(manifest, encoding="utf-8"))
             except Exception:
                 if strict:
                     raise
@@ -371,7 +372,7 @@ def _contained_in_package(resolved: Path, package_dir: Path) -> bool:
     (e.g. "./evil": "../../../etc/passwd"). Only accept paths that stay
     within package_dir after resolution."""
     try:
-        return resolved.resolve().is_relative_to(package_dir.resolve())
+        return source_resolve(resolved).is_relative_to(source_resolve(package_dir))
     except ValueError:
         return False
 
@@ -379,7 +380,7 @@ def _package_entry_candidates(package_dir: Path, subpath: str, *, strict: bool =
     manifest = package_dir / "package.json"
     manifest_data: dict[str, Any] = {}
     try:
-        manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+        manifest_data = json.loads(source_read_text(manifest, encoding="utf-8"))
     except Exception:
         if strict:
             raise
@@ -501,7 +502,7 @@ def _resolve_c_include_path(raw: str, str_path: str, *, strict: bool = False) ->
     """
     if not raw:
         return None
-    candidate = (Path(str_path).parent / raw).resolve()
+    candidate = source_resolve(Path(str_path).parent / raw)
     if checked_is_file(candidate, strict=strict):
         return candidate
     return None
@@ -538,7 +539,7 @@ def _resolve_lua_import_target(raw_module: str, str_path: str, *, strict: bool =
                 cand = probe / rel / f"init{suffix}"
                 if checked_is_file(cand, strict=strict):
                     return _make_id(str(cand))
-            if probe.parent == probe:
+            if probe.parent == probe or at_source_root(probe):
                 break
             probe = probe.parent
     return _make_id(raw_module)
@@ -583,7 +584,7 @@ def _source_key(source_file: str, root: Path, *, strict: bool = False) -> str:
         return ""
     source_path = Path(source_file)
     try:
-        return str(source_path.resolve().relative_to(root))
+        return str(source_resolve(source_path).relative_to(root))
     except Exception as exc:
         if strict and not isinstance(exc, ValueError):
             raise
@@ -736,7 +737,7 @@ def _js_source_path(source_file: str, root: Path, *, strict: bool = False) -> Pa
     if not path.is_absolute():
         path = root / path
     try:
-        return path.resolve()
+        return source_resolve(path)
     except Exception:
         if strict:
             raise
@@ -762,8 +763,8 @@ def _apply_symbol_resolution_facts(
     ):
         return
 
-    path_by_resolved = {path.resolve(): path for path in paths}
-    source_file_id = {path.resolve(): _make_id(str(path)) for path in paths}
+    path_by_resolved = {source_resolve(path): path for path in paths}
+    source_file_id = {source_resolve(path): _make_id(str(path)) for path in paths}
     symbol_nodes: dict[tuple[Path, str], str] = {}
     for node in nodes:
         source_path = _js_source_path(str(node.get("source_file", "")), root, strict=strict)
@@ -774,7 +775,7 @@ def _apply_symbol_resolution_facts(
             symbol_nodes[(source_path, label)] = str(node["id"])
 
     def ensure_symbol_node(path: Path, name: str, line: int) -> str:
-        resolved_path = path.resolve()
+        resolved_path = source_resolve(path)
         existing = symbol_nodes.get((resolved_path, name))
         if existing is not None:
             return existing
@@ -820,15 +821,15 @@ def _apply_symbol_resolution_facts(
 
     local_aliases_by_file: dict[Path, dict[str, tuple[Path, str]]] = {}
     for import_fact in facts.imports:
-        file_path = import_fact.file_path.resolve()
+        file_path = source_resolve(import_fact.file_path)
         local_aliases_by_file.setdefault(file_path, {})[import_fact.local_name] = (
-            import_fact.target_path.resolve(),
+            source_resolve(import_fact.target_path),
             import_fact.imported_name,
         )
 
     pending_aliases_by_file: dict[Path, list[_SymbolAliasFact]] = {}
     for alias_fact in facts.aliases:
-        pending_aliases_by_file.setdefault(alias_fact.file_path.resolve(), []).append(alias_fact)
+        pending_aliases_by_file.setdefault(source_resolve(alias_fact.file_path), []).append(alias_fact)
 
     for file_path, aliases in pending_aliases_by_file.items():
         local_aliases = local_aliases_by_file.setdefault(file_path, {})
@@ -847,8 +848,8 @@ def _apply_symbol_resolution_facts(
     star_exports_by_file: dict[Path, list[Path]] = {}
 
     for star_fact in facts.star_exports:
-        source_path = star_fact.file_path.resolve()
-        target_path = star_fact.target_path.resolve()
+        source_path = source_resolve(star_fact.file_path)
+        target_path = source_resolve(star_fact.target_path)
         star_exports_by_file.setdefault(source_path, []).append(target_path)
         source_id = source_file_id.get(source_path)
         if source_id is not None:
@@ -862,8 +863,8 @@ def _apply_symbol_resolution_facts(
             )
 
     for namespace_fact in facts.namespace_exports:
-        source_path = namespace_fact.file_path.resolve()
-        target_path = namespace_fact.target_path.resolve()
+        source_path = source_resolve(namespace_fact.file_path)
+        target_path = source_resolve(namespace_fact.target_path)
         namespace_id = ensure_symbol_node(
             namespace_fact.file_path,
             namespace_fact.exported_name,
@@ -892,10 +893,10 @@ def _apply_symbol_resolution_facts(
             )
 
     for export_fact in facts.exports:
-        file_path = export_fact.file_path.resolve()
+        file_path = source_resolve(export_fact.file_path)
         origin: tuple[Path, str] | None = None
         if export_fact.target_path is not None and export_fact.target_name is not None:
-            origin = (export_fact.target_path.resolve(), export_fact.target_name)
+            origin = (source_resolve(export_fact.target_path), export_fact.target_name)
         elif export_fact.local_name is not None:
             origin = local_aliases_by_file.get(file_path, {}).get(export_fact.local_name)
             if origin is None and (file_path, export_fact.local_name) in symbol_nodes:
@@ -916,7 +917,7 @@ def _apply_symbol_resolution_facts(
                 )
 
     def resolve_exported_origin(target_path: Path, imported_name: str, seen: set[tuple[Path, str]] | None = None) -> tuple[Path, str]:
-        target_path = target_path.resolve()
+        target_path = source_resolve(target_path)
         key = (target_path, imported_name)
         if seen is None:
             seen = set()
@@ -936,7 +937,7 @@ def _apply_symbol_resolution_facts(
         return key
 
     for import_fact in facts.imports:
-        source_id = source_file_id.get(import_fact.file_path.resolve())
+        source_id = source_file_id.get(source_resolve(import_fact.file_path))
         if source_id is None:
             continue
         origin_path, origin_symbol = resolve_exported_origin(
@@ -967,7 +968,7 @@ def _apply_symbol_resolution_facts(
         add_edge(source_id, target_id, "imports_from", "submodule_import", line, from_path)
 
     for use_fact in facts.uses:
-        file_path = use_fact.file_path.resolve()
+        file_path = source_resolve(use_fact.file_path)
         target_id = None
         unresolved_origin = local_aliases_by_file.get(file_path, {}).get(use_fact.local_name)
         if unresolved_origin is not None:
@@ -1000,11 +1001,11 @@ def _parse_js_tree(path: Path, *, strict: bool = False):
         vue_lang: str | None = None
         if path.suffix == ".vue":
             masked, vue_lang = _vue_mask_non_script(
-                path.read_text(encoding="utf-8", errors="replace")
+                source_read_text(path, encoding="utf-8", errors="replace")
             )
             source = masked.encode("utf-8")
         else:
-            source = path.read_bytes()
+            source = source_read_bytes(path)
         use_ts = path.suffix in (".ts", ".tsx", ".mts", ".cts") or (
             path.suffix == ".vue" and vue_lang not in ("js", "jsx")
         )
@@ -1361,7 +1362,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
     trees: dict[Path, tuple[bytes, object]] = {}
 
     for path in js_paths:
-        resolved_path = path.resolve()
+        resolved_path = source_resolve(path)
         parsed = _parse_js_tree(path, strict=strict)
         if parsed is None:
             continue
@@ -1383,7 +1384,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
             target_path = _resolve_js_module_path(raw_module, path.parent, strict=strict)
             if target_path is None:
                 continue
-            target_path = target_path.resolve()
+            target_path = source_resolve(target_path)
             for imported_name, local_name in _js_named_specifiers(node, source, "import_specifier"):
                 facts.imports.append(
                     _SymbolImportFact(
@@ -1413,7 +1414,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
                 )
 
     for path in js_paths:
-        resolved_path = path.resolve()
+        resolved_path = source_resolve(path)
         parsed = trees.get(resolved_path)
         if parsed is None:
             continue
@@ -1429,7 +1430,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
                 target_path = _resolve_js_module_path(raw_module, path.parent, strict=strict)
                 if target_path is None:
                     continue
-                target_path = target_path.resolve()
+                target_path = source_resolve(target_path)
                 namespace_name = _js_namespace_export_name(node, source)
                 if namespace_name is not None:
                     facts.namespace_exports.append(
@@ -1499,7 +1500,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
                 )
 
     for path in js_paths:
-        resolved_path = path.resolve()
+        resolved_path = source_resolve(path)
         parsed = trees.get(resolved_path)
         if parsed is None:
             continue
@@ -1521,7 +1522,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
                 )
 
     for path in js_paths:
-        resolved_path = path.resolve()
+        resolved_path = source_resolve(path)
         parsed = trees.get(resolved_path)
         if parsed is None:
             continue
@@ -1547,7 +1548,7 @@ def _parse_python_tree(path: Path, *, strict: bool = False):
     try:
         import tree_sitter_python as tspython
         from tree_sitter import Language, Parser
-        source = path.read_bytes()
+        source = source_read_bytes(path)
         parser = Parser(Language(tspython.language()))
         return source, parser.parse(source).root_node
     except Exception:
@@ -1660,7 +1661,7 @@ def _collect_python_symbol_resolution_facts(
         if parsed is None:
             continue
         source, root_node = parsed
-        trees[path.resolve()] = parsed
+        trees[source_resolve(path)] = parsed
 
         for node in _walk_python_tree(root_node):
             if node.type != "import_from_statement":
@@ -1701,7 +1702,7 @@ def _collect_python_symbol_resolution_facts(
                     )
 
     for path in py_paths:
-        parsed = trees.get(path.resolve())
+        parsed = trees.get(source_resolve(path))
         if parsed is None:
             continue
         source, root_node = parsed
@@ -1819,7 +1820,7 @@ def _resolve_cross_file_imports(
 
         # Parse imports from this file
         try:
-            source = path.read_bytes()
+            source = source_read_bytes(path)
             tree = parser.parse(source)
         except Exception:
             if strict:
@@ -2077,7 +2078,7 @@ def _resolve_cross_file_java_imports(
     for path in paths:
         file_nid = _make_id(str(path))
         try:
-            source = path.read_bytes()
+            source = source_read_bytes(path)
             tree = parser.parse(source)
         except Exception:
             if strict:
@@ -2166,7 +2167,7 @@ def _resolve_java_type_references(
         if not srcs:
             continue
         try:
-            source = path.read_bytes()
+            source = source_read_bytes(path)
             tree = parser.parse(source)
         except Exception:
             if strict:
@@ -2335,7 +2336,7 @@ def _resolve_php_type_references(
         if not srcs:
             continue
         try:
-            source = path.read_bytes()
+            source = source_read_bytes(path)
             tree = parser.parse(source)
         except Exception:
             if strict:
@@ -2558,7 +2559,7 @@ def _pascal_project_root(from_path: Path, *, strict: bool = False) -> Path:
         if pas_count >= 2 or dpr_count >= 1:
             best = current
         parent = current.parent
-        if parent == current:
+        if parent == current or at_source_root(current):
             break
         current = parent
     return best

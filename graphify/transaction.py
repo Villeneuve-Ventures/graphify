@@ -2763,6 +2763,7 @@ def _transaction_from_json(
     raw: object,
     *,
     allowed_phases: set[str] = _TRANSACTION_PHASES,
+    source_io=None,
 ) -> Transaction:
     if not isinstance(raw, dict) or set(raw) != _TRANSACTION_FIELDS:
         raise PendingTransactionError("malformed live transaction")
@@ -2786,7 +2787,13 @@ def _transaction_from_json(
     root = Path(raw["root"])
     output = Path(raw["output"])
     try:
-        canonical_root = root.resolve(strict=True)
+        if source_io is None:
+            canonical_root = root.resolve(strict=True)
+        else:
+            info = source_io.probe(root)
+            if info is None or not stat.S_ISDIR(info.st_mode):
+                raise PendingTransactionError('unavailable live transaction root')
+            canonical_root = Path(os.path.abspath(root))
     except OSError as exc:
         raise PendingTransactionError("malformed live transaction root") from exc
     if (
@@ -3499,6 +3506,25 @@ def _stat_signature(info: os.stat_result) -> tuple[int, ...]:
             info.st_mtime_ns, info.st_ctime_ns)
 
 
+class _ScopedCorpusDirectory:
+    """Observation-only capability; never usable by transaction writers."""
+    def __init__(self, source_io, path):
+        self.source_io = source_io
+        self.path = Path(path)
+        info = source_io.probe(path)
+        if info is None:
+            raise FileNotFoundError(path)
+        if not stat.S_ISDIR(info.st_mode):
+            raise _IncompleteCorpusRecognition('not a directory')
+        self.identity = OutputIdentity(info.st_dev, info.st_ino)
+
+    def validate(self):
+        info = self.source_io.probe(self.path)
+        if info is None or not stat.S_ISDIR(info.st_mode) or (
+            info.st_dev, info.st_ino) != (self.identity.device, self.identity.inode):
+            raise _IncompleteCorpusRecognition('directory binding changed')
+
+
 class _OperationalCorpusScan:
     """Bound native workspace exclusions to one selected output and scan.
 
@@ -3507,7 +3533,9 @@ class _OperationalCorpusScan:
     This observer never enters transaction authority validation or recovery.
     """
 
-    def __init__(self, root: Path, output: Path | str):
+    def __init__(self, root: Path, output: Path | str, *, source_io=None, ambient_output=True):
+        self.source_io = source_io
+        self.ambient_output = ambient_output
         self.root = root
         self.context = self._context()
         self.authority = self.context[0]
@@ -3544,9 +3572,16 @@ class _OperationalCorpusScan:
             self._error(self.output, "transaction environment has no in-process owner")
             self.unavailable = True
 
-    @staticmethod
     @contextlib.contextmanager
-    def _directory(path: Path, parent: OutputCapability | None = None) -> Iterator[OutputCapability]:
+    def _directory(self, path: Path, parent: OutputCapability | None = None) -> Iterator[OutputCapability]:
+        if self.source_io is not None:
+            directory = _ScopedCorpusDirectory(self.source_io, path)
+            directory.validate()
+            try:
+                yield directory
+            finally:
+                directory.validate()
+            return
         # Close even when fstat, canonicalization, or initial validation fails.
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
         fd = os.open(path if parent is None else path.name, flags,
@@ -3574,8 +3609,9 @@ class _OperationalCorpusScan:
             else:
                 capability.close()
 
-    @staticmethod
-    def _context() -> tuple[_Authority | None, tuple[str | None, ...]]:
+    def _context(self) -> tuple[_Authority | None, tuple[str | None, ...]]:
+        if not self.ambient_output:
+            return None, tuple(None for _ in _TRANSACTION_ENV_SIGNALS)
         return _AUTHORITY.get(), tuple(os.environ.get(key) for key in _TRANSACTION_ENV_SIGNALS)
 
     def _error(self, path: Path, error: object) -> None:
@@ -3587,6 +3623,25 @@ class _OperationalCorpusScan:
             raise _IncompleteCorpusRecognition("nonblocking marker admission unavailable")
         if self.remaining <= 0:
             raise _IncompleteCorpusRecognition("metadata byte budget exhausted")
+        if self.source_io is not None:
+            path = directory.path / name
+            info = self.source_io.probe(path)
+            if info is None:
+                return None
+            if not stat.S_ISREG(info.st_mode) or info.st_size >= _CORPUS_MARKER_BYTES:
+                raise _IncompleteCorpusRecognition('unsafe or oversized marker')
+            if info.st_size >= self.remaining:
+                raise _IncompleteCorpusRecognition('metadata byte budget exhausted')
+            payload = self.source_io.read_bytes(path)
+            self.remaining -= len(payload)
+            fingerprints[str(path)] = hashlib.sha256(payload).hexdigest()
+            try:
+                value = json.loads(payload)
+            except RecursionError as exc:
+                raise _IncompleteCorpusRecognition('marker JSON depth exceeded') from exc
+            except (ValueError, UnicodeError):
+                return None
+            return value if isinstance(value, dict) else None
         try:
             before = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -3644,7 +3699,7 @@ class _OperationalCorpusScan:
         try:
             if raw is None or raw.get("root") != str(self.root):
                 raise PendingTransactionError("runner root differs from the scan root")
-            live = _transaction_from_json(managed, raw)
+            live = _transaction_from_json(managed, raw, source_io=self.source_io)
         except (PendingTransactionError, TypeError, ValueError) as exc:
             raise _IncompleteCorpusRecognition("live runner binding is unavailable") from exc
         if (live.root != str(self.root) or _authority_for(live) != self.authority
@@ -3700,10 +3755,10 @@ class _OperationalCorpusScan:
                         return None
                     assert owner is not None
                     child_name = "graphify-out"
-                    child = _directory_entry_identity(workspace, child_name)
+                    child = self._child_identity(workspace, child_name)
                     if child is None and candidate.name.startswith(".graphify-prepare-stage-"):
                         child_name = f".graphify-output-stage-{owner['child_nonce']}"
-                        child = _directory_entry_identity(workspace, child_name)
+                        child = self._child_identity(workspace, child_name)
                     if child is None or not self._identity_matches(owner.get("output_identity"), child):
                         return None
                     if is_retired:
@@ -3728,7 +3783,7 @@ class _OperationalCorpusScan:
                             try:
                                 if raw is None or raw.get("root") != str(self.root):
                                     return None
-                                live = _transaction_from_json(managed, raw)
+                                live = _transaction_from_json(managed, raw, source_io=self.source_io)
                             except (PendingTransactionError, TypeError, ValueError):
                                 return None
                         prepared = self._read(managed, PREPARED_FILE, fingerprints)
@@ -3756,15 +3811,31 @@ class _OperationalCorpusScan:
                     return (managed.identity, parent.identity, workspace.identity, child_name,
                             child, tuple(sorted(fingerprints.items())))
 
+    def _resolve(self, path):
+        if self.source_io is None:
+            return path.resolve(strict=True)
+        self.source_io.probe(path)
+        return Path(os.path.abspath(path))
+
+    def _child_identity(self, directory, name):
+        if self.source_io is None:
+            return _directory_entry_identity(directory, name)
+        info = self.source_io.probe(directory.path / name)
+        if info is None:
+            return None
+        if not stat.S_ISDIR(info.st_mode):
+            raise _IncompleteCorpusRecognition('unsafe output child')
+        return OutputIdentity(info.st_dev, info.st_ino)
+
     def prune(self, path: Path, *, follow_symlinks: bool) -> bool:
         # Aliases are recognized only when the caller already permits following.
         try:
-            if path.is_symlink() and not follow_symlinks:
+            if self.source_io is None and path.is_symlink() and not follow_symlinks:
                 return False
-            candidate = path.resolve(strict=True)
+            candidate = self._resolve(path)
             if not candidate.is_relative_to(self.root) or not _CORPUS_WORKSPACE_NAME.fullmatch(candidate.name):
                 return False
-            if candidate.parent != self.output.parent.resolve():
+            if candidate.parent != self._resolve(self.output.parent):
                 return False
             self.considered += 1
             if self.unavailable or self.considered > _CORPUS_WORKSPACES or self.remaining <= 0:
@@ -3788,7 +3859,7 @@ class _OperationalCorpusScan:
             self._error(self.output, "output selection context changed")
         for path, before in self.excluded.items():
             try:
-                candidate = path.resolve(strict=True)
+                candidate = self._resolve(path)
                 observed = self._observe(candidate)
                 if observed is None or (candidate, *observed) != before:
                     raise _IncompleteCorpusRecognition("excluded workspace binding changed")
