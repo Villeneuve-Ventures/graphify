@@ -540,13 +540,14 @@ def test_direct_scoped_xaml_uses_accounted_project_listing(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('kind', ['json', 'mcp'])
-def test_scoped_config_size_limit_applies_before_payload_read(tmp_path, kind):
+@pytest.mark.parametrize('size', [1024 * 1024 + 1, 2 * 1024 * 1024])
+def test_scoped_config_size_limit_applies_before_payload_read(tmp_path, kind, size):
     from graphify.source_io import SourceIO, SourceUnsupported, engine_inputs
     from graphify.extractors.json_config import extract_json
     from graphify.mcp_ingest import extract_mcp_config
     extractor = extract_json if kind == 'json' else extract_mcp_config
     path = tmp_path / ('config.json' if kind == 'json' else '.mcp.json')
-    path.write_bytes(b' ' * (2 * 1024 * 1024))
+    path.write_bytes(b' ' * size)
     expected = 'json file too large to index' if kind == 'json' else 'mcp config too large to index'
     assert extractor(path)['error'] == expected
     with SourceIO(tmp_path) as inputs:
@@ -605,3 +606,98 @@ def test_unqualified_jieba_refuses_only_memory_path(monkeypatch):
     assert '南京' in serve._segment_chinese('南京市')
     with pytest.raises(RuntimeError, match='qualified jieba 0.42.1'):
         serve.memory_query_segmenter()
+
+
+@pytest.mark.parametrize('failure', ['missing', 'changed', 'sniff'])
+def test_scoped_batch_preserves_completed_and_unattempted_outcomes(tmp_path, monkeypatch, failure):
+    from graphify import extract as extraction
+    from graphify.source_io import SourceIO
+    good = tmp_path / 'good.py'
+    unsupported = tmp_path / 'unsupported.r'
+    bad = tmp_path / ('missing.h' if failure == 'sniff' else 'bad.py')
+    later = tmp_path / 'later.py'
+    empty = tmp_path / 'empty.json'
+    missing_parser = tmp_path / 'empty.sql'
+    good.write_text('def good(): pass')
+    unsupported.write_text('')
+    later.write_text('def later(): pass')
+    empty.write_text('{"prices": [[1, 2]]}')
+    missing_parser.write_text('')
+    import sys
+    monkeypatch.setitem(sys.modules, 'tree_sitter_sql', None)
+    paths = [good, unsupported, empty, missing_parser, bad, later]
+    with SourceIO(tmp_path) as inputs:
+        if failure == 'changed':
+            bad.write_text('pass')
+            inputs.read_bytes(bad)
+            bad.write_text('x = 1')
+        with pytest.raises(extraction.ExtractionIncomplete) as caught:
+            extraction.extract(paths, source_io=inputs, quiet=True)
+        outcomes = caught.value.outcomes
+        assert [item['path'] for item in outcomes] == list(map(str, paths))
+        assert [item['status'] for item in outcomes] == [
+            'not_processed' if failure == 'sniff' else 'success',
+            'unsupported_extractor',
+            'not_processed' if failure == 'sniff' else 'empty',
+            'not_processed' if failure == 'sniff' else 'missing_parser',
+            'inconsistent_input' if failure == 'changed' else 'failed_read',
+            'not_processed',
+        ]
+
+
+@pytest.mark.parametrize('parallel', [False, True])
+@pytest.mark.parametrize('case', ['missing_parser', 'success', 'resolver_failure'])
+def test_no_ambient_cache_keeps_ordinary_fallbacks(tmp_path, monkeypatch, parallel, case):
+    from graphify import extract as extraction
+    import sys
+    source = tmp_path / ('empty.sql' if case == 'missing_parser' else 'main.py')
+    source.write_text('' if case == 'missing_parser' else 'def run(): pass')
+    monkeypatch.setitem(sys.modules, 'tree_sitter_sql', None)
+    if case == 'resolver_failure':
+        def fail_resolution(*args, **kwargs):
+            raise RuntimeError('injected resolver failure')
+        monkeypatch.setattr(extraction, '_resolve_cross_file_imports', fail_resolution)
+    ordinary = extraction.extract([source], cache_root=tmp_path, parallel=False,
+                                  report_outcomes=True, quiet=True)
+    monkeypatch.setattr(extraction, 'load_cached', lambda *a, **k: pytest.fail('cache read'))
+    monkeypatch.setattr(extraction, 'save_cached', lambda *a, **k: pytest.fail('cache write'))
+    # Exercise the production worker dispatch without relying on process inheritance.
+    if parallel:
+        import concurrent.futures
+        monkeypatch.setattr(extraction, '_PARALLEL_THRESHOLD', 1)
+        monkeypatch.setattr(concurrent.futures, 'ProcessPoolExecutor', concurrent.futures.ThreadPoolExecutor)
+    result = extraction.extract([source], cache_root=tmp_path, ambient_output=False,
+                                parallel=parallel, report_outcomes=True, quiet=True)
+    assert result == ordinary
+    assert result['outcomes'][0]['status'] == ('missing_parser' if case == 'missing_parser' else 'success')
+
+
+def test_scoped_resolution_failure_retains_extraction_outcomes(tmp_path, monkeypatch):
+    from graphify import extract as extraction
+    from graphify.source_io import SourceIO, SourceChanged
+    source = tmp_path / 'main.py'
+    source.write_text('def run(): pass')
+    with SourceIO(tmp_path) as inputs:
+        def fail_resolution(*args, **kwargs):
+            inputs.refuse('resolver dependency changed', SourceChanged)
+        monkeypatch.setattr(extraction, '_resolve_cross_file_imports', fail_resolution)
+        with pytest.raises(extraction.ExtractionIncomplete) as caught:
+            extraction.extract([source], source_io=inputs, quiet=True)
+        assert caught.value.outcomes == [{'path': str(source), 'status': 'success'}]
+        assert caught.value.failure == {'status': 'inconsistent_input',
+                                        'detail': 'resolver dependency changed'}
+
+
+@pytest.mark.parametrize('kind', ['json', 'mcp'])
+def test_scoped_config_exact_size_limit_is_accepted(tmp_path, kind):
+    from graphify.source_io import SourceIO, engine_inputs
+    from graphify.extractors.json_config import extract_json
+    from graphify.mcp_ingest import extract_mcp_config
+    extractor = extract_json if kind == 'json' else extract_mcp_config
+    path = tmp_path / ('config.json' if kind == 'json' else '.mcp.json')
+    content = b'{"mcpServers": {}}'
+    path.write_bytes(content.ljust(1024 * 1024, b' '))
+    with SourceIO(tmp_path) as inputs, engine_inputs(inputs):
+        assert 'error' not in extractor(path)
+        assert inputs.failure is None
+        assert inputs._bytes == 1024 * 1024

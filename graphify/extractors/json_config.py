@@ -66,11 +66,10 @@ def extract_json(path: Path) -> dict:
         return {"nodes": [], "edges": [], "error": "tree-sitter-json not installed"}
 
     try:
-        # Bounded read instead of stat()+read() to eliminate TOCTOU (J-1):
-        # read one byte beyond the limit so we can detect oversized files even
-        # if the file grows between stat and read.
+        # SourceIO checks the complete read against the cap, including growth.
+        # Ordinary reads retain a one-byte sentinel to detect oversized files.
         if current_source_io() is not None:
-            source = current_source_io().read_bytes(path, max_bytes=_JSON_MAX_BYTES + 1)
+            source = current_source_io().read_bytes(path, max_bytes=_JSON_MAX_BYTES)
         else:
             with path.open("rb") as _f:
                 source = _f.read(_JSON_MAX_BYTES + 1)

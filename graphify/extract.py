@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -4200,7 +4201,8 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     Returns:
         (index, result_dict) so results can be placed back in order.
     """
-    strict = len(args) == 5 and args[4]
+    strict = len(args) >= 5 and args[4]
+    use_cache = args[5] if len(args) >= 6 else True
     if len(args) >= 4:
         args = args[:4]
         idx, path_str, root_str, cache_location_str = args
@@ -4211,7 +4213,7 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     root = Path(root_str)
     cache_location = Path(cache_location_str)
     _raise_recursion_limit()
-    bypass_cache = strict or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+    bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
 
     # Check cache first (avoid re-extraction)
     if not bypass_cache:
@@ -4245,6 +4247,7 @@ def _extract_parallel(
     total_files: int,
     cache_location: Path | None = None,
     strict: bool = False,
+    use_cache: bool = True,
 ) -> bool:
     """Extract uncached files in parallel using ProcessPoolExecutor.
 
@@ -4286,7 +4289,9 @@ def _extract_parallel(
     root_str = str(root)
     cache_loc_str = str(cache_location if cache_location is not None else root)
     work_items = [(idx, str(path), root_str, cache_loc_str) for idx, path in uncached_work]
-    if strict:
+    if not use_cache:
+        work_items = [(*item, strict, False) for item in work_items]
+    elif strict:
         work_items = [(*item, True) for item in work_items]
 
     done_count = 0
@@ -4355,6 +4360,8 @@ def _extract_sequential(
     total_files: int,
     cache_location: Path | None = None,
     strict: bool = False,
+    use_cache: bool = True,
+    input_outcomes: list[dict] | None = None,
 ) -> None:
     """Extract uncached files sequentially (fallback for small batches)."""
     _PROGRESS_INTERVAL = 100
@@ -4368,20 +4375,23 @@ def _extract_sequential(
                 f"  AST extraction: {work_idx}/{len(uncached_work)} uncached files ({work_idx * 100 // len(uncached_work)}%)",
                 flush=True,
             )
-        extractor = _get_extractor(path, strict=strict)
-        if extractor is None:
-            per_file[idx] = {"nodes": [], "edges": []}
-            continue
-        bypass_cache = strict or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
-        # XAML boundary anchors on `root` (the corpus), not the cache location.
-        if strict:
-            result = _safe_extract_with_xaml_root(extractor, path, root, strict=True)
-        else:
-            result = _safe_extract_with_xaml_root(extractor, path, root)
-        # See _extract_single_file: don't cache an anomalous zero-node result (#1666).
-        if not bypass_cache and "error" not in result and result.get("nodes"):
-            save_cached(path, result, root, cache_root=cache_location)
-        per_file[idx] = result
+        with _observe_input(path, input_outcomes, idx):
+            extractor = _get_extractor(path, strict=strict)
+            if extractor is None:
+                result = {"nodes": [], "edges": [], "_unsupported": True}
+            else:
+                # XAML boundary anchors on `root`, not the cache location.
+                if strict:
+                    result = _safe_extract_with_xaml_root(extractor, path, root, strict=True)
+                else:
+                    result = _safe_extract_with_xaml_root(extractor, path, root)
+            bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+            # Never persist anomalous zero-node results (#1666).
+            if not bypass_cache and "error" not in result and result.get("nodes"):
+                save_cached(path, result, root, cache_root=cache_location)
+            per_file[idx] = result
+        if input_outcomes is not None:
+            input_outcomes[idx] = _input_outcome(path, result)
     if total_files >= _PROGRESS_INTERVAL:
         # Consistent denominator with the intermediate lines (#1693).
         _done = len(uncached_work)
@@ -4393,9 +4403,24 @@ _PARALLEL_THRESHOLD = 20
 
 class ExtractionIncomplete(RuntimeError):
     """Structured incomplete result; partial graph facts must not be certified."""
-    def __init__(self, outcomes):
+    def __init__(self, outcomes, *, failure=None):
         self.outcomes = outcomes
-        super().__init__('AST extraction incomplete: ' + repr(outcomes))
+        self.failure = failure
+        super().__init__('AST extraction incomplete: ' + repr(outcomes)
+                         + (f'; {failure}' if failure else ''))
+
+
+@contextmanager
+def _observe_input(path, outcomes, index):
+    """Attribute a scoped failure before the poisoned context stops the batch."""
+    try:
+        yield
+        if outcomes is not None:
+            current_source_io().check()
+    except SourceError as exc:
+        if outcomes is not None:
+            outcomes[index] = {'path': str(path), 'status': exc.code, 'detail': str(exc)}
+        raise
 
 
 def _input_outcome(path, result):
@@ -4439,21 +4464,26 @@ def extract(paths, cache_root=None, *, parallel=True, max_workers=None, strict=F
             source_root = scope.root
             paths = [path if path.is_absolute() else scope.root / path for path in paths]
             parallel = False
+        input_outcomes = ([{'path': str(path), 'status': 'not_processed'} for path in paths]
+                          if scope is not None else None)
         try:
             return _extract_impl(paths, cache_root, parallel=parallel, max_workers=max_workers,
-                                 strict=strict or scope is not None or not ambient_output,
+                                 strict=strict or scope is not None, use_cache=ambient_output,
                                  source_root=source_root,
+                                 input_outcomes=input_outcomes,
                                  report_outcomes=report_outcomes or scope is not None)
         except SourceError as exc:
-            raise ExtractionIncomplete([{'path': str(path), 'status': exc.code,
-                                         'detail': str(exc)} for path in paths]) from exc
+            if scope is None:
+                raise
+            raise ExtractionIncomplete(input_outcomes,
+                                       failure={'status': exc.code, 'detail': str(exc)}) from exc
         except ExtractionIncomplete:
             raise
         except Exception as exc:
             if scope is None:
                 raise
-            raise ExtractionIncomplete([{'path': str(path), 'status': 'failed_extraction',
-                                         'detail': str(exc)} for path in paths]) from exc
+            raise ExtractionIncomplete(input_outcomes, failure={
+                'status': 'failed_extraction', 'detail': str(exc)}) from exc
 
 
 def _extract_impl(
@@ -4465,6 +4495,8 @@ def _extract_impl(
     strict: bool = False,
     source_root: Path | None = None,
     report_outcomes: bool = False,
+    use_cache: bool = True,
+    input_outcomes: list[dict] | None = None,
 ) -> dict:
     """Extract AST nodes and edges from a list of code files.
 
@@ -4533,10 +4565,14 @@ def _extract_impl(
     uncached_work: list[tuple[int, Path]] = []
 
     for i, path in enumerate(paths):
-        if _get_extractor(path, strict=strict) is None:
+        with _observe_input(path, input_outcomes, i):
+            extractor = _get_extractor(path, strict=strict)
+        if extractor is None:
             per_file[i] = {"nodes": [], "edges": [], "_unsupported": True}
+            if input_outcomes is not None:
+                input_outcomes[i] = _input_outcome(path, per_file[i])
             continue
-        bypass_cache = strict or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
+        bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
             if cached is not None:
@@ -4551,10 +4587,14 @@ def _extract_impl(
             ran_parallel = _extract_parallel(
                 uncached_work, per_file, root, max_workers, total, cache_location,
                 *([True] if strict else []),
+                **({'use_cache': False} if not use_cache else {}),
             )
         if not ran_parallel:
             _extract_sequential(uncached_work, per_file, root, total, cache_location,
-                                *([True] if strict else []))
+                                *([True] if strict else []),
+                                **({'use_cache': False} if not use_cache else {}),
+                                **({'input_outcomes': input_outcomes}
+                                   if input_outcomes is not None else {}))
 
     outcomes = [_input_outcome(path, result) for path, result in zip(paths, per_file)]
     if current_source_io() is not None:

@@ -94,7 +94,7 @@ def extract_mcp_config(path: Path) -> dict[str, Any]:
     """
     try:
         if current_source_io() is not None:
-            raw = current_source_io().read_bytes(path, max_bytes=_MAX_BYTES + 1)
+            raw = current_source_io().read_bytes(path, max_bytes=_MAX_BYTES)
         else:
             with path.open("rb") as fh:
                 raw = fh.read(_MAX_BYTES + 1)
