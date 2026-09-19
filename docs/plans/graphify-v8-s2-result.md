@@ -401,3 +401,38 @@ The existing [security baseline #113](https://github.com/Villeneuve-Ventures/gra
 remains the umbrella for contextual hash/bind-address dispositions and any future
 enforcement policy. No duplicate umbrella issue, blanket suppression, public-bind
 behavior change, dependency update or S3 implementation is included here.
+
+### Sixth review follow-up (`77478f6f` input)
+
+Nine new current-head comments were reviewed against the implementation. Eight
+were valid S2 admission gaps and were repaired:
+
+- authority ancestors now retain their owner/mode policy through the final
+  descriptor-relative recheck, including the state root's exact owned `0700`;
+- bytecode-cache lookup failures other than ordinary absence now use the
+  documented authority refusal type;
+- the checked `pyproject.toml` bytes are bound to the source inventory and reused
+  for both package selection and project metadata, while corrupt archive and
+  decompression failures are translated to `ContractError`;
+- detection-phase code inputs require a full six-field regular-file probe;
+  directory membership alone no longer supplies admission identity;
+- installed `METADATA` and `RECORD` are bounded before `importlib.metadata`
+  parses them, expected metadata identities are retained to the final admission
+  point, and every verified package member must still be present in the final
+  tree walk.
+
+The common cause was incomplete end-to-end preservation of evidence: the code
+captured a safe identity or policy at one boundary but discarded or weakened it
+before the final success decision. The remaining console-launcher-content report
+is a valid limitation, not an S2 defect: this result already states that generated
+launcher bytes and execution are outside compatibility identity, and the design's
+S7 exact-candidate packaging and aggregate proof owns that later certification.
+It therefore does not need a separate GitHub issue unless S7 itself is moved from
+the repository design into issue-based scheduling.
+
+Focused validation after these repairs: 88 contract/composition/review and
+installed-identity tests plus 46 subtests, and 174 wheel-packaging tests passed.
+The wheel suite includes the disposable noneditable installation/authority smoke.
+Scoped Ruff and Pyright passed with zero findings. The current pre-repair head was
+already green in GitHub Actions; no unrelated full-suite rerun or additional gate
+was added for these localized changes.

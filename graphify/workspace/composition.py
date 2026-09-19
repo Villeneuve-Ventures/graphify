@@ -128,9 +128,16 @@ def _read_authority(state_root):
                     RUNTIME_AUTHORITY_FILENAME, dir_fd=fd, follow_symlinks=False))
                 or size != before.st_size):
             raise WorkspaceAuthorityInvalid("authority changed while reading")
-        for parent, name, dev, ino in links:
+        for index, (parent, name, dev, ino) in enumerate(links):
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
             if not stat.S_ISDIR(info.st_mode) or (info.st_dev, info.st_ino) != (dev, ino):
+                raise WorkspaceAuthorityInvalid("state ancestor changed while reading")
+            if index == len(links) - 1:
+                if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+                    raise WorkspaceAuthorityInvalid("state root changed while reading")
+            elif (info.st_uid not in {0, uid}
+                  or (stat.S_IMODE(info.st_mode) & 0o022
+                      and not info.st_mode & stat.S_ISVTX)):
                 raise WorkspaceAuthorityInvalid("state ancestor changed while reading")
         return b"".join(chunks)
     except OSError as exc:
@@ -156,17 +163,23 @@ def verify_installed_candidate(expected):
     value = expected.to_dict()
     try:
         dist = metadata.distribution("graphifyy")
+        prefix = f"graphifyy-{DISTRIBUTION_VERSION}.dist-info/"
+        verified_metadata = {}
+        for name in ("METADATA", "RECORD"):
+            path = Path(str(dist.locate_file(prefix + name)))
+            _, resolved, identity = _read_installed_member(path)
+            verified_metadata[path] = (resolved, identity)
         if dist.version != value["distribution_version"]:
             raise WorkspaceAuthorityInvalid("installed package version mismatch")
-        actual = {str(p): p for p in (dist.files or ()) if str(p).startswith("graphify/")
+        files = tuple(dist.files or ())
+        actual = {str(p): p for p in files if str(p).startswith("graphify/")
                   and "__pycache__" not in p.parts and not str(p).endswith(".pyc")}
         if set(actual) != set(value["package_members"]):
             raise WorkspaceAuthorityInvalid("installed package inventory mismatch")
         active = Path(graphify.__file__).resolve()
         if Path(str(dist.locate_file("graphify/__init__.py"))).resolve() != active:
             raise WorkspaceAuthorityInvalid("active import is not the authorized installed package")
-        prefix = f"graphifyy-{DISTRIBUTION_VERSION}.dist-info/"
-        owned = {str(p): p for p in (dist.files or ())}
+        owned = {str(p): p for p in files}
         allowed_metadata = {prefix + name for name in (*INSTALLATION_METADATA, "RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json")}
         scripts = Path(sysconfig.get_path("scripts")).resolve()
         script_paths = {scripts / "graphify", scripts / "graphify-mcp",
@@ -198,9 +211,15 @@ def verify_installed_candidate(expected):
                 raise WorkspaceAuthorityInvalid("installed package member mismatch")
             if name.startswith("graphify/"):
                 verified_package_files[resolved] = identity
+            else:
+                previous = verified_metadata.get(path)
+                if previous is not None and previous != (resolved, identity):
+                    raise WorkspaceAuthorityInvalid("installed metadata changed while parsing")
+                verified_metadata[path] = (resolved, identity)
             if name.endswith(".py"):
                 verified_caches.update(_verify_source_caches(path, source))
         _verify_package_tree(active.parent, verified_package_files, verified_caches)
+        _verify_captured_files(verified_metadata)
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
 
@@ -246,6 +265,8 @@ def _read_installed_member(path):
 def _verify_package_tree(package_root, verified_files, verified_caches):
     """Refuse executable or data entries omitted from the wheel-derived inventory."""
     allowed = {**verified_files, **verified_caches}
+    required = set(verified_files)
+    seen = set()
     try:
         for path in package_root.rglob("*"):
             info = path.lstat()
@@ -260,8 +281,24 @@ def _verify_package_tree(package_root, verified_files, verified_caches):
                 raise WorkspaceAuthorityInvalid("unrecorded installed package member")
             if allowed[resolved] is not None and _file_identity(info) != allowed[resolved]:
                 raise WorkspaceAuthorityInvalid("installed package member changed after verification")
+            seen.add(resolved)
+        if not required <= seen:
+            raise WorkspaceAuthorityInvalid("installed package member disappeared after verification")
     except OSError as exc:
         raise WorkspaceAuthorityInvalid("installed package tree unreadable") from exc
+
+
+def _verify_captured_files(verified):
+    """Require non-package files to retain the exact named and resolved identities read."""
+    try:
+        for path, (resolved, identity) in verified.items():
+            before = path.lstat()
+            if (path.resolve(strict=True) != resolved
+                    or _file_identity(before) != identity
+                    or _file_identity(path.lstat()) != identity):
+                raise WorkspaceAuthorityInvalid("installed metadata changed after verification")
+    except OSError as exc:
+        raise WorkspaceAuthorityInvalid("installed metadata unreadable") from exc
 
 
 def _verify_source_caches(path, source):
@@ -301,6 +338,8 @@ def _verify_source_caches(path, source):
                 info = cache.lstat()
             except FileNotFoundError:
                 continue
+            except OSError as exc:
+                raise WorkspaceAuthorityInvalid("installed bytecode cache unreadable") from exc
             try:
                 if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
                     raise WorkspaceAuthorityInvalid("unsafe installed bytecode cache")

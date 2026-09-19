@@ -54,7 +54,7 @@ def test_composition_does_not_create_missing_state(tmp_path):
     assert not root.exists()
 
 
-@pytest.mark.parametrize("damage", ["none", "mode", "root-mode", "symlink", "ancestor-link", "hardlink", "truncated", "duplicate", "oversized", "wrong-tuple", "no-policy"])
+@pytest.mark.parametrize("damage", ["none", "mode", "root-mode", "root-mode-race", "symlink", "ancestor-link", "hardlink", "truncated", "duplicate", "oversized", "wrong-tuple", "no-policy"])
 def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
     import graphify.workspace.composition as composition
     root = tmp_path.resolve() / "state"
@@ -82,6 +82,19 @@ def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
         from graphify.workspace.contracts import CompatibilityManifest
         data = expected.to_dict(); data["wheel_sha256"] = "0" * 64
         expected = CompatibilityManifest.from_mapping(data)
+    if damage == "root-mode-race":
+        real_stat = composition.os.stat
+
+        def raced_stat(name, *args, **kwargs):
+            info = real_stat(name, *args, **kwargs)
+            if name == root.name and kwargs.get("dir_fd") is not None:
+                return os.stat_result((info.st_mode | 0o077, info.st_ino, info.st_dev,
+                                       info.st_nlink, info.st_uid, info.st_gid,
+                                       info.st_size, info.st_atime, info.st_mtime,
+                                       info.st_ctime))
+            return info
+
+        monkeypatch.setattr(composition.os, "stat", raced_stat)
     before = [(p.name, p.lstat().st_ino, p.lstat().st_mode, p.lstat().st_mtime_ns) for p in root.iterdir()]
     # Installed-package verification is independently tested through real wheels.
     monkeypatch.setattr(composition, "verify_installed_candidate", lambda expected: None)

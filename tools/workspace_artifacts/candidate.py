@@ -7,6 +7,7 @@ must match every intended package member before any fixture output is created.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import csv
 import hashlib
 import io
@@ -18,6 +19,7 @@ import stat
 import subprocess
 import tomllib
 import zipfile
+import zlib
 
 from graphify.workspace.composition import StructuralPolicy, WorkspaceRuntimeAuthority
 from graphify.workspace.contracts import (
@@ -189,9 +191,27 @@ def _validate_wheel_record(payload, names, record_name, read_member):
             raise ContractError("wheel RECORD member identity mismatch")
 
 
-def package_members(repo):
+def _project_document(repo, inventory=None):
+    """Read one checked project document and optionally bind it to the inventory."""
+    payload = _read(repo / "pyproject.toml")
+    if inventory is not None:
+        recorded = inventory["files"].get("pyproject.toml")
+        if (not isinstance(recorded, dict)
+                or recorded.get("sha256") != hashlib.sha256(payload).hexdigest()):
+            raise ContractError("project configuration differs from source inventory")
+    try:
+        return tomllib.loads(payload.decode("utf-8"))
+    except (UnicodeError, tomllib.TOMLDecodeError) as exc:
+        raise ContractError("invalid project configuration") from exc
+
+
+def package_members(repo, *, config=None):
     """Mirror explicit setuptools package/data selection, preserving all host data."""
-    config = tomllib.loads((repo / "pyproject.toml").read_text())["tool"]["setuptools"]
+    if config is None:
+        try:
+            config = _project_document(repo)["tool"]["setuptools"]
+        except (KeyError, TypeError) as exc:
+            raise ContractError("invalid setuptools package selection") from exc
     members = set()
     for package in config["packages"]:
         directory = repo / package.replace(".", "/")
@@ -205,6 +225,17 @@ def package_members(repo):
             members.update(matches)
     return {p.relative_to(repo).as_posix(): hashlib.sha256(_read(p)).hexdigest()
             for p in sorted(members)}
+
+
+@contextmanager
+def _wheel_archive(payload):
+    """Translate archive corruption/decompression failures to the contract boundary."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            yield archive
+    except (OSError, EOFError, RuntimeError, zipfile.BadZipFile,
+            zipfile.LargeZipFile, zlib.error) as exc:
+        raise ContractError("wheel archive cannot be safely read") from exc
 
 
 def source_manifest(repo):
@@ -235,12 +266,17 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
     if type(policy) is not StructuralPolicy:
         raise ContractError("explicit fixture policy is required")
     inventory = source_manifest(repo)
-    members = package_members(repo)
-    project = tomllib.loads((repo / "pyproject.toml").read_text())["project"]
+    document = _project_document(repo, inventory)
+    try:
+        package_config = document["tool"]["setuptools"]
+        project = document["project"]
+    except (KeyError, TypeError) as exc:
+        raise ContractError("invalid project configuration") from exc
+    members = package_members(repo, config=package_config)
     expected_requirements, expected_extras = _project_requirements(project)
     _validate_wheel_filename(wheel, project)
     wheel_bytes = _read(wheel)
-    with zipfile.ZipFile(io.BytesIO(wheel_bytes)) as archive:
+    with _wheel_archive(wheel_bytes) as archive:
         infos = archive.infolist()
         names = [info.filename for info in infos]
         dist_info = f"graphifyy-{DISTRIBUTION_VERSION}.dist-info/"
@@ -318,7 +354,8 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
     for path in sorted((repo / "tests").glob("test_workspace_*.py")):
         bundle["tests/" + path.name] = _read(path)
     # Recheck source after reading wheel/schemas/tests so mixed inputs refuse.
-    if source_manifest(repo) != inventory or package_members(repo) != members:
+    if (source_manifest(repo) != inventory
+            or package_members(repo, config=package_config) != members):
         raise ContractError("candidate changed during fixture collection")
     outer = canonical_json_bytes({"kind": "local-fixture", "certified": False,
                                   "members": {n: hashlib.sha256(b).hexdigest()

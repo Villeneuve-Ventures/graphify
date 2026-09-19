@@ -430,6 +430,58 @@ def test_fixture_translates_malformed_project_dependencies(
     assert not output.exists()
 
 
+def test_fixture_binds_checked_project_bytes_to_source_inventory(
+        built_wheel, tmp_path, monkeypatch):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    read = candidate._read
+    project_path = REPO / "pyproject.toml"
+    project_reads = 0
+
+    def racing_read(path):
+        nonlocal project_reads
+        payload = read(path)
+        if path == project_path:
+            project_reads += 1
+            if project_reads == 2:
+                return payload + b"\n# alternate project snapshot\n"
+        return payload
+
+    monkeypatch.setattr(candidate, "_read", racing_read)
+    output = tmp_path / "refused-project-snapshot"
+    with pytest.raises(ContractError, match="project configuration differs"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=built_wheel,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
+def test_fixture_translates_corrupt_archive_member_reads(
+        built_wheel, tmp_path, monkeypatch):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+
+    def corrupt_member(*args, **kwargs):
+        raise zipfile.BadZipFile("CRC mismatch")
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", corrupt_member)
+    output = tmp_path / "refused-corrupt-member"
+    with pytest.raises(ContractError, match="wheel archive") as caught:
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=built_wheel,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert isinstance(caught.value.__cause__, zipfile.BadZipFile)
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("damage", ["package", "metadata", "license", "total", "namespace"])
 def test_wheel_expansion_rejected_before_read(built_wheel, tmp_path, monkeypatch, damage):
     from graphify.workspace.composition import StructuralPolicy

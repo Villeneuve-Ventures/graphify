@@ -328,7 +328,7 @@ class InputManifest(Document):
                 or list(roots) != sorted(set(roots)) or "source" not in roots
                 or not set(roots) <= ROOT_LABELS):
             raise ContractError("invalid input root allowlist")
-        indexed, bindings = _evidence(value["evidence"], roots)
+        indexed, _bindings = _evidence(value["evidence"], roots)
         code = value["code_inputs"]
         if not isinstance(code, (list, tuple)) or len(code) > MAX_ENTRIES:
             raise ContractError("invalid code inventory")
@@ -340,8 +340,11 @@ class InputManifest(Document):
         if not isinstance(outcomes, (list, tuple)):
             raise ContractError("invalid outcomes")
         if value["phase"] == "detection":
-            if any(bindings.get(path) is None or not stat.S_ISREG(bindings[path][2])
-                   for path in code):
+            probes = [indexed.get(("probe", path)) for path in code]
+            if any(probe is None or probe["value"] is None
+                   or not isinstance(probe["value"], (list, tuple))
+                   or len(probe["value"]) != 6
+                   or not stat.S_ISREG(probe["value"][2]) for probe in probes):
                 raise ContractError("code input requires regular-file identity evidence")
             if outcomes or value["failure"] is not None:
                 raise ContractError("detection does not assert extraction outcomes")

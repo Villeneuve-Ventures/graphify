@@ -39,6 +39,7 @@ def manifests(tmp_path):
     path.write_text("{}")
     with SourceIO(root) as inputs:
         inputs.listdir(root)
+        inputs.probe(path)
         inputs.probe(root / "optional.json")
         initial = InputManifest.from_engine(inputs, phase="detection", code_inputs=[path])
         result = extract([path], source_io=inputs, quiet=True, ambient_output=False)
@@ -211,6 +212,16 @@ def test_admitted_code_input_requires_identity_evidence(tmp_path):
     data = initial.to_dict()
     data["code_inputs"] = ["unbound.py"]
     with pytest.raises(ContractError, match="code input.*evidence"):
+        InputManifest.from_mapping(data)
+
+
+def test_directory_membership_is_not_full_code_input_identity(tmp_path):
+    initial, _ = manifests(tmp_path)
+    data = initial.to_dict()
+    data["evidence"] = [record for record in data["evidence"]
+                        if (record["operation"], record["path"])
+                        != ("probe", "empty.json")]
+    with pytest.raises(ContractError, match="code input.*identity evidence"):
         InputManifest.from_mapping(data)
 
 

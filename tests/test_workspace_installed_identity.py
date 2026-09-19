@@ -31,14 +31,20 @@ class InstalledIdentityTests(unittest.TestCase):
                        b'    def inner():\n        return value, "repeated"\n'
                        b'    return [inner() for _ in range(2)]\n')
         self.module.write_bytes(self.source)
+        self.dist_info = self.root / "graphifyy-0.10.0.dist-info"
+        self.dist_info.mkdir()
+        self.metadata_file = self.dist_info / "METADATA"
+        self.metadata_file.write_bytes(b"Name: graphifyy\nVersion: 0.10.0\n")
+        (self.dist_info / "RECORD").write_bytes(b"")
         self.files = [metadata.PackagePath("graphify/__init__.py"),
                       metadata.PackagePath("graphify/marker.py")]
         members = {str(p): hashlib.sha256((self.root / p).read_bytes()).hexdigest()
                    for p in self.files}
+        self.installation_metadata = {}
         self.expected = SimpleNamespace(to_dict=lambda: {
             "distribution_version": "0.10.0",
             "package_members": members,
-            "installation_metadata": {},
+            "installation_metadata": self.installation_metadata,
         })
         self.dist = SimpleNamespace(version="0.10.0", files=self.files,
                                     locate_file=lambda p: self.root / p)
@@ -158,6 +164,67 @@ class InstalledIdentityTests(unittest.TestCase):
               self.assertRaisesRegex(WorkspaceAuthorityInvalid, "changed after verification")):
             verify_installed_candidate(self.expected)
 
+    def test_package_member_deletion_after_hash_is_refused(self):
+        import graphify.workspace.composition as composition
+        inspect_tree = composition._verify_package_tree
+
+        def delete_then_inspect(*args):
+            self.module.unlink()
+            return inspect_tree(*args)
+
+        with (patch.object(composition, "_verify_package_tree", delete_then_inspect),
+              self.assertRaisesRegex(WorkspaceAuthorityInvalid, "disappeared")):
+            verify_installed_candidate(self.expected)
+
+    def test_metadata_replacement_after_hash_is_refused(self):
+        import graphify.workspace.composition as composition
+        member = metadata.PackagePath("graphifyy-0.10.0.dist-info/METADATA")
+        self.files.append(member)
+        self.installation_metadata["METADATA"] = hashlib.sha256(
+            self.metadata_file.read_bytes()
+        ).hexdigest()
+        inspect_tree = composition._verify_package_tree
+
+        def replace_then_inspect(*args):
+            replacement = self.root / "replacement-metadata"
+            replacement.write_bytes(self.metadata_file.read_bytes())
+            replacement.replace(self.metadata_file)
+            return inspect_tree(*args)
+
+        with (patch.object(composition, "_verify_package_tree", replace_then_inspect),
+              self.assertRaisesRegex(WorkspaceAuthorityInvalid, "metadata changed")):
+            verify_installed_candidate(self.expected)
+
+    def test_metadata_is_bounded_before_importlib_parses_it(self):
+        import graphify.workspace.composition as composition
+        captured = set()
+        capture = composition._read_installed_member
+
+        def tracked(path):
+            result = capture(path)
+            if path.parent == self.dist_info:
+                captured.add(path.name)
+            return result
+
+        class GuardedDistribution:
+            def locate_file(inner_self, path):
+                return self.root / path
+
+            @property
+            def version(inner_self):
+                self.assertTrue({"METADATA", "RECORD"} <= captured)
+                return "0.10.0"
+
+            @property
+            def files(inner_self):
+                self.assertTrue({"METADATA", "RECORD"} <= captured)
+                return self.files
+
+        with (patch.object(composition, "_read_installed_member", tracked),
+              patch.object(composition.metadata, "distribution",
+                           return_value=GuardedDistribution())):
+            verify_installed_candidate(self.expected)
+
     def test_external_pycache_prefix_is_checked(self):
         with patch("sys.pycache_prefix", str(self.root / "external-cache")):
             cached = self.cache()
@@ -194,10 +261,27 @@ class InstalledIdentityTests(unittest.TestCase):
             verify_installed_candidate(self.expected)
         self.assertIsInstance(caught.exception.__cause__, FileNotFoundError)
 
+    def test_cache_initial_lookup_errors_use_authority_refusal(self):
+        cached = self.cache()
+        lstat = Path.lstat
+
+        def failing_lstat(path, *args, **kwargs):
+            if path == cached:
+                raise PermissionError("cache lookup refused")
+            return lstat(path, *args, **kwargs)
+
+        with (patch.object(Path, "lstat", failing_lstat),
+              self.assertRaisesRegex(WorkspaceAuthorityInvalid,
+                                     "bytecode cache unreadable") as caught):
+            verify_installed_candidate(self.expected)
+        self.assertIsInstance(caught.exception.__cause__, PermissionError)
+
     def test_symlinked_installation_ancestors_accept_either_compile_filename(self):
         alias = self.root / "alias"
         alias.symlink_to(self.package, target_is_directory=True)
-        self.dist.locate_file = lambda p: alias / Path(p).name
+        self.dist.locate_file = lambda p: (
+            alias / Path(p).name if str(p).startswith("graphify/") else self.root / p
+        )
         for filename in (self.module, alias / self.module.name):
             with self.subTest(filename=str(filename)):
                 py_compile.compile(str(filename), doraise=True)
@@ -254,7 +338,9 @@ class InstalledIdentityTests(unittest.TestCase):
         self.package = location
         self.init = location / "__init__.py"
         self.module = location / "marker.py"
-        self.dist.locate_file = lambda p: location / Path(p).name
+        self.dist.locate_file = lambda p: (
+            location / Path(p).name if str(p).startswith("graphify/") else self.root / p
+        )
         with patch("graphify.__file__", str(self.init)):
             self.cache()
             verify_installed_candidate(self.expected)
