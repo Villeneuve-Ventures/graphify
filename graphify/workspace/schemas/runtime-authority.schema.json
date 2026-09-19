@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/runtime-authority.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "format_version",
+    "compatibility_manifest",
+    "structural_policy"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.runtime_authority.internal",
+      "type": "string"
+    },
+    "format_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "compatibility_manifest": {
+      "$ref": "compatibility.schema.json"
+    },
+    "structural_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_pending_tasks",
+        "max_pending_bytes",
+        "max_claimed_tasks",
+        "max_generations",
+        "max_payload_bytes"
+      ],
+      "properties": {
+        "max_pending_tasks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_pending_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_claimed_tasks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_generations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "max_payload_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        }
+      }
+    }
+  }
+}

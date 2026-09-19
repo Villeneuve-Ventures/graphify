@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/compatibility.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "schema_version",
+    "distribution",
+    "distribution_version",
+    "engine_baseline",
+    "extractor_cache_abi",
+    "adapter_contract_version",
+    "state_schema_version",
+    "detector_id",
+    "graph_payload_version",
+    "input_manifest_version",
+    "candidate_kind",
+    "certified",
+    "distribution_build",
+    "source_manifest_sha256",
+    "wheel_sha256",
+    "package_members",
+    "installation_metadata"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.compatibility",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "distribution": {
+      "const": "graphifyy",
+      "type": "string"
+    },
+    "distribution_version": {
+      "const": "0.10.0",
+      "type": "string"
+    },
+    "engine_baseline": {
+      "const": "git:7a6f667acf805b34e28f1658d9c69de16a282892",
+      "type": "string"
+    },
+    "extractor_cache_abi": {
+      "const": "graphify-v8-structural-1",
+      "type": "string"
+    },
+    "adapter_contract_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "state_schema_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "detector_id": {
+      "const": "graphify-v8/workspace-observer-v2",
+      "type": "string"
+    },
+    "graph_payload_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "input_manifest_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "candidate_kind": {
+      "const": "local-fixture",
+      "type": "string"
+    },
+    "certified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "distribution_build": {
+      "type": "string",
+      "pattern": "^fixture:sha256:[0-9a-f]{64}$"
+    },
+    "source_manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "wheel_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "package_members": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 10000,
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^graphify/"
+      }
+    },
+    "installation_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "METADATA",
+        "WHEEL",
+        "entry_points.txt",
+        "top_level.txt",
+        "licenses/LICENSE"
+      ],
+      "properties": {
+        "METADATA": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "WHEEL": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "entry_points.txt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "top_level.txt": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "licenses/LICENSE": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}
