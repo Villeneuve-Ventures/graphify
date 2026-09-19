@@ -60,6 +60,10 @@ class SourceObservation:
     stable_inventory_passes: int
 
     def __post_init__(self):
+        if (not isinstance(self.initial_detection, InputManifest)
+                or (self.consumed_inputs is not None
+                    and not isinstance(self.consumed_inputs, InputManifest))):
+            raise ContractError("observation requires validated input manifests")
         if self.initial_detection.to_dict()["phase"] != "detection":
             raise ContractError("initial observation must be detection")
         if type(self.stable_inventory_passes) is not int or not 2 <= self.stable_inventory_passes <= 6:
@@ -77,6 +81,8 @@ class StructuralBuild:
 
     def __post_init__(self):
         from graphify.workspace.contracts import digest, integer
+        if not isinstance(self.input_manifest, InputManifest):
+            raise ContractError("structural build requires a validated input manifest")
         if not self.input_manifest.complete:
             raise ContractError("structural build requires complete input dispositions")
         digest(self.graph_sha256)

@@ -234,6 +234,34 @@ def test_wheel_hash_and_validation_use_same_captured_bytes(built_wheel, tmp_path
     assert fixture.to_dict()["wheel_sha256"] == hashlib.sha256(original).hexdigest()
 
 
+@pytest.mark.parametrize("wheel_metadata", [
+    b"not metadata\n",
+    b"Wheel-Version: 999.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    b"Wheel-Version: 1.0\nRoot-Is-Purelib: false\nTag: py3-none-any\n",
+    b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: cp314-cp314-macosx_14_0_arm64\n",
+])
+def test_fixture_rejects_invalid_wheel_metadata(built_wheel, tmp_path, wheel_metadata):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    changed = tmp_path / built_wheel.name
+    with zipfile.ZipFile(built_wheel) as source, zipfile.ZipFile(changed, "w") as target:
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename.endswith("/WHEEL"):
+                payload = wheel_metadata
+            target.writestr(info, payload)
+    output = tmp_path / "refused-wheel-metadata"
+    with pytest.raises(ContractError, match="WHEEL|wheel"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=changed,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("damage", ["package", "metadata", "license", "total", "namespace"])
 def test_wheel_expansion_rejected_before_read(built_wheel, tmp_path, monkeypatch, damage):
     from graphify.workspace.composition import StructuralPolicy

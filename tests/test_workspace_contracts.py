@@ -1,6 +1,7 @@
 """S2 contracts against actual merged S1 evidence, including failed extraction."""
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,7 @@ from graphify.workspace.contracts import (
     CompatibilityManifest, CompletionBinding, ContractError, InputManifest,
     INSTALLATION_METADATA, SCHEMA_FILES, StateRootMarker, canonical_json_bytes, decode_canonical,
 )
+from graphify.workspace.adapters.base import SourceObservation, StructuralBuild
 from tools.workspace_artifacts.candidate import package_members
 
 REPO = Path(__file__).resolve().parents[1]
@@ -57,6 +59,23 @@ def test_actual_empty_extraction_and_two_phase_binding(tmp_path):
     changed = final.to_dict()
     changed["outcomes"].clear()
     assert final.complete  # No mutable alias escapes the frozen model.
+
+
+def test_validated_input_models_are_required_at_trust_boundaries(tmp_path):
+    initial, final = manifests(tmp_path)
+    fake = SimpleNamespace(
+        complete=True,
+        sha256="f" * 64,
+        to_dict=lambda: initial.to_dict(),
+    )
+    with pytest.raises(ContractError, match="validated input manifests"):
+        CompletionBinding.bind(fake, final, compatibility=compatibility(), graph_sha256="c" * 64)
+    with pytest.raises(ContractError, match="validated input manifests"):
+        CompletionBinding.bind(initial, fake, compatibility=compatibility(), graph_sha256="c" * 64)
+    with pytest.raises(ContractError, match="validated input manifests"):
+        SourceObservation(fake, final, 2)
+    with pytest.raises(ContractError, match="validated input manifest"):
+        StructuralBuild(fake, "c" * 64, 0, 0)
 
 
 def test_supporting_reads_negative_probes_and_membership(tmp_path):

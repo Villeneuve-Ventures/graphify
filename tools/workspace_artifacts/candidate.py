@@ -74,6 +74,29 @@ def _read(path):
             os.close(descriptor)
 
 
+def _validate_wheel_metadata(payload):
+    """Require the supported pure-Python wheel envelope before fixture identity."""
+    from email import policy
+    from email.parser import BytesParser
+
+    wheel = BytesParser(policy=policy.compat32).parsebytes(payload)
+    if wheel.defects:
+        raise ContractError("malformed WHEEL metadata")
+
+    def one(name):
+        values = wheel.get_all(name, [])
+        if len(values) != 1:
+            raise ContractError(f"WHEEL metadata requires one {name}")
+        return values[0].strip()
+
+    if one("Wheel-Version") != "1.0":
+        raise ContractError("unsupported wheel metadata version")
+    if one("Root-Is-Purelib").lower() != "true":
+        raise ContractError("wheel must install as pure Python")
+    if [value.strip() for value in wheel.get_all("Tag", [])] != ["py3-none-any"]:
+        raise ContractError("unsupported wheel compatibility tag")
+
+
 def package_members(repo):
     """Mirror explicit setuptools package/data selection, preserving all host data."""
     config = tomllib.loads((repo / "pyproject.toml").read_text())["tool"]["setuptools"]
@@ -164,6 +187,7 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
             raise ContractError("wheel entry points differ from project")
         if read_member(dist_info + "licenses/LICENSE") != _read(repo / "LICENSE"):
             raise ContractError("wheel license differs from project")
+        _validate_wheel_metadata(read_member(dist_info + "WHEEL"))
         metadata_name = dist_info + "METADATA"
         from email.parser import BytesParser
         meta = BytesParser().parsebytes(read_member(metadata_name))

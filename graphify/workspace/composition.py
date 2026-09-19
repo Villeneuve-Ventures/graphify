@@ -180,6 +180,7 @@ def verify_installed_candidate(expected):
                 raise WorkspaceAuthorityInvalid("unexpected installed distribution member")
         expected_files = dict(value["package_members"])
         expected_files.update({prefix + name: sha for name, sha in value["installation_metadata"].items()})
+        verified_package_files, verified_caches = set(), set()
         for name, wanted in expected_files.items():
             if name not in owned:
                 raise WorkspaceAuthorityInvalid("missing installed distribution metadata")
@@ -190,12 +191,34 @@ def verify_installed_candidate(expected):
                 source = path.read_bytes()
                 if hashlib.sha256(source).hexdigest() != wanted:
                     raise WorkspaceAuthorityInvalid("installed package member mismatch")
+                if name.startswith("graphify/"):
+                    verified_package_files.add(path.resolve())
                 if name.endswith(".py"):
-                    _verify_source_caches(path, source)
+                    verified_caches.update(_verify_source_caches(path, source))
             except OSError as exc:
                 raise WorkspaceAuthorityInvalid("installed package member unreadable") from exc
+        _verify_package_tree(active.parent, verified_package_files, verified_caches)
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
+
+
+def _verify_package_tree(package_root, verified_files, verified_caches):
+    """Refuse executable or data entries omitted from the wheel-derived inventory."""
+    allowed = verified_files | verified_caches
+    try:
+        for path in package_root.rglob("*"):
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise WorkspaceAuthorityInvalid("unsafe installed package tree entry")
+            resolved = path.resolve(strict=True)
+            if _file_identity(info) != _file_identity(path.lstat()):
+                raise WorkspaceAuthorityInvalid("installed package tree changed")
+            if resolved not in allowed:
+                raise WorkspaceAuthorityInvalid("unrecorded installed package member")
+    except OSError as exc:
+        raise WorkspaceAuthorityInvalid("installed package tree unreadable") from exc
 
 
 def _verify_source_caches(path, source):
@@ -208,12 +231,25 @@ def _verify_source_caches(path, source):
     """
     from importlib.util import MAGIC_NUMBER, cache_from_source
     import base64
+    import sys
 
-    caches = []
+    caches, verified = [], set()
     limit = 64 * 1024 * 1024
     # Resolve symlinked installation ancestors consistently, while supporting
     # caches created with either the installation spelling or its real path.
     filenames = tuple(dict.fromkeys((str(path), str(path.resolve()))))
+    if sys.pycache_prefix is not None:
+        # With an external prefix, the source loader does not select ordinary
+        # adjacent __pycache__ entries. Permit only the canonical cache names
+        # belonging to an authorized source; the package-tree walk still rejects
+        # arbitrary .pyc shadow packages and non-regular entries.
+        tag = sys.implementation.cache_tag
+        for filename in filenames:
+            source_path = Path(filename)
+            for optimize in (0, 1, 2):
+                suffix = f".opt-{optimize}" if optimize else ""
+                verified.add((source_path.parent / "__pycache__" /
+                              f"{source_path.stem}.{tag}{suffix}.pyc").resolve())
     for filename in filenames:
         for optimize in (0, 1, 2):
             cache = Path(cache_from_source(filename, optimization=str(optimize) if optimize else ""))
@@ -237,8 +273,10 @@ def _verify_source_caches(path, source):
                     or int.from_bytes(payload[4:8], "little") not in (0, 1, 3)):
                 raise WorkspaceAuthorityInvalid("unverified installed bytecode cache header")
             caches.append([optimize, base64.b64encode(payload[16:]).decode("ascii")])
+            verified.add(cache.resolve())
     if caches:
         _compare_cached_code(source, filenames, caches)
+    return verified
 
 
 # CPython code equality omits some fields. Compare every serialized code field,

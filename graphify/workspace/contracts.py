@@ -408,6 +408,8 @@ class CompletionBinding(Document):
 
     @classmethod
     def bind(cls, initial, consumed, *, compatibility, graph_sha256):
+        if not isinstance(initial, InputManifest) or not isinstance(consumed, InputManifest):
+            raise ContractError("completion requires validated input manifests")
         if not isinstance(compatibility, CompatibilityManifest):
             raise ContractError("completion requires a compatibility manifest")
         a, b = initial.to_dict(), consumed.to_dict()

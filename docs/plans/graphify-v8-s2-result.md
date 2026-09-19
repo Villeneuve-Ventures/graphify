@@ -307,6 +307,36 @@ Pyright passed, and the final AST graph update completed with 13,566 nodes and
 Pytest remains unrun under the operator's instruction. Native Linux/Windows
 validation and fresh full-suite proof are not claimed.
 
+### Third review follow-up (`6ae7ff7f` input)
+
+The current 24-thread snapshot added four materially related trust-boundary
+claims. Three are accepted and repaired in this follow-up:
+
+- Installed identity now compares the wheel-derived member set with the actual
+  installed package tree. Unrecorded regular files and non-regular entries
+  refuse, while only verified selected caches and canonical cache names that are
+  inert under an external `sys.pycache_prefix` are admitted. A regression covers
+  an unrecorded package that would otherwise shadow a recorded module.
+- Completion binding, source observation and structural build construction now
+  require actual validated `InputManifest` instances instead of accepting
+  duck-typed objects with caller-chosen digests or completion flags.
+- Fixture creation parses `WHEEL` before publication and requires the supported
+  `Wheel-Version: 1.0`, pure-Python root and `py3-none-any` compatibility tag.
+  Malformed, unsupported-version, non-purelib and incompatible-tag fixtures
+  refuse without public output.
+
+The constant-reference-sharing report is factually demonstrated by the existing
+identity-sensitive marker regression, but it duplicates the explicitly stated
+field/value-equivalence limit above. Requiring complete reference-topology
+equivalence can reject ordinary same-source caches, so changing that admission
+policy needs an explicit contract decision; this follow-up does not silently
+broaden the promise or claim observational bytecode equivalence.
+
+Focused validation after these repairs: all 16 installed-identity unittests,
+55 contract/composition pytest cases and 154 wheel-packaging pytest cases passed.
+Scoped Ruff and Pyright passed with zero findings. No full pytest run, native
+Linux/Windows claim, or new security-enforcement gate is added.
+
 Out-of-scope baseline follow-ups are tracked separately:
 [XML admission #150](https://github.com/Villeneuve-Ventures/graphify/issues/150)
 and [dependency maintenance #151](https://github.com/Villeneuve-Ventures/graphify/issues/151).

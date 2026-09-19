@@ -129,6 +129,13 @@ class InstalledIdentityTests(unittest.TestCase):
                             verify_installed_candidate(self.expected)
                         cached.unlink()
 
+    def test_unrecorded_shadow_package_is_refused(self):
+        shadow = self.package / "marker"
+        shadow.mkdir()
+        (shadow / "__init__.py").write_text("MARKER = 99\n")
+        with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "unrecorded"):
+            verify_installed_candidate(self.expected)
+
     def test_external_pycache_prefix_is_checked(self):
         with patch("sys.pycache_prefix", str(self.root / "external-cache")):
             cached = self.cache()
