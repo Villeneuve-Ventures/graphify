@@ -1,6 +1,6 @@
 """Json_config extractor. Moved verbatim from graphify/extract.py."""
 from __future__ import annotations
-from graphify.source_io import current_source_io, source_read_bytes
+from graphify.source_io import current_source_io, SourceTooLarge
 
 
 from pathlib import Path
@@ -70,7 +70,7 @@ def extract_json(path: Path) -> dict:
         # read one byte beyond the limit so we can detect oversized files even
         # if the file grows between stat and read.
         if current_source_io() is not None:
-            source = source_read_bytes(path)
+            source = current_source_io().read_bytes(path, max_bytes=_JSON_MAX_BYTES + 1)
         else:
             with path.open("rb") as _f:
                 source = _f.read(_JSON_MAX_BYTES + 1)
@@ -80,6 +80,8 @@ def extract_json(path: Path) -> dict:
         parser = Parser(language)
         tree = parser.parse(source)
         root = tree.root_node
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "json file too large to index"}
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 

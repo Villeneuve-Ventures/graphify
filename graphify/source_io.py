@@ -29,6 +29,10 @@ class SourceUnsupported(SourceError):
     code = 'unsupported_input'
 
 
+class SourceTooLarge(SourceUnsupported):
+    """A caller-specific read cap refused the input without returning a prefix."""
+
+
 class SourceUnavailable(SourceError):
     code = 'failed_read'
 
@@ -68,12 +72,13 @@ class SourceIO:
     def __init__(self, source_root, *, extra_roots=None, max_file_bytes=64 * 1024 * 1024,
                  max_total_bytes=512 * 1024 * 1024, max_entries=100_000):
         self.root = Path(os.path.abspath(source_root))
-        self.roots = {'source': self.root, **(extra_roots or {})}
-        if self.roots['source'] != self.root or any(
+        raw_roots = {'source': self.root, **(extra_roots or {})}
+        if raw_roots['source'] != self.root or any(
             not isinstance(label, str) or not label or '/' in label or ':' in label
-            or not Path(root).is_absolute() for label, root in self.roots.items()
+            or not Path(root).is_absolute() for label, root in raw_roots.items()
         ):
             raise ValueError('invalid source root allowlist')
+        self.roots = {label: Path(os.path.abspath(root)) for label, root in raw_roots.items()}
         if any(type(n) is not int or n <= 0 for n in
                (max_file_bytes, max_total_bytes, max_entries)):
             raise ValueError('input bounds must be positive integers')
@@ -94,7 +99,7 @@ class SourceIO:
             for label, root in self.roots.items():
                 # Walk every ancestor without following a substituted symlink.
                 path = Path(os.path.abspath(root))
-                fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+                fd = os.open(path.anchor, self._dir_flags())
                 try:
                     for part in path.parts[1:]:
                         child = os.open(part, self._dir_flags(), dir_fd=fd)
@@ -118,7 +123,7 @@ class SourceIO:
 
     @staticmethod
     def _dir_flags():
-        if not hasattr(os, 'O_NOFOLLOW') or not hasattr(os, 'O_DIRECTORY'):
+        if any(not hasattr(os, flag) for flag in ('O_NOFOLLOW', 'O_DIRECTORY', 'O_NONBLOCK')):
             raise SourceUnsupported('no-follow directory descriptors unavailable')
         return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 
@@ -175,7 +180,7 @@ class SourceIO:
         try:
             # Compare the live pathname walk with the pinned root on every use.
             root = Path(self.roots[label])
-            live = os.open(root.anchor, os.O_RDONLY | os.O_DIRECTORY)
+            live = os.open(root.anchor, self._dir_flags())
             try:
                 for part in root.parts[1:]:
                     child = os.open(part, self._dir_flags(), dir_fd=live)
@@ -221,14 +226,26 @@ class SourceIO:
         except OSError as exc:
             self.refuse(str(exc), SourceUnavailable)
 
-    def read_bytes(self, path):
+    def read_bytes(self, path, *, max_bytes=None):
+        """Read a complete input, optionally tightening the per-file byte cap.
+
+        Oversized inputs poison the scope; no partial content is accepted as
+        complete read evidence. The context's aggregate byte bound still applies.
+        """
+        if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+            raise ValueError('read bound must be a positive integer')
+        file_limit = min(self.max_file_bytes, max_bytes) if max_bytes is not None else self.max_file_bytes
+        limit_error = (SourceTooLarge if max_bytes is not None and max_bytes <= self.max_file_bytes
+                       else SourceUnsupported)
         try:
             info = self.probe(path)
             if info is None:
                 self.refuse(f'missing input: {path}', SourceUnavailable)
             if not stat.S_ISREG(info.st_mode):
                 self.refuse(f'not a regular input: {path}')
-            if info.st_size > self.max_file_bytes or self._bytes + info.st_size > self.max_total_bytes:
+            if info.st_size > file_limit:
+                self.refuse('input byte limit exceeded', limit_error)
+            if self._bytes + info.st_size > self.max_total_bytes:
                 self.refuse('input byte limit exceeded')
             with self._parent(path) as (parent, name, key):
                 fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -238,13 +255,15 @@ class SourceIO:
                     chunks = []
                     size = 0
                     while True:
-                        chunk = os.read(fd, min(65536, self.max_file_bytes - size + 1,
+                        chunk = os.read(fd, min(65536, file_limit - size + 1,
                                                 self.max_total_bytes - self._bytes + 1))
                         if not chunk:
                             break
                         size += len(chunk)
                         self._bytes += len(chunk)
-                        if size > self.max_file_bytes or self._bytes > self.max_total_bytes:
+                        if size > file_limit:
+                            self.refuse('input byte limit exceeded', limit_error)
+                        if self._bytes > self.max_total_bytes:
                             self.refuse('input byte limit exceeded')
                         chunks.append(chunk)
                     if _identity(info) != _identity(os.fstat(fd)):

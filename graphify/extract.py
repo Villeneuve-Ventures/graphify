@@ -1,6 +1,6 @@
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
-from graphify.source_io import diagnostics_enabled, current_source_io, engine_inputs, SourceError, source_ancestors, at_source_root, engine_print, source_read_bytes, source_read_text, source_resolve
+from graphify.source_io import diagnostics_enabled, current_source_io, engine_inputs, SourceError, source_ancestors, engine_print, source_read_bytes, source_read_text, source_resolve
 
 import hashlib
 import importlib
@@ -3516,7 +3516,9 @@ def _xaml_project_root(path: Path, *, strict: bool = False) -> Path:
     root = path.parent
     for directory in source_ancestors(path.parent):
         try:
-            if any(child.suffix in project_markers for child in (checked_glob(directory, "*", strict=True) if strict else directory.iterdir())):
+            children = (checked_glob(directory, "*", strict=strict)
+                        if strict or current_source_io() is not None else directory.iterdir())
+            if any(child.suffix in project_markers for child in children):
                 root = directory
                 break
         except OSError:

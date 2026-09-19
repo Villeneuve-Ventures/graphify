@@ -25,6 +25,12 @@ metadata found in source files never expands that allowlist. An adapter supplyin
 its own implementations must preserve these authority, bound, evidence, and
 failure-latching contracts. The context must be open before engine entry.
 
+`read_bytes(path, max_bytes=...)` can tighten the context's per-file limit for a
+bounded extractor. It returns complete bytes or refuses with `SourceTooLarge`;
+it never records a truncated prefix as a successful read. Refusal still poisons
+the context even when an extractor translates it to its usual size error.
+Custom reader implementations must support this optional bound as well.
+
 Evidence contains rooted labels, file hashes and identities, negative probes,
 directory bindings, and complete consulted memberships. Atime is excluded.
 Repeated input observations must agree. Directory contents, file identities and

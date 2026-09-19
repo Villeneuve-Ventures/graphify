@@ -115,7 +115,7 @@ def test_scoped_refusals_and_poisoned_context(tmp_path, monkeypatch):
 
 
 def test_scoped_valid_empty_missing_parser_and_unadapted_callback(tmp_path, monkeypatch):
-    import graphify.extract as extraction
+    from graphify import extract as extraction
     from graphify.source_io import SourceIO
     path = tmp_path / 'empty.md'
     path.write_text('')
@@ -359,7 +359,7 @@ def test_all_builtin_dispatches_use_source_helpers(tmp_path, monkeypatch):
     must use scoped descriptors; unsupported/error inputs must not report success.
     Rich resolver behavior is covered separately by the supporting-input fixtures.
     """
-    import graphify.extract as extraction
+    from graphify import extract as extraction
     from graphify.source_io import SourceIO
     import subprocess
     paths = [tmp_path / ('input' + suffix) for suffix in extraction._DISPATCH]
@@ -498,3 +498,110 @@ def test_scoped_registered_resolver_must_be_adapted(tmp_path, monkeypatch):
     with SourceIO(tmp_path) as inputs:
         with pytest.raises(ExtractionIncomplete, match='unadapted registered resolver'):
             extract([path], source_io=inputs, quiet=True)
+
+
+def test_extra_roots_normalize_after_absolute_validation(tmp_path):
+    from graphify.source_io import SourceIO
+    source = tmp_path / 'source'
+    policy = tmp_path / 'policy'
+    source.mkdir()
+    policy.mkdir()
+    config = policy / 'config.json'
+    config.write_bytes(b'{}')
+    with SourceIO(source, extra_roots={'policy': source / '..' / 'policy'}) as inputs:
+        assert inputs.read_bytes(config) == b'{}'
+        assert any(r['operation'] == 'read' and r['path'] == 'policy:config.json'
+                   for r in inputs.evidence)
+    with pytest.raises(ValueError, match='root allowlist'):
+        SourceIO(source, extra_roots={'policy': Path('policy')})
+
+
+@pytest.mark.parametrize('flag', ['O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK'])
+def test_unsupported_descriptor_flags_refuse_before_open(tmp_path, monkeypatch, flag):
+    from graphify.source_io import SourceIO, SourceUnsupported
+    import os
+    monkeypatch.delattr(os, flag)
+    monkeypatch.setattr(os, 'open', lambda *a, **k: pytest.fail('opened before support check'))
+    with pytest.raises(SourceUnsupported, match='descriptors unavailable'):
+        with SourceIO(tmp_path):
+            pytest.fail('unsupported input context opened')
+
+
+def test_direct_scoped_xaml_uses_accounted_project_listing(tmp_path, monkeypatch):
+    from graphify.source_io import SourceIO, engine_inputs
+    from graphify.extract import extract_xaml
+    from tests.test_strict_extraction_completeness import _xaml_fixture
+    view, _, vm = _xaml_fixture(tmp_path)
+    monkeypatch.setattr(Path, 'iterdir', lambda *a: pytest.fail('unaccounted enumeration'))
+    with SourceIO(tmp_path) as inputs, engine_inputs(inputs):
+        result = extract_xaml(view)
+        assert any(n['source_file'] == str(vm) for n in result['nodes'])
+        assert any(r['operation'] == 'list' and r['path'] == '.' for r in inputs.evidence)
+
+
+@pytest.mark.parametrize('kind', ['json', 'mcp'])
+def test_scoped_config_size_limit_applies_before_payload_read(tmp_path, kind):
+    from graphify.source_io import SourceIO, SourceUnsupported, engine_inputs
+    from graphify.extractors.json_config import extract_json
+    from graphify.mcp_ingest import extract_mcp_config
+    extractor = extract_json if kind == 'json' else extract_mcp_config
+    path = tmp_path / ('config.json' if kind == 'json' else '.mcp.json')
+    path.write_bytes(b' ' * (2 * 1024 * 1024))
+    expected = 'json file too large to index' if kind == 'json' else 'mcp config too large to index'
+    assert extractor(path)['error'] == expected
+    with SourceIO(tmp_path) as inputs:
+        with pytest.raises(SourceUnsupported, match='byte limit'), engine_inputs(inputs):
+            assert extractor(path)['error'] == expected
+            assert inputs._bytes == 0
+            assert not any(r['operation'] == 'read' for r in inputs.evidence)
+        with pytest.raises(SourceUnsupported, match='byte limit'):
+            inputs.check()
+
+
+def test_per_read_limit_keeps_full_evidence_and_global_bounds(tmp_path):
+    from graphify.source_io import SourceIO, SourceUnsupported
+    path = tmp_path / 'small'
+    path.write_bytes(b'1234')
+    with SourceIO(tmp_path, max_file_bytes=8, max_total_bytes=8) as inputs:
+        assert inputs.read_bytes(path, max_bytes=4) == b'1234'
+        assert inputs.read_bytes(path) == b'1234'
+        assert len([r for r in inputs.evidence if r['operation'] == 'read']) == 1
+        with pytest.raises(SourceUnsupported, match='byte limit'):
+            inputs.read_bytes(path, max_bytes=4)
+    with SourceIO(tmp_path, max_file_bytes=3) as inputs:
+        with pytest.raises(SourceUnsupported, match='byte limit'):
+            inputs.read_bytes(path, max_bytes=8)
+        assert inputs._bytes == 0
+
+
+def test_scoped_walk_honors_mutable_pruning_and_detection_exclusions(tmp_path, monkeypatch):
+    from graphify.source_io import SourceIO, source_walk, engine_inputs
+    from graphify.detect import detect
+    for name in ('kept', 'ignored', 'node_modules'):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / 'module.py').write_text('pass')
+    (tmp_path / '.gitignore').write_text('ignored/\n')
+    with SourceIO(tmp_path) as inputs, engine_inputs(inputs):
+        walk = source_walk(tmp_path)
+        _, directories, _ = next(walk)
+        directories[:] = ['kept']
+        assert [Path(item[0]).name for item in walk] == ['kept']
+    with SourceIO(tmp_path) as inputs:
+        listing = inputs.listdir
+        def checked_listing(path):
+            assert Path(path).name not in {'ignored', 'node_modules'}
+            return listing(path)
+        monkeypatch.setattr(inputs, 'listdir', checked_listing)
+        result = detect(tmp_path, source_io=inputs, quiet=True)
+        assert result['files']['code'] == [str(tmp_path / 'kept/module.py')]
+
+
+def test_unqualified_jieba_refuses_only_memory_path(monkeypatch):
+    from graphify import serve
+    from types import SimpleNamespace
+    monkeypatch.setattr(serve, '_jieba', SimpleNamespace(
+        __version__='unqualified', cut=lambda text: ['南京', '市'],
+        Tokenizer=lambda: pytest.fail('unqualified tokenizer initialized')))
+    assert '南京' in serve._segment_chinese('南京市')
+    with pytest.raises(RuntimeError, match='qualified jieba 0.42.1'):
+        serve.memory_query_segmenter()
