@@ -408,9 +408,9 @@ class CompletionBinding(Document):
 
     @classmethod
     def bind(cls, initial, consumed, *, compatibility, graph_sha256):
-        if not isinstance(initial, InputManifest) or not isinstance(consumed, InputManifest):
+        if type(initial) is not InputManifest or type(consumed) is not InputManifest:
             raise ContractError("completion requires validated input manifests")
-        if not isinstance(compatibility, CompatibilityManifest):
+        if type(compatibility) is not CompatibilityManifest:
             raise ContractError("completion requires a compatibility manifest")
         a, b = initial.to_dict(), consumed.to_dict()
         if a["phase"] != "detection" or not consumed.complete:

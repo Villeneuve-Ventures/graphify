@@ -97,6 +97,29 @@ def _validate_wheel_metadata(payload):
         raise ContractError("unsupported wheel compatibility tag")
 
 
+def _validate_core_metadata(payload, project):
+    """Validate complete core metadata and bind it to the captured project."""
+    from packaging.metadata import Metadata
+    from packaging.specifiers import SpecifierSet
+    from packaging.utils import canonicalize_name
+    from packaging.version import Version
+
+    try:
+        metadata = Metadata.from_email(payload, validate=True)
+        project_name = canonicalize_name(project["name"])
+        project_version = Version(project["version"])
+        project_python = SpecifierSet(project["requires-python"])
+    except Exception as exc:
+        raise ContractError("invalid project or core metadata") from exc
+    if project_name != canonicalize_name("graphifyy") or project_version != Version(DISTRIBUTION_VERSION):
+        raise ContractError("project distribution identity outside compatibility contract")
+    if (canonicalize_name(metadata.name) != project_name
+            or metadata.version != project_version
+            or metadata.requires_python != project_python):
+        raise ContractError("wheel distribution identity differs from project")
+    return metadata
+
+
 def package_members(repo):
     """Mirror explicit setuptools package/data selection, preserving all host data."""
     config = tomllib.loads((repo / "pyproject.toml").read_text())["tool"]["setuptools"]
@@ -140,7 +163,7 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
     repo = repo.resolve(strict=True)
     if output.exists() or output.is_symlink() or output.resolve().is_relative_to(repo):
         raise ContractError("fixture output must be new and outside source checkout")
-    if not isinstance(policy, StructuralPolicy):
+    if type(policy) is not StructuralPolicy:
         raise ContractError("explicit fixture policy is required")
     inventory = source_manifest(repo)
     members = package_members(repo)
@@ -189,12 +212,8 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
             raise ContractError("wheel license differs from project")
         _validate_wheel_metadata(read_member(dist_info + "WHEEL"))
         metadata_name = dist_info + "METADATA"
-        from email.parser import BytesParser
-        meta = BytesParser().parsebytes(read_member(metadata_name))
-        if (meta["Name"] != "graphifyy" or meta["Version"] != DISTRIBUTION_VERSION
-                or meta["Requires-Python"] != "==3.14.*,>=3.14.2"):
-            raise ContractError("wheel distribution identity mismatch")
-        if set(meta.get_all("Provides-Extra", [])) != set(project["optional-dependencies"]):
+        meta = _validate_core_metadata(read_member(metadata_name), project)
+        if set(meta.provides_extra or []) != set(project["optional-dependencies"]):
             raise ContractError("wheel optional extras differ from project")
         # Use build-tooling packaging (already in the dev toolchain), not a new
         # runtime dependency. Preserve dependency markers and optional extras.
@@ -205,7 +224,7 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
                 base, separator, marker = requirement.partition(";")
                 expected_requirements.add(base + "; " +
                     (f"({marker.strip()}) and " if separator else "") + f'extra == "{extra}"')
-        if {str(Requirement(r)) for r in meta.get_all("Requires-Dist", [])} != {
+        if {str(requirement) for requirement in (meta.requires_dist or [])} != {
                 str(Requirement(r)) for r in expected_requirements}:
             raise ContractError("wheel dependencies differ from project")
         installation_metadata = {name: hashlib.sha256(read_member(dist_info + name)).hexdigest()

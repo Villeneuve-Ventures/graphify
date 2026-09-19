@@ -6,8 +6,8 @@ def select_adapter(compatibility: CompatibilityTuple, *, expected: Compatibility
                    intent: AdapterIntent) -> AdapterSelection:
     if not isinstance(intent, AdapterIntent):
         raise UnsupportedCompatibility("explicit adapter intent required")
-    if (not isinstance(compatibility, CompatibilityTuple)
-            or not isinstance(expected, CompatibilityTuple) or compatibility != expected):
+    if (type(compatibility) is not CompatibilityTuple
+            or type(expected) is not CompatibilityTuple or compatibility != expected):
         raise UnsupportedCompatibility("candidate is not the exact authorized tuple")
     if intent is not AdapterIntent.PROBE:
         raise UnsupportedCompatibility("S2 fixture is non-executable and non-promoting")

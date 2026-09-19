@@ -40,7 +40,7 @@ class CompatibilityTuple:
     manifest: CompatibilityManifest
 
     def __post_init__(self):
-        if not isinstance(self.manifest, CompatibilityManifest):
+        if type(self.manifest) is not CompatibilityManifest:
             raise UnsupportedCompatibility("validated compatibility manifest required")
 
     @classmethod
@@ -60,9 +60,9 @@ class SourceObservation:
     stable_inventory_passes: int
 
     def __post_init__(self):
-        if (not isinstance(self.initial_detection, InputManifest)
+        if (type(self.initial_detection) is not InputManifest
                 or (self.consumed_inputs is not None
-                    and not isinstance(self.consumed_inputs, InputManifest))):
+                    and type(self.consumed_inputs) is not InputManifest)):
             raise ContractError("observation requires validated input manifests")
         if self.initial_detection.to_dict()["phase"] != "detection":
             raise ContractError("initial observation must be detection")
@@ -81,7 +81,7 @@ class StructuralBuild:
 
     def __post_init__(self):
         from graphify.workspace.contracts import digest, integer
-        if not isinstance(self.input_manifest, InputManifest):
+        if type(self.input_manifest) is not InputManifest:
             raise ContractError("structural build requires a validated input manifest")
         if not self.input_manifest.complete:
             raise ContractError("structural build requires complete input dispositions")

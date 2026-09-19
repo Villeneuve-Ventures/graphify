@@ -11,7 +11,7 @@ from graphify.workspace.contracts import (
     CompatibilityManifest, CompletionBinding, ContractError, InputManifest,
     INSTALLATION_METADATA, SCHEMA_FILES, StateRootMarker, canonical_json_bytes, decode_canonical,
 )
-from graphify.workspace.adapters.base import SourceObservation, StructuralBuild
+from graphify.workspace.adapters.base import CompatibilityTuple, SourceObservation, StructuralBuild
 from tools.workspace_artifacts.candidate import package_members
 
 REPO = Path(__file__).resolve().parents[1]
@@ -76,6 +76,38 @@ def test_validated_input_models_are_required_at_trust_boundaries(tmp_path):
         SourceObservation(fake, final, 2)
     with pytest.raises(ContractError, match="validated input manifest"):
         StructuralBuild(fake, "c" * 64, 0, 0)
+
+    class ForgedInputManifest(InputManifest):
+        @property
+        def complete(self):
+            return True
+
+        @property
+        def sha256(self):
+            return "f" * 64
+
+    forged_input = ForgedInputManifest(initial.canonical)
+    with pytest.raises(ContractError, match="validated input manifests"):
+        CompletionBinding.bind(
+            forged_input, final, compatibility=compatibility(), graph_sha256="c" * 64,
+        )
+    with pytest.raises(ContractError, match="validated input manifests"):
+        SourceObservation(forged_input, final, 2)
+    with pytest.raises(ContractError, match="validated input manifest"):
+        StructuralBuild(forged_input, "c" * 64, 0, 0)
+
+    class ForgedCompatibilityManifest(CompatibilityManifest):
+        @property
+        def sha256(self):
+            return "f" * 64
+
+    forged_compatibility = ForgedCompatibilityManifest(compatibility().canonical)
+    with pytest.raises(ContractError, match="compatibility manifest"):
+        CompletionBinding.bind(
+            initial, final, compatibility=forged_compatibility, graph_sha256="c" * 64,
+        )
+    with pytest.raises(ContractError, match="compatibility manifest"):
+        CompatibilityTuple(forged_compatibility)
 
 
 def test_supporting_reads_negative_probes_and_membership(tmp_path):

@@ -77,6 +77,14 @@ class InstalledIdentityTests(unittest.TestCase):
         with patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(alias)):
             verify_installed_candidate(self.expected)
 
+    def test_missing_recorded_console_script_is_refused(self):
+        scripts = self.root / "bin"
+        scripts.mkdir()
+        self.files.append(metadata.PackagePath("bin/graphify"))
+        with (patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(scripts)),
+              self.assertRaisesRegex(WorkspaceAuthorityInvalid, "console script")):
+            verify_installed_candidate(self.expected)
+
     def test_normal_caches_preserve_identity_and_bytes(self):
         for optimize in (0, 1, 2):
             for mode in py_compile.PycInvalidationMode:
@@ -134,6 +142,20 @@ class InstalledIdentityTests(unittest.TestCase):
         shadow.mkdir()
         (shadow / "__init__.py").write_text("MARKER = 99\n")
         with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "unrecorded"):
+            verify_installed_candidate(self.expected)
+
+    def test_package_member_replacement_after_hash_is_refused(self):
+        import graphify.workspace.composition as composition
+        inspect_tree = composition._verify_package_tree
+
+        def replace_then_inspect(*args):
+            replacement = self.root / "replacement.py"
+            replacement.write_bytes(self.source.replace(b"MARKER = 1", b"MARKER = 9"))
+            replacement.replace(self.module)
+            return inspect_tree(*args)
+
+        with (patch.object(composition, "_verify_package_tree", replace_then_inspect),
+              self.assertRaisesRegex(WorkspaceAuthorityInvalid, "changed after verification")):
             verify_installed_candidate(self.expected)
 
     def test_external_pycache_prefix_is_checked(self):

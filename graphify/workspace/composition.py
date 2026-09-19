@@ -169,42 +169,83 @@ def verify_installed_candidate(expected):
         owned = {str(p): p for p in (dist.files or ())}
         allowed_metadata = {prefix + name for name in (*INSTALLATION_METADATA, "RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json")}
         scripts = Path(sysconfig.get_path("scripts")).resolve()
+        script_paths = {scripts / "graphify", scripts / "graphify-mcp",
+                        scripts / "graphify.exe", scripts / "graphify-mcp.exe"}
         for name, member in owned.items():
             if name in actual or name in allowed_metadata:
                 continue
             if name.startswith("graphify/") and "__pycache__" in member.parts and name.endswith(".pyc"):
                 continue
-            installed_path = Path(str(dist.locate_file(member))).resolve()
-            if installed_path not in {scripts / "graphify", scripts / "graphify-mcp",
-                                     scripts / "graphify.exe", scripts / "graphify-mcp.exe"}:
+            installed_path = Path(str(dist.locate_file(member)))
+            try:
+                before = installed_path.lstat()
+                resolved = installed_path.resolve(strict=True)
+                after = installed_path.lstat()
+            except OSError as exc:
+                raise WorkspaceAuthorityInvalid("recorded console script missing or unsafe") from exc
+            if (resolved not in script_paths or not stat.S_ISREG(before.st_mode)
+                    or _file_identity(before) != _file_identity(after)):
                 raise WorkspaceAuthorityInvalid("unexpected installed distribution member")
         expected_files = dict(value["package_members"])
         expected_files.update({prefix + name: sha for name, sha in value["installation_metadata"].items()})
-        verified_package_files, verified_caches = set(), set()
+        verified_package_files, verified_caches = {}, {}
         for name, wanted in expected_files.items():
             if name not in owned:
                 raise WorkspaceAuthorityInvalid("missing installed distribution metadata")
             path = Path(str(dist.locate_file(owned[name])))
-            try:
-                if path.is_symlink() or not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
-                    raise WorkspaceAuthorityInvalid("unsafe installed package member")
-                source = path.read_bytes()
-                if hashlib.sha256(source).hexdigest() != wanted:
-                    raise WorkspaceAuthorityInvalid("installed package member mismatch")
-                if name.startswith("graphify/"):
-                    verified_package_files.add(path.resolve())
-                if name.endswith(".py"):
-                    verified_caches.update(_verify_source_caches(path, source))
-            except OSError as exc:
-                raise WorkspaceAuthorityInvalid("installed package member unreadable") from exc
+            source, resolved, identity = _read_installed_member(path)
+            if hashlib.sha256(source).hexdigest() != wanted:
+                raise WorkspaceAuthorityInvalid("installed package member mismatch")
+            if name.startswith("graphify/"):
+                verified_package_files[resolved] = identity
+            if name.endswith(".py"):
+                verified_caches.update(_verify_source_caches(path, source))
         _verify_package_tree(active.parent, verified_package_files, verified_caches)
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
 
 
+def _read_installed_member(path):
+    """Capture bounded member bytes and the exact filesystem identity hashed."""
+    descriptor = None
+    limit = 64 * 1024 * 1024
+    try:
+        named = path.lstat()
+        if not stat.S_ISREG(named.st_mode) or named.st_size > limit:
+            raise WorkspaceAuthorityInvalid("unsafe installed package member")
+        flags = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (_file_identity(named) != _file_identity(opened)
+                or not stat.S_ISREG(opened.st_mode) or opened.st_size > limit):
+            raise WorkspaceAuthorityInvalid("installed package member changed")
+        chunks, size = [], 0
+        while True:
+            chunk = os.read(descriptor, min(65536, limit + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > limit:
+                raise WorkspaceAuthorityInvalid("installed package member exceeds byte limit")
+        after = os.fstat(descriptor)
+        resolved = path.resolve(strict=True)
+        if (_file_identity(opened) != _file_identity(after)
+                or _file_identity(opened) != _file_identity(path.lstat())
+                or size != opened.st_size):
+            raise WorkspaceAuthorityInvalid("installed package member changed")
+        return b"".join(chunks), resolved, _file_identity(opened)
+    except OSError as exc:
+        raise WorkspaceAuthorityInvalid("installed package member unreadable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
 def _verify_package_tree(package_root, verified_files, verified_caches):
     """Refuse executable or data entries omitted from the wheel-derived inventory."""
-    allowed = verified_files | verified_caches
+    allowed = {**verified_files, **verified_caches}
     try:
         for path in package_root.rglob("*"):
             info = path.lstat()
@@ -217,6 +258,8 @@ def _verify_package_tree(package_root, verified_files, verified_caches):
                 raise WorkspaceAuthorityInvalid("installed package tree changed")
             if resolved not in allowed:
                 raise WorkspaceAuthorityInvalid("unrecorded installed package member")
+            if allowed[resolved] is not None and _file_identity(info) != allowed[resolved]:
+                raise WorkspaceAuthorityInvalid("installed package member changed after verification")
     except OSError as exc:
         raise WorkspaceAuthorityInvalid("installed package tree unreadable") from exc
 
@@ -233,7 +276,7 @@ def _verify_source_caches(path, source):
     import base64
     import sys
 
-    caches, verified = [], set()
+    caches, verified = [], {}
     limit = 64 * 1024 * 1024
     # Resolve symlinked installation ancestors consistently, while supporting
     # caches created with either the installation spelling or its real path.
@@ -248,8 +291,8 @@ def _verify_source_caches(path, source):
             source_path = Path(filename)
             for optimize in (0, 1, 2):
                 suffix = f".opt-{optimize}" if optimize else ""
-                verified.add((source_path.parent / "__pycache__" /
-                              f"{source_path.stem}.{tag}{suffix}.pyc").resolve())
+                verified[(source_path.parent / "__pycache__" /
+                          f"{source_path.stem}.{tag}{suffix}.pyc").resolve()] = None
     for filename in filenames:
         for optimize in (0, 1, 2):
             cache = Path(cache_from_source(filename, optimization=str(optimize) if optimize else ""))
@@ -269,11 +312,12 @@ def _verify_source_caches(path, source):
                 if (len(payload) > limit or _file_identity(opened) != _file_identity(os.fstat(stream.fileno()))
                         or _file_identity(opened) != _file_identity(cache.lstat())):
                     raise WorkspaceAuthorityInvalid("installed bytecode cache changed")
+                resolved = cache.resolve(strict=True)
             if (len(payload) < 16 or payload[:4] != MAGIC_NUMBER
                     or int.from_bytes(payload[4:8], "little") not in (0, 1, 3)):
                 raise WorkspaceAuthorityInvalid("unverified installed bytecode cache header")
             caches.append([optimize, base64.b64encode(payload[16:]).decode("ascii")])
-            verified.add(cache.resolve())
+            verified[resolved] = _file_identity(opened)
     if caches:
         _compare_cached_code(source, filenames, caches)
     return verified
@@ -382,7 +426,8 @@ class WorkspaceRuntimeInputs:
 
     def __post_init__(self):
         _absolute(self.state_root)
-        if not isinstance(self.authority, WorkspaceRuntimeAuthority) or not isinstance(self.expected, CompatibilityManifest):
+        if (type(self.authority) is not WorkspaceRuntimeAuthority
+                or type(self.expected) is not CompatibilityManifest):
             raise WorkspaceAuthorityInvalid("validated explicit authority is required")
         if self.authority.compatibility != self.expected:
             raise WorkspaceAuthorityInvalid("runtime authority candidate mismatch")
@@ -408,7 +453,7 @@ class StructuralComposition:
 
 def compose_workspace_runtime(inputs):
     """Validate explicit contract inputs and return a pure, non-operational plan."""
-    if not isinstance(inputs, WorkspaceRuntimeInputs):
+    if type(inputs) is not WorkspaceRuntimeInputs:
         raise WorkspaceAuthorityInvalid("explicit runtime inputs required")
     select_adapter(CompatibilityTuple(inputs.authority.compatibility),
                    expected=CompatibilityTuple(inputs.expected), intent=AdapterIntent.PROBE)

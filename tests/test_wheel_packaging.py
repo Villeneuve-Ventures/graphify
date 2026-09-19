@@ -262,6 +262,67 @@ def test_fixture_rejects_invalid_wheel_metadata(built_wheel, tmp_path, wheel_met
     assert not output.exists()
 
 
+@pytest.mark.parametrize("damage", ["duplicate-name", "missing-version", "malformed-header"])
+def test_fixture_rejects_invalid_core_metadata(built_wheel, tmp_path, damage):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    changed = tmp_path / built_wheel.name
+    with zipfile.ZipFile(built_wheel) as source, zipfile.ZipFile(changed, "w") as target:
+        for info in source.infolist():
+            payload = source.read(info.filename)
+            if info.filename.endswith("/METADATA"):
+                if damage == "duplicate-name":
+                    payload = payload.replace(b"Name: graphifyy\n", b"Name: graphifyy\nName: unexpected\n", 1)
+                elif damage == "missing-version":
+                    payload = b"\n".join(
+                        line for line in payload.split(b"\n")
+                        if not line.startswith(b"Metadata-Version:")
+                    )
+                else:
+                    payload = b"not a metadata header\n" + payload
+            target.writestr(info, payload)
+    output = tmp_path / "refused-core-metadata"
+    with pytest.raises(ContractError, match="metadata"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=changed,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("name", "unexpected"),
+    ("version", "0.10.1"),
+    ("requires-python", ">=3.15"),
+])
+def test_fixture_binds_wheel_identity_to_project(
+        built_wheel, tmp_path, monkeypatch, field, value):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    loads = candidate.tomllib.loads
+
+    def changed_project(payload):
+        parsed = loads(payload)
+        if "project" in parsed:
+            parsed["project"][field] = value
+        return parsed
+
+    monkeypatch.setattr(candidate.tomllib, "loads", changed_project)
+    output = tmp_path / "refused-project-identity"
+    with pytest.raises(ContractError, match="project|identity"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=built_wheel,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
 @pytest.mark.parametrize("damage", ["package", "metadata", "license", "total", "namespace"])
 def test_wheel_expansion_rejected_before_read(built_wheel, tmp_path, monkeypatch, damage):
     from graphify.workspace.composition import StructuralPolicy
