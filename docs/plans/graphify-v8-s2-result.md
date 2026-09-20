@@ -45,10 +45,13 @@ follow-up below records later repairs separately from that initial proof.
 retains S1's sorted `(operation, path)` records: three-integer directory bindings,
 six-integer regular-file identities plus SHA-256 for reads, present/absent probes,
 and sorted directory names with type/mode/device/inode bindings. Reads require
-matching probes; traversed directories and explicit root bindings must exist;
+matching probes; successfully traversed directories and explicit root bindings must exist;
 shared bindings must agree. Atime is absent, as in S1. Root labels are explicitly
 limited to source, Git and policy. Absolute/scratch paths, traversal, alias labels,
 duplicate records and noncanonical filesystem labels refuse before any reopen.
+Negative probes may stop at an absent or non-directory ancestor, for which S1
+emits no directory binding. Positive probes, reads, lists and recorded directory
+bindings still require their full traversed ancestry.
 
 The hard ceiling is 100,000 evidence units (records plus directory members),
 64 MiB per consumed file, 512 MiB aggregate unique consumed bytes and 16 MiB
@@ -629,3 +632,66 @@ Reproduce the new regressions with:
 
 The AST graph update completed at **13,712 nodes / 30,624 edges**, retaining the
 same five zero-node JSON corpus warnings.
+
+### Independent OMX review repairs (`f41509b7` input)
+
+The attached-tmux OMX review pinned `f41509b7`, the complete 24-file PR diff,
+44 conversation comments, 28 reviews and 71 inline threads. Independent
+code-reviewer and architect lanes found three distinct in-scope defects. This
+repair addresses those findings without reopening unchanged dispositions or
+adding an acceptance gate.
+
+- The latest [Qodo member-publication report](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055931683)
+  was valid: directory identity alone did not bind the files being published.
+  Each member now binds writer-intended bytes, length and descriptor identity;
+  completed members must remain singular owned regular files with mode 0600.
+  The exact five-name namespace and member contents are checked before rename
+  and after publication. Cleanup preserves foreign or drifted entries, including
+  changes to the original inode. ZIP output hashes the writer's emitted bytes,
+  so a tampered archive cannot become its own expected content.
+- Valid S1 negative probes below absent or non-directory ancestors previously
+  failed S2 ancestry validation. Such probes now retain exactly the evidence S1
+  emits, including successful prefixes, without inventing missing bindings.
+  Positive observations and explicit root bindings retain their prior checks.
+  A real TypeScript alias resolver reproduces the missing-first-target fallback.
+- Installed admission captured bounded METADATA/RECORD bytes but then reopened
+  them through `Distribution.version` and `Distribution.files`. Version and CSV
+  inventory now parse from those captures; the same METADATA bytes supply its
+  content hash. Malformed RECORD fields refuse through the authority exception,
+  and final metadata identity checks remain. Tests use real `PathDistribution`
+  objects and actual RECORD bytes, including mutation after capture.
+
+The shared cause was verifying an intermediate object while later consumption
+or publication used a less constrained observation. These repairs bind the
+consumed metadata and published members directly, while matching the actual S1
+negative-observation contract. The namespace/content checks are observations,
+not atomic exclusion of a hostile writer; post-rename refusal may leave the
+published artifact in place and never rolls it back unsafely.
+
+No new justified out-of-scope issue was found. Existing tickets #150, #151 and
+#113 and design-assigned S7 qualification remain the appropriate follow-ups.
+
+Repair verification: **109 focused stdlib unittest tests passed**. The new
+fixture module includes 16 mutation subcases around publication, write/close
+failure preservation and deterministic archive contents. The original member
+publication code failed the initial regression run; actual S1 missing-ancestor
+observations likewise failed before the contract repair. Metadata regressions
+exercise the real distribution reader and forbid property-driven rereads.
+Independent read-only verification of the metadata and S1 repairs found no
+actionable regression.
+
+A fresh source-matching wheel passed fixture archive/completion checks and a
+disposable noneditable installation, both without caches and after compiling
+package caches at optimization levels 0, 1 and 2. Scoped Ruff, interpreter-pinned
+Pyright and diff checks passed. The required AST update completed with
+**13,753 nodes / 30,761 edges**, retaining the same five zero-node JSON warnings.
+
+Reproduce the integrated focused selection without pytest:
+
+```sh
+.venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity tests.test_workspace_fixture_member_binding tests.test_workspace_negative_probes -q
+```
+
+Pytest was not rerun. CI was not awaited. Historical full-suite and review
+receipts retain their named snapshot scope; no fresh full-suite or native
+Linux/Windows qualification is claimed.

@@ -284,6 +284,10 @@ def _evidence(records, roots):
             parent = "/".join(parts[:i])
             parent = parent if root == "source" else root + ":" + parent
             if ("directory", parent) not in indexed:
+                # S1 records only successfully opened ancestors. A negative
+                # probe may stop at an absent or non-directory component.
+                if op == "probe" and record["value"] is None:
+                    break
                 raise ContractError("missing traversed directory binding")
         if op in {"read", "list"}:
             probe = indexed.get(("probe", path))

@@ -1,5 +1,5 @@
 """Focused PR-review regressions, also runnable with the stdlib unittest runner."""
-from importlib.metadata import PackagePath
+from importlib.metadata import PackagePath, PathDistribution
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -38,7 +38,7 @@ class InstalledMemberRefusalTests(unittest.TestCase):
         package.mkdir()
         self.path = package / "__init__.py"
         self.path.write_bytes(b"# installed fixture\n")
-        from tests.test_workspace_installed_identity import installed_manifest
+        from tests.test_workspace_installed_identity import installed_manifest, write_installed_record
         self.expected = installed_manifest(root)
         members = [PackagePath(path.relative_to(root).as_posix())
                    for path in root.rglob("*") if path.is_file()]
@@ -47,8 +47,8 @@ class InstalledMemberRefusalTests(unittest.TestCase):
         script_rows = [PackagePath("bin/graphify"), PackagePath("bin/graphify-mcp")]
         for row in script_rows:
             (root / row).write_bytes(b"# fixture console script\n")
-        dist = SimpleNamespace(version="0.10.0", files=[*members, *script_rows],
-                               locate_file=lambda name: root / name)
+        write_installed_record(root, [*members, *script_rows])
+        dist = PathDistribution(root / "graphifyy-0.10.0.dist-info")
         for patcher in (patch("graphify.__file__", str(self.path)),
                         patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(scripts)),
                         patch("graphify.workspace.composition.metadata.distribution", return_value=dist)):

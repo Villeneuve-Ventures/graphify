@@ -542,13 +542,89 @@ def _entry_identity(directory_fd, name):
     return info.st_dev, info.st_ino
 
 
+class _FixtureMemberWriter:
+    """Hash intended writes independently of disk; ZIP uses data descriptors."""
+    def __init__(self, stream, identity):
+        self.stream = stream
+        self.identity = identity
+        self.size = 0
+        self.digest = hashlib.sha256()
+        self.completed: tuple[int, ...] | None = None
+
+    def write(self, payload):
+        written = self.stream.write(payload)
+        self.digest.update(payload[:written])
+        self.size += written
+        if written != len(payload):
+            raise OSError("short fixture member write")
+        return written
+
+    def tell(self):
+        return self.size
+
+    def flush(self):
+        self.stream.flush()
+
+
+def _verify_fixture_member(stage_fd, name, member):
+    descriptor = None
+    try:
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=stage_fd)
+        before = os.fstat(descriptor)
+        if ((before.st_dev, before.st_ino) != member.identity
+                or not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+                or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) != 0o600
+                or before.st_size != member.size
+                or (member.completed is not None and _input_identity(before) != member.completed)):
+            raise ContractError("fixture member identity or policy changed")
+        digest, size = hashlib.sha256(), 0
+        while True:
+            chunk = os.read(descriptor, min(65536, member.size + 1 - size))
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > member.size:
+                raise ContractError("fixture member grew while reading")
+            digest.update(chunk)
+        if (size != member.size or digest.digest() != member.digest.digest()
+                or _input_identity(before) != _input_identity(os.fstat(descriptor))
+                or _input_identity(before) != _input_identity(os.stat(
+                    name, dir_fd=stage_fd, follow_symlinks=False))):
+            raise ContractError("fixture member contents changed")
+        return before
+    except OSError as exc:
+        raise ContractError("fixture member cannot be safely verified") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _verify_fixture_members(stage_fd, members):
+    expected = {"source-manifest.json", "compatibility.json", "runtime-manifest.json",
+                "fixture-manifest.json", "fixture-bundle.zip"}
+    stage = os.fstat(stage_fd)
+    if stage.st_uid != os.geteuid() or stat.S_IMODE(stage.st_mode) != 0o700:
+        raise ContractError("fixture staging directory policy changed")
+    if set(members) != expected or set(os.listdir(stage_fd)) != expected:
+        raise ContractError("fixture member namespace changed")
+    for name, member in members.items():
+        if member.completed is None:
+            raise ContractError("fixture member was not completed")
+        _verify_fixture_member(stage_fd, name, member)
+    if set(os.listdir(stage_fd)) != expected:
+        raise ContractError("fixture member namespace changed during verification")
+
+
 def _cleanup_fixture_stage(parent, stage, stage_fd, identity, members):
     # Never traverse a mutable stage name, nor delete files not created here.
     if _entry_identity(parent.fd, stage) != identity:
         return
-    for name, expected in members.items():
-        if _entry_identity(stage_fd, name) == expected:
-            os.unlink(name, dir_fd=stage_fd)
+    for name, member in members.items():
+        try:
+            _verify_fixture_member(stage_fd, name, member)
+        except ContractError:
+            continue
+        os.unlink(name, dir_fd=stage_fd)
     if _entry_identity(parent.fd, stage) == identity and not os.listdir(stage_fd):
         os.rmdir(stage, dir_fd=parent.fd)
 
@@ -571,15 +647,38 @@ def _write_fixture(output, bundle, outer, *, repo=None):
                 raise ContractError("fixture staging directory must remain owned and private")
             admitted = True
 
+            intended = {name: bundle[name] for name in (
+                "source-manifest.json", "compatibility.json", "runtime-manifest.json")}
+            intended["fixture-manifest.json"] = outer
+
+            @contextmanager
             def open_member(name):
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=stage_fd)
                 opened_file = os.fstat(fd)
-                members[name] = (opened_file.st_dev, opened_file.st_ino)
-                return os.fdopen(fd, "wb")
+                with os.fdopen(fd, "wb") as stream:
+                    member = _FixtureMemberWriter(stream, (opened_file.st_dev, opened_file.st_ino))
+                    members[name] = member
+                    completed = False
+                    try:
+                        yield member
+                        completed = True
+                    finally:
+                        member.flush()
+                        info = _verify_fixture_member(stage_fd, name, member)
+                        if completed and name in intended and (
+                                member.size != len(intended[name])
+                                or member.digest.digest() != hashlib.sha256(intended[name]).digest()):
+                            raise ContractError("fixture member differs from intended bytes")
+                        member.completed = _input_identity(info)
 
             _write_fixture_members(open_member, bundle, outer)
-            _publish_fixture(output.parent / stage, output, parent=parent, expected_identity=identity)
+            _publish_fixture(output.parent / stage, output, parent=parent,
+                             expected_identity=identity, stage_fd=stage_fd, members=members)
+            _verify_fixture_members(stage_fd, members)
+            if _entry_identity(parent.fd, output.name) != identity:
+                raise ContractError("published fixture directory identity changed")
+            _validate_fixture_parent(output, parent)
         finally:
             if stage_fd is not None:
                 try:
@@ -597,12 +696,14 @@ def _validate_fixture_parent(output, parent, *, repo=None):
         raise ContractError("fixture output must be outside source checkout")
 
 
-def _publish_fixture(payload_root, output, *, parent=None, expected_identity=None):
+def _publish_fixture(payload_root, output, *, parent=None, expected_identity=None,
+                     stage_fd=None, members=None):
     # Tooling-only import: preserve the workspace composition cold boundary.
     from graphify.transaction import _atomic_rename_no_replace, pin_output
     if parent is None:
         with pin_output(output.parent, create=False) as pinned:
-            _publish_fixture(payload_root, output, parent=pinned, expected_identity=expected_identity)
+            _publish_fixture(payload_root, output, parent=pinned, expected_identity=expected_identity,
+                             stage_fd=stage_fd, members=members)
         return
     _validate_fixture_parent(output, parent)
     source = str(payload_root.relative_to(output.parent))
@@ -610,6 +711,8 @@ def _publish_fixture(payload_root, output, *, parent=None, expected_identity=Non
     expected_identity = current if expected_identity is None else expected_identity
     if expected_identity is None or current != expected_identity:
         raise ContractError("fixture staging directory identity changed")
+    if stage_fd is not None:
+        _verify_fixture_members(stage_fd, members)
     _atomic_rename_no_replace(parent, source, output.name)
     if _entry_identity(parent.fd, output.name) != expected_identity:
         raise ContractError("published fixture directory identity changed")

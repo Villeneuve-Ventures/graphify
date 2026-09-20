@@ -1,5 +1,8 @@
 """Installed-identity review regressions; run only with stdlib unittest."""
 import hashlib
+import base64
+import csv
+import io
 import compileall
 from importlib import metadata, util
 import os
@@ -38,7 +41,8 @@ def installed_manifest(root):
         path = metadata_root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         if not path.exists():
-            path.write_bytes(b"fixture metadata\n")
+            path.write_bytes(b"Name: graphifyy\nVersion: 0.10.0\n"
+                             if name == "METADATA" else b"fixture metadata\n")
     return CompatibilityManifest.from_mapping({
         "contract": "graphify.workspace.compatibility", "schema_version": 2,
         "distribution": "graphifyy", "distribution_version": DISTRIBUTION_VERSION,
@@ -53,6 +57,20 @@ def installed_manifest(root):
         "installation_metadata": {name: hashlib.sha256((metadata_root / name).read_bytes()).hexdigest()
                                   for name in INSTALLATION_METADATA},
     })
+
+
+def write_installed_record(root, files):
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    for path in files:
+        name = str(path)
+        if name.endswith(("/RECORD", ".pyc")):
+            writer.writerow((name, "", ""))
+        else:
+            payload = (root / path).read_bytes()
+            digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=").decode()
+            writer.writerow((name, "sha256=" + digest, str(len(payload))))
+    (root / "graphifyy-0.10.0.dist-info/RECORD").write_text(stream.getvalue(), encoding="utf-8")
 
 
 class InstalledIdentityTests(unittest.TestCase):
@@ -85,8 +103,8 @@ class InstalledIdentityTests(unittest.TestCase):
         for name in ("graphify", "graphify-mcp"):
             (self.scripts / name).write_bytes(b"# fixture console script\n")
             self.files.append(metadata.PackagePath("bin/" + name))
-        self.dist = SimpleNamespace(version="0.10.0", files=self.files,
-                                    locate_file=lambda p: self.root / p)
+        write_installed_record(self.root, self.files)
+        self.dist = metadata.PathDistribution(self.dist_info)
         for patcher in (patch("graphify.__file__", str(self.init)),
                         patch("graphify.workspace.composition.metadata.distribution", return_value=self.dist),
                         patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(self.scripts)),
@@ -146,6 +164,7 @@ class InstalledIdentityTests(unittest.TestCase):
                         self.files.remove(row)
                         if remove_files:
                             (self.root / row).unlink()
+                    write_installed_record(self.root, self.files)
                     try:
                         with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "console script"):
                             verify_installed_candidate(self.expected)
@@ -153,12 +172,14 @@ class InstalledIdentityTests(unittest.TestCase):
                         self.files.extend(rows)
                         for row in rows:
                             (self.root / row).write_bytes(b"# fixture console script\n")
+                        write_installed_record(self.root, self.files)
 
     def test_supported_exe_launcher_variants_remain_accepted(self):
         for name in ("graphify", "graphify-mcp"):
             (self.scripts / name).rename(self.scripts / (name + ".exe"))
             self.files.remove(metadata.PackagePath("bin/" + name))
             self.files.append(metadata.PackagePath("bin/" + name + ".exe"))
+        write_installed_record(self.root, self.files)
         verify_installed_candidate(self.expected)
 
     def test_console_script_disappearance_before_final_admission_is_refused(self):
@@ -219,6 +240,7 @@ class InstalledIdentityTests(unittest.TestCase):
                         member = metadata.PackagePath(str(cached.relative_to(self.root)))
                         if recorded and member not in self.files:
                             self.files.append(member)
+                            write_installed_record(self.root, self.files)
                         with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "bytecode"):
                             verify_installed_candidate(self.expected)
                         cached.unlink()
@@ -270,37 +292,80 @@ class InstalledIdentityTests(unittest.TestCase):
               self.assertRaisesRegex(WorkspaceAuthorityInvalid, "metadata changed")):
             verify_installed_candidate(self.expected)
 
-    def test_metadata_is_bounded_before_importlib_parses_it(self):
-        import graphify.workspace.composition as composition
-        captured = set()
-        capture = composition._read_installed_member
-
-        def tracked(path):
-            result = capture(path)
-            if path.parent == self.dist_info:
-                captured.add(path.name)
-            return result
-
-        test_case = self
-
-        class GuardedDistribution:
-            def locate_file(self, path):
-                return test_case.root / path
-
-            @property
-            def version(self):
-                test_case.assertTrue({"METADATA", "RECORD"} <= captured)
-                return "0.10.0"
-
-            @property
-            def files(self):
-                test_case.assertTrue({"METADATA", "RECORD"} <= captured)
-                return test_case.files
-
-        with (patch.object(composition, "_read_installed_member", tracked),
-              patch.object(composition.metadata, "distribution",
-                           return_value=GuardedDistribution())):
+    def test_metadata_properties_do_not_reopen_captured_files(self):
+        with patch.object(metadata.PathDistribution, "read_text",
+                          side_effect=AssertionError("unbounded metadata reread")):
             verify_installed_candidate(self.expected)
+
+    def test_malformed_record_size_is_authority_refusal(self):
+        record = self.dist_info / "RECORD"
+        record.write_bytes(b"graphify/__init__.py,,not-an-integer\n")
+        with self.assertRaises(WorkspaceAuthorityInvalid):
+            verify_installed_candidate(self.expected)
+
+    def test_malformed_captured_record_is_authority_refusal(self):
+        record = self.dist_info / "RECORD"
+        invalid_records = [b"\xff", b'"unterminated,,\n', b"path,hash\n",
+                           b"path,,1,extra\n", b"path,,1\npath,,1\n",
+                           b"path,sha256=,1\n", b"path,invalid,1\n", b"bad\x00path,,1\n",
+                           b"path,,1\n./path,,1\n"]
+        invalid_records.extend(b"path,," + size + b"\n"
+                               for size in (b"-1", b"+1", b"1.5", b"\xd9\xa1", b" 1"))
+        for payload in invalid_records:
+            with self.subTest(payload=payload):
+                record.write_bytes(payload)
+                with self.assertRaises(WorkspaceAuthorityInvalid):
+                    verify_installed_candidate(self.expected)
+
+    def test_malformed_captured_metadata_is_authority_refusal(self):
+        for payload in (b"\xff", b"Name: graphifyy\n", b"Version: 1.0\n",
+                        b"Version: 0.10.0\nVersion: 0.10.0\n", b"bad header\nVersion: 0.10.0\n"):
+            with self.subTest(payload=payload):
+                self.metadata_file.write_bytes(payload)
+                with self.assertRaises(WorkspaceAuthorityInvalid):
+                    verify_installed_candidate(self.expected)
+
+    def test_optional_record_hash_and_size_fields_remain_accepted(self):
+        record = self.dist_info / "RECORD"
+        cached = self.cache()
+        self.files.append(metadata.PackagePath(cached.relative_to(self.root).as_posix()))
+        write_installed_record(self.root, self.files)
+        original_rows = list(csv.reader(io.StringIO(record.read_text())))
+        for omit_hash, omit_size in ((False, False), (True, False), (False, True), (True, True)):
+            with self.subTest(omit_hash=omit_hash, omit_size=omit_size):
+                stream = io.StringIO(newline="")
+                csv.writer(stream).writerows((name, "" if omit_hash else digest,
+                                              "" if omit_size else size)
+                                             for name, digest, size in original_rows)
+                record.write_text(stream.getvalue(), encoding="utf-8")
+                verify_installed_candidate(self.expected)
+
+    def test_captured_metadata_is_parsed_before_final_drift_refusal(self):
+        from graphify.workspace import composition
+        capture = composition._read_installed_member
+        inspect_tree = composition._verify_package_tree
+        for name in ("METADATA", "RECORD"):
+            path = self.dist_info / name
+            original = path.read_bytes()
+            reads = []
+            def mutate_after_capture(member):
+                result = capture(member)
+                if member == path:
+                    reads.append(member)
+                    member.write_bytes(b"\xff" * 1024 * 1024)
+                return result
+            try:
+                with (self.subTest(name=name),
+                      patch.object(composition, "_read_installed_member", mutate_after_capture),
+                      patch.object(composition, "_verify_package_tree", wraps=inspect_tree) as tree,
+                      patch.object(metadata.PathDistribution, "read_text",
+                                   side_effect=AssertionError("unbounded metadata reread"))):
+                    with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "metadata changed"):
+                        verify_installed_candidate(self.expected)
+                    tree.assert_called_once()
+                    self.assertEqual(reads, [path])
+            finally:
+                path.write_bytes(original)
 
     def test_external_pycache_prefix_is_checked(self):
         with patch("sys.pycache_prefix", str(self.root / "external-cache")):
@@ -373,8 +438,8 @@ class InstalledIdentityTests(unittest.TestCase):
     def test_symlinked_installation_ancestors_accept_either_compile_filename(self):
         alias = self.root / "alias"
         alias.symlink_to(self.package, target_is_directory=True)
-        self.dist.locate_file = lambda p: (
-            alias / Path(p).relative_to("graphify") if str(p).startswith("graphify/") else self.root / p
+        self.dist.locate_file = lambda path: (
+            alias / Path(path).relative_to("graphify") if str(path).startswith("graphify/") else self.root / path
         )
         for filename in (self.module, alias / self.module.name):
             with self.subTest(filename=str(filename)):
@@ -434,8 +499,8 @@ class InstalledIdentityTests(unittest.TestCase):
         self.package = location
         self.init = location / "__init__.py"
         self.module = location / "marker.py"
-        self.dist.locate_file = lambda p: (
-            location / Path(p).relative_to("graphify") if str(p).startswith("graphify/") else self.root / p
+        self.dist.locate_file = lambda path: (
+            location / Path(path).relative_to("graphify") if str(path).startswith("graphify/") else self.root / path
         )
         with patch("graphify.__file__", str(self.init)):
             self.cache()

@@ -7,6 +7,9 @@ here. S3 owns storage/capability qualification and S4 owns adapter execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import csv
+from email.parser import Parser
+import io
 from importlib import metadata
 import os
 from pathlib import Path
@@ -167,14 +170,15 @@ def verify_installed_candidate(expected):
     try:
         dist = metadata.distribution("graphifyy")
         prefix = f"graphifyy-{DISTRIBUTION_VERSION}.dist-info/"
-        verified_metadata = {}
+        verified_metadata, captured_metadata = {}, {}
         for name in ("METADATA", "RECORD"):
             path = Path(str(dist.locate_file(prefix + name)))
-            _, resolved, identity = _read_installed_member(path)
+            payload, resolved, identity = _read_installed_member(path)
+            captured_metadata[name] = payload
             verified_metadata[path] = (resolved, identity)
-        if dist.version != value["distribution_version"]:
-            raise WorkspaceAuthorityInvalid("installed package version mismatch")
-        files = tuple(dist.files or ())
+        files = _parse_installed_metadata(captured_metadata["METADATA"],
+                                          captured_metadata["RECORD"],
+                                          value["distribution_version"])
         actual = {str(p): p for p in files if str(p).startswith("graphify/")
                   and "__pycache__" not in p.parts and not str(p).endswith(".pyc")}
         if set(actual) != set(value["package_members"]):
@@ -214,7 +218,11 @@ def verify_installed_candidate(expected):
             if name not in owned:
                 raise WorkspaceAuthorityInvalid("missing installed distribution metadata")
             path = Path(str(dist.locate_file(owned[name])))
-            source, resolved, identity = _read_installed_member(path)
+            if name == prefix + "METADATA":
+                source = captured_metadata["METADATA"]
+                resolved, identity = verified_metadata[path]
+            else:
+                source, resolved, identity = _read_installed_member(path)
             if hashlib.sha256(source).hexdigest() != wanted:
                 raise WorkspaceAuthorityInvalid("installed package member mismatch")
             if name.startswith("graphify/"):
@@ -234,6 +242,39 @@ def verify_installed_candidate(expected):
         _verify_captured_files(verified_scripts, "console script")
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
+
+
+def _parse_installed_metadata(metadata_payload, record_payload, expected_version):
+    """Parse only the bounded captures, never Distribution's rereading properties."""
+    try:
+        headers = Parser().parsestr(metadata_payload.decode("utf-8"), headersonly=True)
+        record_text = record_payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise WorkspaceAuthorityInvalid("installed metadata is not UTF-8") from exc
+    if headers.defects or headers.get_all("Version", []) != [expected_version]:
+        raise WorkspaceAuthorityInvalid("installed package version mismatch or malformed metadata")
+    files, seen = [], set()
+    try:
+        for row in csv.reader(io.StringIO(record_text, newline=""), strict=True):
+            if len(row) != 3 or not row[0] or "\x00" in row[0]:
+                raise WorkspaceAuthorityInvalid("malformed installed RECORD row")
+            name, recorded_hash, size = row
+            member = metadata.PackagePath(name)
+            if str(member) in seen:
+                raise WorkspaceAuthorityInvalid("duplicate installed RECORD path")
+            # RECORD hash/size fields are optional (not authority for content).
+            # Validate their syntax without converting attacker-controlled integers.
+            if size and (not size.isascii() or not size.isdecimal()):
+                raise WorkspaceAuthorityInvalid("malformed installed RECORD size")
+            if recorded_hash:
+                algorithm, separator, encoded = recorded_hash.partition("=")
+                if not separator or not algorithm or not encoded:
+                    raise WorkspaceAuthorityInvalid("malformed installed RECORD hash")
+            seen.add(str(member))
+            files.append(member)
+    except csv.Error as exc:
+        raise WorkspaceAuthorityInvalid("malformed installed RECORD CSV") from exc
+    return tuple(files)
 
 
 def _read_installed_member(path):
