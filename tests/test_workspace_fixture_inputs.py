@@ -43,7 +43,8 @@ class FixtureInputReviewTests(unittest.TestCase):
 
     def wheel(self, *, extra_script=False, missing_script=False, top_level=b"graphify\n", entry_points=None):
         extra = 'foo = "graphify.__main__:main"\n' if extra_script else ''
-        project = ('[project]\nname="graphifyy"\nversion="0.10.0"\n'
+        project = ('[build-system]\nrequires=["setuptools>=68"]\nbuild-backend="setuptools.build_meta"\n'
+                   '[project]\nname="graphifyy"\nversion="0.10.0"\n'
                    'requires-python=">=3.14.2,==3.14.*"\ndependencies=[]\n'
                    '[project.optional-dependencies]\n[project.scripts]\n'
                    'graphify="graphify.__main__:main"\ngraphify-mcp="graphify.serve:_main"\n'

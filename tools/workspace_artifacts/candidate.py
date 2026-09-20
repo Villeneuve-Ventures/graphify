@@ -285,6 +285,11 @@ def package_members(repo, *, config=None):
         directory = repo.joinpath(*package.split("."))
         _source_directory_chain(repo, directory)
         members.update(directory.glob("*.py"))
+        # Setuptools includes these package-local typing files even when
+        # include-package-data is false. Its glob skips dotfiles and directories.
+        members.update(path for pattern in ("*.pyi", "py.typed")
+                       for path in directory.glob(pattern)
+                       if not path.name.startswith(".") and path.is_file())
     for package, patterns in package_data.items():
         directory = repo.joinpath(*package.split("."))
         for pattern in patterns:
@@ -366,6 +371,42 @@ def source_manifest(repo):
     return {"kind": "local-fixture", "base_commit": head, "files": files}
 
 
+def _validate_build_inputs(repo, document):
+    """Admit the declared backend surface modeled by this fixture builder."""
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    build = document.get("build-system")
+    if (type(build) is not dict or set(build) != {"requires", "build-backend"}
+            or build["build-backend"] != "setuptools.build_meta"
+            or type(build["requires"]) is not list or not build["requires"]):
+        raise ContractError("unsupported build-system configuration")
+    for raw in build["requires"]:
+        try:
+            if type(raw) is not str:
+                raise TypeError("build requirement must be a string")
+            requirement = Requirement(raw)
+        except (InvalidRequirement, TypeError) as exc:
+            raise ContractError("invalid build requirement") from exc
+        if (canonicalize_name(requirement.name) != "setuptools"
+                or requirement.extras or requirement.url or requirement.marker):
+            raise ContractError("unsupported build requirement")
+    project = document.get("project")
+    if (type(project) is not dict
+            or project.get("dynamic", []) != []
+            or project.get("gui-scripts", {}) != {}
+            or project.get("entry-points", {}) != {}):
+        raise ContractError("unsupported dynamic project or entry-point configuration")
+    for name in ("setup.py", "setup.cfg"):
+        try:
+            (repo / name).lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ContractError("build configuration absence cannot be verified") from exc
+        raise ContractError(f"unsupported build configuration: {name}")
+
+
 def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
     """Write only a new explicit output directory after validating every input."""
     repo, wheel, output = map(Path, (repo_root, wheel, output_root))
@@ -378,6 +419,7 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
         raise ContractError("explicit fixture policy is required")
     inventory = source_manifest(repo)
     document = _project_document(repo, inventory)
+    _validate_build_inputs(repo, document)
     try:
         package_config = document["tool"]["setuptools"]
         project = document["project"]
@@ -487,6 +529,7 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
     outer = canonical_json_bytes({"kind": "local-fixture", "certified": False,
                                   "members": {n: hashlib.sha256(b).hexdigest()
                                               for n, b in sorted(bundle.items())}})
+    _validate_build_inputs(repo, _project_document(repo, inventory))
     _write_fixture(output, bundle, outer, repo=repo)
     return compatibility
 

@@ -739,3 +739,47 @@ Linux/Windows qualification or new whole-PR clean verdict is claimed.
 ```sh
 .venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity tests.test_workspace_fixture_member_binding tests.test_workspace_negative_probes tests.test_workspace_package_selectors tests.test_workspace_observation_binding -q
 ```
+
+
+### Build-input boundary closure (`073c13ec` input)
+
+The requested full OMX review of `073c13ec` approved the code-reviewer lane
+and found one remaining architect P2: intended package membership omitted
+setuptools automatic typing data and alternate build configuration. Repeated
+hashing could therefore bind a stale wheel to an incomplete member model.
+
+Package-local `*.pyi` and `py.typed` now enter the intended hashed inventory,
+including typing files in explicitly listed subpackages. Stale wheels without
+those members refuse; rebuilt wheels containing them pass. Hidden files and
+unlisted package directories follow the backend's automatic-selection boundary.
+A separate real setuptools 82 wheel experiment confirmed these selections.
+
+Build-input admission accepts the modeled `setuptools.build_meta` backend with
+setuptools-only declared requirements. Alternate backends, backend paths, build
+plugins, dynamic metadata, additional entry-point groups, `setup.py` and
+`setup.cfg` refuse before wheel reads. Setup-file checks use `lstat`, including
+ignored files and dangling links. Configuration and absence are checked again
+immediately before publication. Existing source-inventory capture still precedes
+admission. This constrains declared build inputs, not arbitrary build environments
+or backend versions; the existing observed-state and S7 limits remain.
+
+Seven new stdlib regressions cover stale/fresh typing wheels, package-local
+selection, alternate declarations, setup files and their late appearance. The
+before-repair run reproduced the omissions. **132 integrated focused stdlib
+tests passed**, and a fresh source-matching wheel passed fixture archive and
+completion checks plus noneditable installation verification without caches and
+with compiled caches at optimization levels 0, 1 and 2. Scoped Ruff,
+interpreter-pinned Pyright and diff checks passed. The AST update completed with
+**13,796 nodes / 30,892 edges** and the five existing zero-node JSON warnings.
+
+The same architect resumed through attached tmux and marked the single P2
+**RESOLVED**, with no remaining finding or repair-caused regression established.
+The three repair-file hashes matched at both review boundaries;
+`attached_tmux_review=yes`. This was a bounded correction follow-up, not another
+whole-PR review. The original full-review verdict and historical full-suite
+receipts retain their named snapshot scopes. No new out-of-scope ticket or
+acceptance gate was justified. Pytest was not rerun; CI was not awaited.
+
+```sh
+.venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity tests.test_workspace_fixture_member_binding tests.test_workspace_negative_probes tests.test_workspace_package_selectors tests.test_workspace_observation_binding tests.test_workspace_build_inputs -q
+```
