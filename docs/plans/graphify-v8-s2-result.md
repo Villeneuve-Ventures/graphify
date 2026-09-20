@@ -695,3 +695,47 @@ Reproduce the integrated focused selection without pytest:
 Pytest was not rerun. CI was not awaited. Historical full-suite and review
 receipts retain their named snapshot scope; no fresh full-suite or native
 Linux/Windows qualification is claimed.
+
+### Consolidated claim closure (`251bf45a` input)
+
+The next feedback snapshot contains 47 conversation comments, 30 reviews and
+75 inline threads. Four new distinct claims were triaged together against the
+pinned revision. The prior fixture-member publication finding is marked resolved
+by Qodo. No review bot was triggered by this repair pass.
+
+| Claim | Disposition and bounded repair |
+|---|---|
+| [Paired source observations](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056136488) | Valid. `SourceObservation` accepted unrelated detection and consumed inputs. It now shares the existing completion-binding relation: identical roots/code inventory and preservation of every initial evidence record. Detection-only observations and new supporting consumed evidence remain valid; no operational stability passes are inferred. |
+| [Unmodeled package selectors](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056136487) | Valid. A real setuptools wheel included `extra.py` via `py-modules` while the fixture's member model omitted it. Only explicit `packages`, `package-data` and `include-package-data=false` are supported; other configuration keys or implicit manifest-driven data refuse before package payload collection/wheel reads/publication. Existing source-inventory capture still precedes that validation. |
+| [RECORD hash syntax](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056122108) | Valid format-admission gap, not demonstrated bypass of independently trusted package hashes. Require a guaranteed algorithm, canonical URL-safe unpadded base64 and a supported digest length. Empty hash/size fields remain allowed; SHAKE and configurable BLAKE2 lengths remain supported. |
+| [Absent external caches](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056136486) | Valid. Reproduction moves a timestamp-valid forged cache into a previously absent selected path during the package-tree check, before admission returns. Selected absent cache names now receive a final `lstat` absence check, including nonregular entries, with no mutation or cleanup. This corrects the earlier OMX WATCH disposition: the defect is a missing before-return check within existing S2 admission, not protection against future writes. |
+
+RECORD syntax follows the [installed-project specification](https://packaging.python.org/en/latest/specifications/recording-installed-packages/#the-record-file).
+The independent repair review caught an initially overstrict BLAKE2 length check;
+the correction preserves [Python's configurable digest lengths](https://docs.python.org/3/library/hashlib.html#using-different-digest-sizes).
+Neither recorded hash nor size becomes content authority: immutable package and
+metadata bytes still compare with the separately expected compatibility manifest.
+
+The confirmed defects concern relationships between validated observations,
+unsupported build inputs, or absent selected paths. The existing observed-state
+limits remain: rechecks do not create an atomic snapshot or exclude later writes.
+No new out-of-scope ticket or acceptance gate is justified. Existing #150, #151,
+#113 and design-assigned S7 work retain their scope.
+
+Final repair evidence: **125 focused stdlib unittest tests passed**. The
+before-repair admission cases failed in 12 subcases; the package-selector
+regressions failed in 13, and unrelated source-observation pairs were accepted
+while completion binding already refused them. The independent review of the
+four repairs found the BLAKE2 compatibility issue above; its focused correction
+review found that issue resolved and no further actionable repair finding.
+
+A fresh source-matching wheel passed fixture archive/completion checks and
+noneditable installation verification without caches and with optimization
+levels 0, 1 and 2. Scoped Ruff, interpreter-pinned Pyright and diff checks passed.
+The final AST update completed with **13,783 nodes / 30,864 edges** and the same
+five zero-node JSON warnings. Pytest was not rerun; CI was not awaited. No native
+Linux/Windows qualification or new whole-PR clean verdict is claimed.
+
+```sh
+.venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity tests.test_workspace_fixture_member_binding tests.test_workspace_negative_probes tests.test_workspace_package_selectors tests.test_workspace_observation_binding -q
+```

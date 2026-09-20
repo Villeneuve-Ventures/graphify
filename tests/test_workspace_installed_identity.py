@@ -340,6 +340,51 @@ class InstalledIdentityTests(unittest.TestCase):
                 record.write_text(stream.getvalue(), encoding="utf-8")
                 verify_installed_candidate(self.expected)
 
+    def test_record_hash_syntax_is_checked_before_admission(self):
+        record = self.dist_info / "RECORD"
+        rows = list(csv.reader(io.StringIO(record.read_text())))
+        encoded = base64.urlsafe_b64encode(bytes(32)).rstrip(b"=").decode()
+        invalid = ("unknown=!!!", "sha256=!!!", "sha256=" + encoded + "=",
+                   "sha256=AA", "sha256=" + encoded[:-1] + "B",
+                   "sha256=" + "/" * 43, "sha256=" + "é" * 43,
+                   "blake2b=" + base64.urlsafe_b64encode(bytes(65)).rstrip(b"=").decode(),
+                   "blake2s=" + base64.urlsafe_b64encode(bytes(33)).rstrip(b"=").decode())
+        for value in invalid:
+            with self.subTest(value=value):
+                rows[0][1] = value
+                stream = io.StringIO(newline="")
+                csv.writer(stream).writerows(rows)
+                record.write_text(stream.getvalue(), encoding="utf-8")
+                with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "RECORD hash"):
+                    verify_installed_candidate(self.expected)
+
+    def test_record_hash_algorithms_follow_installed_specification(self):
+        from graphify.workspace.composition import _parse_installed_metadata
+        for algorithm in sorted(hashlib.algorithms_guaranteed):
+            with self.subTest(algorithm=algorithm):
+                hasher = hashlib.new(algorithm, b"content", usedforsecurity=False)
+                if algorithm == "shake_128":
+                    raw = hashlib.shake_128(b"content").digest(17)
+                elif algorithm == "shake_256":
+                    raw = hashlib.shake_256(b"content").digest(17)
+                else:
+                    raw = hasher.digest()
+                digest = base64.urlsafe_b64encode(raw).rstrip(b"=")
+                record = b"module.py," + algorithm.encode() + b"=" + digest + b",7\n"
+                self.assertEqual([str(p) for p in _parse_installed_metadata(
+                    self.metadata_file.read_bytes(), record, "0.10.0")], ["module.py"])
+
+    def test_record_blake2_configurable_digest_lengths_remain_valid(self):
+        from graphify.workspace.composition import _parse_installed_metadata
+        for algorithm, factory in (("blake2b", hashlib.blake2b), ("blake2s", hashlib.blake2s)):
+            for size in (1, 20, factory.MAX_DIGEST_SIZE):
+                with self.subTest(algorithm=algorithm, size=size):
+                    raw = factory(b"content", digest_size=size).digest()
+                    digest = base64.urlsafe_b64encode(raw).rstrip(b"=")
+                    record = b"module.py," + algorithm.encode() + b"=" + digest + b",7\n"
+                    self.assertEqual([str(p) for p in _parse_installed_metadata(
+                        self.metadata_file.read_bytes(), record, "0.10.0")], ["module.py"])
+
     def test_captured_metadata_is_parsed_before_final_drift_refusal(self):
         from graphify.workspace import composition
         capture = composition._read_installed_member
@@ -392,6 +437,53 @@ class InstalledIdentityTests(unittest.TestCase):
                   self.assertRaisesRegex(WorkspaceAuthorityInvalid,
                                          "bytecode cache changed")):
                 verify_installed_candidate(self.expected)
+
+    def test_absent_external_cache_appearance_before_return_is_refused(self):
+        from graphify.workspace import composition
+        inspect_tree = composition._verify_package_tree
+        with patch("sys.pycache_prefix", str(self.root / "external-cache")):
+            for optimize in (0, 1, 2):
+                cached = self.poison_cache(optimize=optimize)
+                forged = cached.read_bytes()
+                cached.unlink()
+
+                def appear_then_inspect(*args):
+                    cached.write_bytes(forged)
+                    return inspect_tree(*args)
+
+                try:
+                    with (self.subTest(optimize=optimize),
+                          patch.object(composition, "_verify_package_tree", appear_then_inspect),
+                          self.assertRaisesRegex(WorkspaceAuthorityInvalid, "bytecode cache appeared")):
+                        verify_installed_candidate(self.expected)
+                    self.assertEqual(cached.read_bytes(), forged)
+                finally:
+                    cached.unlink(missing_ok=True)
+
+    def test_absent_external_cache_new_nonregular_entries_are_preserved(self):
+        from graphify.workspace import composition
+        inspect_tree = composition._verify_package_tree
+        with patch("sys.pycache_prefix", str(self.root / "external-cache")):
+            cached = Path(util.cache_from_source(str(self.module)))
+            cached.parent.mkdir(parents=True)
+            for kind in ("dangling-symlink", "directory"):
+                def appear_then_inspect(*args):
+                    if kind == "directory":
+                        cached.mkdir()
+                    else:
+                        cached.symlink_to(self.root / "missing-cache-target")
+                    return inspect_tree(*args)
+                try:
+                    with (self.subTest(kind=kind),
+                          patch.object(composition, "_verify_package_tree", appear_then_inspect),
+                          self.assertRaisesRegex(WorkspaceAuthorityInvalid, "bytecode cache appeared")):
+                        verify_installed_candidate(self.expected)
+                    self.assertTrue(cached.is_symlink() if kind == "dangling-symlink" else cached.is_dir())
+                finally:
+                    if cached.is_symlink():
+                        cached.unlink()
+                    elif cached.is_dir():
+                        cached.rmdir()
 
     def test_cache_symlink_and_oversized_file_are_refused(self):
         cached = self.cache()

@@ -7,7 +7,9 @@ from itertools import islice
 from pathlib import Path
 from typing import Protocol
 
-from graphify.workspace.contracts import CompatibilityManifest, InputManifest, ContractError
+from graphify.workspace.contracts import (
+    CompatibilityManifest, InputManifest, ContractError, _validate_input_extension,
+)
 
 _MAX_QUERY_DEPTH = 8
 _MAX_QUERY_TOKEN_BUDGET = 32_768
@@ -68,8 +70,10 @@ class SourceObservation:
             raise ContractError("initial observation must be detection")
         if type(self.stable_inventory_passes) is not int or not 2 <= self.stable_inventory_passes <= 6:
             raise ContractError("observation requires two to six agreeing passes")
-        if self.consumed_inputs is not None and not self.consumed_inputs.complete:
-            raise ContractError("final observation must cover complete consumed inputs")
+        if self.consumed_inputs is not None:
+            if not self.consumed_inputs.complete:
+                raise ContractError("final observation must cover complete consumed inputs")
+            _validate_input_extension(self.initial_detection, self.consumed_inputs)
 
 
 @dataclass(frozen=True)

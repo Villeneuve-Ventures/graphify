@@ -37,6 +37,7 @@ class FixtureInputReviewTests(unittest.TestCase):
             path.write_bytes(b"{}")
         (self.repo / "LICENSE").write_bytes(b"fixture license")
         self.config = {'packages': ['graphify', 'graphify.workspace', 'graphify.workspace.adapters'],
+                       'include-package-data': False,
                        'package-data': {'graphify.workspace': ['schemas/*.schema.json']}}
         self.output = self.root / "output"
 
@@ -46,7 +47,7 @@ class FixtureInputReviewTests(unittest.TestCase):
                    'requires-python=">=3.14.2,==3.14.*"\ndependencies=[]\n'
                    '[project.optional-dependencies]\n[project.scripts]\n'
                    'graphify="graphify.__main__:main"\ngraphify-mcp="graphify.serve:_main"\n'
-                   + extra + '[tool.setuptools]\npackages=["graphify", "graphify.workspace", "graphify.workspace.adapters"]\n'
+                   + extra + '[tool.setuptools]\ninclude-package-data=false\npackages=["graphify", "graphify.workspace", "graphify.workspace.adapters"]\n'
                    '[tool.setuptools.package-data]\n"graphify.workspace"=["schemas/*.schema.json"]\n')
         if missing_script:
             project = project.replace('graphify-mcp="graphify.serve:_main"\n', '')

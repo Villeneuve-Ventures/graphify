@@ -7,8 +7,11 @@ here. S3 owns storage/capability qualification and S4 owns adapter execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
+import binascii
 import csv
 from email.parser import Parser
+import hashlib
 import io
 from importlib import metadata
 import os
@@ -161,7 +164,6 @@ def verify_installed_candidate(expected):
     This is on-disk admission evidence, not proof of already imported code or
     protection against later writes, import hooks, or a hostile interpreter.
     """
-    import hashlib
     import graphify
 
     if type(expected) is not CompatibilityManifest:
@@ -268,7 +270,22 @@ def _parse_installed_metadata(metadata_payload, record_payload, expected_version
                 raise WorkspaceAuthorityInvalid("malformed installed RECORD size")
             if recorded_hash:
                 algorithm, separator, encoded = recorded_hash.partition("=")
-                if not separator or not algorithm or not encoded:
+                if (not separator or algorithm not in hashlib.algorithms_guaranteed
+                        or not encoded or "=" in encoded):
+                    raise WorkspaceAuthorityInvalid("malformed installed RECORD hash")
+                try:
+                    decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4),
+                                               altchars=b"-_", validate=True)
+                except (ValueError, binascii.Error) as exc:
+                    raise WorkspaceAuthorityInvalid("malformed installed RECORD hash") from exc
+                size_bytes = hashlib.new(algorithm, usedforsecurity=False).digest_size
+                # SHAKE has arbitrary output length; BLAKE2 permits a shorter
+                # digest up to its default maximum. Other algorithms are fixed.
+                valid_size = not size_bytes or len(decoded) == size_bytes
+                if algorithm in {"blake2b", "blake2s"}:
+                    valid_size = 1 <= len(decoded) <= size_bytes
+                if (not valid_size
+                        or base64.urlsafe_b64encode(decoded).rstrip(b"=").decode("ascii") != encoded):
                     raise WorkspaceAuthorityInvalid("malformed installed RECORD hash")
             seen.add(str(member))
             files.append(member)
@@ -342,9 +359,16 @@ def _verify_package_tree(package_root, verified_files, verified_caches):
 
 
 def _verify_captured_files(verified, kind):
-    """Require non-package files to retain the exact named and resolved identities read."""
+    """Recheck captured file identities and explicitly observed absences."""
     try:
-        for path, (resolved, identity) in verified.items():
+        for path, capture in verified.items():
+            if capture is None:
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
+                raise WorkspaceAuthorityInvalid(f"installed {kind} appeared after verification")
+            resolved, identity = capture
             before = path.lstat()
             if (path.resolve(strict=True) != resolved
                     or _file_identity(before) != identity
@@ -391,6 +415,7 @@ def _verify_source_caches(path, source):
             try:
                 info = cache.lstat()
             except FileNotFoundError:
+                captured[cache] = None
                 continue
             except OSError as exc:
                 raise WorkspaceAuthorityInvalid("installed bytecode cache unreadable") from exc

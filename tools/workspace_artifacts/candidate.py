@@ -255,6 +255,10 @@ def package_members(repo, *, config=None):
             raise ContractError("invalid setuptools package selection") from exc
     if type(config) is not dict:
         raise ContractError("invalid setuptools package selection")
+    # This model handles only explicit packages and package-data globs. Other
+    # selectors can change wheel contents without changing these two fields.
+    if set(config) - {"packages", "package-data", "include-package-data"}:
+        raise ContractError("unsupported setuptools package selection")
     packages = config.get("packages")
     package_data = config.get("package-data")
     if (type(packages) is not list or not packages
@@ -272,6 +276,10 @@ def package_members(repo, *, config=None):
                            and ".." not in Path(pattern).parts
                            for pattern in patterns)):
             raise ContractError("invalid setuptools package selection")
+    # Setuptools defaults this to true for pyproject.toml, admitting data from
+    # MANIFEST.in and plugins that this explicit member model does not expand.
+    if config.get("include-package-data") is not False:
+        raise ContractError("unsupported setuptools package selection: include-package-data must be explicitly false")
     members = set()
     for package in packages:
         directory = repo.joinpath(*package.split("."))

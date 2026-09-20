@@ -456,6 +456,16 @@ class InputManifest(Document):
         })
 
 
+def _validate_input_extension(initial, consumed):
+    """Relate already validated detection and complete consumed manifests."""
+    a, b = initial.to_dict(), consumed.to_dict()
+    if a["roots"] != b["roots"] or a["code_inputs"] != b["code_inputs"]:
+        raise ContractError("detection authority changed")
+    final = {(e["operation"], e["path"]): e for e in b["evidence"]}
+    if any(final.get((e["operation"], e["path"])) != e for e in a["evidence"]):
+        raise ContractError("initial evidence missing or changed in consumed binding")
+
+
 class CompletionBinding(Document):
     @staticmethod
     def validate(value):
@@ -473,14 +483,9 @@ class CompletionBinding(Document):
             raise ContractError("completion requires validated input manifests")
         if type(compatibility) is not CompatibilityManifest:
             raise ContractError("completion requires a compatibility manifest")
-        a, b = initial.to_dict(), consumed.to_dict()
-        if a["phase"] != "detection" or not consumed.complete:
+        if initial.to_dict()["phase"] != "detection" or not consumed.complete:
             raise ContractError("completion requires initial detection and complete extraction")
-        if a["roots"] != b["roots"] or a["code_inputs"] != b["code_inputs"]:
-            raise ContractError("detection authority changed")
-        final = {(e["operation"], e["path"]): e for e in b["evidence"]}
-        if any(final.get((e["operation"], e["path"])) != e for e in a["evidence"]):
-            raise ContractError("initial evidence missing or changed in consumed binding")
+        _validate_input_extension(initial, consumed)
         return cls.from_mapping({
             "contract": "graphify.workspace.structural-completion", "state_schema_version": 2,
             "initial_detection_sha256": initial.sha256, "consumed_inputs_sha256": consumed.sha256,
