@@ -16,6 +16,45 @@ from unittest.mock import patch
 from graphify.workspace.composition import WorkspaceAuthorityInvalid, verify_installed_candidate
 
 
+from graphify.workspace.contracts import (
+    CompatibilityManifest, DETECTOR_ID, DISTRIBUTION_VERSION, ENGINE_BASELINE,
+    EXTRACTOR_CACHE_ABI, INSTALLATION_METADATA, SCHEMA_FILES,
+)
+
+
+def installed_manifest(root):
+    """Create all structural members required by a real validated test manifest."""
+    required = {"__init__.py", "__main__.py", "source_io.py", "workspace/contracts.py",
+                "workspace/composition.py", "workspace/__init__.py",
+                "workspace/adapters/base.py", "workspace/adapters/__init__.py"}
+    required.update("workspace/schemas/" + name for name in SCHEMA_FILES)
+    for name in required:
+        path = root / "graphify" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b"# structural fixture\n" if name.endswith(".py") else b"{}\n")
+    metadata_root = root / f"graphifyy-{DISTRIBUTION_VERSION}.dist-info"
+    for name in (*INSTALLATION_METADATA, "RECORD"):
+        path = metadata_root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(b"fixture metadata\n")
+    return CompatibilityManifest.from_mapping({
+        "contract": "graphify.workspace.compatibility", "schema_version": 2,
+        "distribution": "graphifyy", "distribution_version": DISTRIBUTION_VERSION,
+        "distribution_build": "fixture:sha256:" + "a" * 64,
+        "source_manifest_sha256": "a" * 64, "wheel_sha256": "b" * 64,
+        "engine_baseline": ENGINE_BASELINE, "extractor_cache_abi": EXTRACTOR_CACHE_ABI,
+        "adapter_contract_version": 2, "state_schema_version": 2,
+        "detector_id": DETECTOR_ID, "graph_payload_version": 1, "input_manifest_version": 1,
+        "candidate_kind": "local-fixture", "certified": False,
+        "package_members": {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in (root / "graphify").rglob("*") if path.is_file()},
+        "installation_metadata": {name: hashlib.sha256((metadata_root / name).read_bytes()).hexdigest()
+                                  for name in INSTALLATION_METADATA},
+    })
+
+
 class InstalledIdentityTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -36,24 +75,16 @@ class InstalledIdentityTests(unittest.TestCase):
         self.metadata_file = self.dist_info / "METADATA"
         self.metadata_file.write_bytes(b"Name: graphifyy\nVersion: 0.10.0\n")
         (self.dist_info / "RECORD").write_bytes(b"")
-        self.files = [metadata.PackagePath("graphify/__init__.py"),
-                      metadata.PackagePath("graphify/marker.py")]
-        members = {str(p): hashlib.sha256((self.root / p).read_bytes()).hexdigest()
-                   for p in self.files}
         entry_points = b"[console_scripts]\ngraphify = graphify.__main__:main\ngraphify-mcp = graphify.serve:_main\n"
         (self.dist_info / "entry_points.txt").write_bytes(entry_points)
-        self.files.append(metadata.PackagePath("graphifyy-0.10.0.dist-info/entry_points.txt"))
-        self.installation_metadata = {"entry_points.txt": hashlib.sha256(entry_points).hexdigest()}
+        self.expected = installed_manifest(self.root)
+        self.files = [metadata.PackagePath(path.relative_to(self.root).as_posix())
+                      for path in self.root.rglob("*") if path.is_file()]
         self.scripts = self.root / "bin"
         self.scripts.mkdir()
         for name in ("graphify", "graphify-mcp"):
             (self.scripts / name).write_bytes(b"# fixture console script\n")
             self.files.append(metadata.PackagePath("bin/" + name))
-        self.expected = SimpleNamespace(to_dict=lambda: {
-            "distribution_version": "0.10.0",
-            "package_members": members,
-            "installation_metadata": self.installation_metadata,
-        })
         self.dist = SimpleNamespace(version="0.10.0", files=self.files,
                                     locate_file=lambda p: self.root / p)
         for patcher in (patch("graphify.__file__", str(self.init)),
@@ -62,6 +93,19 @@ class InstalledIdentityTests(unittest.TestCase):
                         patch("sys.pycache_prefix", None)):
             patcher.start()
             self.addCleanup(patcher.stop)
+
+    def test_public_verifier_refuses_unvalidated_compatibility(self):
+        class DerivedManifest(CompatibilityManifest):
+            pass
+
+        invalid = self.expected.to_dict()
+        invalid["certified"] = True
+        invalid["installation_metadata"] = {}
+        for expected in (None, invalid, SimpleNamespace(to_dict=lambda: invalid),
+                         DerivedManifest.from_mapping(self.expected.to_dict())):
+            with self.subTest(expected=type(expected).__name__):
+                with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "compatibility manifest"):
+                    verify_installed_candidate(expected)
 
     def cache(self, *, optimize=0, mode=py_compile.PycInvalidationMode.TIMESTAMP):
         filename = py_compile.compile(str(self.module), doraise=True, optimize=optimize,
@@ -214,11 +258,6 @@ class InstalledIdentityTests(unittest.TestCase):
 
     def test_metadata_replacement_after_hash_is_refused(self):
         import graphify.workspace.composition as composition
-        member = metadata.PackagePath("graphifyy-0.10.0.dist-info/METADATA")
-        self.files.append(member)
-        self.installation_metadata["METADATA"] = hashlib.sha256(
-            self.metadata_file.read_bytes()
-        ).hexdigest()
         inspect_tree = composition._verify_package_tree
 
         def replace_then_inspect(*args):
@@ -335,7 +374,7 @@ class InstalledIdentityTests(unittest.TestCase):
         alias = self.root / "alias"
         alias.symlink_to(self.package, target_is_directory=True)
         self.dist.locate_file = lambda p: (
-            alias / Path(p).name if str(p).startswith("graphify/") else self.root / p
+            alias / Path(p).relative_to("graphify") if str(p).startswith("graphify/") else self.root / p
         )
         for filename in (self.module, alias / self.module.name):
             with self.subTest(filename=str(filename)):
@@ -358,7 +397,9 @@ class InstalledIdentityTests(unittest.TestCase):
         # that small fixtures do not exercise. It is compiled, never imported.
         self.source = (Path(__file__).resolve().parents[1] / "graphify/transaction.py").read_bytes()
         self.module.write_bytes(self.source)
-        self.expected.to_dict()["package_members"]["graphify/marker.py"] = hashlib.sha256(self.source).hexdigest()
+        value = self.expected.to_dict()
+        value["package_members"]["graphify/marker.py"] = hashlib.sha256(self.source).hexdigest()
+        self.expected = CompatibilityManifest.from_mapping(value)
         for optimize in (0, 1, 2):
             self.assertTrue(compileall.compile_file(str(self.module), quiet=1, optimize=optimize))
         verify_installed_candidate(self.expected)
@@ -394,7 +435,7 @@ class InstalledIdentityTests(unittest.TestCase):
         self.init = location / "__init__.py"
         self.module = location / "marker.py"
         self.dist.locate_file = lambda p: (
-            location / Path(p).name if str(p).startswith("graphify/") else self.root / p
+            location / Path(p).relative_to("graphify") if str(p).startswith("graphify/") else self.root / p
         )
         with patch("graphify.__file__", str(self.init)):
             self.cache()
@@ -406,7 +447,9 @@ class InstalledIdentityTests(unittest.TestCase):
                        b'def get_value():\n    return "a long value with spaces"\n'
                        b'MARKER = value is get_value()\n')
         self.module.write_bytes(self.source)
-        self.expected.to_dict()["package_members"]["graphify/marker.py"] = hashlib.sha256(self.source).hexdigest()
+        value = self.expected.to_dict()
+        value["package_members"]["graphify/marker.py"] = hashlib.sha256(self.source).hexdigest()
+        self.expected = CompatibilityManifest.from_mapping(value)
         cached = self.cache()
         original = compile(self.source, str(self.module), "exec", dont_inherit=True)
         nested = next(value for value in original.co_consts if isinstance(value, types.CodeType))

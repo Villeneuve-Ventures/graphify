@@ -161,6 +161,8 @@ def verify_installed_candidate(expected):
     import hashlib
     import graphify
 
+    if type(expected) is not CompatibilityManifest:
+        raise WorkspaceAuthorityInvalid("expected a validated compatibility manifest")
     value = expected.to_dict()
     try:
         dist = metadata.distribution("graphifyy")

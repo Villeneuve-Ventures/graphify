@@ -163,9 +163,9 @@ class FixtureInputReviewTests(unittest.TestCase):
         capture = candidate._capture
         reads = 0
 
-        def racing_capture(target):
+        def racing_capture(target, **kwargs):
             nonlocal reads
-            payload, info = capture(target)
+            payload, info = capture(target, **kwargs)
             if target == path:
                 reads += 1
                 if reads == 2:
@@ -187,9 +187,9 @@ class FixtureInputReviewTests(unittest.TestCase):
         capture = candidate._capture
         reads = 0
 
-        def racing_capture(target):
+        def racing_capture(target, **kwargs):
             nonlocal reads
-            payload, info = capture(target)
+            payload, info = capture(target, **kwargs)
             if target == path:
                 reads += 1
                 if reads == 2:

@@ -518,3 +518,55 @@ zero-node JSON warnings. Pytest was not rerun during this pass. Native
 Linux/Windows validation and fresh full-suite certification are not claimed;
 CI was not awaited. No new enforcement, protected-review, or bot-threshold gate
 was introduced.
+
+
+### New-feedback review (`62d1b89d` input)
+
+The refreshed snapshot contains 39 conversation comments, 23 review bodies and
+63 inline threads. Comparing it with the preceding complete audit found four
+new technical claims. Updated bot summaries, review triggers, resolved-thread
+flags and shifted line references supply no new evidence against settled
+findings. The persistent Qodo review repeats the new Windows launcher claim;
+its other technical claims duplicate dispositions above.
+
+| New claim | Disposition and evidence |
+|---|---|
+| [Windows launcher companions](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055706242) | Unsupported for the admitted pip wheel-install route. Current [pip/distlib](https://github.com/pypa/pip/blob/main/src/pip/_vendor/distlib/scripts.py) embeds a ZIP `__main__.py` in each `.exe`; [setuptools wheel builds](https://github.com/pypa/setuptools/blob/1fe0c5d2f46e141d6097910d2905a3fce5e30c52/setuptools/command/bdist_wheel.py) disable the separate entry-point script writer. An isolated exercise of the local pip 26.1.1 Windows writer branch produced only `graphify.exe`. The cited setuptools writer describes another installation path; broadening admission requires a concrete supported wheel-install reproduction. No allowlist change or native Windows execution is claimed. |
+| [Redirected staging parent](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055739035) | Valid: reproduction observed two checkout directory creations before the former late refusal. Fixture output now pins the external parent before staging and uses descriptor-relative creation, writes, cleanup and no-replace publication. Windows fixture generation now uses the existing `pin_output` mutation refusal before staging; ordinary package installation and installed inspection are unchanged. Native Windows qualification remains deferred, rather than preserving an unsafe pathname-write fallback. |
+| [Aggregate bundled-test resources](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055739038) | Valid: scaled byte/count reproductions previously accepted over-limit inputs. The collector now bounds the bundle to 100,000 members and 256 MiB of retained schema/test/document bytes, preflights declared sizes, and limits each capture to the remaining budget. |
+| [Duck-typed public verifier input](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055739042) | Valid: a duck object bypassed compatibility validation at this public entry point. `verify_installed_candidate` now requires the exact validated `CompatibilityManifest`, including refusal of subclasses. Installed-identity regressions now construct real validated manifests, so they exercise the same admission contract as callers. |
+
+The central problem remains incomplete enforcement at the responsible boundary:
+validation must precede the first side effect, total retained input needs an
+aggregate bound, and every public admission entry point must enforce the same
+validated model. These three repairs are S2 work. The Windows companion assertion
+needs evidence for the supported install route before it can justify a change;
+it is not an established defect or a reason for another gate.
+
+The existing XML admission #150, dependency maintenance #151 and policy umbrella
+#113 remain the only separately ticketed justified follow-ups. S7 already owns
+exact-candidate and native qualification. No new or duplicate GitHub ticket is
+needed. Historical test receipts above retain their original snapshot scope.
+
+Current repair evidence: **68 focused stdlib unittest tests passed** across
+installed identity, review regressions, fixture reads/publication, fixture inputs
+and the new output/budget cases. Scoped Ruff and interpreter-pinned Pyright passed.
+A fresh wheel passed fixture archive/completion checks and disposable noneditable
+installation verification, both without caches and after package compilation at
+optimization levels 0, 1 and 2. Tests cover rejection before staging, redirected
+cleanup, preservation of a racing destination, aggregate/count refusal before
+payload capture, growth after preflight, and the existing Windows pre-write
+refusal. The budget bounds retained bundle payload, not total process RSS.
+
+Reproduce the focused selection without pytest:
+
+```sh
+.venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds -q
+```
+
+Pytest was not rerun, CI was not awaited, and no native Linux/Windows execution or
+fresh full-suite certification is claimed. No additional approval or review gate
+was introduced.
+
+The required AST graph update completed at **13,668 nodes / 30,534 edges**; the
+same five zero-node JSON corpus warnings remain.

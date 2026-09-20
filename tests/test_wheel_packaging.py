@@ -474,9 +474,9 @@ def test_fixture_binds_checked_project_bytes_to_source_inventory(
     project_path = REPO / "pyproject.toml"
     project_reads = 0
 
-    def racing_read(path):
+    def racing_read(path, **kwargs):
         nonlocal project_reads
-        payload, info = capture(path)
+        payload, info = capture(path, **kwargs)
         if path == project_path:
             project_reads += 1
             if project_reads == 2:
@@ -529,9 +529,9 @@ def test_fixture_rechecks_bundled_tests_outside_source_inventory(
     capture = candidate._capture
     reads = 0
 
-    def changed_test(path):
+    def changed_test(path, **kwargs):
         nonlocal reads
-        payload, info = capture(path)
+        payload, info = capture(path, **kwargs)
         if path == target:
             reads += 1
             if reads == 2:
@@ -611,11 +611,11 @@ def test_fixture_publication_preserves_racing_destination(tmp_path, monkeypatch,
               ("source-manifest.json", "compatibility.json", "runtime-manifest.json")}
     publish = candidate._publish_fixture
 
-    def racing_publish(payload_root, destination):
+    def racing_publish(payload_root, destination, **kwargs):
         output.mkdir()
         if occupied:
             (output / "other-owner").write_bytes(b"keep")
-        publish(payload_root, destination)
+        publish(payload_root, destination, **kwargs)
 
     monkeypatch.setattr(candidate, "_publish_fixture", racing_publish)
     with pytest.raises(FileExistsError):

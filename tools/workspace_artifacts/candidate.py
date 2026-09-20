@@ -13,7 +13,8 @@ import hashlib
 import io
 import configparser
 import os
-import tempfile
+import secrets
+import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -26,13 +27,15 @@ from graphify.workspace.contracts import (
     ADAPTER_CONTRACT_VERSION, CompatibilityManifest, ContractError, DETECTOR_ID,
     DISTRIBUTION_VERSION, ENGINE_BASELINE, EXTRACTOR_CACHE_ABI, GRAPH_PAYLOAD_VERSION,
     INPUT_MANIFEST_VERSION, INSTALLATION_METADATA, SCHEMA_FILES, STATE_SCHEMA_VERSION,
-    SUPPORTED_CONSOLE_SCRIPTS, canonical_json_bytes, canonical_sha256, input_label,
+    MAX_ENTRIES, SUPPORTED_CONSOLE_SCRIPTS, canonical_json_bytes, canonical_sha256, input_label,
 )
 
 
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_WHEEL_MEMBER_BYTES = MAX_INPUT_BYTES
 MAX_WHEEL_EXPANDED_BYTES = 256 * 1024 * 1024
+MAX_FIXTURE_BUNDLE_BYTES = MAX_WHEEL_EXPANDED_BYTES
+MAX_FIXTURE_BUNDLE_MEMBERS = MAX_ENTRIES
 
 
 def _input_identity(info):
@@ -44,32 +47,33 @@ def _read(path):
     return _capture(path)[0]
 
 
-def _capture(path):
+def _capture(path, *, max_bytes=None):
     """Return bytes and mode-bearing metadata from one validated descriptor."""
+    limit = MAX_INPUT_BYTES if max_bytes is None else min(MAX_INPUT_BYTES, max_bytes)
     descriptor = None
     try:
         named = path.lstat()
         if (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
-                or named.st_size > MAX_INPUT_BYTES):
+                or named.st_size > limit):
             raise ContractError("fixture input must be a bounded singular regular file")
         flags = (os.O_RDONLY | getattr(os, "O_BINARY", 0)
                  | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
         descriptor = os.open(path, flags)
         before = os.fstat(descriptor)
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_size > MAX_INPUT_BYTES):
+                or before.st_size > limit):
             raise ContractError("fixture input must be a bounded singular regular file")
         if (_input_identity(named) != _input_identity(before)
                 or _input_identity(path.lstat()) != _input_identity(before)):
             raise ContractError("fixture input changed before reading")
         chunks, size = [], 0
         while True:
-            chunk = os.read(descriptor, min(65536, MAX_INPUT_BYTES + 1 - size))
+            chunk = os.read(descriptor, min(65536, limit + 1 - size))
             if not chunk:
                 break
             chunks.append(chunk)
             size += len(chunk)
-            if size > MAX_INPUT_BYTES:
+            if size > limit:
                 raise ContractError("fixture input exceeds byte limit")
         if (_input_identity(before) != _input_identity(os.fstat(descriptor))
                 or _input_identity(before) != _input_identity(path.lstat())
@@ -100,14 +104,14 @@ def _source_directory_chain(repo, directory):
         raise ContractError("fixture source directory unavailable or outside checkout") from exc
 
 
-def _read_source(repo, path):
-    return _capture_source(repo, path)[0]
+def _read_source(repo, path, *, max_bytes=None):
+    return _capture_source(repo, path, max_bytes=max_bytes)[0]
 
 
-def _capture_source(repo, path):
+def _capture_source(repo, path, *, max_bytes=None):
     input_label(path.relative_to(repo).as_posix(), {"source"}, source_file=True)
     ancestors = _source_directory_chain(repo, path.parent)
-    captured = _capture(path)
+    captured = _capture(path) if max_bytes is None else _capture(path, max_bytes=max_bytes)
     if _source_directory_chain(repo, path.parent) != ancestors:
         raise ContractError("fixture source ancestor changed while reading")
     return captured
@@ -428,53 +432,117 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
     bundle = {"source-manifest.json": canonical_json_bytes(inventory),
               "compatibility.json": compatibility.canonical,
               "runtime-manifest.json": authority.canonical}
-    for name in SCHEMA_FILES:
-        bundle["schemas/" + name] = _read_source(repo, repo / "graphify/workspace/schemas" / name)
-    workspace_tests = sorted((repo / "tests").glob("test_workspace_*.py"))
-    for path in workspace_tests:
-        bundle["tests/" + path.name] = _read_source(repo, path)
+    workspace_tests = _collect_bundle_sources(repo, bundle)
     # Recheck source after reading wheel/schemas/tests so mixed inputs refuse.
     if (source_manifest(repo) != inventory
             or package_members(repo, config=package_config) != members
             or sorted((repo / "tests").glob("test_workspace_*.py")) != workspace_tests
-            or any(_read_source(repo, path) != bundle["tests/" + path.name]
+            or any(_read_source(repo, path, max_bytes=len(bundle["tests/" + path.name]))
+                   != bundle["tests/" + path.name]
                    for path in workspace_tests)):
         raise ContractError("candidate changed during fixture collection")
     outer = canonical_json_bytes({"kind": "local-fixture", "certified": False,
                                   "members": {n: hashlib.sha256(b).hexdigest()
                                               for n, b in sorted(bundle.items())}})
-    _write_fixture(output, bundle, outer)
+    _write_fixture(output, bundle, outer, repo=repo)
     return compatibility
 
 
-def _write_fixture(output, bundle, outer):
-    # Keep cleanup private: no failure path recursively removes the public name.
-    # Publication never replaces a destination that appeared after preflight.
-    with tempfile.TemporaryDirectory(prefix=".graphify-fixture-", dir=output.parent) as temporary:
-        payload_root = Path(temporary) / "payload"
-        payload_root.mkdir(mode=0o700)
-        for name in ("source-manifest.json", "compatibility.json", "runtime-manifest.json"):
-            (payload_root / name).write_bytes(bundle[name])
-        (payload_root / "fixture-manifest.json").write_bytes(outer)
-        with zipfile.ZipFile(payload_root / "fixture-bundle.zip", "w", compression=zipfile.ZIP_DEFLATED) as archive:
+def _collect_bundle_sources(repo, bundle):
+    """Bound retained schemas/tests and preflight sizes before opening payloads."""
+    sources = [("schemas/" + name, repo / "graphify/workspace/schemas" / name)
+               for name in SCHEMA_FILES]
+    tests = []
+    for path in (repo / "tests").glob("test_workspace_*.py"):
+        if len(bundle) + len(sources) + len(tests) >= MAX_FIXTURE_BUNDLE_MEMBERS:
+            raise ContractError("fixture bundle member count exceeds limit")
+        tests.append(path)
+    tests.sort()
+    sources.extend(("tests/" + path.name, path) for path in tests)
+    if len(bundle) + len(sources) > MAX_FIXTURE_BUNDLE_MEMBERS:
+        raise ContractError("fixture bundle member count exceeds limit")
+    retained = sum(len(payload) for payload in bundle.values())
+    declared = retained
+    try:
+        for _, path in sources:
+            size = path.lstat().st_size
+            if size > MAX_INPUT_BYTES:
+                raise ContractError("fixture input exceeds byte limit")
+            declared += size
+            if declared > MAX_FIXTURE_BUNDLE_BYTES:
+                raise ContractError("fixture bundle aggregate byte limit exceeded")
+    except OSError as exc:
+        raise ContractError("fixture bundle source unavailable") from exc
+    if declared > MAX_FIXTURE_BUNDLE_BYTES:
+        raise ContractError("fixture bundle aggregate byte limit exceeded")
+    for name, path in sources:
+        payload = _read_source(repo, path, max_bytes=MAX_FIXTURE_BUNDLE_BYTES - retained)
+        retained += len(payload)
+        if retained > MAX_FIXTURE_BUNDLE_BYTES:
+            raise ContractError("fixture bundle aggregate byte limit exceeded")
+        bundle[name] = payload
+    return tests
+
+
+def _write_fixture_members(open_member, bundle, outer):
+    for name in ("source-manifest.json", "compatibility.json", "runtime-manifest.json"):
+        with open_member(name) as stream:
+            stream.write(bundle[name])
+    with open_member("fixture-manifest.json") as stream:
+        stream.write(outer)
+    with open_member("fixture-bundle.zip") as stream:
+        with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             for name, payload in sorted(bundle.items()):
                 info = zipfile.ZipInfo(name, date_time=(2026, 9, 19, 0, 0, 0))
                 info.create_system = 3
                 info.external_attr = (stat.S_IFREG | 0o644) << 16
                 archive.writestr(info, payload)
-        _publish_fixture(payload_root, output)
 
 
-def _publish_fixture(payload_root, output):
-    if os.name == "nt":
-        # Windows rename refuses an existing destination, including directories.
-        os.rename(payload_root, output)
-    else:
-        # Tooling-only import: preserve the workspace composition cold boundary.
-        from graphify.transaction import _atomic_rename_no_replace, pin_output
-        with pin_output(output.parent, create=False) as parent:
-            parent.validate()
-            _atomic_rename_no_replace(parent, str(payload_root.relative_to(output.parent)), output.name)
-            # A rename through the pinned descriptor can succeed after its
-            # directory was detached. Refuse success, preserving that artifact.
-            parent.validate()
+def _write_fixture(output, bundle, outer, *, repo=None):
+    from graphify.transaction import pin_output
+    with pin_output(output.parent, create=False) as parent:
+        _validate_fixture_parent(output, parent, repo=repo)
+        stage = ".graphify-fixture-" + secrets.token_hex(16)
+        os.mkdir(stage, mode=0o700, dir_fd=parent.fd)
+        stage_fd = None
+        try:
+            stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.fd)
+
+            def open_member(name):
+                fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=stage_fd)
+                return os.fdopen(fd, "wb")
+
+            _write_fixture_members(open_member, bundle, outer)
+            _publish_fixture(output.parent / stage, output, parent=parent)
+        finally:
+            if stage_fd is not None:
+                os.close(stage_fd)
+            # The parent descriptor still names the original directory even if
+            # its public pathname was redirected. Never clean the public output.
+            try:
+                shutil.rmtree(stage, dir_fd=parent.fd)
+            except FileNotFoundError:
+                pass
+
+
+def _validate_fixture_parent(output, parent, *, repo=None):
+    parent.validate()
+    if output.parent.resolve(strict=True) != parent.path:
+        raise ContractError("fixture output parent changed")
+    if repo is not None and parent.path.is_relative_to(repo):
+        raise ContractError("fixture output must be outside source checkout")
+
+
+def _publish_fixture(payload_root, output, *, parent=None):
+    # Tooling-only import: preserve the workspace composition cold boundary.
+    from graphify.transaction import _atomic_rename_no_replace, pin_output
+    if parent is None:
+        with pin_output(output.parent, create=False) as pinned:
+            _publish_fixture(payload_root, output, parent=pinned)
+        return
+    _validate_fixture_parent(output, parent)
+    _atomic_rename_no_replace(parent, str(payload_root.relative_to(output.parent)), output.name)
+    # Refuse detached-parent success while preserving any published artifact.
+    _validate_fixture_parent(output, parent)

@@ -1,5 +1,4 @@
 """Focused PR-review regressions, also runnable with the stdlib unittest runner."""
-import hashlib
 from importlib.metadata import PackagePath
 from pathlib import Path
 import tempfile
@@ -39,19 +38,17 @@ class InstalledMemberRefusalTests(unittest.TestCase):
         package.mkdir()
         self.path = package / "__init__.py"
         self.path.write_bytes(b"# installed fixture\n")
-        member = PackagePath("graphify/__init__.py")
-        self.expected = SimpleNamespace(to_dict=lambda: {
-            "distribution_version": "0.10.0",
-            "package_members": {str(member): hashlib.sha256(b"# installed fixture\n").hexdigest()},
-            "installation_metadata": {},
-        })
+        from tests.test_workspace_installed_identity import installed_manifest
+        self.expected = installed_manifest(root)
+        members = [PackagePath(path.relative_to(root).as_posix())
+                   for path in root.rglob("*") if path.is_file()]
         scripts = root / "bin"
         scripts.mkdir()
         script_rows = [PackagePath("bin/graphify"), PackagePath("bin/graphify-mcp")]
         for row in script_rows:
             (root / row).write_bytes(b"# fixture console script\n")
-        dist = SimpleNamespace(version="0.10.0", files=[member, *script_rows],
-                               locate_file=lambda name: root / name if str(name).startswith("bin/") else self.path)
+        dist = SimpleNamespace(version="0.10.0", files=[*members, *script_rows],
+                               locate_file=lambda name: root / name)
         for patcher in (patch("graphify.__file__", str(self.path)),
                         patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(scripts)),
                         patch("graphify.workspace.composition.metadata.distribution", return_value=dist)):
