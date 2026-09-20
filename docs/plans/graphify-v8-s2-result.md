@@ -436,3 +436,31 @@ The wheel suite includes the disposable noneditable installation/authority smoke
 Scoped Ruff and Pyright passed with zero findings. The current pre-repair head was
 already green in GitHub Actions; no unrelated full-suite rerun or additional gate
 was added for these localized changes.
+
+### Seventh review follow-up (`c53ec6ea` input)
+
+Six new current-head threads were valid and repaired. Two code-quality findings
+rename nested test-method receivers without changing behavior. Four behavioral
+findings close remaining fixture and installed-cache refusal gaps:
+
+- selected bytecode caches now retain both their named and resolved paths plus
+  exact identities, including external `sys.pycache_prefix` entries, and are
+  revalidated after the package-tree walk before admission succeeds;
+- setuptools package selection validates required containers, canonical dotted
+  package names, package-data ownership and non-escaping relative patterns before
+  globbing, so malformed configuration refuses with `ContractError`;
+- the exact workspace-test set and captured bytes are reread before publication,
+  including tests omitted from Git's tracked/unignored source inventory; and
+- unsupported ZIP compression now joins corrupt/decompression failures at the
+  fixture API's `ContractError` boundary.
+
+These findings extend the same central issue as the prior follow-up: every input
+or executable artifact used for admission must retain its authoritative identity
+through the final success decision. All six are in S2 scope; there is no justified
+out-of-scope follow-up and no new GitHub issue is required.
+
+Focused validation after these repairs: 209 installed-identity and wheel-packaging
+tests plus 35 subtests passed; the overlapping contract/composition/review and
+installed-identity selection passed 89 tests plus 46 subtests. Scoped Ruff and
+Pyright passed with zero findings, and `git diff --check` passed. No unrelated
+full-suite rerun or additional gate was added.

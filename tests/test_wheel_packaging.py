@@ -430,6 +430,41 @@ def test_fixture_translates_malformed_project_dependencies(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("setuptools", [
+    None,
+    {},
+    {"packages": "graphify", "package-data": {}},
+    {"packages": [7], "package-data": {}},
+    {"packages": ["graphify"], "package-data": []},
+    {"packages": ["graphify"], "package-data": {"graphify": "*.py"}},
+    {"packages": ["../outside"], "package-data": {}},
+    {"packages": ["graphify"], "package-data": {"graphify": ["../outside"]}},
+    {"packages": ["graphify"], "package-data": {"outside": ["*.py"]}},
+])
+def test_fixture_translates_malformed_setuptools_selection(
+        built_wheel, tmp_path, monkeypatch, setuptools):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    loads = candidate.tomllib.loads
+
+    def changed_project(payload):
+        parsed = loads(payload)
+        parsed["tool"]["setuptools"] = setuptools
+        return parsed
+
+    monkeypatch.setattr(candidate.tomllib, "loads", changed_project)
+    output = tmp_path / "refused-setuptools-selection"
+    with pytest.raises(ContractError, match="setuptools package selection"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=built_wheel,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
+    assert not output.exists()
+
+
 def test_fixture_binds_checked_project_bytes_to_source_inventory(
         built_wheel, tmp_path, monkeypatch):
     from graphify.workspace.composition import StructuralPolicy
@@ -460,14 +495,15 @@ def test_fixture_binds_checked_project_bytes_to_source_inventory(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("failure", [zipfile.BadZipFile, NotImplementedError])
 def test_fixture_translates_corrupt_archive_member_reads(
-        built_wheel, tmp_path, monkeypatch):
+        built_wheel, tmp_path, monkeypatch, failure):
     from graphify.workspace.composition import StructuralPolicy
     from graphify.workspace.contracts import ContractError
     from tools.workspace_artifacts import candidate
 
     def corrupt_member(*args, **kwargs):
-        raise zipfile.BadZipFile("CRC mismatch")
+        raise failure("unsupported or corrupt member")
 
     monkeypatch.setattr(zipfile.ZipFile, "open", corrupt_member)
     output = tmp_path / "refused-corrupt-member"
@@ -478,7 +514,40 @@ def test_fixture_translates_corrupt_archive_member_reads(
             output_root=output,
             policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
         )
-    assert isinstance(caught.value.__cause__, zipfile.BadZipFile)
+    assert isinstance(caught.value.__cause__, failure)
+    assert not output.exists()
+
+
+def test_fixture_rechecks_bundled_tests_outside_source_inventory(
+        built_wheel, tmp_path, monkeypatch):
+    from graphify.workspace.composition import StructuralPolicy
+    from graphify.workspace.contracts import ContractError
+    from tools.workspace_artifacts import candidate
+    manifest = candidate.source_manifest(REPO)
+    target = REPO / "tests/test_workspace_contracts.py"
+    manifest["files"].pop(target.relative_to(REPO).as_posix())
+    read = candidate._read
+    reads = 0
+
+    def changed_test(path):
+        nonlocal reads
+        payload = read(path)
+        if path == target:
+            reads += 1
+            if reads == 2:
+                return payload + b"\n# changed after fixture capture\n"
+        return payload
+
+    monkeypatch.setattr(candidate, "source_manifest", lambda repo: manifest)
+    monkeypatch.setattr(candidate, "_read", changed_test)
+    output = tmp_path / "refused-bundled-test-race"
+    with pytest.raises(ContractError, match="candidate changed"):
+        candidate.build_fixture(
+            repo_root=REPO,
+            wheel=built_wheel,
+            output_root=output,
+            policy=StructuralPolicy(8, 16384, 1, 4, 1048576),
+        )
     assert not output.exists()
 
 

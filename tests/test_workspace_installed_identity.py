@@ -206,19 +206,21 @@ class InstalledIdentityTests(unittest.TestCase):
                 captured.add(path.name)
             return result
 
+        test_case = self
+
         class GuardedDistribution:
-            def locate_file(inner_self, path):
-                return self.root / path
+            def locate_file(self, path):
+                return test_case.root / path
 
             @property
-            def version(inner_self):
-                self.assertTrue({"METADATA", "RECORD"} <= captured)
+            def version(self):
+                test_case.assertTrue({"METADATA", "RECORD"} <= captured)
                 return "0.10.0"
 
             @property
-            def files(inner_self):
-                self.assertTrue({"METADATA", "RECORD"} <= captured)
-                return self.files
+            def files(self):
+                test_case.assertTrue({"METADATA", "RECORD"} <= captured)
+                return test_case.files
 
         with (patch.object(composition, "_read_installed_member", tracked),
               patch.object(composition.metadata, "distribution",
@@ -233,6 +235,23 @@ class InstalledIdentityTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "bytecode"):
                 verify_installed_candidate(self.expected)
             self.assertTrue(cached.is_file())
+
+    def test_external_cache_replacement_after_comparison_is_refused(self):
+        import graphify.workspace.composition as composition
+        inspect_tree = composition._verify_package_tree
+        with patch("sys.pycache_prefix", str(self.root / "external-cache")):
+            cached = self.cache()
+
+            def replace_then_inspect(*args):
+                replacement = self.root / "replacement-cache"
+                replacement.write_bytes(cached.read_bytes())
+                replacement.replace(cached)
+                return inspect_tree(*args)
+
+            with (patch.object(composition, "_verify_package_tree", replace_then_inspect),
+                  self.assertRaisesRegex(WorkspaceAuthorityInvalid,
+                                         "bytecode cache changed")):
+                verify_installed_candidate(self.expected)
 
     def test_cache_symlink_and_oversized_file_are_refused(self):
         cached = self.cache()

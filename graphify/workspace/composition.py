@@ -201,7 +201,7 @@ def verify_installed_candidate(expected):
                 raise WorkspaceAuthorityInvalid("unexpected installed distribution member")
         expected_files = dict(value["package_members"])
         expected_files.update({prefix + name: sha for name, sha in value["installation_metadata"].items()})
-        verified_package_files, verified_caches = {}, {}
+        verified_package_files, verified_caches, verified_cache_files = {}, {}, {}
         for name, wanted in expected_files.items():
             if name not in owned:
                 raise WorkspaceAuthorityInvalid("missing installed distribution metadata")
@@ -217,9 +217,12 @@ def verify_installed_candidate(expected):
                     raise WorkspaceAuthorityInvalid("installed metadata changed while parsing")
                 verified_metadata[path] = (resolved, identity)
             if name.endswith(".py"):
-                verified_caches.update(_verify_source_caches(path, source))
+                tree_caches, captured_caches = _verify_source_caches(path, source)
+                verified_caches.update(tree_caches)
+                verified_cache_files.update(captured_caches)
         _verify_package_tree(active.parent, verified_package_files, verified_caches)
-        _verify_captured_files(verified_metadata)
+        _verify_captured_files(verified_metadata, "metadata")
+        _verify_captured_files(verified_cache_files, "bytecode cache")
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
 
@@ -288,7 +291,7 @@ def _verify_package_tree(package_root, verified_files, verified_caches):
         raise WorkspaceAuthorityInvalid("installed package tree unreadable") from exc
 
 
-def _verify_captured_files(verified):
+def _verify_captured_files(verified, kind):
     """Require non-package files to retain the exact named and resolved identities read."""
     try:
         for path, (resolved, identity) in verified.items():
@@ -296,9 +299,10 @@ def _verify_captured_files(verified):
             if (path.resolve(strict=True) != resolved
                     or _file_identity(before) != identity
                     or _file_identity(path.lstat()) != identity):
-                raise WorkspaceAuthorityInvalid("installed metadata changed after verification")
+                raise WorkspaceAuthorityInvalid(
+                    f"installed {kind} changed after verification")
     except OSError as exc:
-        raise WorkspaceAuthorityInvalid("installed metadata unreadable") from exc
+        raise WorkspaceAuthorityInvalid(f"installed {kind} unreadable") from exc
 
 
 def _verify_source_caches(path, source):
@@ -313,7 +317,7 @@ def _verify_source_caches(path, source):
     import base64
     import sys
 
-    caches, verified = [], {}
+    caches, verified, captured = [], {}, {}
     limit = 64 * 1024 * 1024
     # Resolve symlinked installation ancestors consistently, while supporting
     # caches created with either the installation spelling or its real path.
@@ -361,9 +365,10 @@ def _verify_source_caches(path, source):
                 raise WorkspaceAuthorityInvalid("unverified installed bytecode cache header")
             caches.append([optimize, base64.b64encode(payload[16:]).decode("ascii")])
             verified[resolved] = _file_identity(opened)
+            captured[cache] = (resolved, _file_identity(opened))
     if caches:
         _compare_cached_code(source, filenames, caches)
-    return verified
+    return verified, captured
 
 
 # CPython code equality omits some fields. Compare every serialized code field,

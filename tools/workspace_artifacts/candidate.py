@@ -212,12 +212,31 @@ def package_members(repo, *, config=None):
             config = _project_document(repo)["tool"]["setuptools"]
         except (KeyError, TypeError) as exc:
             raise ContractError("invalid setuptools package selection") from exc
+    if type(config) is not dict:
+        raise ContractError("invalid setuptools package selection")
+    packages = config.get("packages")
+    package_data = config.get("package-data")
+    if (type(packages) is not list or not packages
+            or not all(type(package) is str and package
+                       and all(part.isidentifier() for part in package.split("."))
+                       for package in packages)
+            or len(packages) != len(set(packages))
+            or type(package_data) is not dict
+            or not set(package_data).issubset(packages)):
+        raise ContractError("invalid setuptools package selection")
+    for package, patterns in package_data.items():
+        if (type(package) is not str or type(patterns) is not list
+                or not all(type(pattern) is str and pattern
+                           and not Path(pattern).is_absolute()
+                           and ".." not in Path(pattern).parts
+                           for pattern in patterns)):
+            raise ContractError("invalid setuptools package selection")
     members = set()
-    for package in config["packages"]:
-        directory = repo / package.replace(".", "/")
+    for package in packages:
+        directory = repo.joinpath(*package.split("."))
         members.update(directory.glob("*.py"))
-    for package, patterns in config["package-data"].items():
-        directory = repo / package.replace(".", "/")
+    for package, patterns in package_data.items():
+        directory = repo.joinpath(*package.split("."))
         for pattern in patterns:
             matches = set(directory.glob(pattern))
             if not matches:
@@ -233,7 +252,7 @@ def _wheel_archive(payload):
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             yield archive
-    except (OSError, EOFError, RuntimeError, zipfile.BadZipFile,
+    except (OSError, EOFError, RuntimeError, NotImplementedError, zipfile.BadZipFile,
             zipfile.LargeZipFile, zlib.error) as exc:
         raise ContractError("wheel archive cannot be safely read") from exc
 
@@ -351,11 +370,15 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
               "runtime-manifest.json": authority.canonical}
     for name in SCHEMA_FILES:
         bundle["schemas/" + name] = _read(repo / "graphify/workspace/schemas" / name)
-    for path in sorted((repo / "tests").glob("test_workspace_*.py")):
+    workspace_tests = sorted((repo / "tests").glob("test_workspace_*.py"))
+    for path in workspace_tests:
         bundle["tests/" + path.name] = _read(path)
     # Recheck source after reading wheel/schemas/tests so mixed inputs refuse.
     if (source_manifest(repo) != inventory
-            or package_members(repo, config=package_config) != members):
+            or package_members(repo, config=package_config) != members
+            or sorted((repo / "tests").glob("test_workspace_*.py")) != workspace_tests
+            or any(_read(path) != bundle["tests/" + path.name]
+                   for path in workspace_tests)):
         raise ContractError("candidate changed during fixture collection")
     outer = canonical_json_bytes({"kind": "local-fixture", "certified": False,
                                   "members": {n: hashlib.sha256(b).hexdigest()
