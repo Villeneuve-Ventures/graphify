@@ -45,27 +45,73 @@ class ContractError(ValueError):
     """Malformed, unsupported, inconsistent or unbounded contract."""
 
 
-def _normalise(value, depth=0):
+def _consume_budget(budget, size):
+    if size > budget[0]:
+        raise ContractError("document byte limit exceeded")
+    budget[0] -= size
+
+
+def _normalise(value, depth=0, budget=None):
+    # Reserve the final newline, then charge exact canonical JSON bytes before
+    # inserting each value into the copied tree. This bounds encoding work; it
+    # is not a bound on Python object overhead or the caller's existing input.
+    if budget is None:
+        budget = [MAX_DOCUMENT_BYTES]
+        _consume_budget(budget, 1)
     if depth > 32:
         raise ContractError("JSON nesting limit exceeded")
-    if value is None or type(value) in (bool, int):
+    if value is None or type(value) is bool:
+        _consume_budget(budget, 4 if value is None or value is True else 5)
+        return value
+    if type(value) is int:
+        # Decimal digits need fewer than four bits each. Reject clearly oversized
+        # integers before decimal conversion, then charge the exact representation.
+        if value.bit_length() > 4 * budget[0]:
+            raise ContractError("document byte limit exceeded")
+        _consume_budget(budget, len(str(value)))
         return value
     if isinstance(value, str):
+        # NFC can compose up to four canonically decomposed code points into one
+        # (including Greek composites; Hangul needs three). Bound the input before
+        # normalization without refusing strings that fit after composition.
+        if len(value) > 4 * max(0, budget[0] - 2):
+            raise ContractError("document byte limit exceeded")
         if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
             raise ContractError("Unicode surrogates are forbidden")
-        return unicodedata.normalize("NFC", value)
+        result = unicodedata.normalize("NFC", value)
+        _consume_budget(budget, 2)  # quotes
+        for char in result:
+            point = ord(char)
+            if char in '\"\\\b\f\n\r\t':
+                size = 2
+            elif point < 32:
+                size = 6  # \u00xx
+            else:
+                size = 1 if point < 128 else 2 if point < 2048 else 3 if point < 65536 else 4
+            _consume_budget(budget, size)
+        return result
     if isinstance(value, Mapping):
+        count = len(value)
+        syntax = 2 + max(0, count - 1) + count  # braces, commas, colons
+        if syntax + 3 * count > budget[0]:  # at least an empty key and one digit
+            raise ContractError("document byte limit exceeded")
+        _consume_budget(budget, syntax)
         result = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ContractError("JSON keys must be strings")
-            key = _normalise(key)
+            key = _normalise(key, budget=budget)
             if key in result:
                 raise ContractError("duplicate normalized key")
-            result[key] = _normalise(item, depth + 1)
+            result[key] = _normalise(item, depth + 1, budget)
         return result
     if isinstance(value, (list, tuple)):
-        return [_normalise(item, depth + 1) for item in value]
+        count = len(value)
+        syntax = 2 + max(0, count - 1)
+        if syntax + count > budget[0]:
+            raise ContractError("document byte limit exceeded")
+        _consume_budget(budget, syntax)
+        return [_normalise(item, depth + 1, budget) for item in value]
     raise ContractError("unsupported canonical JSON value")
 
 
@@ -73,6 +119,8 @@ def canonical_json_bytes(value):
     try:
         result = (json.dumps(_normalise(value), ensure_ascii=False, sort_keys=True,
                              separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8")
+    except ContractError:
+        raise
     except (ValueError, RecursionError) as exc:
         raise ContractError("invalid canonical JSON") from exc
     if len(result) > MAX_DOCUMENT_BYTES:
@@ -259,9 +307,11 @@ class Document:
 
     @classmethod
     def from_mapping(cls, value):
-        # Validate before normalization can alter filesystem labels.
+        # Bound the document before validators allocate derived inventories, but
+        # validate the original input so NFC cannot repair filesystem labels.
+        canonical = canonical_json_bytes(value)
         cls.validate(value)
-        return cls(canonical_json_bytes(value))
+        return cls(canonical)
 
     @classmethod
     def from_json(cls, payload):

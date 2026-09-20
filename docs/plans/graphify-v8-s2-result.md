@@ -570,3 +570,62 @@ was introduced.
 
 The required AST graph update completed at **13,668 nodes / 30,534 edges**; the
 same five zero-node JSON corpus warnings remain.
+
+
+### Boundary-completion review (`b2528c13` input)
+
+The refreshed GitHub snapshot has 42 conversation comments, 26 reviews and 69
+inline threads. Six new inline reports represent four distinct behavioral
+claims, one duplicate and one comment-only suggestion. The persistent Qodo body
+adds the same staging claim; its other retained claims have unchanged substance.
+It says four lower-priority findings are omitted from that body; unpublished
+portal-only content is not evidence available to this review. Every exposed new
+claim is accounted for below.
+
+The previous repair was incomplete: pinning the output parent did not bind the
+staging directory's own identity to publication and cleanup. Likewise, bounding
+the collected bundle did not bound earlier Git inventory materialization, and
+the canonical document limit was checked after expensive allocation. These are
+remaining S2 boundary defects, not merely noisy bots or a reason to add gates.
+
+| New report | Disposition |
+|---|---|
+| [Foreign fixture publication/cleanup](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055854654) and [pinned-stage publication](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055881920) | One valid cause, reported twice; repaired. Publication checks the opened stage identity before rename and the destination identity afterward. Cleanup uses the retained stage descriptor and only known created entries; replaced or vacated names are preserved. |
+| [Project extra normalization](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055881913) | Valid; repaired by normalizing project extra names for metadata comparison. An actual local setuptools metadata writer demonstrates that `foo_bar` becomes `foo-bar`; requirement markers already normalize through `packaging`. No dependency declaration changed. |
+| [Source inventory materialization](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055881916) | Valid; repaired with bounded streaming of `git ls-files`, a 16 MiB output ceiling, a 100,000-name ceiling and canonical path validation before source payload capture. Early refusal terminates and reaps the enumerator. |
+| [Canonicalization allocation](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055881922) | Valid; repaired by charging a shared canonical byte budget during normalization, before full-tree or JSON allocation. Model construction applies that bound before derived validator inventories while still validating original filesystem labels. Exact canonical bytes and existing refusal rules are preserved. |
+| [Empty cleanup exception](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055818497) | Comment-only suggestion, not an independent behavioral defect. The cleanup repair documents why absent or replaced stage entries must be preserved rather than recursively removed. |
+
+Settled Windows-launcher, cache-sharing, glob and deferred-ticket dispositions
+remain unchanged: the new persistent review supplies no new evidence for them.
+No new out-of-scope defect or GitHub ticket is established by this snapshot.
+
+
+Integrated repair evidence: **89 focused stdlib unittest tests passed** across
+the prior five regression modules plus `test_workspace_canonical_budget` and
+`test_workspace_fixture_capture_identity`. Scoped Ruff, interpreter-pinned
+Pyright and diff checks passed. A fresh wheel passed fixture archive/completion
+checks and disposable noneditable installation verification, with no caches and
+with package caches compiled at optimization levels 0, 1 and 2. The extra-name
+test uses actual local setuptools metadata generation; the Git streaming path
+also captured the real checkout successfully.
+
+The new refusal tests use scaled limits and injected directory/file substitutions.
+A substitution inside the rename primitive is detected afterward; it can leave a
+foreign destination and the original staged directory intact. The operation
+refuses and does not attempt an unsafe rollback. These observed-identity checks
+do not promise atomic exclusion of hostile same-user writers. Canonical and
+inventory limits bound their input/encoding work, not total process RSS or the
+caller's already allocated objects. Existing destination preservation, canonical
+byte parity, original-label validation and ordinary wheel installation remain
+covered. No pytest rerun, native Linux/Windows certification, CI wait, review-bot
+request or new approval gate was added.
+
+Reproduce the new regressions with:
+
+```sh
+.venv/bin/python -B -m unittest tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity -q
+```
+
+The AST graph update completed at **13,712 nodes / 30,624 edges**, retaining the
+same five zero-node JSON corpus warnings.

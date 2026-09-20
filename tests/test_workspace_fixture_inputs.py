@@ -14,6 +14,7 @@ import zipfile
 from graphify.workspace.composition import StructuralPolicy
 from graphify.workspace.contracts import ContractError, SCHEMA_FILES
 from tools.workspace_artifacts import candidate
+from tests.test_workspace_fixture_capture_identity import FakeGitProcess
 
 
 class FixtureInputReviewTests(unittest.TestCase):
@@ -125,12 +126,12 @@ class FixtureInputReviewTests(unittest.TestCase):
         path = self.repo / name
         path.parent.mkdir()
         path.write_bytes(b'raw filename')
-        with patch.object(candidate.subprocess, 'check_output', side_effect=['f' * 40, (name + '\0').encode()]), patch.object(candidate.subprocess, 'run'):
+        with patch.object(candidate.subprocess, 'check_output', return_value='f' * 40), patch.object(candidate.subprocess, 'Popen', return_value=FakeGitProcess((name + '\0').encode())), patch.object(candidate.subprocess, 'run'):
             with self.assertRaises(ContractError):
                 candidate.source_manifest(self.repo)
 
     def test_non_utf8_git_name_refuses(self):
-        with patch.object(candidate.subprocess, 'check_output', side_effect=['f' * 40, b'notes/\xff.txt\0']), patch.object(candidate.subprocess, 'run'):
+        with patch.object(candidate.subprocess, 'check_output', return_value='f' * 40), patch.object(candidate.subprocess, 'Popen', return_value=FakeGitProcess(b'notes/\xff.txt\0')), patch.object(candidate.subprocess, 'run'):
             with self.assertRaises(ContractError):
                 candidate.source_manifest(self.repo)
 
@@ -217,7 +218,7 @@ class FixtureInputReviewTests(unittest.TestCase):
             if (captured.st_dev, captured.st_ino) == (identity.st_dev, identity.st_ino):
                 replacement.replace(path)
 
-        with patch.object(candidate.subprocess, 'check_output', side_effect=['f' * 40, b'recorded.py\0']), patch.object(candidate.subprocess, 'run'), patch.object(os, 'close', replace_after_capture):
+        with patch.object(candidate.subprocess, 'check_output', return_value='f' * 40), patch.object(candidate.subprocess, 'Popen', return_value=FakeGitProcess(b'recorded.py\0')), patch.object(candidate.subprocess, 'run'), patch.object(os, 'close', replace_after_capture):
             manifest = candidate.source_manifest(self.repo)
         self.assertEqual(manifest['files']['recorded.py'], {
             'sha256': hashlib.sha256(b'captured A').hexdigest(), 'mode': 0o644})

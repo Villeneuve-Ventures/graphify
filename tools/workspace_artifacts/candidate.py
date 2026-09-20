@@ -14,7 +14,6 @@ import io
 import configparser
 import os
 import secrets
-import shutil
 from pathlib import Path
 import stat
 import subprocess
@@ -27,7 +26,7 @@ from graphify.workspace.contracts import (
     ADAPTER_CONTRACT_VERSION, CompatibilityManifest, ContractError, DETECTOR_ID,
     DISTRIBUTION_VERSION, ENGINE_BASELINE, EXTRACTOR_CACHE_ABI, GRAPH_PAYLOAD_VERSION,
     INPUT_MANIFEST_VERSION, INSTALLATION_METADATA, SCHEMA_FILES, STATE_SCHEMA_VERSION,
-    MAX_ENTRIES, SUPPORTED_CONSOLE_SCRIPTS, canonical_json_bytes, canonical_sha256, input_label,
+    MAX_DOCUMENT_BYTES, MAX_ENTRIES, SUPPORTED_CONSOLE_SCRIPTS, canonical_json_bytes, canonical_sha256, input_label,
 )
 
 
@@ -36,6 +35,7 @@ MAX_WHEEL_MEMBER_BYTES = MAX_INPUT_BYTES
 MAX_WHEEL_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_FIXTURE_BUNDLE_BYTES = MAX_WHEEL_EXPANDED_BYTES
 MAX_FIXTURE_BUNDLE_MEMBERS = MAX_ENTRIES
+MAX_SOURCE_LIST_BYTES = MAX_DOCUMENT_BYTES
 
 
 def _input_identity(info):
@@ -183,6 +183,7 @@ def _validate_wheel_filename(path, project):
 def _project_requirements(project):
     """Validate project dependency containers and return canonical requirements."""
     from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
 
     try:
         dependencies = project["dependencies"]
@@ -204,7 +205,7 @@ def _project_requirements(project):
                 expected.add(str(Requirement(combined)))
     except (KeyError, TypeError, AttributeError, InvalidRequirement) as exc:
         raise ContractError("invalid project dependency declarations") from exc
-    return expected, set(optional)
+    return expected, {canonicalize_name(extra) for extra in optional}
 
 
 def _validate_wheel_record(payload, names, record_name, read_member):
@@ -298,19 +299,53 @@ def _wheel_archive(payload):
         raise ContractError("wheel archive cannot be safely read") from exc
 
 
+def _source_names(repo):
+    """Collect a bounded Git inventory before reading any source payload."""
+    command = ["git", "-C", str(repo), "ls-files", "-z", "--cached",
+               "--others", "--exclude-standard"]
+    names, pending, size = set(), b"", 0
+    with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = process.stdout.read(min(65536, MAX_SOURCE_LIST_BYTES + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_SOURCE_LIST_BYTES:
+                    raise ContractError("source inventory byte limit exceeded")
+                parts = (pending + chunk).split(b"\0")
+                pending = parts.pop()
+                for raw in parts:
+                    try:
+                        name = raw.decode("utf-8")
+                    except UnicodeError as exc:
+                        raise ContractError("source inventory paths must be UTF-8") from exc
+                    input_label(name, {"source"}, source_file=True)
+                    names.add(name)
+                    if len(names) > MAX_ENTRIES:
+                        raise ContractError("source inventory entry limit exceeded")
+                if len(pending) > 4096:
+                    raise ContractError("source inventory path byte limit exceeded")
+            if pending:
+                raise ContractError("unterminated source inventory path")
+            if process.wait() != 0:
+                raise ContractError("cannot enumerate source inventory")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+    return sorted(names)
+
+
 def source_manifest(repo):
     repo = repo.resolve(strict=True)
     head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
                     ENGINE_BASELINE.removeprefix("git:"), head], check=True, capture_output=True)
-    names = subprocess.check_output(["git", "-C", str(repo), "ls-files", "-z", "--cached",
-                                     "--others", "--exclude-standard"])
-    try:
-        names = names.decode("utf-8").split("\0")
-    except UnicodeError as exc:
-        raise ContractError("source inventory paths must be UTF-8") from exc
+    names = _source_names(repo)
     files = {}
-    for name in sorted(set(names) - {""}):
+    for name in names:
         input_label(name, {"source"}, source_file=True)
         path = repo / name
         # Explicit deletion is part of this local candidate; never silently skip it.
@@ -499,32 +534,59 @@ def _write_fixture_members(open_member, bundle, outer):
                 archive.writestr(info, payload)
 
 
+def _entry_identity(directory_fd, name):
+    try:
+        info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino
+
+
+def _cleanup_fixture_stage(parent, stage, stage_fd, identity, members):
+    # Never traverse a mutable stage name, nor delete files not created here.
+    if _entry_identity(parent.fd, stage) != identity:
+        return
+    for name, expected in members.items():
+        if _entry_identity(stage_fd, name) == expected:
+            os.unlink(name, dir_fd=stage_fd)
+    if _entry_identity(parent.fd, stage) == identity and not os.listdir(stage_fd):
+        os.rmdir(stage, dir_fd=parent.fd)
+
+
 def _write_fixture(output, bundle, outer, *, repo=None):
     from graphify.transaction import pin_output
     with pin_output(output.parent, create=False) as parent:
         _validate_fixture_parent(output, parent, repo=repo)
         stage = ".graphify-fixture-" + secrets.token_hex(16)
         os.mkdir(stage, mode=0o700, dir_fd=parent.fd)
-        stage_fd = None
+        created_identity = _entry_identity(parent.fd, stage)
+        stage_fd, identity, members = None, None, {}
+        admitted = False
         try:
             stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent.fd)
+            opened = os.fstat(stage_fd)
+            identity = (opened.st_dev, opened.st_ino)
+            if (identity != created_identity or _entry_identity(parent.fd, stage) != identity
+                    or opened.st_uid != os.geteuid() or stat.S_IMODE(opened.st_mode) != 0o700):
+                raise ContractError("fixture staging directory must remain owned and private")
+            admitted = True
 
             def open_member(name):
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=stage_fd)
+                opened_file = os.fstat(fd)
+                members[name] = (opened_file.st_dev, opened_file.st_ino)
                 return os.fdopen(fd, "wb")
 
             _write_fixture_members(open_member, bundle, outer)
-            _publish_fixture(output.parent / stage, output, parent=parent)
+            _publish_fixture(output.parent / stage, output, parent=parent, expected_identity=identity)
         finally:
             if stage_fd is not None:
-                os.close(stage_fd)
-            # The parent descriptor still names the original directory even if
-            # its public pathname was redirected. Never clean the public output.
-            try:
-                shutil.rmtree(stage, dir_fd=parent.fd)
-            except FileNotFoundError:
-                pass
+                try:
+                    if admitted:
+                        _cleanup_fixture_stage(parent, stage, stage_fd, identity, members)
+                finally:
+                    os.close(stage_fd)
 
 
 def _validate_fixture_parent(output, parent, *, repo=None):
@@ -535,14 +597,21 @@ def _validate_fixture_parent(output, parent, *, repo=None):
         raise ContractError("fixture output must be outside source checkout")
 
 
-def _publish_fixture(payload_root, output, *, parent=None):
+def _publish_fixture(payload_root, output, *, parent=None, expected_identity=None):
     # Tooling-only import: preserve the workspace composition cold boundary.
     from graphify.transaction import _atomic_rename_no_replace, pin_output
     if parent is None:
         with pin_output(output.parent, create=False) as pinned:
-            _publish_fixture(payload_root, output, parent=pinned)
+            _publish_fixture(payload_root, output, parent=pinned, expected_identity=expected_identity)
         return
     _validate_fixture_parent(output, parent)
-    _atomic_rename_no_replace(parent, str(payload_root.relative_to(output.parent)), output.name)
+    source = str(payload_root.relative_to(output.parent))
+    current = _entry_identity(parent.fd, source)
+    expected_identity = current if expected_identity is None else expected_identity
+    if expected_identity is None or current != expected_identity:
+        raise ContractError("fixture staging directory identity changed")
+    _atomic_rename_no_replace(parent, source, output.name)
+    if _entry_identity(parent.fd, output.name) != expected_identity:
+        raise ContractError("published fixture directory identity changed")
     # Refuse detached-parent success while preserving any published artifact.
     _validate_fixture_parent(output, parent)
