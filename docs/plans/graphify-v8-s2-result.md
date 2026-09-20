@@ -464,3 +464,57 @@ tests plus 35 subtests passed; the overlapping contract/composition/review and
 installed-identity selection passed 89 tests plus 46 subtests. Scoped Ruff and
 Pyright passed with zero findings, and `git diff --check` passed. No unrelated
 full-suite rerun or additional gate was added.
+
+### Consolidated review (`cf8ad45a` input)
+
+This pass read all 36 conversation comments, 21 review bodies (including nested
+and outside-diff findings), and 59 inline threads. It checked claims against the
+current implementation, rather than treating unresolved GitHub threads or bot
+severity labels as current defects. Prior test counts above are historical
+receipts for their named inputs, not fresh proof of the current candidate.
+
+The recurring causes are incomplete preservation of captured evidence and
+producer/verifier disagreement about the supported artifact. The source-mode
+finding below also demonstrates why reviewing only newly added inline comments
+misses valid older feedback. Additional churn comes from duplicate style reports,
+old reviewed-commit summaries, and PR-Agent treating explicitly deferred tickets
+as mandatory S2 acceptance. None creates a new gate.
+
+| Claim group | Current disposition and evidence |
+|---|---|
+| [Missing declared launchers](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055531571) | Valid, repaired. The installed verifier requires both supported logical launcher names in RECORD, checks regular-file presence, and retains their captured identities through its final recheck. Tests remove rows alone, rows plus files, and a launcher after package verification. |
+| [Builder accepts unsupported scripts](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055531577) | Valid, repaired. Builder and verifier share `SUPPORTED_CONSOLE_SCRIPTS`; the builder requires the exact supported name set and matching case-preserved entry-point metadata. Malformed entry-point text exposed raw parser/encoding exceptions during reproduction; those now use `ContractError`. |
+| [Nonexistent configured packages](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055531581), [symlinked source ancestors](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055531588) | Valid, repaired at the shared source-capture boundary. Configured directories must exist, and ancestors beneath the resolved checkout must remain real directories with the same observed identities around each capture. Ordinary aliases above the checkout and external wheel paths remain supported. This is not an atomic filesystem snapshot or an ABA guarantee. |
+| [Wrong top-level namespace](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055531592) | Valid, repaired. `top_level.txt` must declare exactly the configured package roots; a tampered value with an otherwise correct RECORD refuses before publication. |
+| [Noncanonical Git paths](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055531594) | Valid, repaired. Git paths must decode as UTF-8 and pass the existing canonical source-label contract before capture. NFC conversion cannot silently change an inventory key. |
+| CodeRabbit outside-diff review: source hash and mode may describe different files | Valid older finding, still present at the review input and repaired here. `_capture` returns bytes plus the validated descriptor stat; `source_manifest` uses that stat's mode. A replacement after descriptor capture cannot combine the old hash with the new file's mode. Two existing race mocks now intercept this capture boundary. |
+| [Malformed `foo/**bar` glob](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4055414898) | Not reproduced on the declared Python 3.14.3: this pattern matches `foo/mybar`; a missing match already refuses. A positive regression preserves this supported behavior. No speculative glob restriction was added. |
+| Earlier wheel expansion, RECORD, filename, core metadata, dependencies, staged publication, configuration capture, bundled-test drift and archive errors | Already fixed in the current candidate: `candidate.py` validates these boundaries and rechecks captured inputs before publication. Original specifier-order speculation is obsolete; `_validate_core_metadata` compares parsed specifier sets with the captured project. |
+| Earlier model, query, schema and detection-evidence findings | Already fixed: exact concrete manifest types in `CompletionBinding.bind` and adapter constructors; six-field regular-file probes for detected code inputs; UTF-8 query refusal; filename-based schema pairing; bounded cold-import timeout. |
+| Earlier installed-member, package-tree, metadata, cache and authority-permission findings | Already fixed: descriptor capture; required-set presence and identity checks; bounded metadata before parsing; final metadata/external-cache rechecks; final authority ancestor policy checks. |
+| Descriptor-leak, Protocol ellipsis, mixed-import and adjacent-string reports | Unsupported behavioral claims or advisory duplicates. Descriptors close in `finally`; ellipses declare Protocol methods; module imports are needed to patch the actual module constants; adjacent strings form one `python -c` argument. The proposed test-module `MAX_ENTRIES` patch would miss the production constant. Nested receiver naming was already changed. |
+| Local proof paths, protected packet and docstring coverage | Local artifacts are explicitly nonportable and the document supplies reproducible commands. No authorized protected designation exists; the conditional policy and default bot docstring threshold are not S2 gates. Published historical test counts are not independently rerun or recertified by this audit. |
+| Immutable constant aliasing and generated launcher contents | Valid disclosed limitations, not regressions within the stated S2 contract. Cache comparison establishes field/type/value equality, not identity-sensitive observational equivalence; launcher presence does not certify generated launcher bytes. Exact installed-entry/candidate qualification remains S7 in the structural design. No duplicate ticket is needed for that already scheduled design scope. |
+| PR-Agent ticket-compliance claims for #150, #151 and #113 | Scope misclassification. Their live issue bodies explicitly call for separate follow-ups. `extract.py`, `manifest_ingest.py`, and `uv.lock` remain byte-identical to the PR base; dependency declarations and advisory scanner policy are unchanged. |
+
+All six new behavioral inline claims were valid, while the new glob claim was
+not reproduced and the two new import-style comments repeat prior dispositions.
+The older outside-diff mode claim and related malformed-entry-point refusal were
+also repaired. No actionable published claim is left awaiting clarification.
+
+The only justified out-of-scope work remains the existing XML admission ticket
+[#150](https://github.com/Villeneuve-Ventures/graphify/issues/150), dependency
+maintenance ticket [#151](https://github.com/Villeneuve-Ventures/graphify/issues/151),
+and policy umbrella [#113](https://github.com/Villeneuve-Ventures/graphify/issues/113),
+plus the already designed S7 qualification above. No new GitHub ticket is needed.
+
+Current repair evidence: 58 focused stdlib unittest tests passed, including the
+new source/metadata cases and the affected installed/refusal/publication tests.
+Scoped Ruff and interpreter-pinned Pyright passed. A fresh wheel passed fixture
+archive/completion checks and disposable installation verification both without
+caches and after full-package compilation at optimization levels 0, 1 and 2.
+The AST graph update completed at 13,644 nodes / 30,470 edges with the same five
+zero-node JSON warnings. Pytest was not rerun during this pass. Native
+Linux/Windows validation and fresh full-suite certification are not claimed;
+CI was not awaited. No new enforcement, protected-review, or bot-threshold gate
+was introduced.

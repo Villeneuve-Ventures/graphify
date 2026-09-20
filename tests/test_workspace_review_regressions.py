@@ -34,7 +34,10 @@ class InstalledMemberRefusalTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        self.path = Path(self.directory.name) / "__init__.py"
+        root = Path(self.directory.name)
+        package = root / "graphify"
+        package.mkdir()
+        self.path = package / "__init__.py"
         self.path.write_bytes(b"# installed fixture\n")
         member = PackagePath("graphify/__init__.py")
         self.expected = SimpleNamespace(to_dict=lambda: {
@@ -42,9 +45,15 @@ class InstalledMemberRefusalTests(unittest.TestCase):
             "package_members": {str(member): hashlib.sha256(b"# installed fixture\n").hexdigest()},
             "installation_metadata": {},
         })
-        dist = SimpleNamespace(version="0.10.0", files=[member],
-                               locate_file=lambda _: self.path)
+        scripts = root / "bin"
+        scripts.mkdir()
+        script_rows = [PackagePath("bin/graphify"), PackagePath("bin/graphify-mcp")]
+        for row in script_rows:
+            (root / row).write_bytes(b"# fixture console script\n")
+        dist = SimpleNamespace(version="0.10.0", files=[member, *script_rows],
+                               locate_file=lambda name: root / name if str(name).startswith("bin/") else self.path)
         for patcher in (patch("graphify.__file__", str(self.path)),
+                        patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(scripts)),
                         patch("graphify.workspace.composition.metadata.distribution", return_value=dist)):
             patcher.start()
             self.addCleanup(patcher.stop)

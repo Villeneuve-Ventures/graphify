@@ -26,7 +26,7 @@ from graphify.workspace.contracts import (
     ADAPTER_CONTRACT_VERSION, CompatibilityManifest, ContractError, DETECTOR_ID,
     DISTRIBUTION_VERSION, ENGINE_BASELINE, EXTRACTOR_CACHE_ABI, GRAPH_PAYLOAD_VERSION,
     INPUT_MANIFEST_VERSION, INSTALLATION_METADATA, SCHEMA_FILES, STATE_SCHEMA_VERSION,
-    canonical_json_bytes, canonical_sha256,
+    SUPPORTED_CONSOLE_SCRIPTS, canonical_json_bytes, canonical_sha256, input_label,
 )
 
 
@@ -41,6 +41,11 @@ def _input_identity(info):
 
 
 def _read(path):
+    return _capture(path)[0]
+
+
+def _capture(path):
+    """Return bytes and mode-bearing metadata from one validated descriptor."""
     descriptor = None
     try:
         named = path.lstat()
@@ -70,12 +75,42 @@ def _read(path):
                 or _input_identity(before) != _input_identity(path.lstat())
                 or size != before.st_size):
             raise ContractError("fixture input changed while reading")
-        return b"".join(chunks)
+        return b"".join(chunks), before
     except OSError as exc:
         raise ContractError("fixture input cannot be safely read") from exc
     finally:
         if descriptor is not None:
             os.close(descriptor)
+
+
+def _source_directory_chain(repo, directory):
+    """Bind source ancestors below the resolved checkout, without following links."""
+    try:
+        parts = directory.relative_to(repo).parts
+        current, identities = repo, []
+        for part in (None, *parts):
+            if part is not None:
+                current = current / part
+            info = current.lstat()
+            if not stat.S_ISDIR(info.st_mode):
+                raise ContractError("fixture source ancestor must be a real directory")
+            identities.append((info.st_dev, info.st_ino, info.st_mode))
+        return identities
+    except (OSError, ValueError) as exc:
+        raise ContractError("fixture source directory unavailable or outside checkout") from exc
+
+
+def _read_source(repo, path):
+    return _capture_source(repo, path)[0]
+
+
+def _capture_source(repo, path):
+    input_label(path.relative_to(repo).as_posix(), {"source"}, source_file=True)
+    ancestors = _source_directory_chain(repo, path.parent)
+    captured = _capture(path)
+    if _source_directory_chain(repo, path.parent) != ancestors:
+        raise ContractError("fixture source ancestor changed while reading")
+    return captured
 
 
 def _validate_wheel_metadata(payload):
@@ -193,7 +228,7 @@ def _validate_wheel_record(payload, names, record_name, read_member):
 
 def _project_document(repo, inventory=None):
     """Read one checked project document and optionally bind it to the inventory."""
-    payload = _read(repo / "pyproject.toml")
+    payload = _read_source(repo, repo / "pyproject.toml")
     if inventory is not None:
         recorded = inventory["files"].get("pyproject.toml")
         if (not isinstance(recorded, dict)
@@ -207,6 +242,7 @@ def _project_document(repo, inventory=None):
 
 def package_members(repo, *, config=None):
     """Mirror explicit setuptools package/data selection, preserving all host data."""
+    repo = Path(repo).resolve(strict=True)
     if config is None:
         try:
             config = _project_document(repo)["tool"]["setuptools"]
@@ -234,6 +270,7 @@ def package_members(repo, *, config=None):
     members = set()
     for package in packages:
         directory = repo.joinpath(*package.split("."))
+        _source_directory_chain(repo, directory)
         members.update(directory.glob("*.py"))
     for package, patterns in package_data.items():
         directory = repo.joinpath(*package.split("."))
@@ -242,7 +279,7 @@ def package_members(repo, *, config=None):
             if not matches:
                 raise ContractError(f"empty package-data pattern: {pattern}")
             members.update(matches)
-    return {p.relative_to(repo).as_posix(): hashlib.sha256(_read(p)).hexdigest()
+    return {p.relative_to(repo).as_posix(): hashlib.sha256(_read_source(repo, p)).hexdigest()
             for p in sorted(members)}
 
 
@@ -263,14 +300,22 @@ def source_manifest(repo):
     subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
                     ENGINE_BASELINE.removeprefix("git:"), head], check=True, capture_output=True)
     names = subprocess.check_output(["git", "-C", str(repo), "ls-files", "-z", "--cached",
-                                     "--others", "--exclude-standard"]).decode().split("\0")
+                                     "--others", "--exclude-standard"])
+    try:
+        names = names.decode("utf-8").split("\0")
+    except UnicodeError as exc:
+        raise ContractError("source inventory paths must be UTF-8") from exc
     files = {}
     for name in sorted(set(names) - {""}):
+        input_label(name, {"source"}, source_file=True)
         path = repo / name
         # Explicit deletion is part of this local candidate; never silently skip it.
-        files[name] = (None if not path.exists() and not path.is_symlink() else
-                       {"sha256": hashlib.sha256(_read(path)).hexdigest(),
-                        "mode": stat.S_IMODE(path.lstat().st_mode)})
+        if not path.exists() and not path.is_symlink():
+            files[name] = None
+        else:
+            payload, info = _capture_source(repo, path)
+            files[name] = {"sha256": hashlib.sha256(payload).hexdigest(),
+                           "mode": stat.S_IMODE(info.st_mode)}
     return {"kind": "local-fixture", "base_commit": head, "files": files}
 
 
@@ -293,6 +338,10 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
         raise ContractError("invalid project configuration") from exc
     members = package_members(repo, config=package_config)
     expected_requirements, expected_extras = _project_requirements(project)
+    scripts = project.get("scripts")
+    if (type(scripts) is not dict or set(scripts) != SUPPORTED_CONSOLE_SCRIPTS
+            or not all(type(value) is str and value for value in scripts.values())):
+        raise ContractError("project console scripts outside supported set")
     _validate_wheel_filename(wheel, project)
     wheel_bytes = _read(wheel)
     with _wheel_archive(wheel_bytes) as archive:
@@ -332,11 +381,22 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
         record_name = dist_info + "RECORD"
         _validate_wheel_record(read_member(record_name), names, record_name, read_member)
         entry_points = configparser.ConfigParser()
-        entry_points.read_string(read_member(dist_info + "entry_points.txt").decode())
-        if (entry_points.sections() != ["console_scripts"]
-                or dict(entry_points["console_scripts"]) != project["scripts"]):
-            raise ContractError("wheel entry points differ from project")
-        if read_member(dist_info + "licenses/LICENSE") != _read(repo / "LICENSE"):
+        entry_points.optionxform = lambda optionstr: optionstr
+        try:
+            entry_points.read_string(read_member(dist_info + "entry_points.txt").decode("utf-8"))
+            if (entry_points.sections() != ["console_scripts"]
+                    or dict(entry_points["console_scripts"]) != scripts):
+                raise ContractError("wheel entry points differ from project")
+        except (configparser.Error, UnicodeError) as exc:
+            raise ContractError("invalid wheel entry points") from exc
+        try:
+            top_level = read_member(dist_info + "top_level.txt").decode("utf-8").splitlines()
+        except UnicodeError as exc:
+            raise ContractError("invalid wheel top-level package metadata") from exc
+        expected_top_level = {package.split(".")[0] for package in package_config["packages"]}
+        if len(top_level) != len(expected_top_level) or set(top_level) != expected_top_level:
+            raise ContractError("wheel top-level package metadata differs from project")
+        if read_member(dist_info + "licenses/LICENSE") != _read_source(repo, repo / "LICENSE"):
             raise ContractError("wheel license differs from project")
         _validate_wheel_metadata(read_member(dist_info + "WHEEL"))
         metadata_name = dist_info + "METADATA"
@@ -369,15 +429,15 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
               "compatibility.json": compatibility.canonical,
               "runtime-manifest.json": authority.canonical}
     for name in SCHEMA_FILES:
-        bundle["schemas/" + name] = _read(repo / "graphify/workspace/schemas" / name)
+        bundle["schemas/" + name] = _read_source(repo, repo / "graphify/workspace/schemas" / name)
     workspace_tests = sorted((repo / "tests").glob("test_workspace_*.py"))
     for path in workspace_tests:
-        bundle["tests/" + path.name] = _read(path)
+        bundle["tests/" + path.name] = _read_source(repo, path)
     # Recheck source after reading wheel/schemas/tests so mixed inputs refuse.
     if (source_manifest(repo) != inventory
             or package_members(repo, config=package_config) != members
             or sorted((repo / "tests").glob("test_workspace_*.py")) != workspace_tests
-            or any(_read(path) != bundle["tests/" + path.name]
+            or any(_read_source(repo, path) != bundle["tests/" + path.name]
                    for path in workspace_tests)):
         raise ContractError("candidate changed during fixture collection")
     outer = canonical_json_bytes({"kind": "local-fixture", "certified": False,

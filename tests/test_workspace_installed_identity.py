@@ -40,7 +40,15 @@ class InstalledIdentityTests(unittest.TestCase):
                       metadata.PackagePath("graphify/marker.py")]
         members = {str(p): hashlib.sha256((self.root / p).read_bytes()).hexdigest()
                    for p in self.files}
-        self.installation_metadata = {}
+        entry_points = b"[console_scripts]\ngraphify = graphify.__main__:main\ngraphify-mcp = graphify.serve:_main\n"
+        (self.dist_info / "entry_points.txt").write_bytes(entry_points)
+        self.files.append(metadata.PackagePath("graphifyy-0.10.0.dist-info/entry_points.txt"))
+        self.installation_metadata = {"entry_points.txt": hashlib.sha256(entry_points).hexdigest()}
+        self.scripts = self.root / "bin"
+        self.scripts.mkdir()
+        for name in ("graphify", "graphify-mcp"):
+            (self.scripts / name).write_bytes(b"# fixture console script\n")
+            self.files.append(metadata.PackagePath("bin/" + name))
         self.expected = SimpleNamespace(to_dict=lambda: {
             "distribution_version": "0.10.0",
             "package_members": members,
@@ -50,6 +58,7 @@ class InstalledIdentityTests(unittest.TestCase):
                                     locate_file=lambda p: self.root / p)
         for patcher in (patch("graphify.__file__", str(self.init)),
                         patch("graphify.workspace.composition.metadata.distribution", return_value=self.dist),
+                        patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(self.scripts)),
                         patch("sys.pycache_prefix", None)):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -74,20 +83,47 @@ class InstalledIdentityTests(unittest.TestCase):
         return cached
 
     def test_symlinked_scripts_directory_is_accepted(self):
-        scripts = self.root / "bin"
-        scripts.mkdir()
         alias = self.root / "linked-bin"
-        alias.symlink_to(scripts, target_is_directory=True)
-        (scripts / "graphify").write_bytes(b"# fixture console script\n")
-        self.files.append(metadata.PackagePath("linked-bin/graphify"))
+        alias.symlink_to(self.scripts, target_is_directory=True)
         with patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(alias)):
             verify_installed_candidate(self.expected)
 
     def test_missing_recorded_console_script_is_refused(self):
-        scripts = self.root / "bin"
-        scripts.mkdir()
-        self.files.append(metadata.PackagePath("bin/graphify"))
-        with (patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(scripts)),
+        (self.scripts / "graphify").unlink()
+        with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "console script"):
+            verify_installed_candidate(self.expected)
+
+    def test_missing_declared_console_script_rows_are_refused(self):
+        for names in (("graphify",), ("graphify-mcp",), ("graphify", "graphify-mcp")):
+            for remove_files in (False, True):
+                with self.subTest(names=names, remove_files=remove_files):
+                    rows = [metadata.PackagePath("bin/" + name) for name in names]
+                    for row in rows:
+                        self.files.remove(row)
+                        if remove_files:
+                            (self.root / row).unlink()
+                    try:
+                        with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "console script"):
+                            verify_installed_candidate(self.expected)
+                    finally:
+                        self.files.extend(rows)
+                        for row in rows:
+                            (self.root / row).write_bytes(b"# fixture console script\n")
+
+    def test_supported_exe_launcher_variants_remain_accepted(self):
+        for name in ("graphify", "graphify-mcp"):
+            (self.scripts / name).rename(self.scripts / (name + ".exe"))
+            self.files.remove(metadata.PackagePath("bin/" + name))
+            self.files.append(metadata.PackagePath("bin/" + name + ".exe"))
+        verify_installed_candidate(self.expected)
+
+    def test_console_script_disappearance_before_final_admission_is_refused(self):
+        from graphify.workspace import composition
+        verify_tree = composition._verify_package_tree
+        def remove_script(*args):
+            verify_tree(*args)
+            (self.scripts / "graphify").unlink()
+        with (patch.object(composition, "_verify_package_tree", side_effect=remove_script),
               self.assertRaisesRegex(WorkspaceAuthorityInvalid, "console script")):
             verify_installed_candidate(self.expected)
 

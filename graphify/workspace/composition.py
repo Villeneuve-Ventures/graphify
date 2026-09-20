@@ -15,7 +15,8 @@ import sysconfig
 
 from .adapters import AdapterIntent, CompatibilityTuple, select_adapter
 from .contracts import (CompatibilityManifest, ContractError, Document, canonical_json_bytes,
-                        DISTRIBUTION_VERSION, INSTALLATION_METADATA, exact, integer)
+                        DISTRIBUTION_VERSION, INSTALLATION_METADATA,
+                        SUPPORTED_CONSOLE_SCRIPTS, exact, integer)
 
 RUNTIME_AUTHORITY_FILENAME = "runtime-manifest.json"
 RUNTIME_AUTHORITY_MAX_BYTES = 1024 * 1024
@@ -182,8 +183,9 @@ def verify_installed_candidate(expected):
         owned = {str(p): p for p in files}
         allowed_metadata = {prefix + name for name in (*INSTALLATION_METADATA, "RECORD", "INSTALLER", "REQUESTED", "direct_url.json", "uv_cache.json")}
         scripts = Path(sysconfig.get_path("scripts")).resolve()
-        script_paths = {scripts / "graphify", scripts / "graphify-mcp",
-                        scripts / "graphify.exe", scripts / "graphify-mcp.exe"}
+        script_paths = {scripts / (name + suffix): name
+                        for name in SUPPORTED_CONSOLE_SCRIPTS for suffix in ("", ".exe")}
+        verified_scripts, seen_script_names = {}, set()
         for name, member in owned.items():
             if name in actual or name in allowed_metadata:
                 continue
@@ -199,6 +201,10 @@ def verify_installed_candidate(expected):
             if (resolved not in script_paths or not stat.S_ISREG(before.st_mode)
                     or _file_identity(before) != _file_identity(after)):
                 raise WorkspaceAuthorityInvalid("unexpected installed distribution member")
+            seen_script_names.add(script_paths[resolved])
+            verified_scripts[installed_path] = (resolved, _file_identity(before))
+        if seen_script_names != SUPPORTED_CONSOLE_SCRIPTS:
+            raise WorkspaceAuthorityInvalid("missing declared console script inventory")
         expected_files = dict(value["package_members"])
         expected_files.update({prefix + name: sha for name, sha in value["installation_metadata"].items()})
         verified_package_files, verified_caches, verified_cache_files = {}, {}, {}
@@ -223,6 +229,7 @@ def verify_installed_candidate(expected):
         _verify_package_tree(active.parent, verified_package_files, verified_caches)
         _verify_captured_files(verified_metadata, "metadata")
         _verify_captured_files(verified_cache_files, "bytecode cache")
+        _verify_captured_files(verified_scripts, "console script")
     except metadata.PackageNotFoundError as exc:
         raise WorkspaceAuthorityInvalid("candidate distribution not installed") from exc
 

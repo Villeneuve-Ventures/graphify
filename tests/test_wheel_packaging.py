@@ -470,20 +470,20 @@ def test_fixture_binds_checked_project_bytes_to_source_inventory(
     from graphify.workspace.composition import StructuralPolicy
     from graphify.workspace.contracts import ContractError
     from tools.workspace_artifacts import candidate
-    read = candidate._read
+    capture = candidate._capture
     project_path = REPO / "pyproject.toml"
     project_reads = 0
 
     def racing_read(path):
         nonlocal project_reads
-        payload = read(path)
+        payload, info = capture(path)
         if path == project_path:
             project_reads += 1
             if project_reads == 2:
-                return payload + b"\n# alternate project snapshot\n"
-        return payload
+                return payload + b"\n# alternate project snapshot\n", info
+        return payload, info
 
-    monkeypatch.setattr(candidate, "_read", racing_read)
+    monkeypatch.setattr(candidate, "_capture", racing_read)
     output = tmp_path / "refused-project-snapshot"
     with pytest.raises(ContractError, match="project configuration differs"):
         candidate.build_fixture(
@@ -526,20 +526,20 @@ def test_fixture_rechecks_bundled_tests_outside_source_inventory(
     manifest = candidate.source_manifest(REPO)
     target = REPO / "tests/test_workspace_contracts.py"
     manifest["files"].pop(target.relative_to(REPO).as_posix())
-    read = candidate._read
+    capture = candidate._capture
     reads = 0
 
     def changed_test(path):
         nonlocal reads
-        payload = read(path)
+        payload, info = capture(path)
         if path == target:
             reads += 1
             if reads == 2:
-                return payload + b"\n# changed after fixture capture\n"
-        return payload
+                return payload + b"\n# changed after fixture capture\n", info
+        return payload, info
 
     monkeypatch.setattr(candidate, "source_manifest", lambda repo: manifest)
-    monkeypatch.setattr(candidate, "_read", changed_test)
+    monkeypatch.setattr(candidate, "_capture", changed_test)
     output = tmp_path / "refused-bundled-test-race"
     with pytest.raises(ContractError, match="candidate changed"):
         candidate.build_fixture(

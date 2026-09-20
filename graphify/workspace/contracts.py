@@ -38,6 +38,7 @@ SCHEMA_FILES = ("compatibility.schema.json", "input-manifest.schema.json",
                 "completion-binding.schema.json", "runtime-authority.schema.json",
                 "state-root.schema.json")
 INSTALLATION_METADATA = ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt", "licenses/LICENSE")
+SUPPORTED_CONSOLE_SCRIPTS = frozenset({"graphify", "graphify-mcp"})
 
 
 class ContractError(ValueError):
