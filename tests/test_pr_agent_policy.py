@@ -68,7 +68,7 @@ def test_common_path_and_trusted_runtime_settings_are_preserved() -> None:
     assert "github.event.pull_request.draft == false" in workflow
     assert "timeout-minutes: 45" in workflow
     assert 'python-version: "3.14"' in workflow
-    assert "f3b385ea2927247ddcff2fe252472380b9c8f5fc" in workflow
+    assert "1d01f24f455bb879c1d9c557ad7de3d72dcc7975" in workflow
     assert 'config.model: "gemini/gemini-3.8-flash"' in workflow
     assert 'config.fallback_models: \'["gemini/gemini-3.5-flash-lite"]\'' in workflow
     assert 'config.max_model_tokens: "262144"' in workflow
@@ -436,7 +436,7 @@ def test_publication_rejects_wrong_binding_and_canonicalizes_persistent_update()
 
 def test_wiring_attests_policy_before_constructors_and_uses_one_raw_builder() -> None:
     code = _embedded_python()
-    shim = code.index('MAX_TOKENS["gemini/gemini-3.8-flash"] = 1048576')
+    shim = code.index("NO_SUPPORT_TEMPERATURE_MODELS.extend")
     assert shim < code.index("from pr_agent.agent.pr_agent import PRAgent")
     assert code.index("policy_attested = True") < code.index("asyncio.run(_run_action_and_drain())")
     assert "pr_description.get_pr_diff = _complete_diff" in code
@@ -536,7 +536,7 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
         kwargs = {"model": model}
         if model not in no_temperature_models:
             kwargs["temperature"] = 0.2
-        if model.rsplit("/", 1)[-1] in algo.SUPPORT_REASONING_EFFORT_MODELS:
+        if model.startswith("gemini/"):
             kwargs["reasoning_effort"] = settings.values["CONFIG.REASONING_EFFORT"]
         reads["completion_kwargs"].append(kwargs)
     class Provider:
@@ -633,11 +633,13 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
 
     module("github", Github=lambda token: SimpleNamespace(get_repo=lambda name: repo))
     pr_agent = module("pr_agent")
-    max_tokens = {"gemini/gemini-3.5-flash-lite": 1048576}
+    max_tokens = {
+        "gemini/gemini-3.8-flash": 1048576,
+        "gemini/gemini-3.5-flash-lite": 1048576,
+    }
     no_temperature_models = []
     algo = module("pr_agent.algo", MAX_TOKENS=max_tokens,
-                  NO_SUPPORT_TEMPERATURE_MODELS=no_temperature_models,
-                  SUPPORT_REASONING_EFFORT_MODELS=[])
+                  NO_SUPPORT_TEMPERATURE_MODELS=no_temperature_models)
     module("pr_agent.algo.file_filter", filter_ignored=lambda files: files)
     def convert_patch(_patch, file):
         reads["conversions"].append(file)
@@ -648,9 +650,8 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
     module("pr_agent.algo.language_handler", is_valid_file=lambda name: True)
     def stub_get_max_tokens(model):
         return min(max_tokens[model], settings.values["CONFIG.MAX_MODEL_TOKENS"])
-    module("litellm", register_model=lambda entries: None, model_cost={})
-    module("pr_agent.algo.utils", get_max_tokens=stub_get_max_tokens,
-           add_pr_review_identity=lambda body, marker: body)
+    module("pr_agent.algo.comment_identity", add_pr_review_identity=lambda body, marker: body)
+    module("pr_agent.algo.token_budget", get_max_tokens=stub_get_max_tokens)
     module("pr_agent.config_loader", get_settings=lambda: settings)
     module("pr_agent.git_providers")
     github_provider_module = module("pr_agent.git_providers.github_provider", GithubProvider=GithubProvider)
@@ -726,7 +727,6 @@ def _run_stubbed_entry(monkeypatch, tmp_path, event_name="pull_request", handled
             "gemini/gemini-3.8-flash", "gemini/gemini-3.5-flash-lite")
     }
     reads["no_temperature_models"] = list(no_temperature_models)
-    reads["reasoning_models"] = list(algo.SUPPORT_REASONING_EFFORT_MODELS)
     reads["reasoning_effort"] = settings.values["CONFIG.REASONING_EFFORT"]
     return reads, description_module, reviewer_module
 
@@ -753,7 +753,6 @@ def test_stubbed_embedded_entry_runs_initial_and_full_prreview(monkeypatch, tmp_
     assert reads["completion_kwargs"] == [
         {"model": "gemini/gemini-3.8-flash", "reasoning_effort": "high"},
     ]
-    assert reads["reasoning_models"] == ["gemini-3.8-flash", "gemini-3.5-flash-lite"]
     assert reads["reasoning_effort"] == "high"
     reads, _, _ = _run_stubbed_entry(monkeypatch, tmp_path, event_name="issue_comment")
     assert reads["requests"] == ["/review"]
