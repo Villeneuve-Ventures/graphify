@@ -36,6 +36,8 @@ MAX_WHEEL_EXPANDED_BYTES = 256 * 1024 * 1024
 MAX_FIXTURE_BUNDLE_BYTES = MAX_WHEEL_EXPANDED_BYTES
 MAX_FIXTURE_BUNDLE_MEMBERS = MAX_ENTRIES
 MAX_SOURCE_LIST_BYTES = MAX_DOCUMENT_BYTES
+MAX_PACKAGE_MEMBERS = 10_000
+MAX_PACKAGE_BYTES = MAX_WHEEL_EXPANDED_BYTES
 
 
 def _input_identity(info):
@@ -121,6 +123,7 @@ def _validate_wheel_metadata(payload):
     """Require the supported pure-Python wheel envelope before fixture identity."""
     from email import policy
     from email.parser import BytesParser
+    from packaging.version import InvalidVersion, Version
 
     wheel = BytesParser(policy=policy.compat32).parsebytes(payload)
     if wheel.defects:
@@ -138,6 +141,16 @@ def _validate_wheel_metadata(payload):
         raise ContractError("wheel must install as pure Python")
     if [value.strip() for value in wheel.get_all("Tag", [])] != ["py3-none-any"]:
         raise ContractError("unsupported wheel compatibility tag")
+    generator = one("Generator")
+    try:
+        if not generator.startswith("setuptools (") or not generator.endswith(")"):
+            raise ValueError("unknown generator")
+        version = Version(generator[len("setuptools ("):-1])
+        if version < Version("77"):
+            raise ValueError("legacy generator")
+    except (InvalidVersion, ValueError) as exc:
+        raise ContractError("fixture wheel requires the setuptools>=77 output profile") from exc
+    return version
 
 
 def _validate_core_metadata(payload, project):
@@ -163,6 +176,104 @@ def _validate_core_metadata(payload, project):
     return metadata
 
 
+def _validate_project_metadata(metadata, project, repo, inventory):
+    """Bind descriptive core metadata to the same captured source as the wheel."""
+    from email.headerregistry import Address
+
+    def text(value):
+        if type(value) is not str:
+            raise ContractError("project metadata must contain strings")
+        return value
+
+    def source_text(name):
+        name = text(name)
+        input_label(name, {"source"}, source_file=True)
+        payload = _read_source(repo, repo / name)
+        recorded = inventory["files"].get(name)
+        if (not isinstance(recorded, dict)
+                or recorded.get("sha256") != hashlib.sha256(payload).hexdigest()):
+            raise ContractError("project metadata file differs from source inventory")
+        try:
+            return payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        except UnicodeError as exc:
+            raise ContractError("invalid project metadata text encoding") from exc
+
+    def strings(name):
+        values = project.get(name, [])
+        if type(values) is not list:
+            raise ContractError("project metadata list required")
+        return [text(value) for value in values]
+
+    summary = text(project.get("description", ""))
+    if "\n" in summary:
+        summary = summary.strip().split("\n")[0]
+    keywords = ",".join(strings("keywords"))
+    if (metadata.summary or "") != summary.lstrip(" \t"):
+        raise ContractError("wheel summary differs from project")
+    if ((metadata.keywords or []) != ([part.strip() for part in keywords.split(",")] if keywords else [])
+            or (metadata.classifiers or []) != strings("classifiers")):
+        raise ContractError("wheel keywords or classifiers differ from project")
+    urls = project.get("urls", {})
+    if type(urls) is not dict:
+        raise ContractError("project URLs must be a mapping")
+    if (metadata.project_urls or {}) != {text(k).strip(): text(v).strip() for k, v in urls.items()}:
+        raise ContractError("wheel URLs differ from project")
+    for field in ("author", "maintainer"):
+        people = project.get(field + "s", [])
+        if type(people) is not list:
+            raise ContractError("project contacts must be a list")
+        names, emails = [], []
+        for person in people:
+            if type(person) is not dict or set(person) - {"name", "email"}:
+                raise ContractError("invalid project contact")
+            name, email = text(person.get("name", "")), text(person.get("email", ""))
+            if email:
+                try:
+                    emails.append(str(Address(display_name=name, addr_spec=email)) if name else email)
+                except ValueError as exc:
+                    raise ContractError("invalid project contact address") from exc
+            elif name:
+                names.append(name)
+        if ((getattr(metadata, field) or "") != ", ".join(names)
+                or (getattr(metadata, field + "_email") or "") != ", ".join(emails)):
+            raise ContractError("wheel contacts differ from project")
+    readme = project.get("readme")
+    body, content_type = "", ""
+    if type(readme) is str:
+        content_type = {".md": "text/markdown", ".rst": "text/x-rst", ".txt": "text/plain"}.get(
+            Path(readme).suffix.lower(), "")
+        if not content_type:
+            raise ContractError("unsupported project readme type")
+        body = source_text(readme)
+    elif readme is not None:
+        if (type(readme) is not dict or set(readme) not in (
+                {"file", "content-type"}, {"text", "content-type"})):
+            raise ContractError("unsupported project readme configuration")
+        content_type = text(readme["content-type"])
+        body = source_text(readme["file"]) if "file" in readme else text(readme["text"])
+    if body and not body.endswith("\n"):
+        body += "\n"
+    if ((metadata.description or "") != body
+            or (metadata.description_content_type or "") != content_type):
+        raise ContractError("wheel readme differs from project")
+    license_value = project.get("license")
+    license_text, expression = "", ""
+    if type(license_value) is str:
+        from packaging.licenses import InvalidLicenseExpression, canonicalize_license_expression
+        try:
+            expression = canonicalize_license_expression(license_value)
+        except InvalidLicenseExpression as exc:
+            raise ContractError("invalid project license expression") from exc
+    elif license_value is not None:
+        if type(license_value) is not dict or set(license_value) not in ({"file"}, {"text"}):
+            raise ContractError("unsupported project license configuration")
+        license_text = (source_text(license_value["file"]) if "file" in license_value
+                        else text(license_value["text"]))
+    if ((metadata.license or "") != license_text.replace("\n", "\n        ").lstrip(" \t")
+            or (metadata.license_expression or "") != expression):
+        raise ContractError("wheel license metadata differs from project")
+
+
 def _validate_wheel_filename(path, project):
     """Bind the installer-facing wheel name to the captured project identity."""
     from packaging.tags import Tag
@@ -183,6 +294,7 @@ def _validate_wheel_filename(path, project):
 def _project_requirements(project):
     """Validate project dependency containers and return canonical requirements."""
     from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.markers import Marker
     from packaging.utils import canonicalize_name
 
     try:
@@ -198,11 +310,10 @@ def _project_requirements(project):
         expected = {str(Requirement(requirement)) for requirement in dependencies}
         for extra, requirements in optional.items():
             for requirement in requirements:
-                base, separator, marker = requirement.partition(";")
-                combined = (base + "; "
-                            + (f"({marker.strip()}) and " if separator else "")
-                            + f'extra == "{extra}"')
-                expected.add(str(Requirement(combined)))
+                parsed = Requirement(requirement)
+                parsed.marker = Marker((f"({parsed.marker}) and " if parsed.marker else "")
+                                       + f'extra == "{extra}"')
+                expected.add(str(parsed))
     except (KeyError, TypeError, AttributeError, InvalidRequirement) as exc:
         raise ContractError("invalid project dependency declarations") from exc
     return expected, {canonicalize_name(extra) for extra in optional}
@@ -280,24 +391,46 @@ def package_members(repo, *, config=None):
     # MANIFEST.in and plugins that this explicit member model does not expand.
     if config.get("include-package-data") is not False:
         raise ContractError("unsupported setuptools package selection: include-package-data must be explicitly false")
-    members = set()
+    members, total_bytes = {}, 0
+
+    def include(paths, *, pattern=None):
+        nonlocal total_bytes
+        matched = False
+        for path in paths:
+            matched = True
+            if path in members:
+                continue
+            if len(members) >= MAX_PACKAGE_MEMBERS:
+                raise ContractError("package member count limit exceeded")
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise ContractError("package member cannot be inspected") from exc
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or not 0 <= info.st_size <= MAX_INPUT_BYTES):
+                raise ContractError("package member must be a bounded singular regular file")
+            total_bytes += info.st_size
+            if total_bytes > MAX_PACKAGE_BYTES:
+                raise ContractError("package aggregate byte limit exceeded")
+            members[path] = info.st_size
+        if pattern is not None and not matched:
+            raise ContractError(f"empty package-data pattern: {pattern}")
+
     for package in packages:
         directory = repo.joinpath(*package.split("."))
         _source_directory_chain(repo, directory)
-        members.update(directory.glob("*.py"))
+        include(directory.glob("*.py"))
         # Setuptools includes these package-local typing files even when
         # include-package-data is false. Its glob skips dotfiles and directories.
-        members.update(path for pattern in ("*.pyi", "py.typed")
-                       for path in directory.glob(pattern)
-                       if not path.name.startswith(".") and path.is_file())
+        include(path for pattern in ("*.pyi", "py.typed")
+                for path in directory.glob(pattern)
+                if not path.name.startswith(".") and path.is_file())
     for package, patterns in package_data.items():
         directory = repo.joinpath(*package.split("."))
         for pattern in patterns:
-            matches = set(directory.glob(pattern))
-            if not matches:
-                raise ContractError(f"empty package-data pattern: {pattern}")
-            members.update(matches)
-    return {p.relative_to(repo).as_posix(): hashlib.sha256(_read_source(repo, p)).hexdigest()
+            include(directory.glob(pattern), pattern=pattern)
+    return {p.relative_to(repo).as_posix(): hashlib.sha256(
+                _read_source(repo, p, max_bytes=members[p])).hexdigest()
             for p in sorted(members)}
 
 
@@ -464,6 +597,11 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
                 raise ContractError("wheel expanded member size mismatch")
             return payload
 
+        generator_version = _validate_wheel_metadata(read_member(dist_info + "WHEEL"))
+        from packaging.requirements import Requirement
+        if any(not Requirement(raw).specifier.contains(generator_version, prereleases=True)
+               for raw in document["build-system"]["requires"]):
+            raise ContractError("wheel generator differs from declared build requirements")
         actual = {name: hashlib.sha256(read_member(name)).hexdigest() for name in members}
         if actual != members:
             raise ContractError("wheel does not match the complete candidate package")
@@ -487,9 +625,9 @@ def build_fixture(*, repo_root, wheel, output_root, policy: StructuralPolicy):
             raise ContractError("wheel top-level package metadata differs from project")
         if read_member(dist_info + "licenses/LICENSE") != _read_source(repo, repo / "LICENSE"):
             raise ContractError("wheel license differs from project")
-        _validate_wheel_metadata(read_member(dist_info + "WHEEL"))
         metadata_name = dist_info + "METADATA"
         meta = _validate_core_metadata(read_member(metadata_name), project)
+        _validate_project_metadata(meta, project, repo, inventory)
         if set(meta.provides_extra or []) != expected_extras:
             raise ContractError("wheel optional extras differ from project")
         if {str(requirement) for requirement in (meta.requires_dist or [])} != expected_requirements:

@@ -57,7 +57,7 @@ class FixtureInputReviewTests(unittest.TestCase):
         payloads = {name: (self.repo / name).read_bytes() for name in members}
         prefix = 'graphifyy-0.10.0.dist-info/'
         payloads.update({prefix + 'METADATA': b'Metadata-Version: 2.4\nName: graphifyy\nVersion: 0.10.0\nRequires-Python: ==3.14.*,>=3.14.2\n',
-                         prefix + 'WHEEL': b'Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n',
+                         prefix + 'WHEEL': b'Wheel-Version: 1.0\nGenerator: setuptools (82.0.1)\nRoot-Is-Purelib: true\nTag: py3-none-any\n',
                          prefix + 'entry_points.txt': b'[console_scripts]\ngraphify = graphify.__main__:main\ngraphify-mcp = graphify.serve:_main\n' + (b'foo = graphify.__main__:main\n' if extra_script else b''),
                          prefix + 'top_level.txt': top_level,
                          prefix + 'licenses/LICENSE': b'fixture license'})

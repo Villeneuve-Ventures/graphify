@@ -783,3 +783,49 @@ acceptance gate was justified. Pytest was not rerun; CI was not awaited.
 ```sh
 .venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity tests.test_workspace_fixture_member_binding tests.test_workspace_negative_probes tests.test_workspace_package_selectors tests.test_workspace_observation_binding tests.test_workspace_build_inputs -q
 ```
+
+
+### Consolidated fixture repair (`85781bb8` input)
+
+Four new Codex comments were checked as one fixture-builder batch. The central
+remaining boundary was correspondence between the captured project, selected
+payloads and emitted wheel metadata. Repeated Qodo Windows-launcher, immutable
+constant-sharing and glob claims retain their earlier evidence-based dispositions.
+
+| Claim | Disposition and correction |
+|---|---|
+| [Descriptive metadata](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056231386) | Valid. Bind summary, keywords, classifiers, project URLs, authors/maintainers, README content/type and license metadata to the captured project. File-backed text is read through the existing bounded reader and must match its source-inventory digest. Supported backend newline/header normalization is preserved; stale wheels refuse and matching fresh metadata passes. |
+| [Package expansion bounds](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056231389) | Valid. Consume glob matches incrementally, deduplicate them and enforce the 10,000-member and 256 MiB aggregate payload ceilings before hashing any selected member. Capture is also limited to each preflight size, so subsequent growth refuses. Ignored package-data is included in these checks. These bounds do not certify total process RSS or change pathlib's internal directory traversal. |
+| [Optional direct-reference URLs](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056231393) | Reproduced. Parse PEP 508 requirements before combining their marker with the normalized extra marker. Semicolons inside URLs remain URL data; existing marker grouping remains intact. |
+| [Backend-version profile](https://github.com/Villeneuve-Ventures/graphify/pull/149#discussion_r4056231392) | Valid compatibility mismatch, resolved with an explicit fixture-only output profile. Production `setuptools>=68` stays unchanged. Fixture wheels require a `setuptools (version)` Generator declaration at least 77 and consistent with the declared build requirement, plus all existing exact member/content checks. Legacy and unknown profiles refuse. The declaration selects an output profile; it is not trusted build provenance or backend-environment certification. |
+
+Isolated real builds on Python 3.14.3 established the version distinction:
+setuptools **68.0.0** omits automatic typing files and uses `.dist-info/LICENSE`;
+**76.1.0** includes typing files but retains that license layout;
+**77.0.1**, **77.0.3** and **82.0.1** include typing files and use
+`.dist-info/licenses/LICENSE`. All accepted the project's license-table style.
+General package building remains governed by its existing requirement; accepting
+legacy layouts into the S2 immutable-metadata contract is outside this repair.
+Upstream documents [automatic typing inclusion](https://setuptools.pypa.io/en/latest/userguide/miscellaneous.html)
+and [modern license configuration](https://setuptools.pypa.io/en/latest/userguide/pyproject_config.html).
+
+**146 integrated focused stdlib tests passed**, including 14 new batch tests.
+Running the new tests against the before-repair implementation produced 21 failed
+subcases and two optional-URL parsing errors. A real current wheel passed fixture
+archive/completion checks and disposable noneditable installation admission,
+without caches and with compiled caches at optimization levels 0, 1 and 2.
+The final fixture capture reused that same wheel after confirming unchanged
+package/build inputs. Scoped Ruff, interpreter-pinned Pyright and diff checks
+passed. The independent review of this batch found no actionable P0-P2 issue;
+its three implementation/test hashes matched at both review boundaries.
+
+The required AST update completed with **13,824 nodes / 30,969 edges** and five
+existing zero-node JSON warnings. Its first invocation refused the previous
+completed graph's obsolete filesystem device identity. That generated graph was
+preserved outside the checkout before a fresh update; no protocol identity was
+rewritten. Pytest was not rerun; CI was not awaited. No whole-PR clean verdict,
+new acceptance gate or new issue ticket is claimed.
+
+```sh
+.venv/bin/python -B -m unittest tests.test_workspace_installed_identity tests.test_workspace_review_regressions tests.test_workspace_fixture_review tests.test_workspace_fixture_inputs tests.test_workspace_fixture_output_bounds tests.test_workspace_canonical_budget tests.test_workspace_fixture_capture_identity tests.test_workspace_fixture_member_binding tests.test_workspace_negative_probes tests.test_workspace_package_selectors tests.test_workspace_observation_binding tests.test_workspace_build_inputs tests.test_workspace_fixture_batch -q
+```
