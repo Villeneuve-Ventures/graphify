@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/state-root.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "state_schema_version",
+    "owner"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.state-root",
+      "type": "string"
+    },
+    "state_schema_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "owner": {
+      "const": "graphify.workspace",
+      "type": "string"
+    }
+  }
+}

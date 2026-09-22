@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/completion-binding.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "state_schema_version",
+    "initial_detection_sha256",
+    "consumed_inputs_sha256",
+    "compatibility_sha256",
+    "graph_sha256"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.structural-completion",
+      "type": "string"
+    },
+    "state_schema_version": {
+      "const": 2,
+      "type": "integer"
+    },
+    "initial_detection_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "consumed_inputs_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "compatibility_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "graph_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}
