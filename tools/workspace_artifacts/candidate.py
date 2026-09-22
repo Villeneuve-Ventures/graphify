@@ -294,7 +294,7 @@ def _validate_wheel_filename(path, project):
 def _project_requirements(project):
     """Validate project dependency containers and return canonical requirements."""
     from packaging.requirements import InvalidRequirement, Requirement
-    from packaging.markers import Marker
+    from packaging.markers import InvalidMarker, Marker
     from packaging.utils import canonicalize_name
 
     try:
@@ -314,7 +314,7 @@ def _project_requirements(project):
                 parsed.marker = Marker((f"({parsed.marker}) and " if parsed.marker else "")
                                        + f'extra == "{extra}"')
                 expected.add(str(parsed))
-    except (KeyError, TypeError, AttributeError, InvalidRequirement) as exc:
+    except (KeyError, TypeError, AttributeError, InvalidRequirement, InvalidMarker) as exc:
         raise ContractError("invalid project dependency declarations") from exc
     return expected, {canonicalize_name(extra) for extra in optional}
 

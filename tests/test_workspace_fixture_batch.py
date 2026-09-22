@@ -72,6 +72,14 @@ class FixtureBatchTests(unittest.TestCase):
         (self.fixture.repo / 'README.md').write_text('Changed README\n')
         self.refuse()
 
+    def test_malformed_extra_marker_refuses_before_publication(self):
+        self.project.write_text(self.project.read_text().replace(
+            '[project.optional-dependencies]\n',
+            '[project.optional-dependencies]\n\'bad"\' = ["demo"]\n'))
+        with self.assertRaisesRegex(ContractError, 'invalid project dependency declarations'):
+            self.fixture.build(self.wheel)
+        self.assertFalse(self.fixture.output.exists())
+
     def test_fresh_descriptive_metadata_and_readme_pass(self):
         self.add_project('description="  A summary  "\nkeywords=["a", " b,c"]\n'
                          'classifiers=["Topic :: Software Development"]\nreadme="README.MD"\n'
