@@ -1,0 +1,105 @@
+"""Focused PR-review regressions, also runnable with the stdlib unittest runner."""
+from importlib.metadata import PackagePath, PathDistribution
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from graphify.workspace.adapters.base import QueryRejected, QueryRequest
+from graphify.workspace.composition import (
+    WorkspaceAuthorityInvalid, verify_installed_candidate,
+)
+from graphify.workspace.contracts import (
+    CompletionBinding, ContractError, InputManifest, StateRootMarker,
+)
+
+
+class QueryEncodingTests(unittest.TestCase):
+    def test_surrogates_use_query_refusal_for_both_fields(self):
+        for surrogate in ("\ud800", "\udfff"):
+            for question, filters in ((surrogate, ()), ("valid", (surrogate,))):
+                with self.subTest(question=repr(question), filters=repr(filters)):
+                    with self.assertRaises(QueryRejected):
+                        QueryRequest(question, context_filters=filters)
+
+    def test_valid_multibyte_text_remains_accepted(self):
+        request = QueryRequest("café 😀", context_filters=("日本語",))
+        self.assertEqual(request.question, "café 😀")
+        self.assertEqual(request.context_filters, ("日本語",))
+
+
+class InstalledMemberRefusalTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        root = Path(self.directory.name)
+        package = root / "graphify"
+        package.mkdir()
+        self.path = package / "__init__.py"
+        self.path.write_bytes(b"# installed fixture\n")
+        from tests.test_workspace_installed_identity import installed_manifest, write_installed_record
+        self.expected = installed_manifest(root)
+        members = [PackagePath(path.relative_to(root).as_posix())
+                   for path in root.rglob("*") if path.is_file()]
+        scripts = root / "bin"
+        scripts.mkdir()
+        script_rows = [PackagePath("bin/graphify"), PackagePath("bin/graphify-mcp")]
+        for row in script_rows:
+            (root / row).write_bytes(b"# fixture console script\n")
+        write_installed_record(root, [*members, *script_rows])
+        dist = PathDistribution(root / "graphifyy-0.10.0.dist-info")
+        for patcher in (patch("graphify.__file__", str(self.path)),
+                        patch("graphify.workspace.composition.sysconfig.get_path", return_value=str(scripts)),
+                        patch("graphify.workspace.composition.metadata.distribution", return_value=dist)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_matching_installed_member_is_accepted(self):
+        verify_installed_candidate(self.expected)
+
+    def test_descriptor_races_use_authority_refusal(self):
+        for operation in ("open", "read"):
+            for error in (FileNotFoundError, PermissionError):
+                with self.subTest(operation=operation, error=error):
+                    with patch(
+                        f"graphify.workspace.composition.os.{operation}",
+                        side_effect=error("fixture race"),
+                    ):
+                        with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "unreadable") as caught:
+                            verify_installed_candidate(self.expected)
+                        self.assertIsInstance(caught.exception.__cause__, error)
+
+    def test_hash_mismatch_keeps_its_specific_refusal(self):
+        self.path.write_bytes(b"tampered\n")
+        with self.assertRaisesRegex(WorkspaceAuthorityInvalid, "member mismatch"):
+            verify_installed_candidate(self.expected)
+
+    def test_unrelated_programming_error_is_not_hidden(self):
+        with patch("graphify.workspace.composition.os.read", side_effect=ValueError("unrelated")):
+            with self.assertRaisesRegex(ValueError, "unrelated"):
+                verify_installed_candidate(self.expected)
+
+
+class CompletionCompatibilityTests(unittest.TestCase):
+    def test_unrelated_document_cannot_supply_the_compatibility_digest(self):
+        common = {
+            "contract": "graphify.workspace.source-inputs", "format_version": 1,
+            "roots": ["source"], "code_inputs": [], "outcomes": [], "failure": None,
+            "evidence": [{"operation": "directory", "path": ".", "value": [1, 2, 16832]}],
+        }
+        initial = InputManifest.from_mapping(dict(common, phase="detection"))
+        consumed = InputManifest.from_mapping(dict(common, phase="consumed"))
+        marker = StateRootMarker.from_mapping({
+            "contract": "graphify.workspace.state-root", "state_schema_version": 2,
+            "owner": "graphify.workspace",
+        })
+        for wrong in (marker, SimpleNamespace(sha256="a" * 64), None):
+            with self.subTest(wrong=type(wrong).__name__):
+                with self.assertRaisesRegex(ContractError, "compatibility manifest"):
+                    CompletionBinding.bind(initial, consumed, compatibility=wrong,
+                                           graph_sha256="b" * 64)
+
+
+if __name__ == "__main__":
+    unittest.main()
