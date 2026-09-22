@@ -103,5 +103,6 @@ or moving Graphify.
 ### Optional network calls
 
 - `ingest` subcommand: fetches URLs explicitly provided by the user
+- Semantic extraction: sends content, including locally generated video/audio transcripts in the skill workflow, to the selected AI assistant or backend; remote services receive that content when selected
 - PDF extraction: reads local files only (pypdf does not make network calls)
 - watch mode: local filesystem events only (watchdog does not make network calls)
