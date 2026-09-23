@@ -202,6 +202,11 @@ class JournalStore:
                     )
                     if not stat.S_ISREG(entry_details.st_mode) or entry_details.st_nlink != 1:
                         raise StatePathError(f"journal segment entry is unsafe: {directory / name}")
+                    if match is None and _ATOMIC_SEGMENT_TEMP_RE.fullmatch(name) is not None:
+                        self.state.inspect_atomic_temps(relative, deadline_ns=deadline_ns)
+                        raise JournalRecoveryRequired(
+                            "journal atomic temporary files require fenced recovery"
+                        )
                     if match is None:
                         raise JournalCorrupt(f"unexpected journal segment entry: {name}")
                     result.append((int(match.group("sequence")), directory / name))
@@ -362,7 +367,7 @@ class JournalStore:
             deadline_ns=deadline_ns,
         )
         if not allow_atomic_temps and (head_temps or segment_temps):
-            raise JournalCorrupt("journal atomic temporary files require legacy fenced recovery")
+            raise JournalRecoveryRequired("journal atomic temporary files require fenced recovery")
         head_record_sha256: dict[str, str | None] = {}
         for name, relative in (
             ("current", current),
