@@ -688,20 +688,58 @@ def test_workspace_mutation_refuses_unsupported_runtime_before_root_creation(tmp
     assert not root.exists()
 
 
-def test_darwin_capability_probe_uses_mount_filesystem_not_mount_path(tmp_path, monkeypatch):
+@pytest.mark.parametrize("filesystem", ["apfs", "nfs", "unknown"])
+def test_darwin_capability_probe_uses_containing_mount(tmp_path, monkeypatch, filesystem):
+    import graphify.workspace.persistence as persistence
+
+    monkeypatch.setattr(persistence.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(persistence.os, "geteuid", lambda: 501)
+    mount = "/Volumes/State Disk"
+
+    def probe(argv, **_kwargs):
+        if argv[0] == "df":
+            assert argv == ["df", "-P", str(tmp_path.resolve())]
+            return CompletedProcess(argv, 0, stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                f"/dev/disk4s1 100 10 90 10% {mount}\n"
+            ))
+        assert argv == ["diskutil", "info", "-plist", mount]
+        return CompletedProcess(argv, 0, stdout=plistlib.dumps({
+            "MountPoint": mount, "FilesystemType": filesystem,
+        }))
+
+    monkeypatch.setattr(persistence.subprocess, "run", probe)
+    capabilities = RuntimeCapabilities.detect(tmp_path / "not-yet-created")
+    assert capabilities.filesystem == filesystem
+    if filesystem == "apfs":
+        capabilities.require_supported()
+    else:
+        with pytest.raises(UnsupportedRuntime):
+            capabilities.require_supported()
+
+
+@pytest.mark.parametrize("response", ["malformed", "failed", "wrong-mount", "missing-type"])
+def test_darwin_capability_probe_fails_closed(tmp_path, monkeypatch, response):
     import graphify.workspace.persistence as persistence
 
     monkeypatch.setattr(persistence.platform, "system", lambda: "Darwin")
 
     def probe(argv, **_kwargs):
-        if argv[0] == "stat":
-            return CompletedProcess(argv, 0, stdout="/\n")
-        assert argv[:3] == ["diskutil", "info", "-plist"]
-        return CompletedProcess(argv, 0, stdout=plistlib.dumps({
-            "MountPoint": "/", "FilesystemType": "apfs",
-        }))
+        if argv[0] == "df":
+            return CompletedProcess(argv, 0, stdout=(
+                "malformed" if response == "malformed" else
+                "header\n/dev/disk4s1 100 10 90 10% /Volumes/State\n"
+            ))
+        details = {"MountPoint": "/Volumes/State", "FilesystemType": "apfs"}
+        if response == "wrong-mount":
+            details["MountPoint"] = "/"
+        if response == "missing-type":
+            del details["FilesystemType"]
+        return CompletedProcess(argv, 1 if response == "failed" else 0,
+                                stdout=plistlib.dumps(details))
 
     monkeypatch.setattr(persistence.subprocess, "run", probe)
     capabilities = RuntimeCapabilities.detect(tmp_path)
-    assert capabilities.filesystem == "apfs"
-    assert capabilities.local
+    assert capabilities.filesystem == "unknown"
+    with pytest.raises(UnsupportedRuntime):
+        capabilities.require_supported()

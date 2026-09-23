@@ -588,7 +588,7 @@ def discover_source(
     remote_pairs: dict[str, str] = {}
     for line in remote_output.splitlines():
         fields = line.split()
-        if len(fields) < 3 or fields[-1] != "(fetch)":
+        if len(fields) < 3 or fields[2] != "(fetch)":
             continue
         name, raw_url = fields[0], fields[1]
         normalized = _normalize_remote(raw_url)
