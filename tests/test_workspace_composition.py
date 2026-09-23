@@ -46,9 +46,30 @@ def test_composition_does_not_create_missing_state(tmp_path):
     root = tmp_path / "absent"
     auth = authority()
     result = compose_workspace_runtime(WorkspaceRuntimeInputs(root, auth, auth.compatibility))
-    with pytest.raises(WorkspaceAuthorityInvalid, match="S3"):
+    with pytest.raises(WorkspaceAuthorityInvalid, match="S4"):
         result.require_runtime()
     assert not root.exists()
+
+
+def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_path, monkeypatch):
+    from graphify.workspace.persistence import RuntimeCapabilities
+
+    monkeypatch.setattr(
+        RuntimeCapabilities, "detect",
+        classmethod(lambda _cls, _path: RuntimeCapabilities.supported_test_fixture()),
+    )
+    root = tmp_path / "absent"
+    auth = authority()
+    composition = compose_workspace_runtime(
+        WorkspaceRuntimeInputs(root, auth, auth.compatibility)
+    )
+    stores = composition.require_lifecycle_stores()
+    assert stores.generations.state.root == root
+    assert stores.capacity_policy.workspace_max_generations == 4
+    assert stores.queue_policy.max_claimed_tasks == 1
+    assert not root.exists()
+    with pytest.raises(WorkspaceAuthorityInvalid, match="S4"):
+        composition.require_runtime()
     with pytest.raises(WorkspaceAuthorityInvalid):
         load_workspace_runtime_inputs(state_root=root, expected=auth.compatibility)
     assert not root.exists()
