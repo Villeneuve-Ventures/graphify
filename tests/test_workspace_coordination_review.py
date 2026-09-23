@@ -5,7 +5,7 @@ import fcntl
 import pytest
 
 from graphify.workspace.adapters.base import SourceObservation as StructuralObservation
-from graphify.workspace.journal import JournalRecoveryRequired, JournalStore
+from graphify.workspace.journal import JournalConflict, JournalRecoveryRequired, JournalStore
 from graphify.workspace.lifecycle_observation import ObservationError, SourceObservation
 from graphify.workspace.persistence import StatePathError
 from tests.test_workspace_contracts import manifests
@@ -84,3 +84,28 @@ def test_s3_observation_requires_exactly_two_passes(tmp_path, passes):
     else:
         with pytest.raises(ObservationError, match="exactly two"):
             SourceObservation("a" * 40, "b" * 64, structural)
+
+
+def test_stable_journal_read_reports_concurrent_committed_append(tmp_path, monkeypatch):
+    harness = create_harness(tmp_path)
+    grant = acquire(harness, "BUILD")
+    journal = JournalStore(harness.state_root, harness.leases, capabilities=SUPPORTED)
+    journal.state.ensure_directory(journal._segments_directory(REPO_UUID))
+    original = journal._segment_names
+    appended = False
+
+    def segment_names(*args, **kwargs):
+        nonlocal appended
+        if not appended:
+            appended = True
+            journal.append(
+                grant, transition="ALLOCATED", generation_id="gen-concurrent",
+                receipt_sha256=None, pointer_revision=None,
+                occurred_at=START, monotonic_ns=10_001,
+            )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(journal, "_segment_names", segment_names)
+    with pytest.raises(JournalConflict, match="advanced during stable read"):
+        journal.read_stable(REPO_UUID)
+    assert len(journal.read_stable(REPO_UUID).events) == 1

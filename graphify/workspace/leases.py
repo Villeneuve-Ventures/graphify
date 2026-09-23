@@ -1184,10 +1184,11 @@ class LeaseStore:
                     deadline_ns=deadline_ns,
                 )
             if staged_request is None:
+                # Every lease domain advances the shared epoch and fence. Keep
+                # terminal cleanup authoritative until its paired lease is released.
                 if (
                     staged_build is not None
                     and staged_build.lifecycle_state == "PROMOTED"
-                    and _lease_domain(operation) == "workspace"
                     and (
                         state.leases.get("workspace") is not None
                         or state.staged_attempt_sha256 is not None
