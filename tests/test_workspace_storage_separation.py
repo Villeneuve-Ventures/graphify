@@ -373,6 +373,10 @@ def test_windows_open_checks_the_file_handle_before_truncation(tmp_path, monkeyp
             return getattr(real_os, name)
 
     monkeypatch.setattr(guard, "os", WindowsOS())
+    monkeypatch.setattr(
+        guard, "_create_windows_output",
+        lambda path, flags: real_os.open(path, flags | real_os.O_CREAT | real_os.O_EXCL),
+    )
     safe = tmp_path / "safe"
     safe.mkdir()
     (safe / "graph.json").write_bytes(b"ordinary")
@@ -399,6 +403,78 @@ def test_windows_open_checks_the_file_handle_before_truncation(tmp_path, monkeyp
     assert switched
     assert protected.read_bytes() == b"protected"
     assert (tmp_path / "retained" / "graph.json").read_bytes() == b"ordinary"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulated Windows branch uses POSIX symlinks")
+def test_windows_denied_creation_rolls_back_the_opened_file(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    real_os = guard.os
+
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+    monkeypatch.setattr(guard, "os", WindowsOS())
+    monkeypatch.setattr(
+        guard, "_create_windows_output",
+        lambda path, flags: real_os.open(path, flags | real_os.O_CREAT | real_os.O_EXCL),
+    )
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+    original_admission = guard.require_ordinary_output
+    switched = False
+
+    def replace_parent_after_admission(path):
+        nonlocal switched
+        original_admission(path)
+        if not switched:
+            safe.rename(tmp_path / "retained")
+            safe.symlink_to(managed, target_is_directory=True)
+            switched = True
+
+    def delete_opened_file(descriptor):
+        created = managed / "new.json"
+        opened = real_os.fstat(descriptor)
+        named = created.lstat()
+        assert (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
+        created.unlink()
+
+    monkeypatch.setattr(guard, "require_ordinary_output", replace_parent_after_admission)
+    monkeypatch.setattr(guard, "_delete_opened_windows_output", delete_opened_file)
+    with pytest.raises(ManagedWorkspaceOutputError):
+        with guard.ordinary_open(safe / "new.json", "w") as stream:
+            stream.write("unexpected")
+    assert switched
+    assert not (managed / "new.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulated Windows branch uses POSIX descriptors")
+def test_windows_ordinary_creation_still_writes(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    real_os = guard.os
+
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+    monkeypatch.setattr(guard, "os", WindowsOS())
+    monkeypatch.setattr(
+        guard, "_create_windows_output",
+        lambda path, flags: real_os.open(path, flags | real_os.O_CREAT | real_os.O_EXCL),
+    )
+    output = tmp_path / "ordinary.txt"
+    with guard.ordinary_open(output, "w", encoding="utf-8") as stream:
+        stream.write("ordinary")
+    assert output.read_text() == "ordinary"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="simulated Windows branch uses POSIX symlinks")

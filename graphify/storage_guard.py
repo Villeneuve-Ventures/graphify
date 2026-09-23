@@ -246,6 +246,55 @@ def ordinary_mkdir(path: str | os.PathLike[str]) -> Path:
         return resolved
 
 
+def _create_windows_output(path: Path, flags: int) -> int:
+    """Create a new file with DELETE access so failed admission can undo it by handle."""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create.restype = wintypes.HANDLE
+    handle = create(str(path), 0x40010000, 0x7, None, 1, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        error = ctypes.get_last_error()
+        if error in {80, 183}:  # ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS
+            raise FileExistsError(error, "ordinary output already exists", str(path))
+        raise ctypes.WinError(error)
+    try:
+        return msvcrt.open_osfhandle(handle, flags | getattr(os, "O_NOINHERIT", 0))
+    except BaseException:
+        kernel.CloseHandle(wintypes.HANDLE(handle))
+        raise
+
+
+def _delete_opened_windows_output(descriptor: int) -> None:
+    """Schedule deletion of exactly the created file, regardless of its pathname."""
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_info = kernel.SetFileInformationByHandle
+    set_info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    set_info.restype = wintypes.BOOL
+    disposition = FileDispositionInfo(1)
+    if not set_info(
+        msvcrt.get_osfhandle(descriptor), 4,  # FileDispositionInfo
+        ctypes.byref(disposition), ctypes.sizeof(disposition),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 @contextmanager
 def ordinary_open(
     path: str | os.PathLike[str], mode: str, *, encoding: str | None = None,
@@ -260,12 +309,24 @@ def ordinary_open(
         flags = os.O_WRONLY | getattr(os, "O_BINARY", 0)
         if "a" in mode:
             flags |= os.O_APPEND
+        created = False
         try:
-            descriptor = os.open(resolved, flags | os.O_CREAT | os.O_EXCL, 0o666)
+            descriptor = _create_windows_output(resolved, flags)
+            created = True
         except FileExistsError:
             descriptor = os.open(resolved, flags)
         try:
-            _require_opened_output_binding(resolved, descriptor)
+            try:
+                _require_opened_output_binding(resolved, descriptor)
+            except BaseException:
+                if created:
+                    try:
+                        _delete_opened_windows_output(descriptor)
+                    except OSError as exc:
+                        raise ManagedWorkspaceOutputError(
+                            "ordinary output admission failed and created-file rollback failed"
+                        ) from exc
+                raise
             if "w" in mode:
                 os.ftruncate(descriptor, 0)
             with os.fdopen(descriptor, mode, encoding=encoding) as stream:
