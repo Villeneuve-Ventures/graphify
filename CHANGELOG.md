@@ -6,6 +6,11 @@ entries retain their original attribution.
 
 ## 0.10.0 (unreleased)
 
+- Fork tooling: PR-Agent now uses the pinned upstream v0.46.0 Action for
+  repository-writer commands on PR comments. Automatic reviews and its custom
+  compatibility CI job were removed; native `/review`, `/describe`, `/improve`,
+  `/ask`, and `/help` remain available on request.
+
 - Fix: semantic incremental merges preserve unrelated accepted entities and
   reference evidence. Only fresh extraction input is deduplicated; new references
   resolve against retained identities, and conflicting node, edge or hyperedge
@@ -14,10 +19,10 @@ entries retain their original attribution.
 - Fork tooling ([PR #121](https://github.com/Villeneuve-Ventures/graphify/pull/121)):
   upgraded PR-Agent to v0.45.0, configured Gemini 3.8 Flash with Gemini 3.5 Flash
   Lite fallback, disabled automatic PR summaries, and added an offline
-  compatibility CI job for the pinned runtime. Automatic full reviews and
-  explicit maintainer `/prreview` requests remain supported. Persistent finding
-  state and large-PR chunking are disabled to retain the attested full-diff
-  review path.
+  compatibility CI job for the pinned runtime. At that time, automatic full
+  reviews and explicit maintainer `/prreview` requests were supported. Persistent
+  finding state and large-PR chunking were disabled for the attested full-diff
+  review path. The manual upstream Action change above supersedes this setup.
 - Fork docs: corrected development setup, current architecture APIs and schema,
   extractor migration status, native-Leiden fallback behavior, and PR review
   guidance against the merged `v8` implementation.

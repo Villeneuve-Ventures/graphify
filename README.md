@@ -858,12 +858,8 @@ uv run --frozen pytest tests/ -q -k "python" --tb=short    # filter by name
 ```
 
 The [CI workflow](.github/workflows/ci.yml) also defines separate generated-skill,
-protected-verifier, native-Leiden, and PR-Agent compatibility checks. In
-particular, `tests/test_pr_agent_runtime.py` requires the workflow's pinned
-PR-Agent installation in a separate environment and is skipped by the ordinary
-Graphify environment when that package is absent. A regular pytest pass does
-not prove that runtime compatibility job passed. The full CI test environment
-also pins Git 2.55.0 for the acceptance-sensitive tests; follow the workflow when
+protected-verifier, and native-Leiden checks. The full CI test environment pins
+Git 2.55.0 for the acceptance-sensitive tests; follow the workflow when
 reproducing those checks.
 
 > macOS note: the test suite includes both `sample.f90` and `sample.F90` fixtures. These collide on case-insensitive HFS+ / APFS file systems. Run on Linux or in a Docker container if you need to test both Fortran variants simultaneously.
@@ -879,21 +875,14 @@ reproducing those checks.
   [protected-change review policy](docs/protected-change-review.md).
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
 
-### Automated PR review
+### Manual PR-Agent commands
 
-For eligible non-draft PRs whose head branch is in this repository, PR-Agent
-runs a full review on `opened`, `reopened`, and `ready_for_review` events.
-Later pushes do not trigger another automatic review. An authorized owner,
-member, or collaborator can request a fresh full review with an exact
-`/prreview` comment; fork PRs require this explicit maintainer request.
-
-Automatic PR summaries are disabled, and maintainer-authored PR titles and
-bodies are preserved. [PR #121](https://github.com/Villeneuve-Ventures/graphify/pull/121)
-upgraded the pinned PR-Agent runtime to v0.45.0 and selected Gemini 3.8 Flash
-with Gemini 3.5 Flash Lite as fallback. The
-[workflow](.github/workflows/pr-agent.yml) owns the runtime pin and event rules;
-[`.pr_agent.toml`](.pr_agent.toml) owns review settings alongside its attested
-workflow overrides.
+PR-Agent runs only after a repository writer comments on a PR with a leading
+slash command such as `/review`, `/describe`, `/improve`, `/ask`, or `/help`;
+inline review comments also support `/ask`. PR opens and pushes do not run
+PR-Agent. The [workflow](.github/workflows/pr-agent.yml) pins the upstream
+Action image and passes the Gemini secret. [`.pr_agent.toml`](.pr_agent.toml)
+selects Gemini 3.8 Flash with Gemini 3.5 Flash Lite as fallback.
 
 ### What to contribute
 

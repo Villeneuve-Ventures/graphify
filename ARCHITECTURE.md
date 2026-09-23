@@ -110,9 +110,6 @@ uv run --frozen pytest tests/ -q --tb=short
 
 Use focused test files for narrow changes; installer and transaction tests use
 disposable environments and explicit test seams. See
-[CI](.github/workflows/ci.yml) for generated-skill checks, the optimized-Python
-protected-verifier check, and the separate PR-Agent compatibility job. That job
-installs its own pinned PR-Agent runtime and runs
-`python -m pytest --noconftest tests/test_pr_agent_runtime.py -q` with
-`LITELLM_LOCAL_MODEL_COST_MAP=true`; it is distinct from the frozen package test
-environment.
+[CI](.github/workflows/ci.yml) for generated-skill checks and the optimized-Python
+protected-verifier check. The manual PR-Agent workflow is separate from the
+frozen package test environment.
