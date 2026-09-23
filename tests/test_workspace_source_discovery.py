@@ -2,10 +2,11 @@
 
 import os
 import subprocess
+import traceback
 
 import pytest
 
-from graphify.workspace.identity import discover_source
+from graphify.workspace.identity import SourceDiscoveryError, discover_source
 
 
 def _git(root, *args):
@@ -20,6 +21,60 @@ def _git(root, *args):
         ["git", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args],
         cwd=root, env=environment, check=True, capture_output=True, text=True,
     ).stdout
+
+
+@pytest.fixture
+def source_repository(tmp_path):
+    root = tmp_path.resolve() / "source"
+    root.mkdir()
+    _git(root, "init", "-q")
+    for message in ("initial", "second"):
+        _git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+             "commit", "--allow-empty", "-qm", message)
+    config = root / ".graphify" / "workspace.toml"
+    config.parent.mkdir()
+    config.write_text('''contract = "graphify.workspace.config"
+schema_version = 1
+repo_uuid = "550e8400-e29b-41d4-a716-446655440000"
+[policy]
+freshness = "current_only"
+semantic_mode = "host_agent_only"
+network_egress = false
+headless_backends = []
+''')
+    return root
+
+
+@pytest.mark.parametrize("remote", [
+    "user:TEST_SECRET@host:owner/repo",
+    "https://user:TEST_SECRET@host:abc/repo",
+    "https://host:TEST_SECRET/repo",
+    "https://user:TEST_SECRET@[invalid/repo",
+])
+def test_discovery_errors_do_not_disclose_remote_credentials(source_repository, remote):
+    _git(source_repository, "remote", "add", "origin", remote)
+    with pytest.raises(SourceDiscoveryError) as raised:
+        discover_source(source_repository)
+    assert "TEST_SECRET" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_shallow_repository_requires_complete_history(source_repository, tmp_path):
+    clone = tmp_path.resolve() / "shallow"
+    _git(tmp_path, "clone", "--depth=1", source_repository.as_uri(), str(clone))
+    _git(clone, "remote", "set-url", "origin", "https://example.test/owner/repo.git")
+    (clone / ".graphify").mkdir()
+    (clone / ".graphify/workspace.toml").write_bytes(
+        (source_repository / ".graphify/workspace.toml").read_bytes()
+    )
+    head = _git(clone, "rev-parse", "HEAD")
+    with pytest.raises(SourceDiscoveryError, match="shallow"):
+        discover_source(clone)
+    _git(clone, "fetch", "--unshallow", source_repository.as_uri())
+    discovered = discover_source(clone)
+    assert discovered.head_commit == head.strip()
+    assert discovered.history_roots == tuple(
+        _git(source_repository, "rev-list", "--max-parents=0", "HEAD").splitlines()
+    )
 
 
 @pytest.mark.parametrize("hostile_environment", [False, True])

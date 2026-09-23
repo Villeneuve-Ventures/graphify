@@ -615,6 +615,9 @@ def _validate_generation_receipt(data: Mapping[str, object]) -> None:
         raise ContractError("$.sealed_query_payload: unexpected structural files")
     if completion_value["graph_sha256"] != paths["graphify-out/graph.json"]["sha256"]:
         raise ContractError("$.completion_binding: graph differs from sealed payload")
+    if (completion_value["consumed_inputs_sha256"]
+            != paths["graphify-out/input-manifest.json"]["sha256"]):
+        raise ContractError("$.completion_binding: consumed inputs differ from sealed payload")
     if manifest_sha256 != payload_manifest_sha256(
         root,
         cast(Sequence[Mapping[str, object]], payload["entries"]),
@@ -783,7 +786,7 @@ def _validate_prior_pointer(data: Mapping[str, object]) -> None:
     _date_time(data["retained_at"], "$.retained_at")
     replaced = _integer(data["replaced_by_revision"], "$.replaced_by_revision", minimum=2)
     pointer = _mapping(data["pointer_set"], "$.pointer_set")
-    _validate_pointer_set(pointer)
+    PointerSet.from_mapping(pointer)
     pointer_revision = _integer(pointer["pointer_revision"], "$.pointer_set.pointer_revision", minimum=1)
     if replaced <= pointer_revision:
         raise ContractError("$.replaced_by_revision: must exceed retained pointer revision")

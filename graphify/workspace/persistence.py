@@ -536,7 +536,10 @@ class DurableStateRoot:
                 require_parent_binding()
                 if created:
                     self.syscalls.fsync(parent_descriptor)
-                self._require_root_marker(root_descriptor, install=ensure)
+                try:
+                    self._require_root_marker(root_descriptor, install=ensure)
+                except OSError as exc:
+                    raise StatePathError("workspace root ownership marker is unsafe") from exc
                 yield root_descriptor
             finally:
                 os.close(root_descriptor)
@@ -2733,8 +2736,10 @@ class DurableStateRoot:
                     label=label,
                     deadline_ns=deadline_ns,
                 )
-            except Exception:
-                pass
+            except BaseException as exc:
+                raise CommitUnknown(
+                    f"{label} cleanup became visible before retained cleanup completed"
+                ) from exc
         return True
 
     def fsync_directory(self, relative: str | Path) -> None:

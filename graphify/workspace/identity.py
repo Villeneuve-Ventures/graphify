@@ -197,15 +197,15 @@ def _normalize_remote(raw: str) -> str:
     if "://" not in value:
         match = re.fullmatch(r"(?P<user>[^@/:\s]+)@(?P<host>[^:/\s]+):(?P<path>.+)", value)
         if match is None:
-            raise SourceDiscoveryError(f"unsupported remote URL: {raw!r}")
+            raise SourceDiscoveryError("unsupported remote URL")
         value = (
             f"ssh://{match.group('user')}@{match.group('host')}/{match.group('path').lstrip('/')}"
         )
     try:
         parsed = urlsplit(value)
         port = parsed.port
-    except ValueError as exc:
-        raise SourceDiscoveryError(f"invalid remote URL: {raw!r}") from exc
+    except ValueError:
+        raise SourceDiscoveryError("invalid remote URL") from None
     if parsed.scheme.lower() not in {"https", "ssh"} or not parsed.hostname:
         raise SourceDiscoveryError("workspace remotes must use https:// or ssh://")
     if parsed.password is not None or port is not None or parsed.query or parsed.fragment:
@@ -615,6 +615,8 @@ def discover_source(
         "remote_aliases": remote_aliases,
         "worktree_id": worktree_id,
     }
+    if _git(root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns) == "true":
+        raise SourceDiscoveryError("shallow repositories require complete history before enrollment")
     head = _git(root, "rev-parse", "HEAD", deadline_ns=deadline_ns)
     roots = tuple(
         sorted(
