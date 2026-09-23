@@ -1,0 +1,3734 @@
+"""Crash-durable primitives for external workspace lifecycle state."""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import hashlib
+import os
+import platform
+import plistlib
+import re
+import stat
+import subprocess
+import time
+import uuid
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable, Generic, Iterator, Protocol, Sequence, TypeVar
+
+from graphify.storage_guard import WORKSPACE_ROOT_MARKER
+from graphify.workspace.contracts import StateRootMarker, ContractError
+
+FaultHook = Callable[[str], None]
+REGISTRY_INITIALIZATION_LOCK_RANK = 5
+REGISTRY_LOCK_RANK = 10
+WORKSPACE_LOCK_RANK = 20
+GENERATION_LOCK_RANK = 30
+_LOCK_STACK: ContextVar[tuple[tuple[int, str], ...]] = ContextVar(
+    "graphify_workspace_lock_stack",
+    default=(),
+)
+_ATOMIC_TEMP_RE = re.compile(
+    r"^\.(?P<destination>.+)\.tmp-(?P<pid>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$",
+    re.ASCII,
+)
+_ROOT_MARKER_TEMP_RE = re.compile(
+    rf"^{re.escape(WORKSPACE_ROOT_MARKER)}\.init-[1-9][0-9]*-[0-9a-f]{{32}}$",
+    re.ASCII,
+)
+_PRIVATE_DIRECTORY_MODES = frozenset({0o700})
+_PRIVATE_FILE_MODES = frozenset({0o600})
+_PRIVATE_TREE_DEADLINE_DETAIL = "private tree operation exceeded its deadline"
+_CLEANUP_MARKER_MAX_ENTRIES = 64
+_CLEANUP_MARKER_IDENTITY_RE = re.compile(r"^[0-9a-f]+-[0-9a-f]+$", re.ASCII)
+_CLEANUP_MARKER_ARCHIVE = ".semantic-result-consumed"
+
+
+class WorkspaceRuntimeError(RuntimeError):
+    """Base class for stable P2 runtime failures."""
+
+    code = "workspace_runtime_error"
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(f"{self.code}: {detail}")
+
+
+class UnsupportedRuntime(WorkspaceRuntimeError):
+    code = "unsupported_runtime"
+
+
+class StatePathError(WorkspaceRuntimeError):
+    code = "unsafe_state_path"
+
+
+class StateCorrupt(WorkspaceRuntimeError):
+    code = "state_corrupt"
+
+
+class StateRecordMissing(StateCorrupt):
+    """A required current durable record is absent."""
+
+
+class StateRecoveryRequired(StateCorrupt):
+    """A stable read found a durable pending record requiring recovery."""
+
+
+class CommitUnknown(WorkspaceRuntimeError):
+    code = "commit_unknown"
+
+
+class LockOrderError(WorkspaceRuntimeError):
+    code = "lock_order"
+
+
+class LockTimeout(WorkspaceRuntimeError):
+    code = "lock_timeout"
+
+    def __init__(
+        self,
+        detail: str,
+        *,
+        phase: str = "deadline",
+        kind: str | None = None,
+    ) -> None:
+        super().__init__(detail)
+        self.phase = phase
+        self.kind = kind
+
+
+def require_before_deadline(deadline_ns: int | None, detail: str) -> None:
+    """Raise the stable timeout error after an absolute monotonic deadline."""
+
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        raise LockTimeout(detail)
+
+
+class InjectedFault(RuntimeError):
+    """Test-only process-death analogue raised by named failpoint hooks."""
+
+
+@dataclass(frozen=True)
+class RuntimeCapabilities:
+    """Detected support boundary for lifecycle mutation."""
+
+    system: str
+    filesystem: str
+    elevated: bool
+    local: bool
+
+    @classmethod
+    def detect(cls, path: Path) -> "RuntimeCapabilities":
+        existing = path.resolve(strict=False)
+        while not existing.exists() and existing != existing.parent:
+            existing = existing.parent
+        system = platform.system()
+        filesystem = "unknown"
+        if system == "Darwin":
+            try:
+                mount = subprocess.run(
+                    ["df", "-P", str(existing)],
+                    capture_output=True, text=True, check=False, timeout=5,
+                    env={**os.environ, "LC_ALL": "C"},
+                )
+                # POSIX df reports the containing mount, including APFS firmlinks.
+                # stat %T does not identify the containing filesystem mount.
+                rows = mount.stdout.splitlines()
+                fields = rows[1].split(maxsplit=5) if len(rows) == 2 else []
+                mount_point = fields[5] if len(fields) == 6 else ""
+                if mount.returncode == 0 and mount_point.startswith("/"):
+                    info = subprocess.run(
+                        ["diskutil", "info", "-plist", mount_point],
+                        capture_output=True, check=False, timeout=5,
+                    )
+                    if info.returncode == 0:
+                        details = plistlib.loads(info.stdout)
+                        if (isinstance(details, dict)
+                                and details.get("MountPoint") == mount_point):
+                            filesystem = str(details.get("FilesystemType", "unknown")).lower()
+            except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+                pass
+        elevated = bool(hasattr(os, "geteuid") and os.geteuid() == 0)
+        network_filesystems = {"nfs", "smbfs", "fusefs", "webdav", "afpfs"}
+        return cls(
+            system=system,
+            filesystem=filesystem,
+            elevated=elevated,
+            local=filesystem not in network_filesystems,
+        )
+
+    @classmethod
+    def supported_test_fixture(cls) -> "RuntimeCapabilities":
+        """Explicit capability seam for deterministic non-production tests."""
+
+        return cls(system="Darwin", filesystem="apfs", elevated=False, local=True)
+
+    def require_supported(self) -> None:
+        if (
+            self.system != "Darwin"
+            or self.filesystem.lower() != "apfs"
+            or self.elevated
+            or not self.local
+        ):
+            raise UnsupportedRuntime(
+                "workspace lifecycle mutation requires non-elevated macOS on local APFS"
+            )
+
+
+class Syscalls(Protocol):
+    def write(self, descriptor: int, data: memoryview) -> int: ...
+
+    def fsync(self, descriptor: int) -> None: ...
+
+    def replace(self, source: Path, destination: Path) -> None: ...
+
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None: ...
+
+    def rename_exclusive_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None: ...
+
+    def truncate(self, descriptor: int, length: int) -> None: ...
+
+    def unlink(self, path: Path) -> None: ...
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None: ...
+
+    def rmdir(self, path: Path) -> None: ...
+
+    def rmdir_at(self, path: str, *, dir_fd: int) -> None: ...
+
+    def mkdir(self, path: Path, mode: int) -> None: ...
+
+    def mkdir_at(self, path: str, mode: int, *, dir_fd: int) -> None: ...
+
+
+class PosixSyscalls:
+    """Injectable POSIX syscall surface used by durability tests."""
+
+    _rename_exclusive_binding_cache: tuple[Any, int] | None = None
+
+    def write(self, descriptor: int, data: memoryview) -> int:
+        return os.write(descriptor, data)
+
+    def fsync(self, descriptor: int) -> None:
+        os.fsync(descriptor)
+
+    def replace(self, source: Path, destination: Path) -> None:
+        os.replace(source, destination)
+
+    def replace_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        os.replace(
+            source,
+            destination,
+            src_dir_fd=source_dir_fd,
+            dst_dir_fd=destination_dir_fd,
+        )
+
+    def rename_exclusive_at(
+        self,
+        source: str,
+        destination: str,
+        *,
+        source_dir_fd: int,
+        destination_dir_fd: int,
+    ) -> None:
+        binding = self._rename_exclusive_binding_cache
+        if binding is None:
+            system = platform.system()
+            if system == "Darwin":
+                symbol = "renameatx_np"
+                flags = 0x00000004  # RENAME_EXCL
+            elif system == "Linux":
+                symbol = "renameat2"
+                flags = 0x00000001  # RENAME_NOREPLACE
+            else:  # pragma: no cover - workspace mutation rejects other hosts
+                raise OSError(
+                    errno.ENOSYS,
+                    "exclusive descriptor-relative rename unavailable",
+                )
+            libc = ctypes.CDLL(None, use_errno=True)
+            try:
+                rename = getattr(libc, symbol)
+            except AttributeError as exc:
+                raise OSError(
+                    errno.ENOSYS,
+                    "exclusive descriptor-relative rename unavailable",
+                ) from exc
+            rename.argtypes = (
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_int,
+                ctypes.c_char_p,
+                ctypes.c_uint,
+            )
+            rename.restype = ctypes.c_int
+            binding = (rename, flags)
+            self._rename_exclusive_binding_cache = binding
+        rename, flags = binding
+        if (
+            rename(
+                source_dir_fd,
+                os.fsencode(source),
+                destination_dir_fd,
+                os.fsencode(destination),
+                flags,
+            )
+            != 0
+        ):
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, os.strerror(error_number), destination)
+
+    def truncate(self, descriptor: int, length: int) -> None:
+        os.ftruncate(descriptor, length)
+
+    def unlink(self, path: Path) -> None:
+        os.unlink(path)
+
+    def unlink_at(self, path: str, *, dir_fd: int) -> None:
+        os.unlink(path, dir_fd=dir_fd)
+
+    def rmdir(self, path: Path) -> None:
+        os.rmdir(path)
+
+    def rmdir_at(self, path: str, *, dir_fd: int) -> None:
+        os.rmdir(path, dir_fd=dir_fd)
+
+    def mkdir(self, path: Path, mode: int) -> None:
+        os.mkdir(path, mode)
+
+    def mkdir_at(self, path: str, mode: int, *, dir_fd: int) -> None:
+        os.mkdir(path, mode, dir_fd=dir_fd)
+
+
+RecordT = TypeVar("RecordT")
+
+
+@dataclass(frozen=True)
+class DurableRecordRecovery(Generic[RecordT]):
+    """Read-only projection of one durable current/previous/pending recovery."""
+
+    record: RecordT | None
+    selected_name: str | None
+    selected_bytes: bytes | None
+    current_bytes: bytes | None
+    install_current: bool
+    retain_current: bool
+    remove_pending: bool
+
+    @property
+    def requires_recovery(self) -> bool:
+        return self.install_current or self.retain_current or self.remove_pending
+
+
+class DurableStateRoot:
+    """Secure path, locking, and record-install authority for one state root."""
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        capabilities: RuntimeCapabilities | None = None,
+        fault_hook: FaultHook | None = None,
+        syscalls: Syscalls | None = None,
+        _require_supported_runtime: bool = True,
+    ) -> None:
+        if not root.is_absolute():
+            raise StatePathError("state root must be an absolute path")
+        lexical_root = Path(os.path.abspath(root))
+        if lexical_root.is_symlink():
+            raise StatePathError(f"state root must not be a symbolic link: {lexical_root}")
+        self.root = lexical_root
+        self.capabilities = capabilities or RuntimeCapabilities.detect(self.root)
+        if _require_supported_runtime:
+            self.capabilities.require_supported()
+        self.fault_hook = fault_hook or (lambda _event: None)
+        self.syscalls = syscalls or PosixSyscalls()
+
+    @classmethod
+    def read_optional_bytes_for_inspection(
+        cls,
+        root: Path,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        capabilities: RuntimeCapabilities | None = None,
+        fault_hook: FaultHook | None = None,
+        syscalls: Syscalls | None = None,
+    ) -> bytes | None:
+        """Read existing bytes safely before the runtime-support verdict."""
+
+        inspection_capabilities = capabilities or RuntimeCapabilities(
+            system="inspection",
+            filesystem="unknown",
+            elevated=False,
+            local=True,
+        )
+        state = cls(
+            root,
+            capabilities=inspection_capabilities,
+            fault_hook=fault_hook,
+            syscalls=syscalls,
+            _require_supported_runtime=False,
+        )
+        return state.read_optional_existing_bytes(relative, max_bytes=max_bytes)
+
+    def _open_root_parent(self, *, allow_missing: bool) -> int | None:
+        """Open the lexical root parent without following any ancestor link."""
+
+        parent = self.root.parent
+        anchor = Path(parent.anchor)
+        try:
+            descriptor = os.open(anchor, self._directory_open_flags())
+        except OSError as exc:
+            raise StatePathError("filesystem root cannot be inspected safely") from exc
+        current = anchor
+        for part in parent.relative_to(anchor).parts:
+            candidate = current / part
+            try:
+                child_descriptor = os.open(
+                    part,
+                    self._directory_open_flags(),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError as exc:
+                os.close(descriptor)
+                if allow_missing:
+                    return None
+                raise StatePathError(
+                    f"state root parent must already exist: {candidate}"
+                ) from exc
+            except OSError as exc:
+                os.close(descriptor)
+                raise StatePathError(
+                    "state root ancestor is a symbolic link or not a directory: "
+                    f"{candidate}"
+                ) from exc
+            try:
+                details = os.fstat(child_descriptor)
+                if not stat.S_ISDIR(details.st_mode):
+                    raise StatePathError(
+                        f"state root ancestor is not a directory: {candidate}"
+                    )
+            except BaseException:
+                os.close(child_descriptor)
+                os.close(descriptor)
+                raise
+            os.close(descriptor)
+            descriptor = child_descriptor
+            current = candidate
+        try:
+            self._require_owned_directory_descriptor(descriptor, parent)
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    @contextmanager
+    def _root_directory(
+        self,
+        *,
+        ensure: bool,
+        allow_missing: bool = False,
+        repair_existing: bool = True,
+    ) -> Iterator[int | None]:
+        """Hold the root and its verified parent across one contained operation."""
+
+        parent = self.root.parent
+        if parent == self.root:
+            raise StatePathError("state root must not be the filesystem root")
+        parent_descriptor = self._open_root_parent(allow_missing=allow_missing)
+        if parent_descriptor is None:
+            yield None
+            return
+        try:
+            opened_parent = os.fstat(parent_descriptor)
+
+            def require_parent_binding() -> None:
+                try:
+                    bound_parent = parent.lstat()
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state root parent changed while opening: {parent}"
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(bound_parent.st_mode)
+                    or (opened_parent.st_dev, opened_parent.st_ino)
+                    != (bound_parent.st_dev, bound_parent.st_ino)
+                ):
+                    raise StatePathError(
+                        f"state root parent changed while opening: {parent}"
+                    )
+
+            created = False
+            try:
+                root_descriptor = self._open_owned_directory_at(
+                    parent_descriptor,
+                    self.root.name,
+                    self.root,
+                )
+            except FileNotFoundError:
+                if not ensure:
+                    if allow_missing:
+                        require_parent_binding()
+                        yield None
+                        return
+                    raise StatePathError(f"state directory is missing: {self.root}")
+                try:
+                    self.syscalls.mkdir_at(
+                        self.root.name,
+                        0o700,
+                        dir_fd=parent_descriptor,
+                    )
+                    created = True
+                except FileExistsError:
+                    pass
+                root_descriptor = self._open_owned_directory_at(
+                    parent_descriptor,
+                    self.root.name,
+                    self.root,
+                )
+            try:
+                if ensure and created:
+                    os.fchmod(root_descriptor, 0o700)
+                opened = self._require_private_directory_descriptor(
+                    root_descriptor,
+                    self.root,
+                )
+                try:
+                    bound = os.stat(
+                        self.root.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state root changed while opening: {self.root}"
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(bound.st_mode)
+                    or (opened.st_dev, opened.st_ino) != (bound.st_dev, bound.st_ino)
+                ):
+                    raise StatePathError(
+                        f"state root changed while opening: {self.root}"
+                    )
+                require_parent_binding()
+                if created:
+                    self.syscalls.fsync(parent_descriptor)
+                self._require_root_marker(root_descriptor, install=ensure)
+                yield root_descriptor
+            finally:
+                os.close(root_descriptor)
+        finally:
+            os.close(parent_descriptor)
+
+    def _require_root_marker(self, root_descriptor: int, *, install: bool) -> None:
+        """Install denial ownership before any lifecycle descendant is created."""
+        marker = StateRootMarker.from_mapping({
+            "contract": "graphify.workspace.state-root",
+            "state_schema_version": 2,
+            "owner": "graphify.workspace",
+        }).canonical
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        try:
+            descriptor = os.open(WORKSPACE_ROOT_MARKER, flags, dir_fd=root_descriptor)
+        except FileNotFoundError:
+            if not install:
+                raise StatePathError("workspace state root has no ownership marker") from None
+            names = set(os.listdir(root_descriptor))
+            if WORKSPACE_ROOT_MARKER in names:
+                # A concurrent initializer published while we enumerated.
+                return self._require_root_marker(root_descriptor, install=False)
+            for name in names - {"runtime-manifest.json"}:
+                if not _ROOT_MARKER_TEMP_RE.fullmatch(name):
+                    raise StatePathError("unmarked occupied state root cannot be adopted")
+                try:
+                    details = os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    # Its initializer may already have published or cleaned up.
+                    continue
+                self._require_regular_details(
+                    details, self.root / name, allowed_modes=_PRIVATE_FILE_MODES,
+                )
+            # Keep partial bytes private. An interrupted initializer's exact
+            # temporary namespace is tolerated, never deleted by another writer.
+            temporary = f"{WORKSPACE_ROOT_MARKER}.init-{os.getpid()}-{uuid.uuid4().hex}"
+            descriptor = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+                dir_fd=root_descriptor,
+            )
+            try:
+                try:
+                    self._write_all(descriptor, marker)
+                    self.syscalls.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                try:
+                    self.syscalls.rename_exclusive_at(
+                        temporary, WORKSPACE_ROOT_MARKER,
+                        source_dir_fd=root_descriptor,
+                        destination_dir_fd=root_descriptor,
+                    )
+                except FileExistsError:
+                    # The winning marker is validated below, never replaced.
+                    pass
+            finally:
+                try:
+                    self.syscalls.unlink_at(temporary, dir_fd=root_descriptor)
+                except FileNotFoundError:
+                    pass
+            self.syscalls.fsync(root_descriptor)
+            descriptor = os.open(WORKSPACE_ROOT_MARKER, flags, dir_fd=root_descriptor)
+        except OSError as exc:
+            raise StatePathError("workspace root ownership marker is unsafe") from exc
+        try:
+            info = os.fstat(descriptor)
+            named = os.stat(WORKSPACE_ROOT_MARKER, dir_fd=root_descriptor, follow_symlinks=False)
+            if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1 or info.st_uid != os.geteuid()
+                    or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
+                    or info.st_size != len(marker)):
+                raise StatePathError("workspace root ownership marker is unsafe")
+            content = os.read(descriptor, len(marker) + 1)
+            try:
+                parsed = StateRootMarker.from_json(content)
+            except ContractError as exc:
+                raise StatePathError("workspace root ownership marker is invalid") from exc
+            if parsed.canonical != marker:
+                raise StatePathError("workspace root ownership marker is invalid")
+        finally:
+            os.close(descriptor)
+
+    def _ensure_root(self) -> None:
+        with self._root_directory(ensure=True):
+            pass
+
+    def root_exists_for_inspection(self) -> bool:
+        """Probe the owned state root without creating it or suppressing unsafe paths."""
+
+        with self._root_directory(ensure=False, allow_missing=True) as descriptor:
+            return descriptor is not None
+
+    @staticmethod
+    def _require_owner(details: os.stat_result, path: Path) -> None:
+        if hasattr(os, "geteuid") and details.st_uid != os.geteuid():
+            raise StatePathError(f"state path is not owned by the current user: {path}")
+
+    @staticmethod
+    def _directory_open_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+
+    @staticmethod
+    def _regular_open_flags() -> int:
+        return (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @staticmethod
+    def _regular_update_flags() -> int:
+        return (
+            os.O_RDWR
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+
+    @staticmethod
+    def _stat_identity(details: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            details.st_dev,
+            details.st_ino,
+            details.st_mode,
+            details.st_nlink,
+            details.st_size,
+            details.st_mtime_ns,
+            details.st_ctime_ns,
+        )
+
+    def _require_directory_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> os.stat_result:
+        details = self._require_owned_directory_descriptor(descriptor, path)
+        if stat.S_IMODE(details.st_mode) not in allowed_modes:
+            if allowed_modes == _PRIVATE_DIRECTORY_MODES:
+                raise StatePathError(f"state directory mode is not 0700: {path}")
+            modes = ", ".join(f"{mode:04o}" for mode in sorted(allowed_modes))
+            raise StatePathError(f"state directory mode is not allowed ({modes}): {path}")
+        return details
+
+    def _require_owned_directory_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+    ) -> os.stat_result:
+        details = os.fstat(descriptor)
+        if not stat.S_ISDIR(details.st_mode):
+            raise StatePathError(f"state directory is not a real directory: {path}")
+        self._require_owner(details, path)
+        return details
+
+    def _require_private_directory_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+    ) -> os.stat_result:
+        return self._require_directory_descriptor(
+            descriptor,
+            path,
+            allowed_modes=_PRIVATE_DIRECTORY_MODES,
+        )
+
+    def _open_directory_at(
+        self,
+        parent_descriptor: int,
+        name: str,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int] | None,
+        allow_missing: bool = False,
+    ) -> int | None:
+        try:
+            descriptor = os.open(name, self._directory_open_flags(), dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            raise
+        except OSError as exc:
+            raise StatePathError(
+                f"state directory is linked or not a directory: {path}"
+            ) from exc
+        try:
+            if allowed_modes is None:
+                self._require_owned_directory_descriptor(descriptor, path)
+            else:
+                self._require_directory_descriptor(
+                    descriptor,
+                    path,
+                    allowed_modes=allowed_modes,
+                )
+        except BaseException:
+            os.close(descriptor)
+            raise
+        return descriptor
+
+    def _open_owned_directory_at(
+        self,
+        parent_descriptor: int,
+        name: str,
+        path: Path,
+    ) -> int:
+        descriptor = self._open_directory_at(
+            parent_descriptor,
+            name,
+            path,
+            allowed_modes=None,
+        )
+        if descriptor is None:  # pragma: no cover - allow_missing is false
+            raise StatePathError(f"state directory is missing: {path}")
+        return descriptor
+
+    def _require_regular_details(
+        self,
+        details: os.stat_result,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> None:
+        if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+            raise StatePathError(f"state file is not a singular regular file: {path}")
+        self._require_owner(details, path)
+        if stat.S_IMODE(details.st_mode) not in allowed_modes:
+            raise StatePathError(f"state file mode is not allowed: {path}")
+
+    def _require_regular_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> os.stat_result:
+        details = os.fstat(descriptor)
+        self._require_regular_details(details, path, allowed_modes=allowed_modes)
+        return details
+
+    @contextmanager
+    def _existing_private_directory(
+        self,
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+    ) -> Iterator[int | None]:
+        """Open one private directory through descriptor-relative no-follow traversal."""
+
+        if Path(relative) in {Path(), Path(".")}:
+            destination = self.root
+            parts: tuple[str, ...] = ()
+        else:
+            destination = self.path(relative)
+            parts = destination.relative_to(self.root).parts
+        with self._root_directory(
+            ensure=False,
+            allow_missing=allow_missing,
+        ) as root_descriptor:
+            if root_descriptor is None:
+                yield None
+                return
+            descriptor = os.dup(root_descriptor)
+            try:
+                current = self.root
+                for part in parts:
+                    candidate = current / part
+                    try:
+                        child = self._open_directory_at(
+                            descriptor,
+                            part,
+                            candidate,
+                            allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                        )
+                    except FileNotFoundError as exc:
+                        if allow_missing:
+                            yield None
+                            return
+                        raise StatePathError(
+                            f"state directory is missing: {candidate}"
+                        ) from exc
+                    if child is None:  # pragma: no cover - allow_missing is false
+                        raise StatePathError(f"state directory is missing: {candidate}")
+                    os.close(descriptor)
+                    descriptor = child
+                    current = candidate
+                yield descriptor
+            finally:
+                os.close(descriptor)
+
+    def _open_existing_file(
+        self,
+        path: Path,
+        *,
+        allow_missing_parent: bool = False,
+    ) -> int | None:
+        try:
+            relative_parent = path.parent.relative_to(self.root)
+        except ValueError as exc:
+            raise StatePathError(f"state file escapes root: {path}") from exc
+        flags = self._regular_open_flags()
+        with self._existing_private_directory(
+            relative_parent,
+            allow_missing=allow_missing_parent,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return None
+            return os.open(path.name, flags, dir_fd=parent_descriptor)
+
+    @staticmethod
+    def _contained_parts(relative: str | Path) -> tuple[str, ...]:
+        if Path(relative) in {Path(), Path(".")}:
+            return ()
+        pure = PurePosixPath(Path(relative).as_posix())
+        if pure.is_absolute() or not pure.parts or ".." in pure.parts or "." in pure.parts:
+            raise StatePathError(f"contained path must be relative: {relative}")
+        return pure.parts
+
+    @contextmanager
+    def _existing_directory_beneath(
+        self,
+        anchor_descriptor: int,
+        anchor_path: Path,
+        relative: str | Path,
+        *,
+        allowed_modes: frozenset[int],
+    ) -> Iterator[int]:
+        """Open a directory beneath a held anchor without following links."""
+
+        descriptor = os.dup(anchor_descriptor)
+        current = anchor_path
+        try:
+            for part in self._contained_parts(relative):
+                candidate = current / part
+                try:
+                    child = self._open_directory_at(
+                        descriptor,
+                        part,
+                        candidate,
+                        allowed_modes=allowed_modes,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state directory is linked or not a directory: {candidate}"
+                    ) from exc
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state directory is missing: {candidate}")
+                os.close(descriptor)
+                descriptor = child
+                current = candidate
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    def _require_private_directory_chain(self, destination: Path) -> None:
+        """Validate an existing state-directory chain without repairing it."""
+
+        if destination != self.root and self.root not in destination.parents:
+            raise StatePathError(f"state directory escapes root: {destination}")
+        relative = Path(".") if destination == self.root else destination.relative_to(self.root)
+        with self._existing_private_directory(relative):
+            pass
+
+    def _require_held_private_directory_binding(
+        self,
+        relative: Path,
+        descriptor: int,
+        path: Path,
+    ) -> None:
+        """Prove a held private directory still occupies its canonical path."""
+
+        held = self._require_private_directory_descriptor(descriptor, path)
+        with self._existing_private_directory(relative) as current_descriptor:
+            if current_descriptor is None:  # pragma: no cover - allow_missing is false
+                raise StatePathError(f"state directory is missing: {path}")
+            current = self._require_private_directory_descriptor(
+                current_descriptor,
+                path,
+            )
+            if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                raise StatePathError(
+                    f"state directory binding changed while held: {path}"
+                )
+
+    def path(self, relative: str | Path) -> Path:
+        pure = PurePosixPath(Path(relative).as_posix())
+        if pure.is_absolute() or not pure.parts or ".." in pure.parts or "." in pure.parts:
+            raise StatePathError(f"state path must be a contained relative path: {relative}")
+        candidate = self.root.joinpath(*pure.parts)
+        if self.root not in candidate.parents:
+            raise StatePathError(f"state path escapes root: {relative}")
+        return candidate
+
+    def ensure_directory(self, relative: str | Path) -> Path:
+        destination = (
+            self.root
+            if Path(relative) in {Path(), Path(".")}
+            else self.path(relative)
+        )
+        with self._root_directory(ensure=True) as root_descriptor:
+            if root_descriptor is None:  # pragma: no cover - ensure is true
+                raise StatePathError(f"state directory is missing: {self.root}")
+            if destination == self.root:
+                return destination
+            descriptor = os.dup(root_descriptor)
+            try:
+                current = self.root
+                for part in destination.relative_to(self.root).parts:
+                    child_path = current / part
+                    try:
+                        child_descriptor = self._open_owned_directory_at(
+                            descriptor,
+                            part,
+                            child_path,
+                        )
+                    except FileNotFoundError:
+                        try:
+                            self.syscalls.mkdir_at(part, 0o700, dir_fd=descriptor)
+                        except FileExistsError:
+                            pass
+                        else:
+                            self.syscalls.fsync(descriptor)
+                        child_descriptor = self._open_owned_directory_at(
+                            descriptor,
+                            part,
+                            child_path,
+                        )
+                    try:
+                        os.fchmod(child_descriptor, 0o700)
+                        opened = self._require_private_directory_descriptor(
+                            child_descriptor,
+                            child_path,
+                        )
+                        bound = os.stat(
+                            part,
+                            dir_fd=descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            not stat.S_ISDIR(bound.st_mode)
+                            or (opened.st_dev, opened.st_ino)
+                            != (bound.st_dev, bound.st_ino)
+                        ):
+                            raise StatePathError(
+                                f"state directory changed while opening: {child_path}"
+                            )
+                    except BaseException:
+                        os.close(child_descriptor)
+                        raise
+                    os.close(descriptor)
+                    descriptor = child_descriptor
+                    current = child_path
+                return destination
+            finally:
+                os.close(descriptor)
+
+    def _ensure_parent(self, path: Path) -> None:
+        relative = path.parent.relative_to(self.root)
+        if relative.parts:
+            self.ensure_directory(relative)
+
+    def assert_external_to(self, source_root: Path) -> None:
+        source = source_root.resolve(strict=True)
+        if self.root == source or self.root in source.parents or source in self.root.parents:
+            raise StatePathError(
+                f"external state root {self.root} overlaps source checkout {source}"
+            )
+
+    def require_existing_directory_chain(self, relative: str | Path) -> Path:
+        """Validate a private directory chain without mutating or following links."""
+
+        destination = self.path(relative)
+        self._require_private_directory_chain(destination)
+        return destination
+
+    @contextmanager
+    def existing_private_directory(self, relative: str | Path) -> Iterator[int]:
+        """Hold an owned 0700 directory opened by descriptor-relative traversal."""
+
+        with self._existing_private_directory(relative) as descriptor:
+            if descriptor is None:  # pragma: no cover - allow_missing is false
+                raise StatePathError(f"state directory is missing: {self.path(relative)}")
+            yield descriptor
+
+    def list_existing_private_directories(
+        self,
+        relative: str | Path,
+        *,
+        allow_missing: bool = False,
+        maximum_entries: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> tuple[str, ...]:
+        """List owned 0700 child directories without following any path component."""
+
+        if maximum_entries is not None and maximum_entries < 0:
+            raise ValueError("maximum_entries must be nonnegative")
+        require_before_deadline(deadline_ns, _PRIVATE_TREE_DEADLINE_DETAIL)
+        destination = self.path(relative)
+        with self._existing_private_directory(
+            destination.relative_to(self.root),
+            allow_missing=allow_missing,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            try:
+                with os.scandir(descriptor) as entries:
+                    names: list[str] = []
+                    for entry in entries:
+                        require_before_deadline(
+                            deadline_ns,
+                            _PRIVATE_TREE_DEADLINE_DETAIL,
+                        )
+                        name = entry.name
+                        child_path = destination / name
+                        child = self._open_directory_at(
+                            descriptor,
+                            name,
+                            child_path,
+                            allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                        )
+                        if child is None:  # pragma: no cover - allow_missing is false
+                            raise StatePathError(f"state directory is missing: {child_path}")
+                        os.close(child)
+                        if maximum_entries is not None and len(names) >= maximum_entries:
+                            raise StatePathError(
+                                f"state directory exceeds maximum entries: {destination}"
+                            )
+                        names.append(name)
+            except OSError as exc:
+                raise StatePathError(
+                    f"state directory cannot be enumerated safely: {destination}: {exc}"
+                ) from exc
+            require_before_deadline(deadline_ns, _PRIVATE_TREE_DEADLINE_DETAIL)
+            return tuple(sorted(names))
+
+    def private_directory_exists(self, relative: str | Path) -> bool:
+        """Probe one private directory without following any path component."""
+
+        destination = self.path(relative)
+        parent_relative = destination.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return False
+            descriptor = self._open_directory_at(
+                parent_descriptor,
+                destination.name,
+                destination,
+                allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                allow_missing=True,
+            )
+            if descriptor is None:
+                return False
+            os.close(descriptor)
+            return True
+
+    def private_file_exists(self, relative: str | Path) -> bool:
+        """Probe one owned 0600 file without following any path component."""
+
+        path = self.path(relative)
+        try:
+            descriptor = self._open_existing_file(path, allow_missing_parent=True)
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise StatePathError(f"state file cannot be opened safely: {path}") from exc
+        if descriptor is None:
+            return False
+        try:
+            self._require_regular_descriptor(
+                descriptor,
+                path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+        finally:
+            os.close(descriptor)
+        return True
+
+    def _tree_entry_names_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        deadline_ns: int | None = None,
+        maximum_entries: int | None = None,
+    ) -> list[str]:
+        if maximum_entries is not None and maximum_entries < 0:
+            raise ValueError("maximum_entries must be nonnegative")
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        try:
+            with os.scandir(descriptor) as entries:
+                names: list[str] = []
+                for entry in entries:
+                    require_before_deadline(
+                        deadline_ns,
+                        _PRIVATE_TREE_DEADLINE_DETAIL,
+                    )
+                    if maximum_entries is not None and len(names) >= maximum_entries:
+                        raise StatePathError(
+                            f"state tree exceeds maximum entries: {path}"
+                        )
+                    names.append(entry.name)
+        except OSError as exc:
+            raise StatePathError(
+                f"state tree cannot be enumerated safely: {path}: {exc}"
+            ) from exc
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        return sorted(names)
+
+    def _tree_bytes_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
+    ) -> int:
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        before = os.fstat(descriptor)
+        names = self._tree_entry_names_descriptor(
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+        )
+        total = 0
+        for name in names:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+            candidate = path / name
+            try:
+                details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {candidate}: {exc}"
+                ) from exc
+            if stat.S_ISDIR(details.st_mode):
+                child = self._open_directory_at(
+                    descriptor,
+                    name,
+                    candidate,
+                    allowed_modes=allowed_directory_modes,
+                )
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state tree directory is missing: {candidate}")
+                try:
+                    opened_directory = os.fstat(child)
+                    if (opened_directory.st_dev, opened_directory.st_ino) != (
+                        details.st_dev,
+                        details.st_ino,
+                    ):
+                        raise StatePathError(
+                            f"state tree directory changed while opening: {candidate}"
+                        )
+                    total += self._tree_bytes_descriptor(
+                        child,
+                        candidate,
+                        allowed_directory_modes=allowed_directory_modes,
+                        allowed_file_modes=allowed_file_modes,
+                        deadline_ns=deadline_ns,
+                    )
+                finally:
+                    os.close(child)
+                require_before_deadline(
+                    deadline_ns,
+                    _PRIVATE_TREE_DEADLINE_DETAIL,
+                )
+                continue
+            self._require_regular_details(
+                details,
+                candidate,
+                allowed_modes=allowed_file_modes,
+            )
+            try:
+                file_descriptor = os.open(
+                    name,
+                    self._regular_open_flags(),
+                    dir_fd=descriptor,
+                )
+            except FileNotFoundError:
+                raise
+            except OSError as exc:
+                raise StatePathError(f"state tree file cannot be opened safely: {candidate}") from exc
+            try:
+                opened = self._require_regular_descriptor(
+                    file_descriptor,
+                    candidate,
+                    allowed_modes=allowed_file_modes,
+                )
+                current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                expected_identity = self._stat_identity(details)
+                if (
+                    self._stat_identity(opened) != expected_identity
+                    or self._stat_identity(current) != expected_identity
+                ):
+                    raise StatePathError(f"state tree file changed while opening: {candidate}")
+                total += opened.st_size
+            finally:
+                os.close(file_descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+        after_names = self._tree_entry_names_descriptor(
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+        )
+        after = os.fstat(descriptor)
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        if names != after_names or self._stat_identity(before) != self._stat_identity(after):
+            raise StatePathError(f"state tree changed while scanning: {path}")
+        return total
+
+    def tree_bytes(
+        self,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
+    ) -> int:
+        """Measure a private tree through a held no-follow root descriptor."""
+
+        path = self.path(relative)
+        with self._existing_private_directory(
+            relative,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                raise FileNotFoundError(path)
+            return self._tree_bytes_descriptor(
+                descriptor,
+                path,
+                allowed_directory_modes=allowed_directory_modes,
+                allowed_file_modes=allowed_file_modes,
+                deadline_ns=deadline_ns,
+            )
+
+    def _remove_tree_contents_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+        first_entry: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> None:
+        names = self._tree_entry_names_descriptor(
+            descriptor,
+            path,
+            deadline_ns=deadline_ns,
+        )
+        entries: list[tuple[str, os.stat_result]] = []
+        for name in names:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {path / name}: {exc}"
+                ) from exc
+            entries.append((name, details))
+        entries.sort(
+            key=lambda item: (
+                0 if item[0] == first_entry else 1,
+                0 if stat.S_ISDIR(item[1].st_mode) else 1,
+            )
+        )
+        for name, observed in entries:
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+            candidate = path / name
+            try:
+                details = os.stat(
+                    name,
+                    dir_fd=descriptor,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state tree entry cannot be inspected safely: {candidate}: {exc}"
+                ) from exc
+            if self._stat_identity(observed) != self._stat_identity(details):
+                raise StatePathError(
+                    f"state tree entry changed before cleanup: {candidate}"
+                )
+            if stat.S_ISDIR(details.st_mode):
+                child = self._open_directory_at(
+                    descriptor,
+                    name,
+                    candidate,
+                    allowed_modes=allowed_directory_modes,
+                )
+                if child is None:  # pragma: no cover - allow_missing is false
+                    raise StatePathError(f"state tree directory is missing: {candidate}")
+                try:
+                    self._remove_tree_contents_descriptor(
+                        child,
+                        candidate,
+                        allowed_directory_modes=allowed_directory_modes,
+                        allowed_file_modes=allowed_file_modes,
+                        first_entry=None,
+                        deadline_ns=deadline_ns,
+                    )
+                finally:
+                    os.close(child)
+                require_before_deadline(
+                    deadline_ns,
+                    _PRIVATE_TREE_DEADLINE_DETAIL,
+                )
+                self.syscalls.rmdir_at(name, dir_fd=descriptor)
+                self.syscalls.fsync(descriptor)
+                require_before_deadline(
+                    deadline_ns,
+                    _PRIVATE_TREE_DEADLINE_DETAIL,
+                )
+                continue
+            self._require_regular_details(
+                details,
+                candidate,
+                allowed_modes=allowed_file_modes,
+            )
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+            self.syscalls.unlink_at(name, dir_fd=descriptor)
+            self.syscalls.fsync(descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+
+    def remove_private_tree(
+        self,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+        first_entry: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> bool:
+        """Validate and remove one private tree through held no-follow descriptors."""
+
+        require_before_deadline(
+            deadline_ns,
+            _PRIVATE_TREE_DEADLINE_DETAIL,
+        )
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return False
+            descriptor = self._open_directory_at(
+                parent_descriptor,
+                path.name,
+                path,
+                allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                allow_missing=True,
+            )
+            if descriptor is None:
+                return False
+            try:
+                self._tree_bytes_descriptor(
+                    descriptor,
+                    path,
+                    allowed_directory_modes=allowed_directory_modes,
+                    allowed_file_modes=allowed_file_modes,
+                    deadline_ns=deadline_ns,
+                )
+                self._remove_tree_contents_descriptor(
+                    descriptor,
+                    path,
+                    allowed_directory_modes=allowed_directory_modes,
+                    allowed_file_modes=allowed_file_modes,
+                    first_entry=first_entry,
+                    deadline_ns=deadline_ns,
+                )
+            finally:
+                os.close(descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+            self.syscalls.rmdir_at(path.name, dir_fd=parent_descriptor)
+            self.syscalls.fsync(parent_descriptor)
+            require_before_deadline(
+                deadline_ns,
+                _PRIVATE_TREE_DEADLINE_DETAIL,
+            )
+        return True
+
+    def fsync_contained_regular_file(
+        self,
+        anchor: str | Path,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+    ) -> None:
+        """Sync one file beneath a held private anchor without path re-resolution."""
+
+        parts = self._contained_parts(relative)
+        if not parts:
+            raise StatePathError("contained regular-file path must not be empty")
+        anchor_path = self.path(anchor)
+        relative_path = Path(*parts)
+        with self.existing_private_directory(anchor) as anchor_descriptor:
+            with self._existing_directory_beneath(
+                anchor_descriptor,
+                anchor_path,
+                relative_path.parent,
+                allowed_modes=allowed_directory_modes,
+            ) as parent_descriptor:
+                path = anchor_path / relative_path
+                try:
+                    descriptor = os.open(
+                        relative_path.name,
+                        self._regular_open_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state file cannot be opened safely: {path}: {exc}"
+                    ) from exc
+                try:
+                    self._require_regular_descriptor(
+                        descriptor,
+                        path,
+                        allowed_modes=allowed_file_modes,
+                    )
+                    self.syscalls.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+
+    def read_contained_regular_file(
+        self,
+        anchor: str | Path,
+        relative: str | Path,
+        *,
+        max_bytes: int,
+        allowed_directory_modes: frozenset[int],
+        allowed_file_modes: frozenset[int],
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        """Read a bounded payload through a held anchor without following links."""
+
+        parts = self._contained_parts(relative)
+        if not parts or max_bytes < 0:
+            raise ValueError("a contained file and nonnegative read limit are required")
+        anchor_path = self.path(anchor)
+        relative_path = Path(*parts)
+        with self.existing_private_directory(anchor) as anchor_descriptor:
+            with self._existing_directory_beneath(
+                anchor_descriptor,
+                anchor_path,
+                relative_path.parent,
+                allowed_modes=allowed_directory_modes,
+            ) as parent_descriptor:
+                path = anchor_path / relative_path
+                try:
+                    descriptor = os.open(
+                        relative_path.name,
+                        self._regular_open_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as exc:
+                    raise StatePathError(f"payload cannot be opened safely: {path}: {exc}") from exc
+                return self._read_regular_descriptor(
+                    descriptor,
+                    path,
+                    max_bytes=max_bytes,
+                    deadline_ns=deadline_ns,
+                    stable_parent_descriptor=parent_descriptor,
+                    stable_name=relative_path.name,
+                    allowed_modes=allowed_file_modes,
+                )
+
+    def fsync_contained_directory(
+        self,
+        anchor: str | Path,
+        relative: str | Path,
+        *,
+        allowed_directory_modes: frozenset[int],
+    ) -> None:
+        """Sync one directory beneath a held private anchor without following links."""
+
+        anchor_path = self.path(anchor)
+        with self.existing_private_directory(anchor) as anchor_descriptor:
+            with self._existing_directory_beneath(
+                anchor_descriptor,
+                anchor_path,
+                relative,
+                allowed_modes=allowed_directory_modes,
+            ) as descriptor:
+                self.syscalls.fsync(descriptor)
+
+    @contextmanager
+    def lock(
+        self,
+        relative: str | Path,
+        *,
+        rank: int,
+        name: str,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
+        self._ensure_root()
+        stack = _LOCK_STACK.get()
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
+        path = self.path(relative)
+        self._ensure_parent(path)
+        flags = os.O_RDWR
+        flags |= (
+            getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        parent_relative = path.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            descriptor: int | None = None
+            try:
+                for _attempt in range(5):
+                    try:
+                        descriptor = os.open(
+                            path.name,
+                            flags | os.O_CREAT | os.O_EXCL,
+                            0o600,
+                            dir_fd=parent_descriptor,
+                        )
+                    except FileExistsError:
+                        try:
+                            descriptor = os.open(
+                                path.name,
+                                flags,
+                                dir_fd=parent_descriptor,
+                            )
+                        except FileNotFoundError:
+                            continue
+                    break
+            except OSError as exc:
+                raise StatePathError(
+                    f"state lock cannot be opened safely: {path}: {exc}"
+                ) from exc
+            if descriptor is None:
+                raise StatePathError(f"state lock binding did not stabilize: {path}")
+            try:
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                    raise StatePathError(f"state lock is not a regular file: {path}")
+                self._require_owner(details, path)
+                os.fchmod(descriptor, 0o600)
+                try:
+                    bound = os.stat(
+                        path.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state lock binding cannot be inspected safely: {path}"
+                    ) from exc
+                if (
+                    not stat.S_ISREG(bound.st_mode)
+                    or (details.st_dev, details.st_ino) != (bound.st_dev, bound.st_ino)
+                ):
+                    raise StatePathError(f"state lock changed while opening: {path}")
+                try:
+                    import fcntl
+                except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                    raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
+                operation = fcntl.LOCK_EX
+                if deadline_ns is not None:
+                    operation |= fcntl.LOCK_NB
+                while True:
+                    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                        raise LockTimeout(
+                            f"{name} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=name,
+                        )
+                    try:
+                        fcntl.flock(descriptor, operation)
+                    except InterruptedError:
+                        continue
+                    except BlockingIOError:
+                        if deadline_ns is None:  # pragma: no cover - blocking lock
+                            raise
+                        remaining_ns = deadline_ns - time.monotonic_ns()
+                        if remaining_ns <= 0:
+                            raise LockTimeout(
+                                f"{name} lock acquisition timed out: {path}",
+                                phase="acquire",
+                                kind=name,
+                            ) from None
+                        time.sleep(min(0.001, remaining_ns / 1_000_000_000))
+                        continue
+                    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                        raise LockTimeout(
+                            f"{name} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=name,
+                        )
+                    break
+                self._require_current_lock_binding(
+                    descriptor,
+                    path,
+                    kind=name,
+                )
+                token = _LOCK_STACK.set((*stack, (rank, name)))
+                self.fault_hook(f"lock:{name}:acquired")
+                try:
+                    yield
+                finally:
+                    _LOCK_STACK.reset(token)
+                    while True:
+                        try:
+                            fcntl.flock(descriptor, fcntl.LOCK_UN)
+                            break
+                        except InterruptedError:
+                            continue
+                    self.fault_hook(f"lock:{name}:released")
+            finally:
+                os.close(descriptor)
+
+    @contextmanager
+    def initialization_lock(
+        self,
+        *,
+        rank: int,
+        name: str,
+    ) -> Iterator[None]:
+        """Serialize initialization without adding another durable state path."""
+
+        stack = _LOCK_STACK.get()
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
+        with self._root_directory(
+            ensure=True,
+            repair_existing=False,
+        ) as descriptor:
+            if descriptor is None:  # pragma: no cover - ensure is true
+                raise StatePathError(f"state directory is missing: {self.root}")
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                    break
+                except InterruptedError:
+                    continue
+            locked = self._require_private_directory_descriptor(descriptor, self.root)
+            try:
+                current = self.root.lstat()
+            except OSError as exc:
+                raise StatePathError(
+                    f"{name} lock binding changed while acquiring: {self.root}"
+                ) from exc
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (locked.st_dev, locked.st_ino) != (current.st_dev, current.st_ino)
+            ):
+                raise StatePathError(
+                    f"{name} lock binding changed while acquiring: {self.root}"
+                )
+            token = _LOCK_STACK.set((*stack, (rank, name)))
+            self.fault_hook(f"lock:{name}:acquired")
+            try:
+                yield
+            finally:
+                _LOCK_STACK.reset(token)
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        break
+                    except InterruptedError:
+                        continue
+                self.fault_hook(f"lock:{name}:released")
+
+    @contextmanager
+    def existing_lock(
+        self,
+        relative: str | Path,
+        *,
+        rank: int,
+        name: str,
+        exclusive: bool = True,
+        blocking: bool = True,
+        deadline_ns: int | None = None,
+        kind: str = "state",
+    ) -> Iterator[None]:
+        """Lock existing coordination state without mutation, bounded if requested."""
+
+        stack = _LOCK_STACK.get()
+        if stack and (
+            rank < stack[-1][0]
+            or (rank == stack[-1][0] and name <= stack[-1][1])
+        ):
+            raise LockOrderError(
+                f"{name} lock cannot be acquired after {stack[-1][1]} lock"
+            )
+        path = self.path(relative)
+        try:
+            descriptor = self._open_existing_file(path)
+        except FileNotFoundError as exc:
+            raise StatePathError(f"{kind} lock is missing: {path}") from exc
+        except OSError as exc:
+            raise StatePathError(f"{kind} lock cannot be opened safely: {path}") from exc
+        if descriptor is None:  # pragma: no cover - allow_missing_parent is false
+            raise StatePathError(f"{kind} lock is missing: {path}")
+        try:
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise StatePathError(f"state lock is not a singular regular file: {path}")
+            self._require_owner(details, path)
+            if stat.S_IMODE(details.st_mode) != 0o600:
+                raise StatePathError(f"state lock mode is not 0600: {path}")
+            try:
+                import fcntl
+            except ImportError as exc:  # pragma: no cover - rejected by capability gate
+                raise UnsupportedRuntime("fcntl is required for workspace locking") from exc
+            operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+            if not blocking or deadline_ns is not None:
+                operation |= fcntl.LOCK_NB
+            while True:
+                if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                    raise LockTimeout(
+                        f"{kind} lock acquisition timed out: {path}",
+                        phase="acquire",
+                        kind=kind,
+                    )
+                try:
+                    fcntl.flock(descriptor, operation)
+                except InterruptedError:
+                    continue
+                except BlockingIOError:
+                    if deadline_ns is None:
+                        raise
+                    remaining_ns = deadline_ns - time.monotonic_ns()
+                    if remaining_ns <= 0:
+                        raise LockTimeout(
+                            f"{kind} lock acquisition timed out: {path}",
+                            phase="acquire",
+                            kind=kind,
+                        ) from None
+                    time.sleep(min(0.001, remaining_ns / 1_000_000_000))
+                    continue
+                if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                    raise LockTimeout(
+                        f"{kind} lock acquisition timed out: {path}",
+                        phase="acquire",
+                        kind=kind,
+                    )
+                break
+            self._require_current_lock_binding(
+                descriptor,
+                path,
+                kind=kind,
+            )
+            token = _LOCK_STACK.set((*stack, (rank, name)))
+            self.fault_hook(f"lock:{name}:acquired")
+            try:
+                yield
+            finally:
+                _LOCK_STACK.reset(token)
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                        break
+                    except InterruptedError:
+                        continue
+                self.fault_hook(f"lock:{name}:released")
+        finally:
+            os.close(descriptor)
+
+    def _require_current_lock_binding(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        kind: str,
+    ) -> None:
+        """Require the acquired descriptor to remain bound to the lock pathname."""
+
+        locked = self._require_regular_descriptor(
+            descriptor,
+            path,
+            allowed_modes=_PRIVATE_FILE_MODES,
+        )
+        try:
+            current_descriptor = self._open_existing_file(path)
+        except (FileNotFoundError, OSError) as exc:
+            raise StatePathError(
+                f"{kind} lock binding changed while acquiring: {path}"
+            ) from exc
+        if current_descriptor is None:  # pragma: no cover - missing parent raises
+            raise StatePathError(f"{kind} lock binding changed while acquiring: {path}")
+        try:
+            current = self._require_regular_descriptor(
+                current_descriptor,
+                path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            if (locked.st_dev, locked.st_ino) != (current.st_dev, current.st_ino):
+                raise StatePathError(
+                    f"{kind} lock binding changed while acquiring: {path}"
+                )
+        finally:
+            os.close(current_descriptor)
+
+    def write_once(self, relative: str | Path, data: bytes) -> Path:
+        self._ensure_root()
+        path = self.path(relative)
+        self._ensure_parent(path)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if self._read_regular(path) != data:
+                raise StateCorrupt(f"content-addressed state conflicts at {path}")
+            return path
+        self._atomic_replace(path, data)
+        if self._read_regular(path) != data:
+            raise StateCorrupt(f"content-addressed state verification failed at {path}")
+        return path
+
+    def install_once_bytes(
+        self,
+        relative: str | Path,
+        data: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> Path:
+        """Durably install immutable bytes once, preserving a stable inode on retry."""
+
+        require_before_deadline(deadline_ns, "immutable install exceeded its deadline")
+        self._ensure_root()
+        path = self.path(relative)
+        self._ensure_parent(path)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if self._read_regular(path, deadline_ns=deadline_ns) != data:
+                raise StateCorrupt(f"immutable state conflicts at {path}")
+            return path
+        visible = False
+
+        def replaced() -> None:
+            nonlocal visible
+            visible = True
+            self.fault_hook(f"{label}:installed")
+
+        try:
+            self._atomic_replace(
+                path,
+                data,
+                after_replace=replaced,
+                deadline_ns=deadline_ns,
+            )
+        except BaseException as exc:
+            if visible:
+                raise CommitUnknown(
+                    f"{label} became visible before durability acknowledgement"
+                ) from exc
+            raise
+        if self._read_regular(path, deadline_ns=deadline_ns) != data:
+            raise StateCorrupt(f"immutable state verification failed at {path}")
+        return path
+
+    def create_private_file_bytes(
+        self,
+        relative: str | Path,
+        data: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> Path:
+        """Create one exact private file without a temporary or parent creation."""
+
+        require_before_deadline(deadline_ns, "private file creation exceeded its deadline")
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(
+                path.name,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            try:
+                os.fchmod(descriptor, 0o600)
+                self.fault_hook(f"{label}:created")
+                self._write_all(descriptor, data)
+                self.fault_hook(f"{label}:written")
+                self.syscalls.fsync(descriptor)
+                self.fault_hook(f"{label}:durable")
+            finally:
+                os.close(descriptor)
+            self.syscalls.fsync(parent_descriptor)
+            self.fault_hook(f"{label}:parent_durable")
+            self.fault_hook(f"{label}:installed")
+        return path
+
+    def atomic_replace_bytes(
+        self,
+        relative: str | Path,
+        data: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> Path:
+        """Durably replace one contained record and surface uncertain visibility."""
+
+        destination = self.path(relative)
+        visible = False
+
+        def replaced() -> None:
+            nonlocal visible
+            visible = True
+            self.fault_hook(f"{label}:replaced")
+
+        try:
+            self._atomic_replace(
+                destination,
+                data,
+                after_replace=replaced,
+                deadline_ns=deadline_ns,
+            )
+        except BaseException as exc:
+            if visible:
+                raise CommitUnknown(
+                    f"{label} became visible before durability acknowledgement"
+                ) from exc
+            raise
+        return destination
+
+    def rename_contained(
+        self,
+        source: str | Path,
+        destination: str | Path,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> Path:
+        """Atomically move one private directory and sync both held parents."""
+
+        require_before_deadline(deadline_ns, "state rename exceeded its deadline")
+        self._ensure_root()
+        source_path = self.path(source)
+        destination_path = self.path(destination)
+        self._ensure_parent(destination_path)
+        source_parent_relative = source_path.parent.relative_to(self.root)
+        destination_parent_relative = destination_path.parent.relative_to(self.root)
+        visible = False
+        with self.existing_private_directory(source_parent_relative) as source_parent:
+            with self.existing_private_directory(
+                destination_parent_relative
+            ) as destination_parent:
+                source_descriptor = self._open_directory_at(
+                    source_parent,
+                    source_path.name,
+                    source_path,
+                    allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                    allow_missing=True,
+                )
+                if source_descriptor is None:
+                    raise StatePathError(f"rename source is missing: {source_path}")
+                try:
+                    try:
+                        os.stat(
+                            destination_path.name,
+                            dir_fd=destination_parent,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        raise StatePathError(
+                            f"rename destination already exists: {destination_path}"
+                        )
+                    self.fault_hook(f"{label}:before_rename")
+                    require_before_deadline(
+                        deadline_ns,
+                        "state rename exceeded its deadline",
+                    )
+                    try:
+                        self.syscalls.replace_at(
+                            source_path.name,
+                            destination_path.name,
+                            source_dir_fd=source_parent,
+                            destination_dir_fd=destination_parent,
+                        )
+                        visible = True
+                        self.fault_hook(f"{label}:renamed")
+                        self.syscalls.fsync(source_parent)
+                        self.fault_hook(f"{label}:source_parent_durable")
+                        if destination_parent_relative != source_parent_relative:
+                            self.syscalls.fsync(destination_parent)
+                        self.fault_hook(f"{label}:destination_parent_durable")
+                    except BaseException as exc:
+                        if visible:
+                            raise CommitUnknown(
+                                f"{label} rename became visible before both directories were durable"
+                            ) from exc
+                        raise
+                finally:
+                    os.close(source_descriptor)
+        return destination_path
+
+    def rename_exclusive_contained(
+        self,
+        source: str | Path,
+        destination: str | Path,
+        *,
+        source_kind: str,
+        label: str,
+        deadline_ns: int | None = None,
+        recover_commit_unknown: bool = False,
+    ) -> Path:
+        """Exclusively publish one held private file or directory without mkdir."""
+
+        if source_kind not in {"directory", "regular"}:
+            raise ValueError("exclusive rename source_kind must be directory or regular")
+        require_before_deadline(deadline_ns, "state rename exceeded its deadline")
+        self._ensure_root()
+        source_path = self.path(source)
+        destination_path = self.path(destination)
+        source_parent_relative = source_path.parent.relative_to(self.root)
+        destination_parent_relative = destination_path.parent.relative_to(self.root)
+        visible = False
+        with self.existing_private_directory(source_parent_relative) as source_parent:
+            with self.existing_private_directory(
+                destination_parent_relative
+            ) as destination_parent:
+                if source_kind == "directory":
+                    source_descriptor = self._open_directory_at(
+                        source_parent,
+                        source_path.name,
+                        source_path,
+                        allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                        allow_missing=True,
+                    )
+                    if source_descriptor is None:
+                        raise StatePathError(f"rename source is missing: {source_path}")
+                    source_details = os.fstat(source_descriptor)
+                else:
+                    try:
+                        source_descriptor = os.open(
+                            source_path.name,
+                            self._regular_open_flags(),
+                            dir_fd=source_parent,
+                        )
+                    except FileNotFoundError as exc:
+                        raise StatePathError(f"rename source is missing: {source_path}") from exc
+                    source_details = self._require_regular_descriptor(
+                        source_descriptor,
+                        source_path,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                try:
+                    source_bound = os.stat(
+                        source_path.name,
+                        dir_fd=source_parent,
+                        follow_symlinks=False,
+                    )
+                    source_identity = self._stat_identity(source_details)
+                    if self._stat_identity(source_bound) != source_identity:
+                        raise StatePathError(
+                            f"rename source changed while opening: {source_path}"
+                        )
+
+                    def require_visible_binding() -> None:
+                        self._require_held_private_directory_binding(
+                            source_parent_relative,
+                            source_parent,
+                            source_path.parent,
+                        )
+                        self._require_held_private_directory_binding(
+                            destination_parent_relative,
+                            destination_parent,
+                            destination_path.parent,
+                        )
+                        destination_bound = os.stat(
+                            destination_path.name,
+                            dir_fd=destination_parent,
+                            follow_symlinks=False,
+                        )
+                        source_current = os.fstat(source_descriptor)
+                        if source_kind == "regular":
+                            self._require_regular_details(
+                                source_current,
+                                destination_path,
+                                allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                            self._require_regular_details(
+                                destination_bound,
+                                destination_path,
+                                allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                        else:
+                            self._require_private_directory_descriptor(
+                                source_descriptor,
+                                destination_path,
+                            )
+                            if (
+                                not stat.S_ISDIR(destination_bound.st_mode)
+                                or stat.S_IMODE(destination_bound.st_mode)
+                                not in _PRIVATE_DIRECTORY_MODES
+                            ):
+                                raise StatePathError(
+                                    "rename destination is not a private directory: "
+                                    f"{destination_path}"
+                                )
+                            self._require_owner(destination_bound, destination_path)
+                        if (destination_bound.st_dev, destination_bound.st_ino) != (
+                            source_current.st_dev,
+                            source_current.st_ino,
+                        ):
+                            raise StatePathError(
+                                "rename destination changed after visibility: "
+                                f"{destination_path}"
+                            )
+
+                    self.fault_hook(f"{label}:before_rename")
+                    require_before_deadline(
+                        deadline_ns,
+                        "state rename exceeded its deadline",
+                    )
+                    self._require_held_private_directory_binding(
+                        source_parent_relative,
+                        source_parent,
+                        source_path.parent,
+                    )
+                    self._require_held_private_directory_binding(
+                        destination_parent_relative,
+                        destination_parent,
+                        destination_path.parent,
+                    )
+                    source_rebound = os.stat(
+                        source_path.name,
+                        dir_fd=source_parent,
+                        follow_symlinks=False,
+                    )
+                    if self._stat_identity(source_rebound) != source_identity:
+                        raise StatePathError(
+                            f"rename source changed before visibility: {source_path}"
+                        )
+                    try:
+                        self.syscalls.rename_exclusive_at(
+                            source_path.name,
+                            destination_path.name,
+                            source_dir_fd=source_parent,
+                            destination_dir_fd=destination_parent,
+                        )
+                        visible = True
+                        self.fault_hook(f"{label}:renamed")
+                        require_visible_binding()
+                        self.syscalls.fsync(source_parent)
+                        self.fault_hook(f"{label}:source_parent_durable")
+                        if destination_parent_relative != source_parent_relative:
+                            self.syscalls.fsync(destination_parent)
+                        self.fault_hook(f"{label}:destination_parent_durable")
+                    except BaseException as exc:
+                        if visible:
+                            if recover_commit_unknown:
+                                try:
+                                    self.syscalls.fsync(source_parent)
+                                    if destination_parent_relative != source_parent_relative:
+                                        self.syscalls.fsync(destination_parent)
+                                    require_visible_binding()
+                                except BaseException as recovery_exc:
+                                    raise CommitUnknown(
+                                        f"{label} rename became visible before both directories were durable"
+                                    ) from recovery_exc
+                            else:
+                                raise CommitUnknown(
+                                    f"{label} rename became visible before both directories were durable"
+                                ) from exc
+                        else:
+                            raise
+                finally:
+                    os.close(source_descriptor)
+        return destination_path
+
+    def unlink_and_sync(
+        self,
+        relative: str | Path,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> None:
+        self._unlink_and_sync(
+            self.path(relative),
+            label=label,
+            deadline_ns=deadline_ns,
+        )
+
+    def _require_zeroized_cleanup_marker(
+        self,
+        directory_descriptor: int,
+        directory_path: Path,
+        marker_name: str,
+        *,
+        expected_inode: tuple[int, int] | None = None,
+    ) -> os.stat_result:
+        marker_path = directory_path / marker_name
+        try:
+            details = os.stat(
+                marker_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            self._require_regular_details(
+                details,
+                marker_path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            descriptor = os.open(
+                marker_name,
+                self._regular_open_flags(),
+                dir_fd=directory_descriptor,
+            )
+        except OSError as exc:
+            raise StatePathError(
+                f"state cleanup archive collision is unsafe: {marker_path}"
+            ) from exc
+        try:
+            opened = self._require_regular_descriptor(
+                descriptor,
+                marker_path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            identity = self._stat_identity(details)
+            if self._stat_identity(opened) != identity or (
+                expected_inode is not None
+                and (opened.st_dev, opened.st_ino) != expected_inode
+            ):
+                raise StatePathError(
+                    f"state cleanup archive collision changed: {marker_path}"
+                )
+            if opened.st_size != 0:
+                raise StatePathError(
+                    f"state cleanup archive collision bytes differ: {marker_path}"
+                )
+            while True:
+                try:
+                    observed = os.read(descriptor, 1)
+                    break
+                except InterruptedError:
+                    continue
+            current = os.stat(
+                marker_name,
+                dir_fd=directory_descriptor,
+                follow_symlinks=False,
+            )
+            if observed or self._stat_identity(current) != identity:
+                raise StatePathError(
+                    f"state cleanup archive collision changed: {marker_path}"
+                )
+            return current
+        except StatePathError:
+            raise
+        except OSError as exc:
+            raise StatePathError(
+                f"state cleanup archive collision is unsafe: {marker_path}"
+            ) from exc
+        finally:
+            os.close(descriptor)
+
+    def _archive_consumed_marker(
+        self,
+        parent_descriptor: int,
+        parent_path: Path,
+        marker_name: str,
+        opened: os.stat_result,
+        *,
+        label: str,
+    ) -> None:
+        archive_relative = (
+            parent_path.relative_to(self.root) / _CLEANUP_MARKER_ARCHIVE
+        )
+        archive_path = self.ensure_directory(archive_relative)
+        with self.existing_private_directory(archive_relative) as archive_descriptor:
+            visible = False
+            try:
+                self.syscalls.rename_exclusive_at(
+                    marker_name,
+                    marker_name,
+                    source_dir_fd=parent_descriptor,
+                    destination_dir_fd=archive_descriptor,
+                )
+                visible = True
+                try:
+                    archived = os.stat(
+                        marker_name,
+                        dir_fd=archive_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state cleanup archive cannot be rebound safely: "
+                        f"{archive_path / marker_name}"
+                    ) from exc
+                self._require_regular_details(
+                    archived,
+                    archive_path / marker_name,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                if (archived.st_dev, archived.st_ino) != (
+                    opened.st_dev,
+                    opened.st_ino,
+                ):
+                    self.syscalls.fsync(archive_descriptor)
+                    self.syscalls.fsync(parent_descriptor)
+                    raise StatePathError(
+                        f"state cleanup marker changed while archiving: "
+                        f"{parent_path / marker_name}"
+                    )
+                self.syscalls.fsync(archive_descriptor)
+                self.syscalls.fsync(parent_descriptor)
+                self.fault_hook(f"{label}:parent_durable")
+            except FileExistsError:
+                if not visible:
+                    removed = False
+                    try:
+                        source = self._require_zeroized_cleanup_marker(
+                            parent_descriptor,
+                            parent_path,
+                            marker_name,
+                            expected_inode=(opened.st_dev, opened.st_ino),
+                        )
+                        archived = self._require_zeroized_cleanup_marker(
+                            archive_descriptor,
+                            archive_path,
+                            marker_name,
+                        )
+                        rebound_source = os.stat(
+                            marker_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        rebound_archive = os.stat(
+                            marker_name,
+                            dir_fd=archive_descriptor,
+                            follow_symlinks=False,
+                        )
+                        if (
+                            self._stat_identity(rebound_source)
+                            != self._stat_identity(source)
+                            or self._stat_identity(rebound_archive)
+                            != self._stat_identity(archived)
+                        ):
+                            raise StatePathError(
+                                "state cleanup archive collision changed before removal"
+                            )
+                        self.syscalls.unlink_at(marker_name, dir_fd=parent_descriptor)
+                        removed = True
+                        self.syscalls.fsync(archive_descriptor)
+                        self.syscalls.fsync(parent_descriptor)
+                        self.fault_hook(f"{label}:parent_durable")
+                        return
+                    except BaseException as exc:
+                        if removed:
+                            raise CommitUnknown(
+                                f"{label} cleanup archive collision was removed before "
+                                "durability acknowledgement"
+                            ) from exc
+                        if isinstance(exc, OSError):
+                            raise StatePathError(
+                                "state cleanup archive collision changed before removal"
+                            ) from exc
+                        raise
+                raise
+            except BaseException as exc:
+                if visible:
+                    raise CommitUnknown(
+                        f"{label} cleanup archive became visible before durability "
+                        "acknowledgement"
+                    ) from exc
+                raise
+
+    def _zeroize_and_archive_marker(
+        self,
+        descriptor: int,
+        parent_descriptor: int,
+        parent_path: Path,
+        marker_name: str,
+        opened: os.stat_result,
+        *,
+        label: str,
+    ) -> None:
+        self.syscalls.truncate(descriptor, 0)
+        self.syscalls.fsync(descriptor)
+        self.fault_hook(f"{label}:zeroized")
+        self._archive_consumed_marker(
+            parent_descriptor,
+            parent_path,
+            marker_name,
+            opened,
+            label=label,
+        )
+
+    def _consume_retained_markers(
+        self,
+        parent_descriptor: int,
+        parent_path: Path,
+        marker_prefix: str,
+        expected: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None,
+    ) -> bool:
+        consumed = False
+        names = self._tree_entry_names_descriptor(
+            parent_descriptor,
+            parent_path,
+            deadline_ns=deadline_ns,
+            maximum_entries=_CLEANUP_MARKER_MAX_ENTRIES,
+        )
+        for name in names:
+            if not name.startswith(marker_prefix) or not _CLEANUP_MARKER_IDENTITY_RE.fullmatch(
+                name.removeprefix(marker_prefix)
+            ):
+                continue
+            require_before_deadline(
+                deadline_ns,
+                "state cleanup exceeded its deadline",
+            )
+            marker_path = parent_path / name
+            try:
+                descriptor = os.open(
+                    name,
+                    self._regular_update_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise StatePathError(
+                    f"state cleanup marker cannot be opened safely: {marker_path}"
+                ) from exc
+            try:
+                details = self._require_regular_descriptor(
+                    descriptor,
+                    marker_path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                if name != f"{marker_prefix}{details.st_dev:x}-{details.st_ino:x}":
+                    continue
+                if details.st_size:
+                    observed = self._read_regular_descriptor(
+                        os.dup(descriptor),
+                        marker_path,
+                        max_bytes=len(expected),
+                        deadline_ns=deadline_ns,
+                    )
+                    if observed != expected:
+                        continue
+                self._zeroize_and_archive_marker(
+                    descriptor,
+                    parent_descriptor,
+                    parent_path,
+                    name,
+                    details,
+                    label=label,
+                )
+                consumed = True
+            finally:
+                os.close(descriptor)
+        return consumed
+
+    def consume_matching_bytes_and_sync(
+        self,
+        relative: str | Path,
+        expected: bytes,
+        *,
+        label: str,
+        deadline_ns: int | None = None,
+    ) -> bool:
+        """Consume exact private bytes without unlinking a pathname-selected inode."""
+
+        path = self.path(relative)
+        expected_sha256 = hashlib.sha256(expected).hexdigest()
+        marker_prefix = f".{path.name}.consumed-{expected_sha256}-"
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return False
+            try:
+                descriptor = os.open(
+                    path.name,
+                    self._regular_update_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                return self._consume_retained_markers(
+                    parent_descriptor,
+                    path.parent,
+                    marker_prefix,
+                    expected,
+                    label=label,
+                    deadline_ns=deadline_ns,
+                )
+            except OSError as exc:
+                raise StatePathError(
+                    f"state cleanup target cannot be opened safely: {path}"
+                ) from exc
+            try:
+                opened = self._require_regular_descriptor(
+                    descriptor,
+                    path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                observed = self._read_regular_descriptor(
+                    os.dup(descriptor),
+                    path,
+                    max_bytes=len(expected),
+                    deadline_ns=deadline_ns,
+                )
+                if observed != expected:
+                    return self._consume_retained_markers(
+                        parent_descriptor,
+                        path.parent,
+                        marker_prefix,
+                        expected,
+                        label=label,
+                        deadline_ns=deadline_ns,
+                    )
+                self.fault_hook(f"{label}:before_unlink")
+                after_read = self._require_regular_descriptor(
+                    descriptor,
+                    path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                try:
+                    bound = os.stat(
+                        path.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    return False
+                except OSError as exc:
+                    raise StatePathError(
+                        f"state cleanup target cannot be rebound safely: {path}"
+                    ) from exc
+                self._require_regular_details(
+                    bound,
+                    path,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+                identity = self._stat_identity(opened)
+                if (
+                    self._stat_identity(after_read) != identity
+                    or self._stat_identity(bound) != identity
+                ):
+                    raise StatePathError(f"state cleanup target changed while inspecting: {path}")
+                consumed_name = f"{marker_prefix}{opened.st_dev:x}-{opened.st_ino:x}"
+                consumed_path = path.with_name(consumed_name)
+                require_before_deadline(
+                    deadline_ns,
+                    "state cleanup exceeded its deadline",
+                )
+                visible = False
+                try:
+                    self.syscalls.rename_exclusive_at(
+                        path.name,
+                        consumed_name,
+                        source_dir_fd=parent_descriptor,
+                        destination_dir_fd=parent_descriptor,
+                    )
+                    visible = True
+                    self.fault_hook(f"{label}:unlinked")
+                    try:
+                        quarantined = os.stat(
+                            consumed_name,
+                            dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise StatePathError(
+                            f"state cleanup marker cannot be rebound safely: {consumed_path}"
+                        ) from exc
+                    self._require_regular_details(
+                        quarantined,
+                        consumed_path,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                    if (quarantined.st_dev, quarantined.st_ino) != (
+                        opened.st_dev,
+                        opened.st_ino,
+                    ):
+                        try:
+                            self.syscalls.rename_exclusive_at(
+                                consumed_name,
+                                path.name,
+                                source_dir_fd=parent_descriptor,
+                                destination_dir_fd=parent_descriptor,
+                            )
+                        except FileExistsError:
+                            pass
+                        self.syscalls.fsync(parent_descriptor)
+                        raise StatePathError(
+                            f"state cleanup target changed while quarantining: {path}"
+                        )
+                    self._zeroize_and_archive_marker(
+                        descriptor,
+                        parent_descriptor,
+                        path.parent,
+                        consumed_name,
+                        opened,
+                        label=label,
+                    )
+                except FileExistsError, FileNotFoundError:
+                    if not visible:
+                        return False
+                    raise
+                except BaseException as exc:
+                    if visible:
+                        raise CommitUnknown(
+                            f"{label} cleanup became visible before durability acknowledgement"
+                        ) from exc
+                    raise
+            finally:
+                os.close(descriptor)
+            try:
+                self._consume_retained_markers(
+                    parent_descriptor,
+                    path.parent,
+                    marker_prefix,
+                    expected,
+                    label=label,
+                    deadline_ns=deadline_ns,
+                )
+            except Exception:
+                pass
+        return True
+
+    def fsync_directory(self, relative: str | Path) -> None:
+        with self.existing_private_directory(relative) as descriptor:
+            self.syscalls.fsync(descriptor)
+
+    def fsync_regular_file(
+        self,
+        relative: str | Path,
+        *,
+        allowed_modes: frozenset[int] = frozenset({0o600}),
+    ) -> None:
+        path = self.path(relative)
+        try:
+            descriptor = self._open_existing_file(path)
+        except OSError as exc:
+            raise StatePathError(f"state file cannot be opened safely: {path}: {exc}") from exc
+        if descriptor is None:  # pragma: no cover - allow_missing_parent is false
+            raise StatePathError(f"state file parent is missing: {path.parent}")
+        try:
+            self._require_regular_descriptor(
+                descriptor,
+                path,
+                allowed_modes=allowed_modes,
+            )
+            self.syscalls.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def inspect_atomic_temps(
+        self,
+        relative: str | Path,
+        *,
+        destination_name: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> tuple[Path, ...]:
+        """List exact safe atomic-temp orphans without changing state."""
+
+        require_before_deadline(
+            deadline_ns,
+            "atomic-temp inspection exceeded its deadline",
+        )
+        directory = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
+        relative_directory = (
+            Path(".") if directory == self.root else directory.relative_to(self.root)
+        )
+        result: list[Path] = []
+        with self._existing_private_directory(
+            relative_directory,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            try:
+                names = sorted(entry.name for entry in os.scandir(descriptor))
+            except OSError as exc:
+                raise StatePathError(
+                    f"atomic-temp parent cannot be enumerated safely: {directory}: {exc}"
+                ) from exc
+            for name in names:
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic-temp inspection exceeded its deadline",
+                )
+                match = _ATOMIC_TEMP_RE.fullmatch(name)
+                if match is None or (
+                    destination_name is not None and match.group("destination") != destination_name
+                ):
+                    continue
+                entry = directory / name
+                try:
+                    entry_details = os.stat(
+                        name,
+                        dir_fd=descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StatePathError(
+                        f"atomic-temp orphan cannot be inspected safely: {entry}"
+                    ) from exc
+                try:
+                    self._require_regular_details(
+                        entry_details,
+                        entry,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                except StatePathError as exc:
+                    raise StatePathError(f"atomic-temp orphan is unsafe: {entry}") from exc
+                result.append(entry)
+        return tuple(result)
+
+    def cleanup_atomic_temps(
+        self,
+        relative: str | Path,
+        *,
+        destination_name: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> tuple[Path, ...]:
+        """Remove exact owned orphan files created by ``_atomic_replace``.
+
+        The caller must hold the writer lock for ``relative``. Unsafe entries
+        that match the private temp namespace fail closed; unrelated dotfiles
+        remain visible to the caller's ordinary directory validation.
+        """
+
+        require_before_deadline(
+            deadline_ns,
+            "atomic-temp cleanup exceeded its deadline",
+        )
+        directory = self.root if Path(relative) in {Path(), Path(".")} else self.path(relative)
+        relative_directory = (
+            Path(".") if directory == self.root else directory.relative_to(self.root)
+        )
+        removed: list[Path] = []
+        with self._existing_private_directory(
+            relative_directory,
+            allow_missing=True,
+        ) as descriptor:
+            if descriptor is None:
+                return ()
+            try:
+                names = sorted(entry.name for entry in os.scandir(descriptor))
+            except OSError as exc:
+                raise StatePathError(
+                    f"atomic-temp parent cannot be enumerated safely: {directory}: {exc}"
+                ) from exc
+            for name in names:
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic-temp cleanup exceeded its deadline",
+                )
+                match = _ATOMIC_TEMP_RE.fullmatch(name)
+                if match is None or (
+                    destination_name is not None
+                    and match.group("destination") != destination_name
+                ):
+                    continue
+                entry = directory / name
+                try:
+                    entry_details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                except OSError as exc:
+                    raise StatePathError(
+                        f"atomic-temp orphan cannot be inspected safely: {entry}"
+                    ) from exc
+                try:
+                    self._require_regular_details(
+                        entry_details,
+                        entry,
+                        allowed_modes=_PRIVATE_FILE_MODES,
+                    )
+                except StatePathError as exc:
+                    raise StatePathError(f"atomic-temp orphan is unsafe: {entry}") from exc
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic-temp cleanup exceeded its deadline",
+                )
+                self.syscalls.unlink_at(name, dir_fd=descriptor)
+                removed.append(entry)
+                if deadline_ns is not None:
+                    self.syscalls.fsync(descriptor)
+            if removed and deadline_ns is None:
+                self.syscalls.fsync(descriptor)
+        return tuple(removed)
+
+    @contextmanager
+    def existing_generation_lock(
+        self,
+        relative: str | Path,
+        *,
+        generation_id: str,
+        exclusive: bool,
+        blocking: bool = True,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
+        """Lock a retained coordination object without any mutating syscall."""
+
+        name = f"generation:{generation_id}"
+        with self.existing_lock(
+            relative,
+            rank=GENERATION_LOCK_RANK,
+            name=name,
+            exclusive=exclusive,
+            blocking=blocking,
+            deadline_ns=deadline_ns,
+            kind="generation",
+        ):
+            yield
+
+    @contextmanager
+    def existing_generation_locks(
+        self,
+        locks: Sequence[tuple[str, str | Path]],
+        *,
+        exclusive: bool,
+        blocking: bool = True,
+        deadline_ns: int | None = None,
+    ) -> Iterator[None]:
+        ordered = list(locks)
+        if ordered != sorted(ordered, key=lambda item: item[0]):
+            raise LockOrderError("generation locks must be requested in lexical generation order")
+        if len({generation_id for generation_id, _path in ordered}) != len(ordered):
+            raise LockOrderError("generation locks must be unique")
+        with ExitStack() as stack:
+            for generation_id, path in ordered:
+                stack.enter_context(
+                    self.existing_generation_lock(
+                        path,
+                        generation_id=generation_id,
+                        exclusive=exclusive,
+                        blocking=blocking,
+                        deadline_ns=deadline_ns,
+                    )
+                )
+            yield
+
+    def read_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        """Read one contained regular state file without following its final path."""
+
+        self._ensure_root()
+        return self._read_regular(
+            self.path(relative),
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def read_existing_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        """Read existing state without mkdir, chmod, replacement, or cleanup."""
+
+        return self._read_regular(
+            self.path(relative),
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def read_optional_existing_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
+        """Read optional existing state while still validating its private parent chain."""
+
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+        path = self.path(relative)
+        try:
+            descriptor = self._open_existing_file(path, allow_missing_parent=True)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
+        if descriptor is None:
+            return None
+        return self._read_regular_descriptor(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def _read_optional_existing_stable_bytes(
+        self,
+        relative: str | Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes | None:
+        """Read through a held parent and prove the final path remains bound."""
+
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+        path = self.path(relative)
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                require_before_deadline(
+                    deadline_ns,
+                    "state record read exceeded its deadline",
+                )
+                return None
+            try:
+                descriptor = os.open(
+                    path.name,
+                    self._regular_open_flags(),
+                    dir_fd=parent_descriptor,
+                )
+            except FileNotFoundError:
+                require_before_deadline(
+                    deadline_ns,
+                    "state record read exceeded its deadline",
+                )
+                return None
+            except OSError as exc:
+                raise StateCorrupt(
+                    f"state record cannot be opened safely: {path}: {exc}"
+                ) from exc
+            return self._read_regular_descriptor(
+                descriptor,
+                path,
+                max_bytes=max_bytes,
+                deadline_ns=deadline_ns,
+                stable_parent_descriptor=parent_descriptor,
+                stable_name=path.name,
+            )
+
+    def read_current(
+        self,
+        relative: str | Path,
+        *,
+        decoder: Callable[[bytes], RecordT],
+        allow_missing: bool = False,
+        label: str,
+    ) -> RecordT | None:
+        data = self.read_optional_existing_bytes(relative)
+        if data is None:
+            if allow_missing:
+                return None
+            raise StateRecordMissing(f"{label} current record is missing")
+        try:
+            return decoder(data)
+        except Exception as exc:
+            if isinstance(exc, StateCorrupt):
+                raise
+            raise StateCorrupt(f"{label} current record is invalid: {exc}") from exc
+
+    def read_stable_record(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> RecordT | None:
+        """Read current authority only when no durable recovery is required."""
+
+        paths = {
+            "current": self.path(current),
+            "pending": self.path(pending),
+            "previous": self.path(previous),
+        }
+        parents = {path.parent for path in paths.values()}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        self._require_private_directory_chain(parent)
+
+        def load_candidate(name: str) -> tuple[bytes, RecordT, int] | None:
+            path = paths[name]
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return None
+            try:
+                data = self._read_regular(
+                    path,
+                    max_bytes=max_bytes,
+                    deadline_ns=deadline_ns,
+                )
+                record = decoder(data)
+                return data, record, revision(record)
+            except Exception as exc:
+                if isinstance(exc, (LockTimeout, StateCorrupt)):
+                    raise
+                raise StateCorrupt(f"{label} {name} record is invalid: {exc}") from exc
+
+        try:
+            paths["pending"].lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise StateRecoveryRequired(
+                f"{label} has an unresolved pending commit"
+            )
+
+        current_candidate = load_candidate("current")
+        previous_candidate = load_candidate("previous")
+        if current_candidate is None:
+            if allow_missing and previous_candidate is None:
+                return None
+            raise StateRecordMissing(f"{label} current record is missing")
+        current_bytes, current_record, current_revision = current_candidate
+        if previous_candidate is None:
+            return current_record
+        previous_bytes, _previous_record, previous_revision = previous_candidate
+        if previous_revision > current_revision:
+            raise StateCorrupt(f"{label} previous record is newer than current")
+        if previous_revision == current_revision and previous_bytes != current_bytes:
+            raise StateCorrupt(f"{label} has divergent records at revision {current_revision}")
+        return current_record
+
+    def _project_record_recovery(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> DurableRecordRecovery[RecordT]:
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
+        paths = {
+            "current": self.path(current),
+            "pending": self.path(pending),
+            "previous": self.path(previous),
+        }
+        parents = {path.parent for path in paths.values()}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        candidates: dict[str, tuple[bytes, RecordT, int]] = {}
+        invalid: dict[str, Exception] = {}
+        for name, path in paths.items():
+            require_before_deadline(
+                deadline_ns,
+                "state record recovery exceeded its deadline",
+            )
+            try:
+                data = self.read_optional_existing_bytes(
+                    path.relative_to(self.root),
+                    max_bytes=max_bytes,
+                    deadline_ns=deadline_ns,
+                )
+            except LockTimeout:
+                raise
+            except Exception as exc:
+                invalid[name] = exc
+                continue
+            if data is None:
+                continue
+            try:
+                record = decoder(data)
+                candidates[name] = (data, record, revision(record))
+            except Exception as exc:
+                invalid[name] = exc
+
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
+
+        if not candidates:
+            if allow_missing and not invalid:
+                return DurableRecordRecovery(
+                    record=None,
+                    selected_name=None,
+                    selected_bytes=None,
+                    current_bytes=None,
+                    install_current=False,
+                    retain_current=False,
+                    remove_pending=False,
+                )
+            detail = (
+                "; ".join(f"{name}: {invalid[name]}" for name in sorted(invalid))
+                or "all records are missing"
+            )
+            raise StateCorrupt(f"{label} has no valid recoverable record: {detail}")
+        if "current" in invalid and "pending" not in candidates:
+            raise StateCorrupt(f"{label} current is corrupt without a durable pending commit")
+        if "pending" in invalid:
+            raise StateCorrupt(f"{label} pending commit is corrupt")
+        if "current" not in candidates and "pending" not in candidates:
+            raise StateCorrupt(f"{label} current is missing and no pending commit can recover it")
+
+        highest_revision = max(item[2] for item in candidates.values())
+        highest = [(name, item) for name, item in candidates.items() if item[2] == highest_revision]
+        highest_bytes = {item[0] for _name, item in highest}
+        if len(highest_bytes) != 1:
+            raise StateCorrupt(f"{label} has divergent records at revision {highest_revision}")
+        preferred_name = (
+            "current" if any(name == "current" for name, _ in highest) else highest[0][0]
+        )
+        selected = candidates[preferred_name]
+        current_candidate = candidates.get("current")
+        install_current = current_candidate is None or current_candidate[0] != selected[0]
+        return DurableRecordRecovery(
+            record=selected[1],
+            selected_name=preferred_name,
+            selected_bytes=selected[0],
+            current_bytes=None if current_candidate is None else current_candidate[0],
+            install_current=install_current,
+            retain_current=install_current and current_candidate is not None,
+            remove_pending="pending" in candidates,
+        )
+
+    def project_record_recovery(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> DurableRecordRecovery[RecordT]:
+        """Project durable-record recovery without cleanup or any state mutation."""
+
+        return self._project_record_recovery(
+            label=label,
+            current=current,
+            previous=previous,
+            pending=pending,
+            decoder=decoder,
+            revision=revision,
+            allow_missing=allow_missing,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def recover_record(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        decoder: Callable[[bytes], RecordT],
+        revision: Callable[[RecordT], int],
+        allow_missing: bool = False,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> RecordT | None:
+        paths = {
+            "current": self.path(current),
+            "pending": self.path(pending),
+            "previous": self.path(previous),
+        }
+        parents = {path.parent for path in paths.values()}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        relative_parent = parent.relative_to(self.root)
+        if deadline_ns is None:
+            self.cleanup_atomic_temps(relative_parent)
+        else:
+            self.cleanup_atomic_temps(
+                relative_parent,
+                deadline_ns=deadline_ns,
+            )
+        projection = self._project_record_recovery(
+            label=label,
+            current=current,
+            previous=previous,
+            pending=pending,
+            decoder=decoder,
+            revision=revision,
+            allow_missing=allow_missing,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+        if projection.record is None:
+            return None
+        if projection.install_current:
+            if projection.retain_current:
+                assert projection.current_bytes is not None
+                require_before_deadline(
+                    deadline_ns,
+                    "state record recovery exceeded its deadline",
+                )
+                self._atomic_replace(
+                    paths["previous"],
+                    projection.current_bytes,
+                    deadline_ns=deadline_ns,
+                )
+            require_before_deadline(
+                deadline_ns,
+                "state record recovery exceeded its deadline",
+            )
+            assert projection.selected_bytes is not None
+            self._atomic_replace(
+                paths["current"],
+                projection.selected_bytes,
+                deadline_ns=deadline_ns,
+            )
+            self.fault_hook(f"{label}:recovered")
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
+        self._unlink_and_sync(
+            paths["pending"],
+            deadline_ns=deadline_ns,
+        )
+        require_before_deadline(
+            deadline_ns,
+            "state record recovery exceeded its deadline",
+        )
+        return projection.record
+
+    def commit_record(
+        self,
+        *,
+        label: str,
+        current: str | Path,
+        previous: str | Path,
+        pending: str | Path,
+        payload: bytes,
+        decoder: Callable[[bytes], RecordT],
+        cleanup_parent_atomic_temps: bool = True,
+        deadline_ns: int | None = None,
+    ) -> RecordT:
+        require_before_deadline(
+            deadline_ns,
+            "state record commit exceeded its deadline",
+        )
+        record = decoder(payload)
+        current_path = self.path(current)
+        previous_path = self.path(previous)
+        pending_path = self.path(pending)
+        parents = {current_path.parent, previous_path.parent, pending_path.parent}
+        if len(parents) != 1:
+            raise StatePathError(f"{label} record paths must share one directory")
+        parent = next(iter(parents))
+        if cleanup_parent_atomic_temps:
+            if deadline_ns is None:
+                self.cleanup_atomic_temps(parent.relative_to(self.root))
+            else:
+                self.cleanup_atomic_temps(
+                    parent.relative_to(self.root),
+                    deadline_ns=deadline_ns,
+                )
+        commit_may_recover = False
+
+        def pending_replaced() -> None:
+            nonlocal commit_may_recover
+            commit_may_recover = True
+
+        def current_replaced() -> None:
+            self.fault_hook(f"{label}:current_replaced")
+
+        try:
+            self._atomic_replace(
+                pending_path,
+                payload,
+                after_replace=pending_replaced,
+                deadline_ns=deadline_ns,
+            )
+            self.fault_hook(f"{label}:pending_durable")
+
+            current_bytes = self.read_optional_existing_bytes(
+                current,
+                deadline_ns=deadline_ns,
+            )
+            if current_bytes is not None:
+                decoder(current_bytes)
+                self._atomic_replace(
+                    previous_path,
+                    current_bytes,
+                    deadline_ns=deadline_ns,
+                )
+                self.fault_hook(f"{label}:previous_durable")
+
+            self._atomic_replace(
+                current_path,
+                payload,
+                after_replace=current_replaced,
+                deadline_ns=deadline_ns,
+            )
+            self.fault_hook(f"{label}:current_durable")
+            self._unlink_and_sync(pending_path, deadline_ns=deadline_ns)
+            self.fault_hook(f"{label}:pending_cleared")
+        except BaseException as exc:
+            if commit_may_recover:
+                raise CommitUnknown(
+                    f"{label} recovery intent became visible before completion acknowledgement"
+                ) from exc
+            raise
+        return record
+
+    def _read_regular(
+        self,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+    ) -> bytes:
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be nonnegative")
+        try:
+            descriptor = self._open_existing_file(path)
+        except OSError as exc:
+            raise StateCorrupt(f"state record cannot be opened safely: {path}: {exc}") from exc
+        if descriptor is None:  # pragma: no cover - allow_missing_parent is false
+            raise StateCorrupt(f"state record parent is missing: {path.parent}")
+        return self._read_regular_descriptor(
+            descriptor,
+            path,
+            max_bytes=max_bytes,
+            deadline_ns=deadline_ns,
+        )
+
+    def _read_regular_descriptor(
+        self,
+        descriptor: int,
+        path: Path,
+        *,
+        max_bytes: int | None = None,
+        deadline_ns: int | None = None,
+        stable_parent_descriptor: int | None = None,
+        stable_name: str | None = None,
+        allowed_modes: frozenset[int] = _PRIVATE_FILE_MODES,
+    ) -> bytes:
+        try:
+            require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+            details = os.fstat(descriptor)
+            if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
+                raise StateCorrupt(f"state record is not a regular file: {path}")
+            self._require_owner(details, path)
+            if stat.S_IMODE(details.st_mode) not in allowed_modes:
+                raise StateCorrupt(f"file mode is not allowed: {path}")
+            if max_bytes is not None and details.st_size > max_bytes:
+                raise StateCorrupt(
+                    f"state record exceeds its read limit of {max_bytes} bytes: {path}"
+                )
+            identity = self._stat_identity(details)
+            if stable_parent_descriptor is not None:
+                if stable_name is None:
+                    raise ValueError("stable_name is required with a stable parent")
+                try:
+                    bound = os.stat(
+                        stable_name,
+                        dir_fd=stable_parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"state record path changed while reading: {path}"
+                    ) from exc
+                if self._stat_identity(bound) != identity:
+                    raise StateCorrupt(f"state record path changed while reading: {path}")
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+                read_size = 1024 * 1024
+                if max_bytes is not None:
+                    read_size = min(read_size, (max_bytes - total) + 1)
+                try:
+                    chunk = os.read(descriptor, read_size)
+                except InterruptedError:
+                    continue
+                require_before_deadline(deadline_ns, "state record read exceeded its deadline")
+                if not chunk:
+                    if stable_parent_descriptor is not None:
+                        if stable_name is None:  # pragma: no cover - validated above
+                            raise ValueError(
+                                "stable_name is required with a stable parent"
+                            )
+                        reopened = os.fstat(descriptor)
+                        try:
+                            rebound = os.stat(
+                                stable_name,
+                                dir_fd=stable_parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        except OSError as exc:
+                            raise StateCorrupt(
+                                f"state record path changed while reading: {path}"
+                            ) from exc
+                        if (
+                            self._stat_identity(reopened) != identity
+                            or self._stat_identity(rebound) != identity
+                        ):
+                            raise StateCorrupt(
+                                f"state record path changed while reading: {path}"
+                            )
+                    return b"".join(chunks)
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise StateCorrupt(
+                        f"state record exceeds its read limit of {max_bytes} bytes: {path}"
+                    )
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+
+    def _atomic_replace(
+        self,
+        destination: Path,
+        data: bytes,
+        *,
+        after_replace: Callable[[], None] | None = None,
+        deadline_ns: int | None = None,
+    ) -> None:
+        require_before_deadline(
+            deadline_ns,
+            "atomic state replacement exceeded its deadline",
+        )
+        self._ensure_root()
+        self._ensure_parent(destination)
+        if deadline_ns is None:
+            self.cleanup_atomic_temps(
+                destination.parent.relative_to(self.root),
+                destination_name=destination.name,
+            )
+        else:
+            self.cleanup_atomic_temps(
+                destination.parent.relative_to(self.root),
+                destination_name=destination.name,
+                deadline_ns=deadline_ns,
+            )
+        parent_relative = destination.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            try:
+                details = os.stat(
+                    destination.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                self._require_regular_details(
+                    details,
+                    destination,
+                    allowed_modes=_PRIVATE_FILE_MODES,
+                )
+            temporary_name = f".{destination.name}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            require_before_deadline(
+                deadline_ns,
+                "atomic state replacement exceeded its deadline",
+            )
+            descriptor = os.open(
+                temporary_name,
+                flags,
+                0o600,
+                dir_fd=parent_descriptor,
+            )
+            replaced = False
+            try:
+                try:
+                    os.fchmod(descriptor, 0o600)
+                    self._write_all(descriptor, data)
+                    self.syscalls.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                # Deadlines authorize visibility; once replacement succeeds,
+                # durability and verification must run to completion.
+                require_before_deadline(
+                    deadline_ns,
+                    "atomic state replacement exceeded its deadline",
+                )
+                self.syscalls.replace_at(
+                    temporary_name,
+                    destination.name,
+                    source_dir_fd=parent_descriptor,
+                    destination_dir_fd=parent_descriptor,
+                )
+                replaced = True
+                if after_replace is not None:
+                    after_replace()
+                self.syscalls.fsync(parent_descriptor)
+                try:
+                    installed_descriptor = os.open(
+                        destination.name,
+                        self._regular_open_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"installed state cannot be opened safely: {destination}: {exc}"
+                    ) from exc
+                if self._read_regular_descriptor(installed_descriptor, destination) != data:
+                    raise StateCorrupt(f"installed state verification failed at {destination}")
+            finally:
+                if not replaced:
+                    try:
+                        self.syscalls.unlink_at(temporary_name, dir_fd=parent_descriptor)
+                    except FileNotFoundError:
+                        pass
+
+    def _write_all(self, descriptor: int, data: bytes) -> None:
+        view = memoryview(data)
+        offset = 0
+        while offset < len(view):
+            try:
+                written = self.syscalls.write(descriptor, view[offset:])
+            except InterruptedError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.EINTR:
+                    continue
+                raise
+            if written <= 0:
+                raise OSError(errno.EIO, "write returned no progress")
+            offset += written
+
+    def _unlink_and_sync(
+        self,
+        path: Path,
+        *,
+        label: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> None:
+        parent_relative = path.parent.relative_to(self.root)
+        with self._existing_private_directory(
+            parent_relative,
+            allow_missing=True,
+        ) as parent_descriptor:
+            if parent_descriptor is None:
+                return
+            try:
+                details = os.stat(
+                    path.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            except OSError as exc:
+                raise StatePathError(
+                    f"state cleanup target cannot be inspected safely: {path}"
+                ) from exc
+            self._require_regular_details(
+                details,
+                path,
+                allowed_modes=_PRIVATE_FILE_MODES,
+            )
+            if label is not None:
+                self.fault_hook(f"{label}:before_unlink")
+            # Gate the visible unlink, then complete its directory sync even if
+            # the cooperative deadline passes during that durability step.
+            require_before_deadline(
+                deadline_ns,
+                "state cleanup exceeded its deadline",
+            )
+            visible = False
+            try:
+                self.syscalls.unlink_at(path.name, dir_fd=parent_descriptor)
+                visible = True
+                if label is not None:
+                    self.fault_hook(f"{label}:unlinked")
+                self.syscalls.fsync(parent_descriptor)
+                if label is not None:
+                    self.fault_hook(f"{label}:parent_durable")
+            except BaseException as exc:
+                if label is not None and visible:
+                    raise CommitUnknown(
+                        f"{label} cleanup became visible before durability acknowledgement"
+                    ) from exc
+                raise
+
+__all__ = [
+    "GENERATION_LOCK_RANK",
+    "REGISTRY_INITIALIZATION_LOCK_RANK",
+    "REGISTRY_LOCK_RANK",
+    "WORKSPACE_LOCK_RANK",
+    "CommitUnknown",
+    "DurableRecordRecovery",
+    "DurableStateRoot",
+    "FaultHook",
+    "InjectedFault",
+    "LockOrderError",
+    "PosixSyscalls",
+    "RuntimeCapabilities",
+    "StateCorrupt",
+    "StatePathError",
+    "StateRecoveryRequired",
+    "Syscalls",
+    "UnsupportedRuntime",
+    "WorkspaceRuntimeError",
+]

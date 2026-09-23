@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import re
-import tempfile
+import stat
 import warnings
 from collections.abc import Iterable
 from pathlib import Path
@@ -16,6 +16,12 @@ from pathlib import Path
 # absolute path ("/shared/graphify-out"). Single source of truth in graphify.paths
 # (#1423); re-exported here as _GRAPHIFY_OUT for the existing call sites.
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
+from graphify.storage_guard import (
+    ManagedWorkspaceOutputError, _require_directory_binding,
+    ordinary_atomic_bytes, ordinary_directory,
+    ordinary_mkdir, ordinary_unlink,
+    require_ordinary_output,
+)
 
 # AST cache entries are the output of graphify's own extractor code, so they
 # are only valid for the version that wrote them: keying purely on file
@@ -36,31 +42,100 @@ except Exception:
 _cleaned_ast_dirs: set[str] = set()
 
 
+def _require_ordinary_cache_tree(root: Path) -> None:
+    """Refuse a stale cache tree containing any managed directory."""
+
+    pending = [root]
+    inspected = 0
+    while pending:
+        directory = pending.pop()
+        inspected += 1
+        if inspected > 100_000:
+            raise ManagedWorkspaceOutputError("stale cache tree is too large to inspect")
+        with ordinary_directory(directory) as (_resolved, descriptor):
+            for name in os.listdir(descriptor if os.name != "nt" else directory):
+                if os.name == "nt":
+                    details = (directory / name).lstat()
+                else:
+                    details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISDIR(details.st_mode):
+                    pending.append(directory / name)
+
+
+def _remove_ordinary_cache_tree(root: Path) -> None:
+    """Delete a preflighted tree through pinned, revalidated directory handles."""
+    if os.name == "nt":
+        # Windows lacks the descriptor-relative operations needed by this sweep.
+        raise ManagedWorkspaceOutputError("safe recursive cache cleanup is unavailable")
+
+    def remove_contents(directory: Path, descriptor: int) -> None:
+        for name in os.listdir(descriptor):
+            _require_directory_binding(directory, descriptor)
+            details = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+            if stat.S_ISDIR(details.st_mode):
+                flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                child_fd = os.open(name, flags, dir_fd=descriptor)
+                try:
+                    child = directory / name
+                    opened = os.fstat(child_fd)
+                    if (details.st_dev, details.st_ino) != (opened.st_dev, opened.st_ino):
+                        raise ManagedWorkspaceOutputError("stale cache directory changed")
+                    _require_directory_binding(child, child_fd)
+                    remove_contents(child, child_fd)
+                    _require_directory_binding(directory, descriptor)
+                    _require_directory_binding(child, child_fd)
+                    os.rmdir(name, dir_fd=descriptor)
+                finally:
+                    os.close(child_fd)
+            else:
+                _require_directory_binding(directory, descriptor)
+                os.unlink(name, dir_fd=descriptor)
+
+    with ordinary_directory(root.parent) as (parent, parent_fd):
+        resolved = parent / root.name
+        descriptor = os.open(
+            root.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd,
+        )
+        try:
+            _require_directory_binding(resolved, descriptor)
+            _require_ordinary_cache_tree(resolved)
+            _require_directory_binding(resolved, descriptor)
+            remove_contents(resolved, descriptor)
+            _require_directory_binding(parent, parent_fd)
+            _require_directory_binding(resolved, descriptor)
+            os.rmdir(root.name, dir_fd=parent_fd)
+        finally:
+            os.close(descriptor)
+
+
 def _cleanup_stale_ast_entries(ast_base: Path, current_dir: Path) -> None:
     """Remove AST cache entries left behind by other graphify versions.
 
     Sweeps sibling ``v*/`` directories and unversioned ``*.json`` entries
     (the pre-versioning layout) under ``cache/ast/``. Best-effort: failures
-    are ignored, stragglers are retried on the next run.
+    are reported as warnings, and stragglers are retried on the next run.
     """
+    require_ordinary_output(ast_base)
     key = str(current_dir)
     if key in _cleaned_ast_dirs:
         return
     _cleaned_ast_dirs.add(key)
     if not ast_base.is_dir():
         return
-    import shutil
-
-    for child in ast_base.iterdir():
-        if child == current_dir:
-            continue
-        try:
-            if child.is_dir() and child.name.startswith("v"):
-                shutil.rmtree(child, ignore_errors=True)
-            elif child.suffix == ".json":
-                child.unlink()
-        except OSError:
-            pass
+    with ordinary_directory(ast_base) as (resolved, descriptor):
+        for name in os.listdir(descriptor if os.name != "nt" else resolved):
+            if name == current_dir.name:
+                continue
+            child = resolved / name
+            try:
+                if stat.S_ISDIR(child.lstat().st_mode) and name.startswith("v"):
+                    if os.name != "nt":
+                        _require_directory_binding(resolved, descriptor)
+                    _remove_ordinary_cache_tree(child)
+                elif child.suffix == ".json":
+                    ordinary_unlink(child)
+            except (OSError, ManagedWorkspaceOutputError) as exc:
+                warnings.warn(f"Skipping stale cache cleanup for {child}: {exc}", stacklevel=2)
 
 
 # A frontmatter delimiter is a whole line of exactly three dashes (optional
@@ -127,24 +202,12 @@ def _flush_stat_index() -> None:
     global _stat_index_dirty, _stat_index_root
     if not _stat_index_dirty or _stat_index_root is None:
         return
-    p = _stat_index_file(_stat_index_root)
     try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=p.parent, prefix="stat-index.", suffix=".tmp")
-        try:
-            os.write(fd, json.dumps(_stat_index, separators=(",", ":")).encode())
-            os.close(fd)
-            os.replace(tmp, p)
-        except Exception:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-    except OSError:
+        p = _stat_index_file(_stat_index_root)
+        require_ordinary_output(p)
+        ordinary_atomic_bytes(p, json.dumps(_stat_index, separators=(",", ":")).encode())
+    except (OSError, ManagedWorkspaceOutputError):
+        # This optional cache flush must keep shutdown quiet when output is refused.
         pass
     _stat_index_dirty = False
 
@@ -354,11 +417,12 @@ def cache_dir(root: Path = Path("."), kind: str = "ast") -> Path:
     _out = Path(_GRAPHIFY_OUT)
     base = _out if _out.is_absolute() else Path(root).resolve() / _out
     d = base / "cache" / kind
+    require_ordinary_output(d)
     if kind == "ast":
         d = d / f"v{_EXTRACTOR_VERSION}"
         _cleanup_stale_ast_entries(d.parent, d)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    require_ordinary_output(d)
+    return ordinary_mkdir(d)
 
 
 def load_cached(path: Path, root: Path = Path("."), kind: str = "ast",
@@ -439,28 +503,8 @@ def save_cached(path: Path, result: dict, root: Path = Path("."), kind: str = "a
     location = cache_root if cache_root is not None else root
     target_dir = cache_dir(location, kind)
     entry = target_dir / f"{h}.json"
-    fd, tmp_path = tempfile.mkstemp(dir=target_dir, prefix=f"{h}.", suffix=".tmp")
-    try:
-        os.write(fd, json.dumps(on_disk).encode())
-        os.close(fd)
-        try:
-            os.replace(tmp_path, entry)
-        except PermissionError:
-            # Windows: os.replace can fail with WinError 5 if the target is
-            # briefly locked. Fall back to copy-then-delete.
-            import shutil
-            shutil.copy2(tmp_path, entry)
-            os.unlink(tmp_path)
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+    require_ordinary_output(entry)
+    ordinary_atomic_bytes(entry, json.dumps(on_disk).encode())
 
 
 def cached_files(root: Path = Path(".")) -> set[str]:
@@ -484,10 +528,11 @@ def clear_cache(root: Path = Path(".")) -> None:
     """Delete all cache entries (ast/, semantic/, semantic-deep/, and legacy
     flat entries)."""
     base = Path(root).resolve() / _GRAPHIFY_OUT / "cache"
+    require_ordinary_output(base)
     # Legacy flat entries
     if base.is_dir():
         for f in base.glob("*.json"):
-            f.unlink()
+            ordinary_unlink(f)
     # Namespaced entries (ast/ recursively, covering per-version subdirs;
     # semantic-deep/ holds --mode deep entries, #1894)
     for kind, pattern in (("ast", "**/*.json"), ("semantic", "*.json"),
@@ -495,7 +540,7 @@ def clear_cache(root: Path = Path(".")) -> None:
         d = base / kind
         if d.is_dir():
             for f in d.glob(pattern):
-                f.unlink()
+                ordinary_unlink(f)
 
 
 def prune_semantic_cache(root: Path, live_hashes: set[str]) -> int:
@@ -519,26 +564,30 @@ def prune_semantic_cache(root: Path, live_hashes: set[str]) -> int:
     touched (never ``cache/ast/**`` or anything else). The unversioned design
     is preserved: we prune by liveness, not by version.
 
-    Best-effort, mirroring :func:`_cleanup_stale_ast_entries`: each unlink is
-    wrapped in ``try/except OSError`` and a failure is ignored. The worst-case
-    failure mode is benign — a surviving orphan costs only one re-extraction of
-    one doc on a future run, never incorrect output.
+    Best-effort, mirroring :func:`_cleanup_stale_ast_entries`: I/O failures are
+    reported as warnings. A namespace that becomes workspace-owned is skipped
+    with a warning, while independent namespaces continue to be pruned.
     """
     _out = Path(_GRAPHIFY_OUT)
     base = _out if _out.is_absolute() else Path(root).resolve() / _out
+    require_ordinary_output(base)
     pruned = 0
     for kind in ("semantic", "semantic-deep"):
         semantic_dir = base / "cache" / kind
         if not semantic_dir.is_dir():
             continue
-        for entry in semantic_dir.glob("*.json"):
-            if entry.stem in live_hashes:
-                continue
-            try:
-                entry.unlink()
-                pruned += 1
-            except OSError:
-                pass
+        try:
+            require_ordinary_output(semantic_dir)
+            for entry in semantic_dir.glob("*.json"):
+                if entry.stem in live_hashes:
+                    continue
+                try:
+                    ordinary_unlink(entry)
+                    pruned += 1
+                except OSError as exc:
+                    warnings.warn(f"Skipping semantic cache entry {entry}: {exc}", stacklevel=2)
+        except ManagedWorkspaceOutputError as exc:
+            warnings.warn(f"Skipping semantic cache namespace {semantic_dir}: {exc}", stacklevel=2)
     return pruned
 
 

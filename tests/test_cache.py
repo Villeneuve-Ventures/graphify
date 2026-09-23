@@ -1,4 +1,6 @@
 """Tests for graphify/cache.py."""
+import os
+
 import pytest
 from pathlib import Path
 from graphify.cache import file_hash, cache_dir, load_cached, save_cached, cached_files, clear_cache, _body_content
@@ -340,10 +342,15 @@ def test_ast_cache_version_bump_cleans_stale_entries(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cache_mod, "_EXTRACTOR_VERSION", "0.8.1", raising=False)
     monkeypatch.setattr(cache_mod, "_cleaned_ast_dirs", set(), raising=False)
-    cache_dir(tmp_path, "ast")
-    assert not old_dir.exists(), (
-        "stale AST version directory must be removed on upgrade"
-    )
+    if os.name == "nt":
+        with pytest.warns(UserWarning, match="safe recursive cache cleanup is unavailable"):
+            cache_dir(tmp_path, "ast")
+        assert old_dir.exists(), "retain stale trees without descriptor-relative deletion"
+    else:
+        cache_dir(tmp_path, "ast")
+        assert not old_dir.exists(), (
+            "stale AST version directory must be removed on upgrade"
+        )
 
 
 def test_legacy_unversioned_ast_entries_not_served(tmp_path):

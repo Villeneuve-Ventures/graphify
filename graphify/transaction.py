@@ -28,6 +28,7 @@ from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence
 import networkx as nx
 
 from graphify.paths import GRAPHIFY_OUT
+from graphify.storage_guard import ManagedWorkspaceOutputError, require_ordinary_output
 
 if os.name != "nt":
     import fcntl
@@ -525,6 +526,10 @@ def _create_output_chain(
     failpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Create a missing output chain from one pinned existing ancestor."""
+    try:
+        require_ordinary_output(path)
+    except ManagedWorkspaceOutputError as exc:
+        raise ManagedAuthorityError(str(exc)) from exc
     absolute = path.expanduser().absolute()
     ancestor = absolute
     missing: list[str] = []
@@ -644,6 +649,11 @@ def pin_output(
     handle-relative on a native runner.
     """
     path = Path(output)
+    if mutation or create:
+        try:
+            require_ordinary_output(path)
+        except ManagedWorkspaceOutputError as exc:
+            raise ManagedAuthorityError(str(exc)) from exc
     if _PLATFORM == "windows" and mutation:
         raise PendingTransactionError(
             "Windows non-retargetable final mutation is not proven on this runtime"
@@ -669,6 +679,12 @@ def pin_output(
     capability = OutputCapability(
         path.resolve(strict=True), OutputIdentity(info.st_dev, info.st_ino), fd
     )
+    if mutation or create:
+        try:
+            require_ordinary_output(capability.path)
+        except ManagedWorkspaceOutputError as exc:
+            capability.close()
+            raise ManagedAuthorityError(str(exc)) from exc
     capability.validate()
     return capability
 
@@ -4307,6 +4323,10 @@ def begin_transaction(
 ) -> Transaction:
     root_path = _canonical_directory(Path(root))
     output_path = Path(output).expanduser().absolute()
+    try:
+        require_ordinary_output(output_path)
+    except ManagedWorkspaceOutputError as exc:
+        raise ManagedAuthorityError(str(exc)) from exc
     _materialize_absent_snapshot_output(
         output_path,
         expected_snapshot,
