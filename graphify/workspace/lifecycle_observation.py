@@ -31,6 +31,8 @@ class SourceObservation:
     def __post_init__(self):
         if type(self.structural) is not StructuralObservation:
             raise ObservationError("validated S2 source observation required")
+        if self.structural.stable_inventory_passes != 2:
+            raise ObservationError("S3 observation requires exactly two agreeing passes")
         digest(self.policy_sha256)
         if len(self.source_commit) != 40 or any(ch not in "0123456789abcdef" for ch in self.source_commit):
             raise ObservationError("canonical source commit required")

@@ -1681,6 +1681,8 @@ class LeaseStore:
         registry snapshot. The live workspace lease prevents activation or a
         successor fence from committing. Callers that mutate global state such
         as capacity reservations opt into the short ``registry_required`` path.
+        ACTIVATE always retains the registry lock because its recovery barrier
+        may repair root-level capacity records.
         """
 
         self._require_grant_owner(grant)
@@ -1729,7 +1731,7 @@ class LeaseStore:
                 return self.workspace_lock(repo_uuid)
             return self.workspace_lock(repo_uuid, deadline_ns=deadline_ns)
 
-        if registry_required:
+        if registry_required or grant.lease.to_dict()["operation"] == "ACTIVATE":
             with recovered_snapshot() as document:
                 with operation_lock():
                     yield checked_operation(document)
