@@ -347,6 +347,8 @@ def test_windows_locked_replace_never_falls_back_to_path_copy(tmp_path, monkeypa
             raise PermissionError("locked destination")
 
     monkeypatch.setattr(guard, "os", WindowsOS())
+    # This test isolates replace failure; the handle-bound unlink has its own tests.
+    monkeypatch.setattr(guard, "ordinary_unlink", lambda path: Path(path).unlink())
     monkeypatch.setattr(
         shutil, "copy2",
         lambda *_args, **_kwargs: pytest.fail("unsafe path-based copy fallback"),

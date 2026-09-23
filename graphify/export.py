@@ -47,8 +47,12 @@ def backup_if_protected(out_dir: Path) -> "Path | None":
       (graph has been curated by a human or skill).
 
     Returns the backup folder path, or None if no backup was taken.
-    Never raises — backup failure prints a warning but never blocks the write.
-    Set GRAPHIFY_NO_BACKUP=1 to disable.
+    Output admission errors and failures reading files for the existing-backup
+    hash comparison propagate to the caller. Unreadable or invalid labels are
+    ignored when deciding whether a backup is needed.
+    After preflight, backup creation is best effort: individual copy failures
+    are skipped, and other backup failures print a warning and return None.
+    Set GRAPHIFY_NO_BACKUP=1 to skip backups; output admission still applies.
     """
     require_ordinary_output(out_dir)
     if os.environ.get("GRAPHIFY_NO_BACKUP"):

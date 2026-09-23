@@ -463,13 +463,111 @@ def ordinary_replace(source: str | os.PathLike[str], destination: str | os.PathL
             os.replace(src.name, dst.name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
 
 
+def _windows_unlink(path: Path) -> None:
+    """Delete the opened entry only while its physical ancestry stays admitted."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    class FileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    create.restype = wintypes.HANDLE
+    get_info = kernel.GetFileInformationByHandle
+    get_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(FileInformation))
+    get_info.restype = wintypes.BOOL
+    final_path = kernel.GetFinalPathNameByHandleW
+    final_path.argtypes = (wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD)
+    final_path.restype = wintypes.DWORD
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+
+    def open_handle(name: Path, access: int) -> int:
+        handle = create(
+            str(name), access, 0x3, None, 3,  # share read/write, OPEN_EXISTING
+            0x02000000 | 0x00200000, None,  # BACKUP_SEMANTICS, OPEN_REPARSE_POINT
+        )
+        if handle == ctypes.c_void_p(-1).value:
+            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+        return handle
+
+    def information(handle: int) -> FileInformation:
+        info = FileInformation()
+        if not get_info(handle, ctypes.byref(info)):
+            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+        return info
+
+    def physical_path(handle: int) -> Path:
+        size = 260
+        while size <= 32768:
+            buffer = ctypes.create_unicode_buffer(size)
+            length = final_path(handle, buffer, size, 0)  # normalized DOS path
+            if length == 0:
+                raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+            if length < size:
+                result = Path(buffer.value)
+                if not result.is_absolute():
+                    break
+                return result
+            size = length + 1
+        raise ManagedWorkspaceOutputError("ordinary output handle has no usable path")
+
+    def same_path(left: Path, right: Path) -> bool:
+        return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+    require_ordinary_output(path.parent)
+    held: list[int] = []
+    try:
+        target_handle = open_handle(path, 0x10000 | 0x80)  # DELETE | FILE_READ_ATTRIBUTES
+        held.append(target_handle)
+        target_info = information(target_handle)
+        if target_info.dwFileAttributes & 0x10 or target_info.nNumberOfLinks != 1:
+            raise ManagedWorkspaceOutputError("ordinary unlink requires a singular non-directory entry")
+        opened_path = physical_path(target_handle)
+        parent = opened_path.parent
+        # A pathname check alone can race a junction replacement. Holding every
+        # physical ancestor without FILE_SHARE_DELETE pins their names until close.
+        for directory in (*reversed(parent.parents), parent):
+            directory_handle = open_handle(directory, 0x80)  # FILE_READ_ATTRIBUTES
+            held.append(directory_handle)
+            directory_info = information(directory_handle)
+            if not directory_info.dwFileAttributes & 0x10 or directory_info.dwFileAttributes & 0x400:
+                raise ManagedWorkspaceOutputError("ordinary unlink ancestry is unsafe")
+            if not same_path(physical_path(directory_handle), directory):
+                raise ManagedWorkspaceOutputError("ordinary unlink ancestry changed")
+        require_ordinary_output(parent)
+        if not same_path(physical_path(target_handle), opened_path):
+            raise ManagedWorkspaceOutputError("ordinary unlink binding changed")
+        _delete_opened_windows_handle(target_handle)
+    finally:
+        for handle in reversed(held):
+            close(handle)
+
+
 def ordinary_unlink(path: str | os.PathLike[str]) -> None:
     """Remove one file through an inspected parent; never follow its final link."""
 
     target = Path(path).expanduser().absolute()
     if os.name == "nt":
-        require_ordinary_output(target)
-        target.unlink()
+        _windows_unlink(target)
         return
     with ordinary_directory(target.parent) as (parent, parent_fd):
         _require_directory_binding(parent, parent_fd)
@@ -485,17 +583,19 @@ def ordinary_atomic_bytes(path: str | os.PathLike[str], payload: bytes) -> None:
 
         require_ordinary_output(target)
         ordinary_mkdir(target.parent)
-        with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
-            temp = Path(stream.name)
-            stream.write(payload)
+        temp = None
         try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
+                temp = Path(stream.name)
+                stream.write(payload)
             ordinary_replace(temp, target)
         finally:
-            try:
-                ordinary_unlink(temp)
-            except FileNotFoundError:
-                # Replacement may already have consumed the temporary name.
-                pass
+            if temp is not None:
+                try:
+                    ordinary_unlink(temp)
+                except FileNotFoundError:
+                    # Replacement may already have consumed the temporary name.
+                    pass
         return
     with ordinary_directory(target.parent, create=True) as (parent, parent_fd):
         temporary = f".{target.name}.tmp-{uuid.uuid4().hex}"
