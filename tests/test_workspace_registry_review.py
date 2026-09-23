@@ -247,3 +247,74 @@ def test_oversized_registry_candidates_are_never_read(registry_sources, monkeypa
             with pytest.raises(StateCorrupt):
                 store._load_locked(recover=recover)
     assert target_reads == []
+
+
+def test_resolution_rejects_activation_during_discovery(registry_sources, monkeypatch):
+    from graphify.workspace import registry
+    from graphify.workspace.identity import SourceAmbiguousError
+
+    store, (first, second, _) = registry_sources
+    store.adopt(second, authorization("ADOPT"))
+    original = registry.discover_source
+
+    def discover_and_activate(path):
+        source = original(path)
+        activate(store, second, RecordingLeases(store))
+        return source
+
+    monkeypatch.setattr(registry, "discover_source", discover_and_activate)
+    with pytest.raises(SourceAmbiguousError, match="changed"):
+        store.resolve_active_source(first.repo_uuid)
+    assert store.load().to_dict()["workspaces"][0]["active_source"] == second.registry_source
+
+
+def test_rebound_replacement_at_same_path_can_activate(registry_sources):
+    import shutil
+
+    store, (first, _, _) = registry_sources
+    moved = first.root.with_name("original-first")
+    first.root.rename(moved)
+    shutil.copytree(moved, first.root)
+    replacement = discover_source(first.root)
+    store.rebind(replacement, authorization("REBIND"))
+    leases = RecordingLeases(store)
+    result = activate(store, replacement, leases)
+    assert result.registry.to_dict()["workspaces"][0]["active_source_revision"] == 2
+    assert store.resolve_active_source(first.repo_uuid) == replacement
+    assert len(leases.acquired) == len(leases.released) == 1
+    with pytest.raises(SourceAlreadyActive):
+        activate(store, replacement, leases)
+    assert len(leases.acquired) == 1
+
+
+@pytest.mark.parametrize("name", ["workspace.json", "workspace.previous.json", "workspace.pending.json"])
+def test_oversized_orphan_workspace_candidates_are_not_read_or_changed(
+    registry_sources, monkeypatch, name,
+):
+    import os
+
+    store, (first, _, _) = registry_sources
+    directory = store.state.root / "workspaces" / first.repo_uuid
+    (directory / "workspace.json").unlink()
+    path = directory / name
+    with path.open("wb") as stream:
+        stream.truncate(1024 * 1024 + 1)
+    path.chmod(0o600)
+    before = {item.name: item.read_bytes() for item in directory.iterdir()}
+    target = path.stat()
+    original = os.read
+    reads = []
+
+    def read(descriptor, size):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == (target.st_dev, target.st_ino):
+            reads.append(size)
+            raise AssertionError("oversized workspace state reached byte read")
+        return original(descriptor, size)
+
+    monkeypatch.setattr(os, "read", read)
+    with store.exclusive_lock():
+        with pytest.raises(StateCorrupt):
+            store._initialize_workspace_state_locked(first.repo_uuid)
+    assert reads == []
+    assert {item.name: item.read_bytes() for item in directory.iterdir()} == before

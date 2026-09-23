@@ -47,6 +47,7 @@ if TYPE_CHECKING:
 
 
 REGISTRY_MAX_BYTES = 16 * 1024 * 1024
+WORKSPACE_STATE_MAX_BYTES = 1024 * 1024
 IDENTITY_EVIDENCE_MAX_RECORDS = 4096
 
 
@@ -677,6 +678,7 @@ class RegistryStore:
                     decoder=WorkspaceLeaseState.from_json,
                     revision=lambda state: state.revision,
                     allow_missing=True,
+                    max_bytes=WORKSPACE_STATE_MAX_BYTES,
                 ),
             )
             if recovered is None:
@@ -962,7 +964,14 @@ class RegistryStore:
                     f"{expected_active_source_revision}, found {actual_active_revision}"
                 )
             if source.registry_source == entry["active_source"]:
-                raise SourceAlreadyActive("activation target is already selected")
+                active_identity = self.read_evidence(
+                    entry["active_source_evidence"]["rebind_evidence_sha256"]
+                )
+                if (
+                    active_identity["git_common_device"] == source.git_common_device
+                    and active_identity["git_common_inode"] == source.git_common_inode
+                ):
+                    raise SourceAlreadyActive("activation target is already selected")
             grant = leases._acquire_under_registry_lock(
                 current,
                 source.repo_uuid,
@@ -1033,7 +1042,10 @@ class RegistryStore:
             raise SourceAmbiguousError(
                 "selected active source does not match active Git directory identity"
             )
-        return source
+        with self.read_only_snapshot() as current:
+            if current.canonical != document.canonical:
+                raise SourceAmbiguousError("registry changed during active source discovery")
+            return source
 
 
 __all__ = [

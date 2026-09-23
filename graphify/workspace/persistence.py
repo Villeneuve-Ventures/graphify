@@ -1986,7 +1986,11 @@ class DurableStateRoot:
         else:
             self._sync_existing_immutable(path, data, conflict_kind="content-addressed")
             return path
-        self._atomic_replace(path, data)
+        try:
+            self._atomic_replace(path, data, exclusive=True)
+        except FileExistsError:
+            self._sync_existing_immutable(path, data, conflict_kind="content-addressed")
+            return path
         if self._read_regular(path) != data:
             raise StateCorrupt(f"content-addressed state verification failed at {path}")
         return path
@@ -2027,8 +2031,17 @@ class DurableStateRoot:
                 path,
                 data,
                 after_replace=replaced,
+                exclusive=True,
                 deadline_ns=deadline_ns,
             )
+        except FileExistsError:
+            if visible:
+                raise CommitUnknown(f"{label} became visible before durability acknowledgement")
+            self._sync_existing_immutable(
+                path, data, conflict_kind="immutable", label=label,
+                deadline_ns=deadline_ns,
+            )
+            return path
         except BaseException as exc:
             if visible:
                 raise CommitUnknown(
@@ -2047,7 +2060,11 @@ class DurableStateRoot:
         label: str,
         deadline_ns: int | None = None,
     ) -> Path:
-        """Create one exact private file without a temporary or parent creation."""
+        """Exclusively create a private file, rolling back definite write failures.
+
+        A post-file-sync failure retains complete bytes and raises CommitUnknown;
+        callers can reconcile those bytes with install_once_bytes before retrying.
+        """
 
         require_before_deadline(deadline_ns, "private file creation exceeded its deadline")
         path = self.path(relative)
@@ -2061,18 +2078,51 @@ class DurableStateRoot:
                 0o600,
                 dir_fd=parent_descriptor,
             )
+            durable = False
             try:
                 os.fchmod(descriptor, 0o600)
                 self.fault_hook(f"{label}:created")
                 self._write_all(descriptor, data)
                 self.fault_hook(f"{label}:written")
                 self.syscalls.fsync(descriptor)
+                durable = True
+                identity = self._stat_identity(os.fstat(descriptor))
                 self.fault_hook(f"{label}:durable")
+                self.syscalls.fsync(parent_descriptor)
+                self.fault_hook(f"{label}:parent_durable")
+                self.fault_hook(f"{label}:installed")
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, path.parent,
+                )
+                bound = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+                if (self._stat_identity(bound) != identity
+                        or self._stat_identity(os.fstat(descriptor)) != identity):
+                    raise StateCorrupt(f"private state changed while installing: {path}")
+            except BaseException as exc:
+                if durable:
+                    raise CommitUnknown(
+                        f"{label} became visible before durability acknowledgement"
+                    ) from exc
+                try:
+                    owned = os.fstat(descriptor)
+                    try:
+                        bound = os.stat(
+                            path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if (owned.st_dev, owned.st_ino) != (bound.st_dev, bound.st_ino):
+                            raise StatePathError(f"private state changed before rollback: {path}")
+                        self.syscalls.unlink_at(path.name, dir_fd=parent_descriptor)
+                    if os.fstat(descriptor).st_nlink != 0:
+                        raise StatePathError(f"private state remains linked after rollback: {path}")
+                    self.syscalls.fsync(parent_descriptor)
+                except BaseException as cleanup_error:
+                    raise CommitUnknown(f"{label} creation rollback is uncertain") from cleanup_error
+                raise
             finally:
                 os.close(descriptor)
-            self.syscalls.fsync(parent_descriptor)
-            self.fault_hook(f"{label}:parent_durable")
-            self.fault_hook(f"{label}:installed")
         return path
 
     def atomic_replace_bytes(
@@ -2334,6 +2384,7 @@ class DurableStateRoot:
                         if destination_parent_relative != source_parent_relative:
                             self.syscalls.fsync(destination_parent)
                         self.fault_hook(f"{label}:destination_parent_durable")
+                        require_visible_binding()
                     except BaseException as exc:
                         if visible:
                             if recover_commit_unknown:
@@ -3628,6 +3679,7 @@ class DurableStateRoot:
         data: bytes,
         *,
         after_replace: Callable[[], None] | None = None,
+        exclusive: bool = False,
         deadline_ns: int | None = None,
     ) -> None:
         require_before_deadline(
@@ -3636,12 +3688,13 @@ class DurableStateRoot:
         )
         self._ensure_root()
         self._ensure_parent(destination)
-        if deadline_ns is None:
+        # Exclusive creators do not hold the writer lock needed to sweep temps.
+        if not exclusive and deadline_ns is None:
             self.cleanup_atomic_temps(
                 destination.parent.relative_to(self.root),
                 destination_name=destination.name,
             )
-        else:
+        elif not exclusive:
             self.cleanup_atomic_temps(
                 destination.parent.relative_to(self.root),
                 destination_name=destination.name,
@@ -3690,7 +3743,12 @@ class DurableStateRoot:
                     deadline_ns,
                     "atomic state replacement exceeded its deadline",
                 )
-                self.syscalls.replace_at(
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, destination.parent,
+                )
+                publish = (self.syscalls.rename_exclusive_at if exclusive
+                           else self.syscalls.replace_at)
+                publish(
                     temporary_name,
                     destination.name,
                     source_dir_fd=parent_descriptor,
@@ -3710,8 +3768,14 @@ class DurableStateRoot:
                     raise StateCorrupt(
                         f"installed state cannot be opened safely: {destination}: {exc}"
                     ) from exc
-                if self._read_regular_descriptor(installed_descriptor, destination) != data:
+                if self._read_regular_descriptor(
+                    installed_descriptor, destination,
+                    stable_parent_descriptor=parent_descriptor, stable_name=destination.name,
+                ) != data:
                     raise StateCorrupt(f"installed state verification failed at {destination}")
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, destination.parent,
+                )
             finally:
                 if not replaced:
                     try:

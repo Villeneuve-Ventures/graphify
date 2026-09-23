@@ -28,13 +28,15 @@ def _private_tree(tmp_path):
 
 def _simulate_device(monkeypatch, directory, enabled=lambda: True):
     """Present a mount's consistent stat/fstat identity without mounting a volume."""
-    identity = directory.stat()
+    identities = {
+        (details.st_dev, details.st_ino)
+        for path in (directory, *directory.rglob("*"))
+        for details in (path.lstat(),)
+    }
     real_stat, real_fstat, real_lstat = os.stat, os.fstat, os.lstat
 
     def changed(details):
-        if enabled() and (details.st_dev, details.st_ino) == (
-            identity.st_dev, identity.st_ino,
-        ):
+        if enabled() and (details.st_dev, details.st_ino) in identities:
             fields = {name: getattr(details, name) for name in dir(details)
                       if name.startswith("st_")}
             fields["st_dev"] += 1
@@ -50,6 +52,23 @@ def _snapshot(path):
     details = path.stat()
     return (path.read_bytes(), details.st_ino, details.st_mode,
             details.st_nlink, details.st_size, details.st_mtime_ns, details.st_ctime_ns)
+
+
+def test_simulated_mount_keeps_descendants_on_one_device(tmp_path, monkeypatch):
+    state, protected = _private_tree(tmp_path)
+    mounted = state.root / "quarantine"
+    original_device = mounted.stat().st_dev
+    _simulate_device(monkeypatch, mounted)
+    for path in (mounted, *mounted.rglob("*")):
+        assert path.stat().st_dev == original_device + 1
+        assert path.lstat().st_dev == original_device + 1
+        descriptor = os.open(path, os.O_RDONLY)
+        try:
+            assert os.fstat(descriptor).st_dev == original_device + 1
+        finally:
+            os.close(descriptor)
+    assert state.root.stat().st_dev == original_device
+    assert protected.read_bytes() == b"protected volume data"
 
 
 @pytest.mark.parametrize("relative", ["quarantine", "quarantine/nested/volume"])
@@ -99,7 +118,7 @@ def test_state_root_may_be_a_mount_point(tmp_path, monkeypatch):
     state, protected = _private_tree(tmp_path)
     # The parent's device may differ from the state root. Descendant authority
     # starts at the root, not its containing filesystem (e.g. an APFS volume).
-    _simulate_device(monkeypatch, state.root.parent)
+    _simulate_device(monkeypatch, state.root)
     assert state.tree_bytes(
         "quarantine", allowed_directory_modes=DIRECTORY_MODES, allowed_file_modes=FILE_MODES,
     ) == len(protected.read_bytes())
