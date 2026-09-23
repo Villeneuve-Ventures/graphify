@@ -13,7 +13,7 @@ import pytest
 pytest.importorskip("pr_agent", reason="requires the workflow's pinned PR-Agent runtime")
 import importlib
 
-add_pr_review_identity = importlib.import_module("pr_agent.algo.utils").add_pr_review_identity
+add_pr_review_identity = importlib.import_module("pr_agent.algo.comment_identity").add_pr_review_identity
 get_settings = importlib.import_module("pr_agent.config_loader").get_settings
 GithubProvider = importlib.import_module("pr_agent.git_providers.github_provider").GithubProvider
 pr_reviewer = importlib.import_module("pr_agent.tools.pr_reviewer")
@@ -266,27 +266,17 @@ def test_actual_litellm_handler_sends_high_reasoning_without_temperature(monkeyp
     assert captured[0]["reasoning_effort"] == "high"
     assert "temperature" not in captured[0]
     assert algo.MAX_TOKENS["gemini/gemini-3.8-flash"] == 1048576
-    assert importlib.import_module("pr_agent.algo.utils").get_max_tokens(model) == 262144
+    assert importlib.import_module("pr_agent.algo.token_budget").get_max_tokens(model) == 262144
 
 
-@pytest.mark.parametrize("year,factor", [(2026, 1), (2027, 2)])
-def test_missing_model_registration_uses_official_price_boundary(monkeypatch, year, factor):
-    import datetime
+def test_pinned_runtime_supplies_model_metadata_without_workflow_shims():
+    algo = importlib.import_module("pr_agent.algo")
     litellm = importlib.import_module("litellm")
-    captured = []
-    class Clock(datetime.datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(year, 1, 1, tzinfo=tz)
-    monkeypatch.setattr(datetime, "datetime", Clock)
-    monkeypatch.setattr(litellm, "model_cost", {})
-    monkeypatch.setattr(litellm, "register_model", lambda entry: captured.append(entry))
-    prefix = _embedded_python().split("def _valid_int", 1)[0]
-    exec(compile(prefix, "<workflow-model-adapter>", "exec"), {})
-    metadata = captured[0]["gemini/gemini-3.8-flash"]
-    assert metadata["input_cost_per_token"] == 0.75e-6 * factor
-    assert metadata["output_cost_per_token"] == 3.75e-6 * factor
-    assert metadata["cache_read_input_token_cost"] == 0.075e-6 * factor
-    monkeypatch.setattr(litellm, "model_cost", {"gemini/gemini-3.8-flash": {"future": "metadata"}})
-    exec(compile(prefix, "<workflow-model-adapter>", "exec"), {})
-    assert len(captured) == 1  # Never replace upstream's known metadata.
+    metadata = litellm.model_cost["gemini/gemini-3.8-flash"]
+    assert algo.MAX_TOKENS["gemini/gemini-3.8-flash"] == 1048576
+    assert metadata["max_input_tokens"] == 1048576
+    assert metadata["supports_reasoning"] is True
+    assert metadata["input_cost_per_token"] == 0.75e-6
+    assert metadata["output_cost_per_token"] == 3.75e-6
+    assert metadata["cache_read_input_token_cost"] == 0.075e-6
+    assert "register_model" not in _embedded_python()
