@@ -944,9 +944,15 @@ class RegistryStore:
             raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
         if source.repo_uuid != repo_uuid or source.registry_source != recorded:
             raise SourceAmbiguousError("selected active source no longer matches registry evidence")
-        if not self._has_enrollment_continuity(entry, source):
+        evidence = self.read_evidence(
+            entry["active_source_evidence"]["rebind_evidence_sha256"]
+        )
+        if (
+            evidence["git_common_device"] != source.git_common_device
+            or evidence["git_common_inode"] != source.git_common_inode
+        ):
             raise SourceAmbiguousError(
-                "selected active source does not match enrollment identity"
+                "selected active source does not match active Git directory identity"
             )
         return source
 

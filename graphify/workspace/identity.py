@@ -22,6 +22,9 @@ from graphify.workspace.lifecycle_contracts import (
 )
 
 
+WORKSPACE_CONFIG_MAX_BYTES = 1024 * 1024
+
+
 _RFC3339_UTC = re.compile(
     r"^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
     r"T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?Z$"
@@ -413,6 +416,12 @@ def _read_workspace_config(
     deadline_ns: int | None = None,
     max_bytes: int | None = None,
 ) -> tuple[WorkspaceConfig, bytes]:
+    if max_bytes is None:
+        max_bytes = WORKSPACE_CONFIG_MAX_BYTES
+    elif isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    else:
+        max_bytes = min(max_bytes, WORKSPACE_CONFIG_MAX_BYTES)
     config_bytes = _read_source_regular(
         root,
         Path(".graphify") / "workspace.toml",
@@ -555,6 +564,7 @@ def discover_source(
     _check_deadline(deadline_ns)
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    root_identity = source_root_identity(root, deadline_ns=deadline_ns)
     top_level = Path(
         _git(root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns)
     ).resolve(strict=True)
@@ -634,6 +644,21 @@ def discover_source(
     )
     if not roots:
         raise SourceDiscoveryError("source history has no root commit")
+    _config, verified_config_bytes = _read_workspace_config(
+        root, deadline_ns=deadline_ns, max_bytes=max_bytes,
+    )
+    if verified_config_bytes != config_bytes:
+        raise SourceDiscoveryError("workspace config changed during source discovery")
+    verify_source_checkout(
+        root,
+        expected_git_common_dir=git_common_dir,
+        expected_worktree_id=worktree_id,
+        expected_git_common_device=details.st_dev,
+        expected_git_common_inode=details.st_ino,
+        expected_root_identity=root_identity,
+        expected_head_commit=head,
+        deadline_ns=deadline_ns,
+    )
     return SourceIdentity(
         root=root,
         repo_uuid=repo_uuid,

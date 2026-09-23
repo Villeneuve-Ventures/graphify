@@ -5,6 +5,7 @@ import hashlib
 import pytest
 
 from graphify.source_io import SourceIO
+from graphify.workspace import lifecycle_contracts
 from graphify.workspace.contracts import CompletionBinding, InputManifest
 from graphify.workspace.lifecycle_contracts import (
     ContractError, GenerationReceipt, PointerSet, PriorPointerRecord,
@@ -12,6 +13,26 @@ from graphify.workspace.lifecycle_contracts import (
 )
 
 REPO_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
+
+@pytest.mark.parametrize("model,contract", [
+    ("FreshnessRelease", "freshness_release"),
+    ("ArtifactManifest", "artifact_manifest"),
+    ("CompatibilityManifest", "compatibility_manifest"),
+    ("InstallerTransaction", "installer_transaction"),
+    ("CompensationPlan", "compensation_plan"),
+    ("OfflineRollback", "offline_rollback"),
+])
+def test_lifecycle_does_not_expose_deferred_donor_contracts(model, contract):
+    with pytest.raises(ContractError, match="unknown contract"):
+        lifecycle_contracts.parse_contract({
+            "contract": f"graphify.workspace.{contract}", "schema_version": 2,
+        })
+    assert not hasattr(lifecycle_contracts, model)
+
+
+def test_every_exposed_lifecycle_model_has_a_validator():
+    assert set(lifecycle_contracts._MODEL_BY_CONTRACT) == set(lifecycle_contracts._VALIDATORS)
 
 
 def _receipt(root):

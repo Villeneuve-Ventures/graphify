@@ -7,6 +7,7 @@ import traceback
 import pytest
 
 from graphify.workspace.identity import SourceDiscoveryError, discover_source
+from graphify.workspace.persistence import RuntimeCapabilities
 
 
 def _git(root, *args):
@@ -122,3 +123,136 @@ headless_backends = []
     assert len(partial.registry_source["remote_aliases"]) == 1
     assert (root / ".git").is_dir()
     assert not (tmp_path / "outside.git").exists()
+
+
+@pytest.mark.parametrize("replacement", ["root", "git", "config"])
+def test_discovery_rejects_identity_changes_between_git_commands(
+    source_repository, monkeypatch, replacement,
+):
+    from graphify.workspace import identity
+    import shutil
+
+    root = source_repository
+    _git(root, "remote", "add", "origin", "https://example.test/owner/repo.git")
+    original_git = identity._git
+    changed = False
+
+    def changing_git(path, *arguments, **kwargs):
+        nonlocal changed
+        result = original_git(path, *arguments, **kwargs)
+        trigger = ("rev-parse", "--git-common-dir") if replacement == "root" else (
+            "rev-list", "--max-parents=0",
+        )
+        if not changed and arguments[:len(trigger)] == trigger:
+            changed = True
+            if replacement == "root":
+                moved = root.with_name("original")
+                root.rename(moved)
+                shutil.copytree(moved, root)
+            elif replacement == "git":
+                moved = root / "original.git"
+                (root / ".git").rename(moved)
+                shutil.copytree(moved, root / ".git")
+            else:
+                config = root / ".graphify/workspace.toml"
+                config.write_bytes(config.read_bytes() + b"\n# changed\n")
+        return result
+
+    monkeypatch.setattr(identity, "_git", changing_git)
+    with pytest.raises(SourceDiscoveryError, match="changed"):
+        discover_source(root)
+    assert changed
+
+
+def test_discovery_config_read_has_fixed_limit(source_repository, monkeypatch):
+    from graphify.workspace import identity
+
+    _git(source_repository, "remote", "add", "origin", "https://example.test/owner/repo.git")
+    config = source_repository / ".graphify/workspace.toml"
+    with config.open("ab") as stream:
+        stream.truncate(1024 * 1024 + 1)
+    reads = []
+    original_read = identity.os.read
+
+    def record_read(descriptor, size):
+        if os.fstat(descriptor).st_ino == config.stat().st_ino:
+            reads.append(size)
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(identity.os, "read", record_read)
+    with pytest.raises(SourceDiscoveryError, match="byte limit"):
+        discover_source(source_repository)
+    assert not reads
+
+
+def test_active_resolution_rejects_replaced_clone(source_repository, tmp_path):
+    import shutil
+    from graphify.workspace.identity import (
+        IdentityAction, OperatorAuthorization, SourceAmbiguousError,
+    )
+    from graphify.workspace.registry import RegistryStore
+
+    root = source_repository
+    _git(root, "remote", "add", "origin", "https://example.test/owner/repo.git")
+    source = discover_source(root)
+    store = RegistryStore(
+        tmp_path.resolve() / "state",
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+    )
+    store.enroll(source, OperatorAuthorization(
+        IdentityAction.ENROLL, "fixture", "test enrollment", "2026-09-23T00:00:00Z", "enroll",
+    ))
+    assert store.resolve_active_source(source.repo_uuid) == source
+    moved = root.with_name("original")
+    root.rename(moved)
+    shutil.copytree(moved, root)
+    replacement = discover_source(root)
+    assert replacement.registry_source == source.registry_source
+    assert replacement.history_roots == source.history_roots
+    with pytest.raises(SourceAmbiguousError, match="identity"):
+        store.resolve_active_source(source.repo_uuid)
+    # Authorized rebind still permits shared history; selection remains explicit.
+    store.rebind(replacement, OperatorAuthorization(
+        IdentityAction.REBIND, "fixture", "test rebind", "2026-09-23T00:00:00Z", "rebind",
+    ))
+    with pytest.raises(SourceAmbiguousError, match="identity"):
+        store.resolve_active_source(source.repo_uuid)
+
+
+@pytest.mark.parametrize("limit", [None, 2 * 1024 * 1024, 32])
+@pytest.mark.parametrize("reader", ["discover_source", "read_workspace_config", "read_workspace_config_with_digest"])
+def test_config_limit_applies_to_all_readers(source_repository, limit, reader):
+    from graphify.workspace import identity
+
+    _git(source_repository, "remote", "add", "origin", "https://example.test/owner/repo.git")
+    config = source_repository / ".graphify/workspace.toml"
+    if limit != 32:
+        with config.open("ab") as stream:
+            stream.truncate(1024 * 1024 + 1)
+    with pytest.raises(SourceDiscoveryError, match="byte limit"):
+        getattr(identity, reader)(source_repository, max_bytes=limit)
+
+
+def test_authorized_adoption_preserves_active_source(source_repository, tmp_path):
+    import shutil
+    from graphify.workspace.identity import IdentityAction, OperatorAuthorization
+    from graphify.workspace.registry import RegistryStore
+
+    root = source_repository
+    _git(root, "remote", "add", "origin", "https://example.test/owner/repo.git")
+    source = discover_source(root)
+    store = RegistryStore(
+        tmp_path.resolve() / "state",
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+    )
+    store.enroll(source, OperatorAuthorization(
+        IdentityAction.ENROLL, "fixture", "test enrollment", "2026-09-23T00:00:00Z", "enroll",
+    ))
+    clone = root.with_name("clone")
+    shutil.copytree(root, clone)
+    adopted = discover_source(clone)
+    document = store.adopt(adopted, OperatorAuthorization(
+        IdentityAction.ADOPT, "fixture", "test adoption", "2026-09-23T00:00:00Z", "adopt",
+    ))
+    assert adopted.registry_source in document.to_dict()["workspaces"][0]["aliases"]
+    assert store.resolve_active_source(source.repo_uuid) == source

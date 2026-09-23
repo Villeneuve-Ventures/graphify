@@ -1903,6 +1903,68 @@ class DurableStateRoot:
         finally:
             os.close(current_descriptor)
 
+    def _sync_existing_immutable(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        conflict_kind: str,
+        label: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> None:
+        """Acknowledge matching bytes only after syncing their retained inode."""
+
+        parent_relative = path.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            try:
+                descriptor = os.open(
+                    path.name, self._regular_open_flags(), dir_fd=parent_descriptor,
+                )
+            except OSError as exc:
+                raise StateCorrupt(
+                    f"state record cannot be opened safely: {path}: {exc}"
+                ) from exc
+            try:
+                identity = self._stat_identity(os.fstat(descriptor))
+                if self._read_regular_descriptor(
+                    os.dup(descriptor),
+                    path,
+                    deadline_ns=deadline_ns,
+                    stable_parent_descriptor=parent_descriptor,
+                    stable_name=path.name,
+                ) != data:
+                    raise StateCorrupt(f"{conflict_kind} state conflicts at {path}")
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, path.parent,
+                )
+                try:
+                    self.syscalls.fsync(descriptor)
+                    self.syscalls.fsync(parent_descriptor)
+                except BaseException as exc:
+                    if label is not None:
+                        raise CommitUnknown(
+                            f"{label} is visible before durability acknowledgement"
+                        ) from exc
+                    raise
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, path.parent,
+                )
+                try:
+                    bound = os.stat(
+                        path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"immutable state path changed while syncing: {path}"
+                    ) from exc
+                if (
+                    self._stat_identity(os.fstat(descriptor)) != identity
+                    or self._stat_identity(bound) != identity
+                ):
+                    raise StateCorrupt(f"immutable state changed while syncing: {path}")
+            finally:
+                os.close(descriptor)
+
     def write_once(self, relative: str | Path, data: bytes) -> Path:
         self._ensure_root()
         path = self.path(relative)
@@ -1912,8 +1974,7 @@ class DurableStateRoot:
         except FileNotFoundError:
             pass
         else:
-            if self._read_regular(path) != data:
-                raise StateCorrupt(f"content-addressed state conflicts at {path}")
+            self._sync_existing_immutable(path, data, conflict_kind="content-addressed")
             return path
         self._atomic_replace(path, data)
         if self._read_regular(path) != data:
@@ -1939,8 +2000,10 @@ class DurableStateRoot:
         except FileNotFoundError:
             pass
         else:
-            if self._read_regular(path, deadline_ns=deadline_ns) != data:
-                raise StateCorrupt(f"immutable state conflicts at {path}")
+            self._sync_existing_immutable(
+                path, data, conflict_kind="immutable", label=label,
+                deadline_ns=deadline_ns,
+            )
             return path
         visible = False
 
