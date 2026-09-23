@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from graphify.storage_guard import ordinary_mkdir, ordinary_open, require_ordinary_output
+
 _NODES_RE = re.compile(r"(\d+)\s+nodes?\s+found")
 
 
@@ -55,6 +57,7 @@ def log_query(
         path = _log_path()
         if path is None:
             return
+        require_ordinary_output(path)
         if nodes_returned is None and result is not None:
             nodes_returned = nodes_from_result(result)
         rec: dict[str, Any] = {
@@ -73,8 +76,9 @@ def log_query(
                 rec[k] = v
         if result is not None and _log_responses():
             rec["response"] = result
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as fh:
+        require_ordinary_output(path)
+        ordinary_mkdir(path.parent)
+        with ordinary_open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception:
         pass

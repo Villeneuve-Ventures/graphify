@@ -8,6 +8,7 @@ from graphify.analyze import _node_community_map
 import json
 import networkx as nx
 from graphify.security import sanitize_label
+from graphify.storage_guard import ordinary_open, require_ordinary_output
 
 
 MAX_NODES_FOR_VIZ = 5_000
@@ -343,6 +344,7 @@ def to_html(
     If node_limit is set and the graph exceeds it, automatically builds an
     aggregated community-level meta-graph instead of raising ValueError.
     """
+    require_ordinary_output(output_path)
     limit = node_limit if node_limit is not None else _viz_node_limit()
     if G.number_of_nodes() > limit:
         if node_limit is not None:
@@ -557,4 +559,6 @@ def to_html(
 </body>
 </html>"""
 
-    Path(output_path).write_text(html, encoding="utf-8")  # nosec
+    require_ordinary_output(output_path)
+    with ordinary_open(output_path, "w", encoding="utf-8") as stream:
+        stream.write(html)
