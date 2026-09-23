@@ -652,8 +652,8 @@ class JournalStore:
                 allow_atomic_temps=False,
                 deadline_ns=deadline_ns,
             )
-            if not projection.actions:  # pragma: no cover - segment-count invariant
-                raise JournalCorrupt("journal segment count changed without a recovery action")
+            if not projection.actions:
+                raise JournalConflict("journal advanced during stable read; retry")
             raise JournalRecoveryRequired("journal requires recovery before stable read")
 
         events: list[JournalEvent] = []
