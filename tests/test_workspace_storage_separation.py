@@ -209,3 +209,119 @@ def test_export_rechecks_retargeted_symlink_before_open(tmp_path, monkeypatch, r
     assert _tree(state) == before
 
 
+@pytest.mark.parametrize("operation", ["replace", "unlink", "atomic"])
+def test_ordinary_mutations_accept_symlink_parent(tmp_path, operation):
+    from graphify.storage_guard import ordinary_atomic_bytes, ordinary_replace, ordinary_unlink
+
+    directory = tmp_path / "real"
+    directory.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(directory, target_is_directory=True)
+    target = alias / "note"
+    target.write_bytes(b"old")
+    if operation == "replace":
+        source = alias / "source"
+        source.write_bytes(b"new")
+        ordinary_replace(source, target)
+        assert target.read_bytes() == b"new"
+    elif operation == "atomic":
+        ordinary_atomic_bytes(target, b"new")
+        assert target.read_bytes() == b"new"
+    else:
+        ordinary_unlink(target)
+        assert not target.exists()
+
+
+@pytest.mark.parametrize("error", [13, 28, 30])
+@pytest.mark.parametrize("boundary", ["root", "directory", "file", "mkdir"])
+def test_ordinary_io_errors_preserve_errno(tmp_path, monkeypatch, error, boundary):
+    import os
+    import graphify.storage_guard as guard
+
+    real_open, real_mkdir = os.open, os.mkdir
+    target = tmp_path / "parent" / "note"
+    if boundary != "mkdir":
+        target.parent.mkdir()
+
+    def failing_open(path, flags, *args, **kwargs):
+        if ((boundary == "root" and str(path) == "/")
+                or (boundary == "directory" and path == "parent")
+                or (boundary == "file" and path == "note")):
+            raise OSError(error, "injected")
+        return real_open(path, flags, *args, **kwargs)
+
+    def failing_mkdir(path, *args, **kwargs):
+        if path == "parent":
+            raise OSError(error, "injected")
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", failing_open)
+    monkeypatch.setattr(os, "mkdir", failing_mkdir)
+    with pytest.raises(OSError) as raised:
+        if boundary == "mkdir":
+            guard.ordinary_mkdir(target.parent)
+        else:
+            with guard.ordinary_open(target, "w"):
+                pass
+    assert raised.value.errno == error
+    assert not target.exists()
+
+
+def test_obsidian_pruning_preserves_nested_managed_state(tmp_path):
+    import json
+
+    vault = tmp_path / "vault"
+    managed = vault / "retained"
+    managed.mkdir(parents=True)
+    (managed / WORKSPACE_ROOT_MARKER).write_text("denied")
+    (managed / "stale.md").write_bytes(b"protected")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": ["retained/stale.md"]})
+    )
+    before = _tree(managed)
+    to_obsidian(nx.Graph(), {}, str(vault))
+    assert _tree(managed) == before
+
+
+def test_directory_admission_opens_scale_linearly(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    shallow = tmp_path / "first"
+    deep = shallow.joinpath(*("level" for _ in range(10)))
+    deep.mkdir(parents=True)
+    real_open = guard.os.open
+    calls = 0
+
+    def counted_open(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_open(*args, **kwargs)
+
+    monkeypatch.setattr(guard.os, "open", counted_open)
+    with guard.ordinary_directory(shallow):
+        pass
+    shallow_calls = calls
+    calls = 0
+    with guard.ordinary_directory(deep):
+        pass
+    assert calls - shallow_calls <= 2 * 10
+
+
+def test_directory_creation_rechecks_ancestors_before_mkdir(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    parent = tmp_path / "parent"
+    existing = parent / "existing"
+    existing.mkdir(parents=True)
+    real_open = guard.os.open
+
+    def mark_after_descent(path, flags, *args, **kwargs):
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if path == "existing":
+            (parent / WORKSPACE_ROOT_MARKER).write_text("new ownership")
+        return descriptor
+
+    monkeypatch.setattr(guard.os, "open", mark_after_descent)
+    with pytest.raises(ManagedWorkspaceOutputError):
+        guard.ordinary_mkdir(existing / "new")
+    assert not (existing / "new").exists()

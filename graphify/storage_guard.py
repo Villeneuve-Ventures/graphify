@@ -6,6 +6,7 @@ denial signal, not authority to read or write workspace state.
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import uuid
@@ -98,10 +99,7 @@ def require_ordinary_output(path: str | os.PathLike[str]) -> None:
         return
     anchor = Path(resolved.anchor)
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(anchor, flags)
-    except OSError as exc:
-        raise ManagedWorkspaceOutputError("cannot inspect output ancestry") from exc
+    descriptor = os.open(anchor, flags)
     current = anchor
     try:
         parts = resolved.relative_to(anchor).parts
@@ -116,14 +114,14 @@ def require_ordinary_output(path: str | os.PathLike[str]) -> None:
                         return
                     raise ManagedWorkspaceOutputError("output ancestry is unsafe") from exc
                 except OSError as exc:
-                    raise ManagedWorkspaceOutputError("output ancestry changed or is unsafe") from exc
+                    _raise_unsafe_path(exc)
                 os.close(descriptor)
                 descriptor = child
                 current /= part
             opened = os.fstat(descriptor)
             try:
                 named = current.lstat()
-            except OSError as exc:
+            except FileNotFoundError as exc:
                 raise ManagedWorkspaceOutputError("output ancestry changed") from exc
             if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
                 raise ManagedWorkspaceOutputError("output ancestry changed")
@@ -137,13 +135,26 @@ def _require_directory_binding(path: Path, descriptor: int) -> None:
     """Recheck that a held directory still has its admitted ancestry and name."""
 
     require_ordinary_output(path)
+    _require_opened_directory(path, descriptor)
+
+
+def _require_opened_directory(path: Path, descriptor: int) -> None:
+    """Check one traversal step without reopening its already inspected parents."""
     try:
         named = path.lstat()
         opened = os.fstat(descriptor)
-    except OSError as exc:
+    except FileNotFoundError as exc:
         raise ManagedWorkspaceOutputError("ordinary output ancestry changed") from exc
     if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
         raise ManagedWorkspaceOutputError("ordinary output ancestry changed")
+    if _entry(descriptor, WORKSPACE_ROOT_MARKER) is not None or _historical_root(descriptor):
+        raise ManagedWorkspaceOutputError("ordinary output is inside workspace state")
+
+
+def _raise_unsafe_path(exc: OSError) -> None:
+    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+        raise ManagedWorkspaceOutputError("output ancestry changed or is unsafe") from exc
+    raise exc
 
 
 @contextmanager
@@ -162,33 +173,32 @@ def ordinary_directory(
         yield resolved, -1
         return
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(resolved.anchor, flags)
-    except OSError as exc:
-        raise ManagedWorkspaceOutputError("cannot inspect output ancestry") from exc
+    descriptor = os.open(resolved.anchor, flags)
     try:
         parts = resolved.relative_to(resolved.anchor).parts
         current = Path(resolved.anchor)
         for part in ("", *parts):
-            _require_directory_binding(current, descriptor)
+            _require_opened_directory(current, descriptor)
             if not part:
                 continue
             try:
                 child = os.open(part, flags, dir_fd=descriptor)
             except FileNotFoundError:
                 if not create:
-                    raise ManagedWorkspaceOutputError("ordinary output parent is missing") from None
+                    raise
+                # Recheck all ancestors before the traversal itself mutates disk.
+                _require_directory_binding(current, descriptor)
                 try:
                     os.mkdir(part, dir_fd=descriptor)
                     child = os.open(part, flags, dir_fd=descriptor)
                 except OSError as exc:
-                    raise ManagedWorkspaceOutputError("output directory cannot be created safely") from exc
+                    _raise_unsafe_path(exc)
             except OSError as exc:
-                raise ManagedWorkspaceOutputError("output ancestry changed or is unsafe") from exc
+                _raise_unsafe_path(exc)
             os.close(descriptor)
             descriptor = child
             current /= part
-            _require_directory_binding(current, descriptor)
+            _require_opened_directory(current, descriptor)
         _require_directory_binding(current, descriptor)
         yield resolved, descriptor
     finally:
@@ -232,9 +242,9 @@ def ordinary_open(
             except IsADirectoryError:
                 raise
             except OSError as exc:
-                raise ManagedWorkspaceOutputError("output file cannot be opened safely") from exc
+                _raise_unsafe_path(exc)
         except OSError as exc:
-            raise ManagedWorkspaceOutputError("output file cannot be opened safely") from exc
+            _raise_unsafe_path(exc)
         try:
             _require_directory_binding(resolved.parent, parent_descriptor)
             details = os.fstat(descriptor)
@@ -290,6 +300,7 @@ def ordinary_temporary_file(
                     if (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino):
                         os.unlink(name, dir_fd=parent_fd)
                 except OSError:
+                    # Preserve the original staging failure if cleanup also fails.
                     pass
             raise
         finally:
@@ -307,10 +318,10 @@ def ordinary_replace(source: str | os.PathLike[str], destination: str | os.PathL
         require_ordinary_output(dst)
         os.replace(src, dst)
         return
-    with ordinary_directory(src.parent) as (_src_parent, src_fd):
-        with ordinary_directory(dst.parent) as (_dst_parent, dst_fd):
-            _require_directory_binding(src.parent, src_fd)
-            _require_directory_binding(dst.parent, dst_fd)
+    with ordinary_directory(src.parent) as (src_parent, src_fd):
+        with ordinary_directory(dst.parent) as (dst_parent, dst_fd):
+            _require_directory_binding(src_parent, src_fd)
+            _require_directory_binding(dst_parent, dst_fd)
             os.replace(src.name, dst.name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
 
 
@@ -322,8 +333,8 @@ def ordinary_unlink(path: str | os.PathLike[str]) -> None:
         require_ordinary_output(target)
         target.unlink()
         return
-    with ordinary_directory(target.parent) as (_parent, parent_fd):
-        _require_directory_binding(target.parent, parent_fd)
+    with ordinary_directory(target.parent) as (parent, parent_fd):
+        _require_directory_binding(parent, parent_fd)
         os.unlink(target.name, dir_fd=parent_fd)
 
 
@@ -352,11 +363,12 @@ def ordinary_atomic_bytes(path: str | os.PathLike[str], payload: bytes) -> None:
             try:
                 ordinary_unlink(temp)
             except FileNotFoundError:
+                # Replacement may already have consumed the temporary name.
                 pass
         return
-    with ordinary_directory(target.parent, create=True) as (_parent, parent_fd):
+    with ordinary_directory(target.parent, create=True) as (parent, parent_fd):
         temporary = f".{target.name}.tmp-{uuid.uuid4().hex}"
-        _require_directory_binding(target.parent, parent_fd)
+        _require_directory_binding(parent, parent_fd)
         fd = os.open(
             temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
             0o600, dir_fd=parent_fd,
@@ -371,10 +383,11 @@ def ordinary_atomic_bytes(path: str | os.PathLike[str], payload: bytes) -> None:
                     remaining = remaining[written:]
             finally:
                 os.close(fd)
-            _require_directory_binding(target.parent, parent_fd)
+            _require_directory_binding(parent, parent_fd)
             os.replace(temporary, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         finally:
             try:
                 os.unlink(temporary, dir_fd=parent_fd)
             except FileNotFoundError:
+                # Replacement may already have consumed the temporary name.
                 pass

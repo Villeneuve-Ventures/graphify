@@ -739,9 +739,10 @@ def to_obsidian(
         if out.resolve() not in target.parents:
             continue
         try:
-            target.unlink(missing_ok=True)
+            ordinary_unlink(target)
             pruned += 1
-        except OSError:
+        except (OSError, ManagedWorkspaceOutputError):
+            # Pruning is best effort; managed state must remain untouched.
             pass
     if pruned:
         print(
@@ -1015,6 +1016,7 @@ def to_graphml(
         try:
             ordinary_unlink(tmp)
         except (FileNotFoundError, OSError, ManagedWorkspaceOutputError):
+            # Cleanup must not mask the export failure or bypass changed ownership.
             pass
 
 
