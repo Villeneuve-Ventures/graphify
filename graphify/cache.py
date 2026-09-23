@@ -202,11 +202,12 @@ def _flush_stat_index() -> None:
     global _stat_index_dirty, _stat_index_root
     if not _stat_index_dirty or _stat_index_root is None:
         return
-    p = _stat_index_file(_stat_index_root)
-    require_ordinary_output(p)
     try:
+        p = _stat_index_file(_stat_index_root)
+        require_ordinary_output(p)
         ordinary_atomic_bytes(p, json.dumps(_stat_index, separators=(",", ":")).encode())
-    except OSError:
+    except (OSError, ManagedWorkspaceOutputError):
+        # This optional cache flush must keep shutdown quiet when output is refused.
         pass
     _stat_index_dirty = False
 

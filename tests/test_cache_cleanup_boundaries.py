@@ -1,6 +1,8 @@
 """Cache cleanup revalidates ownership at destructive boundaries."""
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +10,51 @@ import pytest
 
 from graphify import cache
 from graphify.storage_guard import WORKSPACE_ROOT_MARKER
+
+
+@pytest.mark.parametrize("refusal_at", ["preflight", "write", "io"])
+def test_exit_flush_preserves_refused_output_without_traceback(tmp_path, refusal_at):
+    output = tmp_path / "out"
+    index = output / "cache" / "stat-index.json"
+    index.parent.mkdir(parents=True)
+    index.write_bytes(b"protected index")
+    result = subprocess.run(
+        [sys.executable, "-c", """
+import atexit
+import sys
+from pathlib import Path
+from graphify import cache
+from graphify.storage_guard import WORKSPACE_ROOT_MARKER
+
+output = Path(sys.argv[1])
+cache._GRAPHIFY_OUT = str(output)
+cache._stat_index_root = output
+cache._stat_index = {"pending": {"hash": "new"}}
+cache._stat_index_dirty = True
+if sys.argv[2] == "preflight":
+    (output / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+elif sys.argv[2] == "write":
+    original = cache.ordinary_atomic_bytes
+    def mark_then_write(path, payload):
+        (output / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+        original(path, payload)
+    cache.ordinary_atomic_bytes = mark_then_write
+else:
+    def inaccessible(path):
+        raise PermissionError("ancestry cannot be inspected")
+    cache.require_ordinary_output = inaccessible
+atexit.register(lambda: print(f"dirty={cache._stat_index_dirty}"))
+atexit.register(cache._flush_stat_index)
+""", str(output), refusal_at],
+        cwd=Path(cache.__file__).resolve().parent.parent,
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert result.stdout.strip() == "dirty=False"
+    assert index.read_bytes() == b"protected index"
+    if refusal_at != "io":
+        assert (output / WORKSPACE_ROOT_MARKER).read_bytes() == b"deny"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="descriptor-relative deletion is POSIX-only")
