@@ -280,7 +280,7 @@ def _create_windows_output(path: Path, flags: int) -> int:
         raise
 
 
-def _delete_opened_windows_handle(handle: int) -> None:
+def _delete_opened_windows_handle(handle: int, *, unlink_on_close: bool = False) -> None:
     """Schedule deletion of exactly this file, regardless of its pathname."""
 
     import ctypes
@@ -289,13 +289,18 @@ def _delete_opened_windows_handle(handle: int) -> None:
     class FileDispositionInfo(ctypes.Structure):
         _fields_ = [("DeleteFile", ctypes.c_ubyte)]
 
+    class FileDispositionInfoEx(ctypes.Structure):
+        _fields_ = [("Flags", ctypes.c_uint32)]
+
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     set_info = kernel.SetFileInformationByHandle
     set_info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
     set_info.restype = wintypes.BOOL
-    disposition = FileDispositionInfo(1)
+    # POSIX semantics remove the name when this handle closes even if other
+    # handles remain open. Unsupported systems refuse; do not defer that unlink.
+    disposition = FileDispositionInfoEx(0x3) if unlink_on_close else FileDispositionInfo(1)
     if not set_info(
-        handle, 4,  # FileDispositionInfo
+        handle, 21 if unlink_on_close else 4,  # FileDispositionInfoEx / FileDispositionInfo
         ctypes.byref(disposition), ctypes.sizeof(disposition),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
@@ -506,7 +511,10 @@ def _windows_unlink(path: Path) -> None:
             0x02000000 | 0x00200000, None,  # BACKUP_SEMANTICS, OPEN_REPARSE_POINT
         )
         if handle == ctypes.c_void_p(-1).value:
-            raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
+            error = getattr(ctypes, "get_last_error")()
+            if error in {2, 3}:  # ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND
+                raise FileNotFoundError(error, "ordinary output does not exist", str(name))
+            raise getattr(ctypes, "WinError")(error)
         return handle
 
     def information(handle: int) -> FileInformation:
@@ -556,8 +564,11 @@ def _windows_unlink(path: Path) -> None:
         require_ordinary_output(parent)
         if not same_path(physical_path(target_handle), opened_path):
             raise ManagedWorkspaceOutputError("ordinary unlink binding changed")
-        _delete_opened_windows_handle(target_handle)
+        _delete_opened_windows_handle(target_handle, unlink_on_close=True)
     finally:
+        # Close the delete handle while all ancestor pins are still held.
+        if held:
+            close(held.pop(0))
         for handle in reversed(held):
             close(handle)
 

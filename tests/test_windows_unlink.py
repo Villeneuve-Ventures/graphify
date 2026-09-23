@@ -32,6 +32,7 @@ def windows_handles(monkeypatch):
     calls = []
     next_handle = 100
     on_open = None
+    pending_deletes = set()
 
     def create(name, access, share, _security, disposition, flags, _template):
         nonlocal next_handle
@@ -64,7 +65,18 @@ def windows_handles(monkeypatch):
 
     def close(handle):
         calls.append(("close", handle))
+        if handle in pending_deletes:
+            handles[handle].unlink()
+            pending_deletes.remove(handle)
         handles.pop(handle)
+        return 1
+
+    def disposition(handle, info_class, info, size):
+        assert info_class == 21  # FileDispositionInfoEx
+        assert info._obj.Flags == 3  # DELETE | POSIX_SEMANTICS
+        assert size == 4
+        calls.append(("delete", handle))
+        pending_deletes.add(handle)
         return 1
 
     api = SimpleNamespace(
@@ -72,15 +84,11 @@ def windows_handles(monkeypatch):
         GetFileInformationByHandle=Function(information),
         GetFinalPathNameByHandleW=Function(final_path),
         CloseHandle=Function(close),
+        SetFileInformationByHandle=Function(disposition),
     )
     monkeypatch.setattr(guard, "os", WindowsOS())
     monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: api, raising=False)
 
-    def delete(handle):
-        calls.append(("delete", handle))
-        handles[handle].unlink()
-
-    monkeypatch.setattr(guard, "_delete_opened_windows_handle", delete)
     def set_open(callback):
         nonlocal on_open
         on_open = callback
@@ -104,6 +112,28 @@ def test_windows_unlink_deletes_opened_file_and_holds_ancestors(tmp_path, window
     assert all(call[3] == 0x3 and call[4] == 3 for call in opens)
     assert all(call[5] == 0x02200000 for call in opens)
     assert ("delete", 101) in windows_handles.calls
+    closes = [call[1] for call in windows_handles.calls if call[0] == "close"]
+    assert closes[0] == 101  # finish deletion before releasing ancestor pins
+    assert windows_handles.handles == {}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulated Win32 API on POSIX paths")
+def test_windows_unlink_refuses_unsupported_immediate_disposition(tmp_path, monkeypatch, windows_handles):
+    target = tmp_path / "note"
+    target.write_text("preserved")
+    attempts = []
+
+    def unsupported(handle, info_class, _info, _size):
+        attempts.append(info_class)
+        return 0
+
+    windows_handles.api.SetFileInformationByHandle.callback = unsupported
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 87, raising=False)
+    monkeypatch.setattr(ctypes, "WinError", lambda code: OSError(code, "unsupported"), raising=False)
+    with pytest.raises(OSError, match="unsupported"):
+        guard.ordinary_unlink(target)
+    assert attempts == [21]  # never fall back to deferred or path-based deletion
+    assert target.read_text() == "preserved"
     assert windows_handles.handles == {}
 
 
@@ -166,6 +196,16 @@ def test_windows_unlink_closes_handle_when_metadata_fails(tmp_path, windows_hand
         ("open", target, 0x10080, 0x3, 3, 0x02200000),
         ("close", 101),
     ]
+    assert windows_handles.handles == {}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulated Win32 API on POSIX paths")
+def test_windows_unlink_preserves_missing_file_error(tmp_path, monkeypatch, windows_handles):
+    windows_handles.api.CreateFileW.callback = lambda *_args: ctypes.c_void_p(-1).value
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 2, raising=False)
+
+    with pytest.raises(FileNotFoundError):
+        guard.ordinary_unlink(tmp_path / "missing")
     assert windows_handles.handles == {}
 
 
