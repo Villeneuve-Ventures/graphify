@@ -269,15 +269,21 @@ def _create_windows_output(path: Path, flags: int) -> int:
     try:
         return msvcrt.open_osfhandle(handle, flags | getattr(os, "O_NOINHERIT", 0))
     except BaseException:
-        kernel.CloseHandle(wintypes.HANDLE(handle))
+        try:
+            _delete_opened_windows_handle(handle)
+        except OSError as exc:
+            raise ManagedWorkspaceOutputError(
+                "ordinary output descriptor transfer and created-file rollback failed"
+            ) from exc
+        finally:
+            kernel.CloseHandle(wintypes.HANDLE(handle))
         raise
 
 
-def _delete_opened_windows_output(descriptor: int) -> None:
-    """Schedule deletion of exactly the created file, regardless of its pathname."""
+def _delete_opened_windows_handle(handle: int) -> None:
+    """Schedule deletion of exactly this file, regardless of its pathname."""
 
     import ctypes
-    import msvcrt
     from ctypes import wintypes
 
     class FileDispositionInfo(ctypes.Structure):
@@ -289,10 +295,16 @@ def _delete_opened_windows_output(descriptor: int) -> None:
     set_info.restype = wintypes.BOOL
     disposition = FileDispositionInfo(1)
     if not set_info(
-        msvcrt.get_osfhandle(descriptor), 4,  # FileDispositionInfo
+        handle, 4,  # FileDispositionInfo
         ctypes.byref(disposition), ctypes.sizeof(disposition),
     ):
         raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _delete_opened_windows_output(descriptor: int) -> None:
+    import msvcrt
+
+    _delete_opened_windows_handle(msvcrt.get_osfhandle(descriptor))
 
 
 @contextmanager

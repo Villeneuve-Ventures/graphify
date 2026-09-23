@@ -477,6 +477,45 @@ def test_windows_ordinary_creation_still_writes(tmp_path, monkeypatch):
     assert output.read_text() == "ordinary"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="fault injection uses a fake Win32 API")
+def test_windows_descriptor_transfer_failure_deletes_by_raw_handle(tmp_path, monkeypatch):
+    import ctypes
+    import errno
+    import sys
+    from types import SimpleNamespace
+
+    import graphify.storage_guard as guard
+
+    events = []
+
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    def dispose(handle, _kind, info, _size):
+        assert ctypes.cast(info, ctypes.POINTER(ctypes.c_ubyte)).contents.value == 1
+        events.append(("delete", handle))
+        return 1
+
+    api = SimpleNamespace(
+        CreateFileW=Function(lambda *_args: 123),
+        SetFileInformationByHandle=Function(dispose),
+        CloseHandle=Function(lambda handle: events.append(("close", handle.value))),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: api, raising=False)
+
+    def fail_descriptor(_handle, _flags):
+        raise OSError(errno.EMFILE, "too many descriptors")
+
+    monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(open_osfhandle=fail_descriptor))
+    with pytest.raises(OSError, match="too many descriptors"):
+        guard._create_windows_output(tmp_path / "new.json", os.O_WRONLY)
+    assert events == [("delete", 123), ("close", 123)]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="simulated Windows branch uses POSIX symlinks")
 def test_windows_admission_denies_dangling_marker(tmp_path, monkeypatch):
     import graphify.storage_guard as guard
