@@ -536,7 +536,9 @@ class DurableStateRoot:
                         f"state root changed while opening: {self.root}"
                     )
                 require_parent_binding()
-                if created:
+                if ensure:
+                    # An existing entry may be left by mkdir followed by a
+                    # failed parent sync in an earlier initialization attempt.
                     self.syscalls.fsync(parent_descriptor)
                 try:
                     self._require_root_marker(root_descriptor, install=ensure)
@@ -999,8 +1001,6 @@ class DurableStateRoot:
                             self.syscalls.mkdir_at(part, 0o700, dir_fd=descriptor)
                         except FileExistsError:
                             pass
-                        else:
-                            self.syscalls.fsync(descriptor)
                         child_descriptor = self._open_owned_directory_at(
                             descriptor,
                             part,
@@ -1025,6 +1025,9 @@ class DurableStateRoot:
                             raise StatePathError(
                                 f"state directory changed while opening: {child_path}"
                             )
+                        # Complete durability even when a prior attempt created
+                        # this child but failed to sync its parent.
+                        self.syscalls.fsync(descriptor)
                     except BaseException:
                         os.close(child_descriptor)
                         raise
@@ -1046,6 +1049,55 @@ class DurableStateRoot:
             raise StatePathError(
                 f"external state root {self.root} overlaps source checkout {source}"
             )
+        # resolve() can retain case aliases on case-insensitive filesystems.
+        # Compare held directory identities, including existing ancestors of a
+        # root that has not been created yet, without adopting symlink paths.
+        with ExitStack() as stack:
+            bindings: list[tuple[int, str, int]] = []
+
+            def ancestry(
+                path: Path, *, allow_missing: bool
+            ) -> tuple[list[tuple[int, int]], tuple[int, int] | None]:
+                descriptor = os.open(path.anchor, self._directory_open_flags())
+                stack.callback(os.close, descriptor)
+                details = os.fstat(descriptor)
+                identity = (details.st_dev, details.st_ino)
+                identities = [identity]
+                for part in path.relative_to(path.anchor).parts:
+                    try:
+                        child = os.open(
+                            part, self._directory_open_flags(), dir_fd=descriptor
+                        )
+                    except FileNotFoundError:
+                        if allow_missing:
+                            return identities, None
+                        raise
+                    stack.callback(os.close, child)
+                    bindings.append((descriptor, part, child))
+                    details = os.fstat(child)
+                    identity = (details.st_dev, details.st_ino)
+                    identities.append(identity)
+                    descriptor = child
+                return identities, identity
+
+            try:
+                source_ancestors, source_identity = ancestry(source, allow_missing=False)
+                state_ancestors, state_identity = ancestry(self.root, allow_missing=True)
+                for parent, name, descriptor in bindings:
+                    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    held = os.fstat(descriptor)
+                    if not stat.S_ISDIR(named.st_mode) or (
+                        named.st_dev, named.st_ino
+                    ) != (held.st_dev, held.st_ino):
+                        raise StatePathError("directory changed during state separation check")
+            except OSError as exc:
+                raise StatePathError("cannot verify external state directory ancestry") from exc
+            if source_identity in state_ancestors or (
+                state_identity is not None and state_identity in source_ancestors
+            ):
+                raise StatePathError(
+                    f"external state root {self.root} overlaps source checkout {source}"
+                )
 
     def require_existing_directory_chain(self, relative: str | Path) -> Path:
         """Validate a private directory chain without mutating or following links."""
@@ -2190,66 +2242,16 @@ class DurableStateRoot:
 
         require_before_deadline(deadline_ns, "state rename exceeded its deadline")
         self._ensure_root()
-        source_path = self.path(source)
+        self.path(source)
         destination_path = self.path(destination)
         self._ensure_parent(destination_path)
-        source_parent_relative = source_path.parent.relative_to(self.root)
-        destination_parent_relative = destination_path.parent.relative_to(self.root)
-        visible = False
-        with self.existing_private_directory(source_parent_relative) as source_parent:
-            with self.existing_private_directory(
-                destination_parent_relative
-            ) as destination_parent:
-                source_descriptor = self._open_directory_at(
-                    source_parent,
-                    source_path.name,
-                    source_path,
-                    allowed_modes=_PRIVATE_DIRECTORY_MODES,
-                    allow_missing=True,
-                )
-                if source_descriptor is None:
-                    raise StatePathError(f"rename source is missing: {source_path}")
-                try:
-                    try:
-                        os.stat(
-                            destination_path.name,
-                            dir_fd=destination_parent,
-                            follow_symlinks=False,
-                        )
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        raise StatePathError(
-                            f"rename destination already exists: {destination_path}"
-                        )
-                    self.fault_hook(f"{label}:before_rename")
-                    require_before_deadline(
-                        deadline_ns,
-                        "state rename exceeded its deadline",
-                    )
-                    try:
-                        self.syscalls.replace_at(
-                            source_path.name,
-                            destination_path.name,
-                            source_dir_fd=source_parent,
-                            destination_dir_fd=destination_parent,
-                        )
-                        visible = True
-                        self.fault_hook(f"{label}:renamed")
-                        self.syscalls.fsync(source_parent)
-                        self.fault_hook(f"{label}:source_parent_durable")
-                        if destination_parent_relative != source_parent_relative:
-                            self.syscalls.fsync(destination_parent)
-                        self.fault_hook(f"{label}:destination_parent_durable")
-                    except BaseException as exc:
-                        if visible:
-                            raise CommitUnknown(
-                                f"{label} rename became visible before both directories were durable"
-                            ) from exc
-                        raise
-                finally:
-                    os.close(source_descriptor)
-        return destination_path
+        return self.rename_exclusive_contained(
+            source,
+            destination,
+            source_kind="directory",
+            label=label,
+            deadline_ns=deadline_ns,
+        )
 
     def rename_exclusive_contained(
         self,

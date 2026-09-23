@@ -55,6 +55,9 @@ def test_retry_completes_retained_inode_durability(tmp_path, method, retry_failu
     class RetrySync(PosixSyscalls):
         def fsync(self, descriptor):
             details = os.fstat(descriptor)
+            if details.st_ino not in {retained.st_ino, parent_inode}:
+                # Initialization also syncs ancestor directory entries.
+                return super().fsync(descriptor)
             kind = "file" if stat.S_ISREG(details.st_mode) else "parent"
             events.append(kind)
             assert details.st_ino == (retained.st_ino if kind == "file" else parent_inode)
@@ -89,12 +92,14 @@ def test_existing_retry_rejects_rebinding_during_sync(tmp_path, method, stage):
     replacement = path.with_name("replacement")
     replacement.write_bytes(b"immutable")
     replacement.chmod(0o600)
+    target_inodes = {path.stat().st_ino, path.parent.stat().st_ino}
 
     class Rebind(PosixSyscalls):
         def fsync(self, descriptor):
-            kind = "file" if stat.S_ISREG(os.fstat(descriptor).st_mode) else "parent"
+            details = os.fstat(descriptor)
+            kind = "file" if stat.S_ISREG(details.st_mode) else "parent"
             super().fsync(descriptor)
-            if kind == stage:
+            if details.st_ino in target_inodes and kind == stage:
                 replacement.replace(path)
 
     with pytest.raises(StateCorrupt, match="changed"):
@@ -107,10 +112,13 @@ def test_conflicting_existing_bytes_are_not_acknowledged(tmp_path, method):
     state = _state(root)
     path = state.write_once("objects/item", b"different")
     retained = path.stat()
+    target_inodes = {retained.st_ino, path.parent.stat().st_ino}
 
     class NoSync(PosixSyscalls):
         def fsync(self, descriptor):
-            pytest.fail("conflicting bytes must fail before durability acknowledgement")
+            if os.fstat(descriptor).st_ino in target_inodes:
+                pytest.fail("conflicting bytes must fail before durability acknowledgement")
+            super().fsync(descriptor)
 
     with pytest.raises(StateCorrupt, match="conflicts"):
         _install(_state(root, NoSync()), method)
