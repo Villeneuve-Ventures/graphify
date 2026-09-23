@@ -25,6 +25,7 @@ from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
     DurableStateRoot,
     FaultHook,
+    LockTimeout,
     RuntimeCapabilities,
     StatePathError,
     Syscalls,
@@ -1054,6 +1055,8 @@ class GcStore:
             if data is None:
                 return None
             completion = GcCompletionState.from_json(data)
+        except LockTimeout:
+            raise
         except Exception as exc:
             raise GcRecoveryRequired(f"GC completion is invalid: {exc}") from exc
         if (
@@ -1340,6 +1343,8 @@ class GcStore:
                 )
             except GcError:
                 raise
+            except LockTimeout:
+                raise
             except Exception as exc:
                 raise GcError(f"GC purge record is invalid: {exc}") from exc
             if purge is not None:
@@ -1353,9 +1358,12 @@ class GcStore:
                 completion = GcCompletionState.from_json(
                     self.state.read_existing_bytes(
                         completion_relative,
+                        max_bytes=_MAX_GC_INTENT_BYTES,
                         deadline_ns=deadline_ns,
                     )
                 )
+            except LockTimeout:
+                raise
             except Exception as exc:
                 raise GcError(f"GC completion is unavailable: {exc}") from exc
             if (

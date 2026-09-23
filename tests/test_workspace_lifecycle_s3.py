@@ -23,7 +23,7 @@ from graphify.workspace.lifecycle_contracts import (
     CapacityPolicy, ContractError, GenerationReceipt, payload_manifest_sha256,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
-from graphify.workspace.persistence import InjectedFault
+from graphify.workspace.persistence import InjectedFault, LockTimeout
 from graphify.workspace.pointers import PointerCAS, PointerStore
 from graphify.workspace.registry import RevisionConflict, SourceAlreadyActive
 from graphify.workspace.semantic_queue import (
@@ -565,6 +565,67 @@ def test_gc_reused_epoch_rejects_changed_plan_before_durable_intent(tmp_path):
         )
     assert tree_snapshot(harness.state_root) == before
     assert not gc._intent_path(REPO_UUID).exists()
+
+
+@pytest.mark.parametrize("site", ["completion", "purge_state", "purge_completion"])
+def test_gc_completion_read_timeouts_remain_retryable(tmp_path, monkeypatch, site):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        plan = gc._plan_locked(
+            operation, capacity_policy=POLICY, protections=protections,
+            probe_locks=True,
+        )
+        intent = gc._intent(operation, plan, occurred_at=START + timedelta(seconds=1))
+    gc.execute(
+        grant, plan, capacity_policy=POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    before = tree_snapshot(harness.state_root)
+    target = (
+        gc._purge_path(REPO_UUID, plan.sha256)
+        if site == "purge_state"
+        else gc._completion_path(REPO_UUID, plan.sha256)
+    )
+    method = "read_existing_bytes" if site == "purge_completion" else "read_optional_existing_bytes"
+    original = getattr(gc.state, method)
+
+    def timeout_on_target(relative, *args, **kwargs):
+        if relative == target:
+            if site == "purge_completion":
+                assert kwargs["max_bytes"] == 1024 * 1024
+            raise LockTimeout("injected GC read deadline")
+        return original(relative, *args, **kwargs)
+
+    monkeypatch.setattr(gc.state, method, timeout_on_target)
+    with pytest.raises(LockTimeout, match="injected GC read deadline"):
+        if site == "completion":
+            gc._read_completion(intent)
+        else:
+            gc.purge(
+                grant, plan_sha256=plan.sha256, capacity_policy=POLICY,
+                protections=protections, completed_at=START + timedelta(seconds=2),
+                monotonic_ns=10_003,
+            )
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_semantic_queue_policy_has_explicit_bounds():
