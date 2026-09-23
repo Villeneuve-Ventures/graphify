@@ -214,7 +214,8 @@ def test_s3_certification_refuses_changed_trusted_consumed_inputs(tmp_path, miss
     assert tree_snapshot(harness.state_root) == before
 
 
-def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path):
+@pytest.mark.parametrize("interrupt_promotion", [False, True])
+def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, interrupt_promotion):
     harness, generations, pointers, observations = _runtime(tmp_path)
     request, attempt, completion = _complete(harness, generations, observations)
     binding = completion.state.completion_binding.to_dict()
@@ -278,16 +279,45 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path):
         occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
     )
     assert pointer.to_dict()["pointer_revision"] == 1
-    assert generations.complete_staged_promotion(
-        promotion, pointer, monotonic_ns=2_000_002,
-    ).lifecycle_state == "PROMOTED"
+    if interrupt_promotion:
+        def interrupt(label):
+            if label.endswith(":staged_promoted_durable"):
+                raise InjectedFault(label)
+
+        generations.fault_hook = interrupt
+        with pytest.raises(InjectedFault):
+            generations.complete_staged_promotion(
+                promotion, pointer, monotonic_ns=2_000_002,
+            )
+        generations.fault_hook = lambda _label: None
+        counters = harness.leases.inspect(REPO_UUID)
+        before = tree_snapshot(harness.state_root)
+        with pytest.raises(StagedBuildLeaseRecoveryRequired, match="promoted cleanup"):
+            harness.leases.acquire(
+                REPO_UUID, "SEMANTIC_CLAIM", harness.leases.current_owner(),
+                expected_registry_revision=1, expected_active_source_revision=1,
+                expected_operation_epoch=counters.operation_epoch,
+                expected_migration_epoch=counters.migration_epoch,
+                acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_003,
+                ttl_ns=1_000_000,
+            )
+        assert tree_snapshot(harness.state_root) == before
+        assert harness.leases.inspect(REPO_UUID) == counters
+    else:
+        assert generations.complete_staged_promotion(
+            promotion, pointer, monotonic_ns=2_000_002,
+        ).lifecycle_state == "PROMOTED"
     terminal = generations.acquire_staged_recovery(
         REPO_UUID, GENERATION_ID, request, attempt_sha256="7" * 64,
         acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_003,
         ttl_ns=1_000_000,
     )
     assert terminal.state.lifecycle_state == "PROMOTED"
+    assert generations.complete_staged_promotion(
+        terminal, pointer, monotonic_ns=2_000_004,
+    ).lifecycle_state == "PROMOTED"
     binding_path = harness.state_root / queue._certification_binding_path(REPO_UUID, GENERATION_ID)
+    saved_binding = binding_path.read_bytes()
     binding_path.unlink()
     before = tree_snapshot(harness.state_root)
     with pytest.raises(GenerationError, match="certification binding"):
@@ -297,6 +327,11 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path):
             ttl_ns=1_000_000,
         )
     assert tree_snapshot(harness.state_root) == before
+
+    binding_path.write_bytes(saved_binding)
+    released = harness.leases.release(terminal.grant)
+    assert released.staged_attempt_sha256 is None
+    assert "workspace" not in released.leases
 
 
 def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_path):
