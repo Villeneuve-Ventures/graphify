@@ -565,6 +565,26 @@ class DurableStateRoot:
             if WORKSPACE_ROOT_MARKER in names:
                 # A concurrent initializer published while we enumerated.
                 return self._require_root_marker(root_descriptor, install=False)
+            if "runtime-manifest.json" in names:
+                from .composition import (
+                    RUNTIME_AUTHORITY_FILENAME, RUNTIME_AUTHORITY_MAX_BYTES,
+                    WorkspaceRuntimeAuthority,
+                )
+
+                try:
+                    authority_descriptor = os.open(
+                        RUNTIME_AUTHORITY_FILENAME, self._regular_open_flags(),
+                        dir_fd=root_descriptor,
+                    )
+                    payload = self._read_regular_descriptor(
+                        authority_descriptor, self.root / RUNTIME_AUTHORITY_FILENAME,
+                        max_bytes=RUNTIME_AUTHORITY_MAX_BYTES,
+                        stable_parent_descriptor=root_descriptor,
+                        stable_name=RUNTIME_AUTHORITY_FILENAME,
+                    )
+                    WorkspaceRuntimeAuthority.from_json(payload)
+                except (OSError, ContractError, StateCorrupt) as exc:
+                    raise StatePathError("bootstrap runtime authority is invalid or unsafe") from exc
             for name in names - {"runtime-manifest.json"}:
                 if not _ROOT_MARKER_TEMP_RE.fullmatch(name):
                     raise StatePathError("unmarked occupied state root cannot be adopted")
@@ -3358,6 +3378,30 @@ class DurableStateRoot:
         if "current" not in candidates and "pending" not in candidates:
             raise StateCorrupt(f"{label} current is missing and no pending commit can recover it")
 
+        current_candidate = candidates.get("current")
+        if current_candidate is not None:
+            current_bytes, _current_record, current_revision = current_candidate
+            previous_candidate = candidates.get("previous")
+            if previous_candidate is not None:
+                previous_bytes, _previous_record, previous_revision = previous_candidate
+                if previous_revision > current_revision:
+                    raise StateCorrupt(f"{label} previous record is newer than current")
+                if previous_revision == current_revision and previous_bytes != current_bytes:
+                    raise StateCorrupt(
+                        f"{label} has divergent records at revision {current_revision}"
+                    )
+            pending_candidate = candidates.get("pending")
+            if (pending_candidate is not None
+                    and pending_candidate[2] > current_revision
+                    and pending_candidate[2] != current_revision + 1):
+                raise StateCorrupt(f"{label} pending commit is not the exact current successor")
+        else:
+            # Without valid current authority, only durable pending intent can
+            # authorize recovery; a newer backup cannot become that authority.
+            previous_candidate = candidates.get("previous")
+            if previous_candidate is not None and previous_candidate[2] > candidates["pending"][2]:
+                raise StateCorrupt(f"{label} previous record is newer than pending commit")
+
         highest_revision = max(item[2] for item in candidates.values())
         highest = [(name, item) for name, item in candidates.items() if item[2] == highest_revision]
         highest_bytes = {item[0] for _name, item in highest}
@@ -3367,7 +3411,6 @@ class DurableStateRoot:
             "current" if any(name == "current" for name, _ in highest) else highest[0][0]
         )
         selected = candidates[preferred_name]
-        current_candidate = candidates.get("current")
         install_current = current_candidate is None or current_candidate[0] != selected[0]
         return DurableRecordRecovery(
             record=selected[1],

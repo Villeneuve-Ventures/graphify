@@ -579,11 +579,23 @@ class RegistryStore:
         for digest in sorted(digests):
             proof = self.read_evidence(digest)
             key = (proof["source_sha256"], proof["git_common_device"], proof["git_common_inode"])
-            identities.setdefault(key, digest)
+            # Rotation observes an identity; it does not authorize a replacement.
+            # Keep a binding authorization when both prove the same identity.
+            if key not in identities or proof["action"] != "ROTATE":
+                identities[key] = digest
         retained = sorted(identities.values())
         if len(retained) > IDENTITY_EVIDENCE_MAX_RECORDS:
             raise StateCorrupt("bound identity evidence inventory exceeds its limit")
         return retained
+
+    @staticmethod
+    def _verify_live_source_identity(source: SourceIdentity) -> None:
+        try:
+            live_source = discover_source(source.root)
+        except (OSError, IdentityError) as exc:
+            raise SourceAmbiguousError("source identity is unavailable") from exc
+        if live_source != source:
+            raise SourceAmbiguousError("source identity changed since discovery")
 
     def _authorized_evidence(
         self,
@@ -596,6 +608,7 @@ class RegistryStore:
         fence_token: int,
         bound_identity_evidence: list[str] | None = None,
     ) -> str:
+        self._verify_live_source_identity(source)
         self._persist_source_evidence(source)
         return self._persist_evidence(
             {
@@ -775,6 +788,26 @@ class RegistryStore:
             evidence.get("git_common_device") == source.git_common_device
             and evidence.get("git_common_inode") == source.git_common_inode
         )
+
+    def _has_authorized_source_identity(
+        self, entry: dict[str, Any], source: SourceIdentity,
+    ) -> bool:
+        enrollment = entry["uuid_enrollment"]
+        current = enrollment["current_evidence_sha256"]
+        active = entry["active_source_evidence"]["rebind_evidence_sha256"]
+        digests = {enrollment["immutable_evidence_sha256"], current, active}
+        for digest in (current, active):
+            digests.update(self._retained_identity_digests(self.read_evidence(digest)))
+        for digest in digests:
+            proof = self.read_evidence(digest)
+            if (
+                proof["action"] in {"ENROLL", "ADOPT", "REBIND", "ACTIVATE"}
+                and proof["source_sha256"] == source.source_sha256
+                and proof["git_common_device"] == source.git_common_device
+                and proof["git_common_inode"] == source.git_common_inode
+            ):
+                return True
+        return False
 
     @staticmethod
     def _known_source(entry: dict[str, Any], source: SourceIdentity) -> bool:
@@ -957,6 +990,9 @@ class RegistryStore:
                 raise SourceAmbiguousError(
                     "activation target does not match enrollment identity"
                 )
+            if not self._has_authorized_source_identity(entry, source):
+                raise SourceAmbiguousError("activation target requires authorized identity binding")
+            self._verify_live_source_identity(source)
             actual_active_revision = int(entry["active_source_revision"])
             if actual_active_revision != expected_active_source_revision:
                 raise RevisionConflict(

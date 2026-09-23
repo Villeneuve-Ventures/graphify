@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import selectors
 import stat
 import subprocess
 import time
@@ -24,6 +25,7 @@ from graphify.workspace.lifecycle_contracts import (
 
 
 WORKSPACE_CONFIG_MAX_BYTES = 1024 * 1024
+GIT_OUTPUT_MAX_BYTES = 1024 * 1024
 
 
 _RFC3339_UTC = re.compile(
@@ -177,23 +179,48 @@ def _git(
         }
     )
     command = ["git", *arguments]
-    try:
-        result = subprocess.run(
-            command,
-            cwd=root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_remaining_timeout_seconds(deadline_ns),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise SourceDiscoveryTimeout("source discovery deadline expired") from exc
     _check_deadline(deadline_ns)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "git command failed"
-        raise SourceDiscoveryError(detail)
-    return result.stdout.strip()
+    with subprocess.Popen(
+        command, cwd=root, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ) as process:
+        assert process.stdout is not None and process.stderr is not None
+        stdout = bytearray()
+        total_bytes = 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream in (process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ)
+                while selector.get_map():
+                    events = selector.select(_remaining_timeout_seconds(deadline_ns))
+                    _check_deadline(deadline_ns)
+                    for key, _events in events:
+                        chunk = os.read(key.fd, min(65536, GIT_OUTPUT_MAX_BYTES - total_bytes + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        total_bytes += len(chunk)
+                        if total_bytes > GIT_OUTPUT_MAX_BYTES:
+                            raise SourceDiscoveryError("Git output exceeds byte limit")
+                        if key.fileobj is process.stdout:
+                            stdout.extend(chunk)
+            process.wait(timeout=_remaining_timeout_seconds(deadline_ns))
+            _check_deadline(deadline_ns)
+        except subprocess.TimeoutExpired:
+            raise SourceDiscoveryTimeout("source discovery deadline expired") from None
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        if process.returncode != 0:
+            # Git diagnostics can contain credentials from repository configuration.
+            raise SourceDiscoveryError(f"Git command failed with status {process.returncode}")
+        try:
+            return stdout.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            raise SourceDiscoveryError("Git output is not valid UTF-8") from None
+
 
 
 def _normalize_remote(raw: str) -> str:

@@ -94,6 +94,7 @@ def test_prior_activated_inode_remains_bound_after_source_switch(registry_source
     replacement = discover_source(second.root)
     assert replacement.registry_source == second.registry_source
     assert replacement.git_common_inode != second.git_common_inode
+    store.rebind(replacement, authorization("REBIND"))
     activate(store, replacement, RecordingLeases(store))
     assert store.resolve_active_source(first.repo_uuid) == replacement
     activate(store, first, RecordingLeases(store))
@@ -259,7 +260,8 @@ def test_resolution_rejects_activation_during_discovery(registry_sources, monkey
 
     def discover_and_activate(path):
         source = original(path)
-        activate(store, second, RecordingLeases(store))
+        if path == first.root:
+            activate(store, second, RecordingLeases(store))
         return source
 
     monkeypatch.setattr(registry, "discover_source", discover_and_activate)
@@ -318,3 +320,104 @@ def test_oversized_orphan_workspace_candidates_are_not_read_or_changed(
             store._initialize_workspace_state_locked(first.repo_uuid)
     assert reads == []
     assert {item.name: item.read_bytes() for item in directory.iterdir()} == before
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_activation_requires_live_authorized_identity_before_lease(registry_sources, stale):
+    import shutil
+    from graphify.workspace.identity import SourceAmbiguousError
+
+    store, (first, _, _) = registry_sources
+    moved = first.root.with_name("original-first")
+    first.root.rename(moved)
+    shutil.copytree(moved, first.root)
+    replacement = discover_source(first.root)
+    if stale:
+        store.rebind(replacement, authorization("REBIND"))
+        activate(store, replacement, RecordingLeases(store))
+    before = store.load().canonical
+    leases = RecordingLeases(store)
+    with pytest.raises(SourceAmbiguousError):
+        activate(store, first if stale else replacement, leases)
+    assert leases.acquired == []
+    assert store.load().canonical == before
+
+
+def test_rotation_cannot_authorize_replacement_activation(registry_sources):
+    import shutil
+    from graphify.workspace.identity import SourceAmbiguousError
+
+    store, (first, _, _) = registry_sources
+    moved = first.root.with_name("original-first")
+    first.root.rename(moved)
+    shutil.copytree(moved, first.root)
+    replacement = discover_source(first.root)
+    store.rotate_enrollment_evidence(replacement, authorization("ROTATE"))
+    leases = RecordingLeases(store)
+    before = store.load().canonical
+    with pytest.raises(SourceAmbiguousError, match="authorized identity binding"):
+        activate(store, replacement, leases)
+    assert not leases.acquired
+    assert store.load().canonical == before
+
+
+def test_rotation_retains_authorized_binding_for_later_activation(registry_sources):
+    store, (_, second, third) = registry_sources
+    store.adopt(second, authorization("ADOPT"))
+    store.rotate_enrollment_evidence(second, authorization("ROTATE"))
+    store.adopt(third, authorization("ADOPT"))
+    activate(store, second, RecordingLeases(store))
+    assert store.resolve_active_source(second.repo_uuid) == second
+
+
+@pytest.mark.parametrize("action", ["ENROLL", "ADOPT", "REBIND", "ROTATE"])
+def test_identity_actions_reject_stale_facts_before_evidence_write(registry_sources, action):
+    import shutil
+    from graphify.workspace.identity import SourceAmbiguousError
+
+    store, (first, second, _) = registry_sources
+    source = second if action == "ADOPT" else first
+    if action == "ENROLL":
+        store = RegistryStore(store.state.root.with_name("new-state"),
+                              capabilities=RuntimeCapabilities.supported_test_fixture())
+    moved = source.root.with_name("old-source")
+    source.root.rename(moved)
+    shutil.copytree(moved, source.root)
+
+    def records():
+        paths = list(store.state.root.glob("registry*.json"))
+        paths += list((store.state.root / "evidence").glob("*.json"))
+        return {str(path): path.read_bytes() for path in paths}
+
+    before = records()
+    method = {"ENROLL": "enroll", "ADOPT": "adopt", "REBIND": "rebind",
+              "ROTATE": "rotate_enrollment_evidence"}[action]
+    with pytest.raises(SourceAmbiguousError, match="changed"):
+        getattr(store, method)(source, authorization(action))
+    assert records() == before
+
+
+def test_activation_rechecks_identity_after_lease_acquisition(registry_sources, monkeypatch):
+    import shutil
+    from graphify.workspace.identity import SourceAmbiguousError
+
+    store, (_, second, _) = registry_sources
+    store.adopt(second, authorization("ADOPT"))
+    before = store.load().canonical
+    evidence = {path.name: path.read_bytes() for path in (store.state.root / "evidence").iterdir()}
+    leases = RecordingLeases(store)
+    original = leases._acquire_under_registry_lock
+
+    def acquire_and_replace(*args, **kwargs):
+        grant = original(*args, **kwargs)
+        moved = second.root.with_name("old-second")
+        second.root.rename(moved)
+        shutil.copytree(moved, second.root)
+        return grant
+
+    monkeypatch.setattr(leases, "_acquire_under_registry_lock", acquire_and_replace)
+    with pytest.raises(SourceAmbiguousError, match="changed"):
+        activate(store, second, leases)
+    assert len(leases.acquired) == len(leases.released) == 1
+    assert store.load().canonical == before
+    assert {path.name: path.read_bytes() for path in (store.state.root / "evidence").iterdir()} == evidence

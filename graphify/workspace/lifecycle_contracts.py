@@ -25,6 +25,9 @@ from graphify.workspace.contracts import CompletionBinding
 
 WORKSPACE_SCHEMA_VERSION = 2
 STATE_SCHEMA_VERSION = 2
+# Generic parsing ceiling; record stores apply their narrower limits before I/O.
+LIFECYCLE_JSON_MAX_BYTES = 64 * 1024 * 1024
+LIFECYCLE_JSON_MAX_DEPTH = 32
 SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES = 25 * 1024 * 1024
 SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION = 64
 SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE = 4_096
@@ -92,7 +95,9 @@ def _normalise_string(value: str, path: str) -> str:
     return unicodedata.normalize("NFC", value)
 
 
-def _normalise_json(value: object, path: str = "$") -> JsonValue:
+def _normalise_json(value: object, path: str = "$", *, depth: int = 0) -> JsonValue:
+    if depth > LIFECYCLE_JSON_MAX_DEPTH:
+        raise ContractError(f"{path}: JSON nesting limit exceeded")
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int):
@@ -109,10 +114,11 @@ def _normalise_json(value: object, path: str = "$") -> JsonValue:
             key = _normalise_string(raw_key, path)
             if key in result:
                 raise ContractError(f"{path}: duplicate key after Unicode normalization: {key!r}")
-            result[key] = _normalise_json(raw_value, f"{path}.{key}")
+            result[key] = _normalise_json(raw_value, f"{path}.{key}", depth=depth + 1)
         return result
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, memoryview)):
-        return [_normalise_json(item, f"{path}[{index}]") for index, item in enumerate(value)]
+        return [_normalise_json(item, f"{path}[{index}]", depth=depth + 1)
+                for index, item in enumerate(value)]
     raise ContractError(f"{path}: unsupported canonical JSON type {type(value).__name__}")
 
 
@@ -154,9 +160,15 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, o
 
 
 def _parse_json(value: str | bytes) -> object:
+    if len(value) > LIFECYCLE_JSON_MAX_BYTES:
+        raise ContractError("JSON byte limit exceeded")
     try:
+        if isinstance(value, str) and len(value.encode("utf-8")) > LIFECYCLE_JSON_MAX_BYTES:
+            raise ContractError("JSON byte limit exceeded")
         return json.loads(value, object_pairs_hook=_reject_duplicate_json_pairs)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except ContractError:
+        raise
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise ContractError(f"invalid JSON: {exc}") from exc
 
 

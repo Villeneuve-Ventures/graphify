@@ -303,3 +303,57 @@ def test_authorized_adoption_preserves_active_source(source_repository, tmp_path
     ))
     assert adopted.registry_source in document.to_dict()["workspaces"][0]["aliases"]
     assert store.resolve_active_source(source.repo_uuid) == source
+
+
+@pytest.mark.parametrize("command", ["remote", "rev-list"])
+@pytest.mark.parametrize("descriptor", [1, 2])
+def test_discovery_bounds_git_output(source_repository, monkeypatch, command, descriptor):
+    import sys
+    from graphify.workspace import identity
+
+    _git(source_repository, "remote", "add", "origin", "https://example.test/repo.git")
+    original = subprocess.Popen
+    children = []
+
+    def popen(arguments, **kwargs):
+        if arguments[0] == "git" and arguments[1] == command:
+            arguments = [sys.executable, "-c", (
+                f"import os; os.write({descriptor}, b'TEST_SECRET' * 110000)"
+            )]
+        child = original(arguments, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    with pytest.raises(SourceDiscoveryError, match="output.*limit") as raised:
+        identity.discover_source(source_repository)
+    assert "TEST_SECRET" not in str(raised.value)
+    assert all(child.poll() is not None for child in children)
+
+
+@pytest.mark.parametrize("failure", ["deadline", "exit"])
+def test_git_failure_reaps_child_and_redacts_diagnostics(source_repository, monkeypatch, failure):
+    import sys
+    import time
+    from graphify.workspace import identity
+
+    _git(source_repository, "remote", "add", "origin", "https://example.test/repo.git")
+    original = subprocess.Popen
+    children = []
+
+    def popen(arguments, **kwargs):
+        if arguments[0] == "git" and arguments[1] == "remote":
+            program = "import time; time.sleep(10)" if failure == "deadline" else (
+                "import sys; sys.stderr.write('TEST_SECRET'); sys.exit(2)"
+            )
+            arguments = [sys.executable, "-c", program]
+        child = original(arguments, **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    error = identity.SourceDiscoveryTimeout if failure == "deadline" else SourceDiscoveryError
+    with pytest.raises(error) as raised:
+        identity.discover_source(source_repository, deadline_ns=time.monotonic_ns() + 1_000_000_000)
+    assert "TEST_SECRET" not in "".join(traceback.format_exception(raised.value))
+    assert all(child.poll() is not None for child in children)
