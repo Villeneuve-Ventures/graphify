@@ -351,14 +351,7 @@ def ordinary_atomic_bytes(path: str | os.PathLike[str], payload: bytes) -> None:
             temp = Path(stream.name)
             stream.write(payload)
         try:
-            try:
-                ordinary_replace(temp, target)
-            except PermissionError:
-                # Preserve the ordinary Windows cache fallback for a locked target.
-                import shutil
-
-                require_ordinary_output(target)
-                shutil.copy2(temp, target)
+            ordinary_replace(temp, target)
         finally:
             try:
                 ordinary_unlink(temp)

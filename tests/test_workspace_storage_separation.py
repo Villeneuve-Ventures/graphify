@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from uuid import uuid4
 
@@ -232,6 +233,7 @@ def test_ordinary_mutations_accept_symlink_parent(tmp_path, operation):
         assert not target.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor fault injection")
 @pytest.mark.parametrize("error", [13, 28, 30])
 @pytest.mark.parametrize("boundary", ["root", "directory", "file", "mkdir"])
 def test_ordinary_io_errors_preserve_errno(tmp_path, monkeypatch, error, boundary):
@@ -283,6 +285,7 @@ def test_obsidian_pruning_preserves_nested_managed_state(tmp_path):
     assert _tree(managed) == before
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor traversal")
 def test_directory_admission_opens_scale_linearly(tmp_path, monkeypatch):
     import graphify.storage_guard as guard
 
@@ -307,6 +310,7 @@ def test_directory_admission_opens_scale_linearly(tmp_path, monkeypatch):
     assert calls - shallow_calls <= 2 * 10
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor fault injection")
 def test_directory_creation_rechecks_ancestors_before_mkdir(tmp_path, monkeypatch):
     import graphify.storage_guard as guard
 
@@ -325,3 +329,32 @@ def test_directory_creation_rechecks_ancestors_before_mkdir(tmp_path, monkeypatc
     with pytest.raises(ManagedWorkspaceOutputError):
         guard.ordinary_mkdir(existing / "new")
     assert not (existing / "new").exists()
+
+
+def test_windows_locked_replace_never_falls_back_to_path_copy(tmp_path, monkeypatch):
+    import shutil
+    import graphify.storage_guard as guard
+
+    real_os = guard.os
+
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+        def replace(self, *_args, **_kwargs):
+            raise PermissionError("locked destination")
+
+    monkeypatch.setattr(guard, "os", WindowsOS())
+    monkeypatch.setattr(
+        shutil, "copy2",
+        lambda *_args, **_kwargs: pytest.fail("unsafe path-based copy fallback"),
+    )
+    target = tmp_path / "cache.json"
+    target.write_bytes(b"old")
+
+    with pytest.raises(PermissionError, match="locked destination"):
+        guard.ordinary_atomic_bytes(target, b"new")
+    assert target.read_bytes() == b"old"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["cache.json"]
