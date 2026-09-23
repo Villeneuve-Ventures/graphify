@@ -1778,8 +1778,8 @@ class DurableStateRoot:
                     kind=name,
                 )
                 token = _LOCK_STACK.set((*stack, (rank, name)))
-                self.fault_hook(f"lock:{name}:acquired")
                 try:
+                    self.fault_hook(f"lock:{name}:acquired")
                     yield
                 finally:
                     _LOCK_STACK.reset(token)
@@ -1841,8 +1841,8 @@ class DurableStateRoot:
                     f"{name} lock binding changed while acquiring: {self.root}"
                 )
             token = _LOCK_STACK.set((*stack, (rank, name)))
-            self.fault_hook(f"lock:{name}:acquired")
             try:
+                self.fault_hook(f"lock:{name}:acquired")
                 yield
             finally:
                 _LOCK_STACK.reset(token)
@@ -1935,8 +1935,8 @@ class DurableStateRoot:
                 kind=kind,
             )
             token = _LOCK_STACK.set((*stack, (rank, name)))
-            self.fault_hook(f"lock:{name}:acquired")
             try:
+                self.fault_hook(f"lock:{name}:acquired")
                 yield
             finally:
                 _LOCK_STACK.reset(token)

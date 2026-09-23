@@ -1,6 +1,7 @@
 """Source discovery accepts Git's annotated partial-clone fetch remotes."""
 
 import os
+import shlex
 import subprocess
 import traceback
 
@@ -123,6 +124,62 @@ def test_shallow_repository_requires_complete_history(source_repository, tmp_pat
     assert discovered.history_roots == tuple(
         _git(source_repository, "rev-list", "--max-parents=0", "HEAD").splitlines()
     )
+
+
+def test_missing_promisor_head_is_rejected_without_fetching(source_repository, tmp_path):
+    root = source_repository
+    head = _git(root, "rev-parse", "HEAD").strip()
+    remote = tmp_path / "remote.git"
+    _git(root, "clone", "--bare", str(root), str(remote))
+    fetch_log = tmp_path / "fetch.log"
+    transport = tmp_path / "local-ssh"
+    # Exercise Git's real promisor fetch path without opening a network connection.
+    transport.write_text(
+        "#!/bin/sh\n"
+        f"echo invoked >> {shlex.quote(str(fetch_log))}\n"
+        f"exec git upload-pack {shlex.quote(str(remote))}\n"
+    )
+    transport.chmod(0o755)
+    _git(root, "remote", "add", "origin", "ssh://fixture.test/owner/repo.git")
+    _git(root, "config", "core.sshCommand", shlex.quote(str(transport)))
+    _git(root, "config", "ssh.variant", "ssh")
+    _git(root, "config", "remote.origin.promisor", "true")
+    _git(root, "config", "remote.origin.partialclonefilter", "blob:none")
+    # A missing parent can fail without fetching; the missing starting commit
+    # reaches Git's lazy object lookup while parsing rev-list's revision argument.
+    (root / ".git" / "objects" / head[:2] / head[2:]).unlink()
+
+    def git_snapshot():
+        return {
+            path.relative_to(root / ".git"): path.read_bytes()
+            for path in (root / ".git").rglob("*") if path.is_file()
+        }
+
+    before = git_snapshot()
+    with pytest.raises(SourceDiscoveryError, match="Git command failed"):
+        discover_source(root)
+    assert not fetch_log.exists()
+    assert git_snapshot() == before
+
+
+def test_discovery_disables_lazy_fetch_in_sanitized_environment(
+    source_repository, monkeypatch,
+):
+    from graphify.workspace import identity
+
+    _git(source_repository, "remote", "add", "origin", "https://example.test/repo.git")
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")
+    original = subprocess.Popen
+    environments = []
+
+    def popen(arguments, **kwargs):
+        environments.append(kwargs["env"])
+        return original(arguments, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    identity.discover_source(source_repository)
+    assert environments
+    assert all(environment.get("GIT_NO_LAZY_FETCH") == "1" for environment in environments)
 
 
 @pytest.mark.parametrize("hostile_environment", [False, True])
