@@ -420,7 +420,7 @@ The separate `graphify update` command retains its own AST update behavior.
 
 Create a `.graphifyignore` in your project root — same syntax as `.gitignore`, including `!` negation.
 
-**`.gitignore` is respected automatically.** graphify reads the `.gitignore` in each directory. If a `.graphifyignore` is also present, the two are **merged** — `.graphifyignore` patterns are evaluated last, so they win on conflicts (including `!` negations). Adding a `.graphifyignore` only ever excludes more; it never re-includes a file your `.gitignore` already excluded. Subdirectory scoping works the same way as git — an ignore file only affects its own subtree.
+**`.gitignore` is respected automatically.** graphify reads the `.gitignore` in each directory. If a `.graphifyignore` is also present, the two are **merged** — `.graphifyignore` patterns are evaluated last, so they win on conflicts (including `!` negations). A negation such as `!keep.py` can re-include a file excluded by `.gitignore`, but cannot rescue a file whose parent directory remains excluded. Subdirectory scoping works the same way as git — an ignore file only affects its own subtree.
 
 ```
 # .graphifyignore
@@ -552,11 +552,11 @@ These are only needed for **headless / CI extraction** (`graphify extract`). Whe
 ## Privacy
 
 - **Code files** — processed locally via tree-sitter. Nothing leaves your machine. A code-only corpus requires no API key — `graphify extract` runs fully offline.
-- **Video / audio** — transcribed locally with faster-whisper. Nothing leaves your machine.
+- **Video / audio** — transcribed locally with faster-whisper. In the `/graphify` skill workflow, the resulting transcripts are then treated as documents for semantic extraction and sent to the selected AI assistant or backend. Local transcription does not make the entire pipeline local; the semantic processing destination determines whether transcript content leaves your machine.
 - **Docs, PDFs, images** — sent to your AI assistant for semantic extraction (via the `/graphify` skill, using whatever model your IDE session runs). Headless `graphify extract` requires `GEMINI_API_KEY` / `GOOGLE_API_KEY` (Gemini), `MOONSHOT_API_KEY` (Kimi), `ANTHROPIC_API_KEY` (Claude), `OPENAI_API_KEY` (OpenAI), `DEEPSEEK_API_KEY` (DeepSeek), a running Ollama instance (`OLLAMA_BASE_URL`), AWS credentials via the standard provider chain (Bedrock - no API key needed, uses IAM), or the `claude` CLI binary (Claude Code - no API key needed, uses your Claude subscription). The `--dedup-llm` flag uses the same key.
 - **Data residency** — `graphify extract` auto-detects which provider to use based on which API key is set (priority: Gemini → Kimi → Claude → OpenAI → DeepSeek → Azure → Bedrock → Ollama). For code with data-residency requirements, use `--backend ollama` (fully local) or pass an explicit `--backend` flag. Kimi (`MOONSHOT_API_KEY`) routes to Moonshot AI servers in China.
 - **No telemetry**, no usage tracking, no analytics.
-- **Query logging** — every `graphify query`, `graphify path`, `graphify explain`, and MCP `query_graph` call is logged to `~/.cache/graphify-queries.log` in JSON Lines format (timestamp, question, corpus, nodes returned, duration). Full subgraph responses are **not** stored by default. Set `GRAPHIFY_QUERY_LOG_DISABLE=1` to opt out, or `GRAPHIFY_QUERY_LOG=/dev/null` to silence without disabling the code path.
+- **Query logging** — off by default. Set `GRAPHIFY_QUERY_LOG_ENABLE=1` to log `graphify query`, `graphify path`, `graphify explain`, and MCP `query_graph` calls to `~/.cache/graphify-queries.log`, or set `GRAPHIFY_QUERY_LOG` to enable logging at another path. Records use JSON Lines (timestamp, question, corpus, nodes returned, duration). Full subgraph responses are stored only when `GRAPHIFY_QUERY_LOG_RESPONSES` is also enabled. Set `GRAPHIFY_QUERY_LOG_DISABLE=1` to force logging off, overriding either enable setting.
 
 ---
 
