@@ -35,6 +35,10 @@ _ATOMIC_TEMP_RE = re.compile(
     r"^\.(?P<destination>.+)\.tmp-(?P<pid>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$",
     re.ASCII,
 )
+_ROOT_MARKER_TEMP_RE = re.compile(
+    rf"^{re.escape(WORKSPACE_ROOT_MARKER)}\.init-[1-9][0-9]*-[0-9a-f]{{32}}$",
+    re.ASCII,
+)
 _PRIVATE_DIRECTORY_MODES = frozenset({0o700})
 _PRIVATE_FILE_MODES = frozenset({0o600})
 _PRIVATE_TREE_DEADLINE_DETAIL = "private tree operation exceeded its deadline"
@@ -553,19 +557,49 @@ class DurableStateRoot:
             if not install:
                 raise StatePathError("workspace state root has no ownership marker") from None
             names = set(os.listdir(root_descriptor))
-            if names - {"runtime-manifest.json"}:
-                raise StatePathError("unmarked occupied state root cannot be adopted")
+            if WORKSPACE_ROOT_MARKER in names:
+                # A concurrent initializer published while we enumerated.
+                return self._require_root_marker(root_descriptor, install=False)
+            for name in names - {"runtime-manifest.json"}:
+                if not _ROOT_MARKER_TEMP_RE.fullmatch(name):
+                    raise StatePathError("unmarked occupied state root cannot be adopted")
+                try:
+                    details = os.stat(name, dir_fd=root_descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    # Its initializer may already have published or cleaned up.
+                    continue
+                self._require_regular_details(
+                    details, self.root / name, allowed_modes=_PRIVATE_FILE_MODES,
+                )
+            # Keep partial bytes private. An interrupted initializer's exact
+            # temporary namespace is tolerated, never deleted by another writer.
+            temporary = f"{WORKSPACE_ROOT_MARKER}.init-{os.getpid()}-{uuid.uuid4().hex}"
             descriptor = os.open(
-                WORKSPACE_ROOT_MARKER,
+                temporary,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
                 dir_fd=root_descriptor,
             )
             try:
-                self._write_all(descriptor, marker)
-                self.syscalls.fsync(descriptor)
+                try:
+                    self._write_all(descriptor, marker)
+                    self.syscalls.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                try:
+                    self.syscalls.rename_exclusive_at(
+                        temporary, WORKSPACE_ROOT_MARKER,
+                        source_dir_fd=root_descriptor,
+                        destination_dir_fd=root_descriptor,
+                    )
+                except FileExistsError:
+                    # The winning marker is validated below, never replaced.
+                    pass
             finally:
-                os.close(descriptor)
+                try:
+                    self.syscalls.unlink_at(temporary, dir_fd=root_descriptor)
+                except FileNotFoundError:
+                    pass
             self.syscalls.fsync(root_descriptor)
             descriptor = os.open(WORKSPACE_ROOT_MARKER, flags, dir_fd=root_descriptor)
         except OSError as exc:
