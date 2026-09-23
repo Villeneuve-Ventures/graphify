@@ -46,21 +46,21 @@ def _historical_root(directory_fd: int) -> bool:
     workspaces_fd = os.open("workspaces", flags, dir_fd=directory_fd)
     try:
         with os.scandir(workspaces_fd) as members:
-            workspace_names = [item.name for item in members]
-        for name in workspace_names:
-            try:
-                if str(uuid.UUID(name)) != name:
+            for item in members:
+                name = item.name
+                try:
+                    if str(uuid.UUID(name)) != name:
+                        continue
+                except ValueError:
                     continue
-            except ValueError:
-                continue
-            if not _is_directory(workspaces_fd, name):
-                continue
-            workspace_fd = os.open(name, flags, dir_fd=workspaces_fd)
-            try:
-                if any(_entry(workspace_fd, part) is not None for part in _OLD_WORKSPACE_NAMES):
-                    return True
-            finally:
-                os.close(workspace_fd)
+                if not _is_directory(workspaces_fd, name):
+                    continue
+                workspace_fd = os.open(name, flags, dir_fd=workspaces_fd)
+                try:
+                    if any(_entry(workspace_fd, part) is not None for part in _OLD_WORKSPACE_NAMES):
+                        return True
+                finally:
+                    os.close(workspace_fd)
     finally:
         os.close(workspaces_fd)
     return False
@@ -70,16 +70,24 @@ def _historical_path(directory: Path) -> bool:
     workspaces = directory / "workspaces"
     if not workspaces.is_dir():
         return False
-    if any((directory / name).exists() for name in _OLD_REGISTRY_NAMES):
+    if any(_path_entry_exists(directory / name) for name in _OLD_REGISTRY_NAMES):
         return True
     for workspace in workspaces.iterdir():
         try:
             if str(uuid.UUID(workspace.name)) == workspace.name and workspace.is_dir():
-                if any((workspace / name).exists() for name in _OLD_WORKSPACE_NAMES):
+                if any(_path_entry_exists(workspace / name) for name in _OLD_WORKSPACE_NAMES):
                     return True
         except ValueError:
             continue
     return False
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return True
 
 
 def require_ordinary_output(path: str | os.PathLike[str]) -> None:
@@ -94,7 +102,7 @@ def require_ordinary_output(path: str | os.PathLike[str]) -> None:
     resolved = Path(os.path.realpath(supplied))
     if os.name == "nt":
         for ancestor in (resolved, *resolved.parents):
-            if (ancestor / WORKSPACE_ROOT_MARKER).exists() or _historical_path(ancestor):
+            if _path_entry_exists(ancestor / WORKSPACE_ROOT_MARKER) or _historical_path(ancestor):
                 raise ManagedWorkspaceOutputError("ordinary output is inside workspace state")
         return
     anchor = Path(resolved.anchor)
@@ -151,6 +159,26 @@ def _require_opened_directory(path: Path, descriptor: int) -> None:
         raise ManagedWorkspaceOutputError("ordinary output is inside workspace state")
 
 
+def _require_opened_output_binding(path: Path, descriptor: int) -> None:
+    """Admit the path currently naming an already opened regular output."""
+
+    require_ordinary_output(path)
+    try:
+        entry = path.lstat()
+        named = path.stat()
+        opened = os.fstat(descriptor)
+    except FileNotFoundError as exc:
+        raise ManagedWorkspaceOutputError("ordinary output binding changed") from exc
+    if (
+        stat.S_ISLNK(entry.st_mode)
+        or not stat.S_ISREG(opened.st_mode)
+        or opened.st_nlink != 1
+        or opened.st_ino == 0
+        or (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino)
+    ):
+        raise ManagedWorkspaceOutputError("ordinary output binding changed or is unsafe")
+
+
 def _raise_unsafe_path(exc: OSError) -> None:
     if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
         raise ManagedWorkspaceOutputError("output ancestry changed or is unsafe") from exc
@@ -190,6 +218,12 @@ def ordinary_directory(
                 _require_directory_binding(current, descriptor)
                 try:
                     os.mkdir(part, dir_fd=descriptor)
+                except FileExistsError:
+                    # A competing creator may have installed this component.
+                    pass
+                except OSError as exc:
+                    _raise_unsafe_path(exc)
+                try:
                     child = os.open(part, flags, dir_fd=descriptor)
                 except OSError as exc:
                     _raise_unsafe_path(exc)
@@ -223,19 +257,36 @@ def ordinary_open(
     resolved = Path(os.path.realpath(Path(path).expanduser().absolute()))
     if os.name == "nt":
         require_ordinary_output(resolved)
-        with open(resolved, mode, encoding=encoding) as stream:
-            yield stream
+        flags = os.O_WRONLY | getattr(os, "O_BINARY", 0)
+        if "a" in mode:
+            flags |= os.O_APPEND
+        try:
+            descriptor = os.open(resolved, flags | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            descriptor = os.open(resolved, flags)
+        try:
+            _require_opened_output_binding(resolved, descriptor)
+            if "w" in mode:
+                os.ftruncate(descriptor, 0)
+            with os.fdopen(descriptor, mode, encoding=encoding) as stream:
+                descriptor = -1
+                yield stream
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         return
     with ordinary_directory(resolved.parent) as (_parent, parent_descriptor):
         _require_directory_binding(resolved.parent, parent_descriptor)
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         if "a" in mode:
             flags |= os.O_APPEND
+        created = False
         try:
             descriptor = os.open(
                 resolved.name, flags | os.O_CREAT | os.O_EXCL, 0o666,
                 dir_fd=parent_descriptor,
             )
+            created = True
         except FileExistsError:
             try:
                 descriptor = os.open(resolved.name, flags, dir_fd=parent_descriptor)
@@ -245,11 +296,13 @@ def ordinary_open(
                 _raise_unsafe_path(exc)
         except OSError as exc:
             _raise_unsafe_path(exc)
+        admitted = False
         try:
             _require_directory_binding(resolved.parent, parent_descriptor)
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
                 raise ManagedWorkspaceOutputError("ordinary output is not a singular regular file")
+            admitted = True
             if "w" in mode:
                 os.ftruncate(descriptor, 0)
             with os.fdopen(descriptor, mode, encoding=encoding) as stream:
@@ -257,6 +310,18 @@ def ordinary_open(
                 yield stream
         finally:
             if descriptor >= 0:
+                if created and not admitted:
+                    try:
+                        named = os.stat(
+                            resolved.name, dir_fd=parent_descriptor,
+                            follow_symlinks=False,
+                        )
+                        opened = os.fstat(descriptor)
+                        if (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino):
+                            os.unlink(resolved.name, dir_fd=parent_descriptor)
+                    except OSError:
+                        # Keep the admission failure if safe cleanup is unavailable.
+                        pass
                 os.close(descriptor)
 
 

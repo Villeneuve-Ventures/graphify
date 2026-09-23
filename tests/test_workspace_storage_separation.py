@@ -358,3 +358,177 @@ def test_windows_locked_replace_never_falls_back_to_path_copy(tmp_path, monkeypa
         guard.ordinary_atomic_bytes(target, b"new")
     assert target.read_bytes() == b"old"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["cache.json"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulated Windows branch uses POSIX symlinks")
+def test_windows_open_checks_the_file_handle_before_truncation(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    real_os = guard.os
+
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+    monkeypatch.setattr(guard, "os", WindowsOS())
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    (safe / "graph.json").write_bytes(b"ordinary")
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+    protected = managed / "graph.json"
+    protected.write_bytes(b"protected")
+    original_admission = guard.require_ordinary_output
+    switched = False
+
+    def replace_parent_after_admission(path):
+        nonlocal switched
+        original_admission(path)
+        if not switched:
+            safe.rename(tmp_path / "retained")
+            safe.symlink_to(managed, target_is_directory=True)
+            switched = True
+
+    monkeypatch.setattr(guard, "require_ordinary_output", replace_parent_after_admission)
+    with pytest.raises(ManagedWorkspaceOutputError):
+        with guard.ordinary_open(safe / "graph.json", "w") as stream:
+            stream.write("overwritten")
+    assert switched
+    assert protected.read_bytes() == b"protected"
+    assert (tmp_path / "retained" / "graph.json").read_bytes() == b"ordinary"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="simulated Windows branch uses POSIX symlinks")
+def test_windows_admission_denies_dangling_marker(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    real_os = guard.os
+
+    class WindowsOS:
+        name = "nt"
+
+        def __getattr__(self, name):
+            return getattr(real_os, name)
+
+    monkeypatch.setattr(guard, "os", WindowsOS())
+    output = tmp_path / "output"
+    output.mkdir()
+    marker = output / WORKSPACE_ROOT_MARKER
+    marker.symlink_to(output / "missing")
+    with pytest.raises(ManagedWorkspaceOutputError):
+        guard.require_ordinary_output(output / "graph.json")
+    marker.unlink()
+    guard.require_ordinary_output(output / "graph.json")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor fault injection")
+@pytest.mark.parametrize("replacement", [False, True])
+def test_ordinary_open_cleans_only_its_created_inode_after_admission_failure(
+    tmp_path, monkeypatch, replacement,
+):
+    import graphify.storage_guard as guard
+
+    safe = tmp_path / "safe"
+    safe.mkdir()
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+    real_open = guard.os.open
+    moved = False
+
+    def move_after_creation(path, flags, *args, **kwargs):
+        nonlocal moved
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if path == "new" and flags & os.O_EXCL and not moved:
+            moved = True
+            if replacement:
+                (safe / "new").rename(safe / "original")
+                (safe / "new").write_bytes(b"replacement")
+            safe.rename(managed / "staging")
+        return descriptor
+
+    monkeypatch.setattr(guard.os, "open", move_after_creation)
+    with pytest.raises(ManagedWorkspaceOutputError):
+        with guard.ordinary_open(safe / "new", "w"):
+            pass
+    assert moved
+    if replacement:
+        assert (managed / "staging" / "new").read_bytes() == b"replacement"
+        assert (managed / "staging" / "original").read_bytes() == b""
+    else:
+        assert not (managed / "staging" / "new").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor fault injection")
+@pytest.mark.parametrize("winner", ["ordinary", "marked", "symlink"])
+def test_directory_creation_validates_competing_winner(tmp_path, monkeypatch, winner):
+    import graphify.storage_guard as guard
+
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    (managed / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+    real_mkdir = guard.os.mkdir
+
+    def competing_mkdir(path, *args, **kwargs):
+        if path == "new":
+            if winner == "symlink":
+                (parent / "new").symlink_to(managed, target_is_directory=True)
+            else:
+                real_mkdir(path, *args, **kwargs)
+                if winner == "marked":
+                    (parent / "new" / WORKSPACE_ROOT_MARKER).write_bytes(b"deny")
+            raise FileExistsError("competing creator won")
+        return real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(guard.os, "mkdir", competing_mkdir)
+    if winner == "ordinary":
+        assert guard.ordinary_mkdir(parent / "new") == parent / "new"
+    else:
+        with pytest.raises(ManagedWorkspaceOutputError):
+            guard.ordinary_mkdir(parent / "new")
+    assert not (managed / "output").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor enumeration")
+def test_historical_workspace_probe_stops_at_first_matching_entry(tmp_path, monkeypatch):
+    import graphify.storage_guard as guard
+
+    root = tmp_path / "old"
+    workspaces = root / "workspaces"
+    historical = workspaces / str(uuid4()) / "generations"
+    historical.mkdir(parents=True)
+    for index in range(20):
+        (workspaces / f"unrelated-{index}").mkdir()
+    real_scandir = guard.os.scandir
+    entries_seen = 0
+
+    class CountedScan:
+        def __init__(self, scan):
+            self.scan = scan
+            self.entries = iter(sorted(
+                scan, key=lambda item: item.name != historical.parent.name,
+            ))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.scan.close()
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal entries_seen
+            entries_seen += 1
+            return next(self.entries)
+
+    monkeypatch.setattr(guard.os, "scandir", lambda path: CountedScan(real_scandir(path)))
+    with pytest.raises(ManagedWorkspaceOutputError):
+        guard.require_ordinary_output(root / "output")
+    assert entries_seen == 1
