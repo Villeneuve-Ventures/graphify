@@ -878,7 +878,11 @@ class ContractDocument:
         parsed = _parse_json(value)
         if not isinstance(parsed, Mapping):
             raise ContractError("$: expected object")
-        return cls.from_mapping(parsed)
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: durable contract is not canonical JSON")
+        return document
 
     def to_dict(self) -> dict[str, Any]:
         result = json.loads(self.canonical)
@@ -1006,6 +1010,9 @@ class WorkspaceLeaseState:
             domain: _integer(epoch, f"$.lease_epochs.{domain}", minimum=1)
             for domain, epoch in raw_lease_epochs.items()
         }
+        for domain, epoch in lease_epochs.items():
+            if epoch > operation_epoch:
+                raise ContractError(f"$.lease_epochs.{domain}: exceeds operation_epoch")
         leases: dict[str, FencedLease] = {}
         for domain, raw_lease in raw_leases.items():
             lease_mapping = _mapping(raw_lease, f"$.leases.{domain}")
@@ -2694,7 +2701,7 @@ def parse_contract(
         raise ContractError(f"$.contract: unknown contract {contract!r}")
     if expected is not None and model is not expected:
         raise ContractError(f"$.contract: expected {expected.CONTRACT!r}, got {contract!r}")
-    document = model.from_mapping(parsed)
+    document = model.from_json(value) if isinstance(value, (str, bytes)) else model.from_mapping(parsed)
     return cast(ContractDocument | DocumentT, document)
 
 

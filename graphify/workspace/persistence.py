@@ -31,6 +31,10 @@ _LOCK_STACK: ContextVar[tuple[tuple[int, str], ...]] = ContextVar(
     "graphify_workspace_lock_stack",
     default=(),
 )
+_HELD_LOCK_BINDINGS: ContextVar[tuple[Callable[[], None], ...]] = ContextVar(
+    "graphify_workspace_held_lock_bindings",
+    default=(),
+)
 _ATOMIC_TEMP_RE = re.compile(
     r"^\.(?P<destination>.+)\.tmp-(?P<pid>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$",
     re.ASCII,
@@ -455,6 +459,7 @@ class DurableStateRoot:
     ) -> Iterator[int | None]:
         """Hold the root and its verified parent across one contained operation."""
 
+        self._validate_held_lock_bindings()
         parent = self.root.parent
         if parent == self.root:
             raise StatePathError("state root must not be the filesystem root")
@@ -536,6 +541,7 @@ class DurableStateRoot:
                         f"state root changed while opening: {self.root}"
                     )
                 require_parent_binding()
+                self._validate_held_lock_bindings()
                 if ensure:
                     # An existing entry may be left by mkdir followed by a
                     # failed parent sync in an earlier initialization attempt.
@@ -544,7 +550,9 @@ class DurableStateRoot:
                     self._require_root_marker(root_descriptor, install=ensure)
                 except OSError as exc:
                     raise StatePathError("workspace root ownership marker is unsafe") from exc
+                self._validate_held_lock_bindings()
                 yield root_descriptor
+                self._validate_held_lock_bindings()
             finally:
                 os.close(root_descriptor)
         finally:
@@ -882,13 +890,20 @@ class DurableStateRoot:
         except ValueError as exc:
             raise StatePathError(f"state file escapes root: {path}") from exc
         flags = self._regular_open_flags()
-        with self._existing_private_directory(
-            relative_parent,
-            allow_missing=allow_missing_parent,
-        ) as parent_descriptor:
-            if parent_descriptor is None:
-                return None
-            return os.open(path.name, flags, dir_fd=parent_descriptor)
+        descriptor: int | None = None
+        try:
+            with self._existing_private_directory(
+                relative_parent,
+                allow_missing=allow_missing_parent,
+            ) as parent_descriptor:
+                if parent_descriptor is not None:
+                    descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+            # Transfer ownership only after the enclosing binding checks pass.
+            return descriptor
+        except BaseException:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise
 
     @staticmethod
     def _contained_parts(relative: str | Path) -> tuple[str, ...]:
@@ -1661,6 +1676,65 @@ class DurableStateRoot:
                 self.syscalls.fsync(descriptor)
 
     @contextmanager
+    def _held_lock_binding(
+        self, descriptor: int, path: Path, *, kind: str,
+    ) -> Iterator[None]:
+        """Retain root and lock identities for every operation in this context."""
+
+        with self._root_directory(ensure=False) as root_descriptor:
+            if root_descriptor is None:  # pragma: no cover - missing root raises
+                raise StatePathError(f"{kind} lock root is missing: {self.root}")
+
+            def validate() -> None:
+                try:
+                    with ExitStack() as opened:
+                        parent = self._open_root_parent(allow_missing=False)
+                        if parent is None:  # pragma: no cover - missing parent raises
+                            raise StatePathError(f"{kind} lock root parent is missing")
+                        opened.callback(os.close, parent)
+                        current_root = self._open_owned_directory_at(
+                            parent, self.root.name, self.root, allow_mount_point=True,
+                        )
+                        opened.callback(os.close, current_root)
+                        held = self._require_private_directory_descriptor(root_descriptor, self.root)
+                        current = self._require_private_directory_descriptor(current_root, self.root)
+                        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                            raise StatePathError(f"{kind} lock root binding changed: {self.root}")
+                        if path == self.root:
+                            locked = self._require_private_directory_descriptor(descriptor, path)
+                            bound = current
+                        else:
+                            directory = opened.enter_context(self._existing_directory_beneath(
+                                current_root, self.root, path.parent.relative_to(self.root),
+                                allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                            ))
+                            candidate = os.open(path.name, self._regular_open_flags(), dir_fd=directory)
+                            opened.callback(os.close, candidate)
+                            locked = self._require_regular_descriptor(
+                                descriptor, path, allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                            bound = self._require_regular_descriptor(
+                                candidate, path, allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                        if (locked.st_dev, locked.st_ino) != (bound.st_dev, bound.st_ino):
+                            raise StatePathError(f"{kind} lock binding changed: {path}")
+                except OSError as exc:
+                    raise StatePathError(f"{kind} lock binding changed: {path}") from exc
+
+            validate()
+            token = _HELD_LOCK_BINDINGS.set((*_HELD_LOCK_BINDINGS.get(), validate))
+            try:
+                yield
+                validate()
+            finally:
+                _HELD_LOCK_BINDINGS.reset(token)
+
+    @staticmethod
+    def _validate_held_lock_bindings() -> None:
+        for validate in _HELD_LOCK_BINDINGS.get():
+            validate()
+
+    @contextmanager
     def lock(
         self,
         relative: str | Path,
@@ -1779,8 +1853,10 @@ class DurableStateRoot:
                 )
                 token = _LOCK_STACK.set((*stack, (rank, name)))
                 try:
-                    self.fault_hook(f"lock:{name}:acquired")
-                    yield
+                    with self._held_lock_binding(descriptor, path, kind=name):
+                        self.fault_hook(f"lock:{name}:acquired")
+                        self._validate_held_lock_bindings()
+                        yield
                 finally:
                     _LOCK_STACK.reset(token)
                     while True:
@@ -1842,8 +1918,10 @@ class DurableStateRoot:
                 )
             token = _LOCK_STACK.set((*stack, (rank, name)))
             try:
-                self.fault_hook(f"lock:{name}:acquired")
-                yield
+                with self._held_lock_binding(descriptor, self.root, kind=name):
+                    self.fault_hook(f"lock:{name}:acquired")
+                    self._validate_held_lock_bindings()
+                    yield
             finally:
                 _LOCK_STACK.reset(token)
                 while True:
@@ -1936,8 +2014,10 @@ class DurableStateRoot:
             )
             token = _LOCK_STACK.set((*stack, (rank, name)))
             try:
-                self.fault_hook(f"lock:{name}:acquired")
-                yield
+                with self._held_lock_binding(descriptor, path, kind=kind):
+                    self.fault_hook(f"lock:{name}:acquired")
+                    self._validate_held_lock_bindings()
+                    yield
             finally:
                 _LOCK_STACK.reset(token)
                 while True:

@@ -164,6 +164,7 @@ def _git(
     root: Path,
     *arguments: str,
     deadline_ns: int | None = None,
+    strip_output: bool = True,
 ) -> str:
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
@@ -218,7 +219,8 @@ def _git(
             # Git diagnostics can contain credentials from repository configuration.
             raise SourceDiscoveryError(f"Git command failed with status {process.returncode}")
         try:
-            return stdout.decode("utf-8").strip()
+            decoded = stdout.decode("utf-8")
+            return decoded.strip() if strip_output else decoded
         except UnicodeDecodeError:
             raise SourceDiscoveryError("Git output is not valid UTF-8") from None
 
@@ -623,13 +625,28 @@ def discover_source(
     _check_deadline(deadline_ns)
     worktree_id = "main" if git_dir == git_common_dir else git_dir.name
 
-    remote_output = _git(root, "remote", "-v", deadline_ns=deadline_ns)
+    # Human-readable remote -v output lets embedded URL newlines forge records.
+    # Enumerate complete config keys, then let Git resolve each fetch URL (including
+    # insteadOf rules) without discarding whitespace from the URL itself.
+    config_keys = _git(
+        root, "config", "--null", "--name-only", "--list",
+        deadline_ns=deadline_ns, strip_output=False,
+    )
+    remote_names = {
+        key[len("remote."):-len(".url")]
+        for key in config_keys.split("\0")
+        if key.startswith("remote.") and key.endswith(".url")
+    }
     remote_pairs: dict[str, str] = {}
-    for line in remote_output.splitlines():
-        fields = line.split()
-        if len(fields) < 3 or fields[2] != "(fetch)":
-            continue
-        name, raw_url = fields[0], fields[1]
+    for name in sorted(remote_names):
+        if not name or any(character.isspace() for character in name):
+            raise SourceDiscoveryError("malformed Git remote name")
+        raw_url = _git(
+            root, "remote", "get-url", "--", name,
+            deadline_ns=deadline_ns, strip_output=False,
+        ).removesuffix("\n")
+        if any(character.isspace() for character in raw_url):
+            raise SourceDiscoveryError("fetch remote URL contains whitespace")
         normalized = _normalize_remote(raw_url)
         prior = remote_pairs.get(normalized)
         if prior is None or name < prior:

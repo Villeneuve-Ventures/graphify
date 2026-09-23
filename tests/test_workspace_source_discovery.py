@@ -60,6 +60,55 @@ def test_discovery_errors_do_not_disclose_remote_credentials(source_repository, 
     assert "TEST_SECRET" not in "".join(traceback.format_exception(raised.value))
 
 
+@pytest.mark.parametrize("whitespace", [" ", "\t", "\n"])
+def test_malformed_fetch_remote_is_not_hidden_by_valid_remote(
+    source_repository, whitespace,
+):
+    _git(source_repository, "remote", "add", "origin", "https://example.test/valid.git")
+    _git(source_repository, "remote", "add", "other",
+         f"https://example.test/TEST_SECRET{whitespace}repo.git")
+    with pytest.raises(SourceDiscoveryError) as raised:
+        discover_source(source_repository)
+    assert "TEST_SECRET" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_push_only_url_whitespace_does_not_enter_fetch_evidence(source_repository):
+    _git(source_repository, "remote", "add", "origin", "https://example.test/valid.git")
+    _git(source_repository, "remote", "set-url", "--push", "origin",
+         "https://example.test/push only.git")
+    source = discover_source(source_repository)
+    assert [remote["url"] for remote in source.remote_evidence] == [
+        "https://example.test/valid.git",
+    ]
+
+
+@pytest.mark.parametrize("remote", [
+    "https://example.test/TEST_SECRET (push)\nfake\thttps://example.test/injected.git",
+    " https://example.test/TEST_SECRET.git",
+    "https://example.test/TEST_SECRET.git\n",
+])
+def test_fetch_url_cannot_forge_remote_records(source_repository, remote):
+    _git(source_repository, "remote", "add", "origin", "https://example.test/valid.git")
+    _git(source_repository, "remote", "add", "other", remote)
+    with pytest.raises(SourceDiscoveryError) as raised:
+        discover_source(source_repository)
+    assert "TEST_SECRET" not in "".join(traceback.format_exception(raised.value))
+
+
+def test_discovery_preserves_git_fetch_url_rewriting(source_repository):
+    _git(source_repository, "remote", "add", "origin", "fixture:owner/repo.git")
+    _git(source_repository, "config", "url.https://example.test/.insteadOf", "fixture:")
+    source = discover_source(source_repository)
+    assert [remote["url"] for remote in source.remote_evidence] == [
+        "https://example.test/owner/repo.git",
+    ]
+
+
+def test_discovery_requires_a_fetch_remote(source_repository):
+    with pytest.raises(SourceDiscoveryError, match="at least one fetch remote is required"):
+        discover_source(source_repository)
+
+
 @pytest.mark.parametrize("remote", [
     "https://example.test/org/repo%20name.git",
     "https://example.test/org/../repo.git",
