@@ -54,9 +54,14 @@ def test_composition_does_not_create_missing_state(tmp_path):
 def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_path, monkeypatch):
     from graphify.workspace.persistence import RuntimeCapabilities
 
+    detections = []
+    def detect(_cls, path):
+        detections.append(path)
+        return RuntimeCapabilities.supported_test_fixture()
+
     monkeypatch.setattr(
         RuntimeCapabilities, "detect",
-        classmethod(lambda _cls, _path: RuntimeCapabilities.supported_test_fixture()),
+        classmethod(detect),
     )
     root = tmp_path / "absent"
     auth = authority()
@@ -64,6 +69,7 @@ def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_p
         WorkspaceRuntimeInputs(root, auth, auth.compatibility)
     )
     stores = composition.require_lifecycle_stores()
+    assert detections == [root]
     assert stores.generations.state.root == root
     assert stores.capacity_policy.workspace_max_generations == 4
     assert stores.queue_policy.max_claimed_tasks == 1

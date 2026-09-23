@@ -15,7 +15,7 @@ from graphify.workspace.generations import (
     CapacityExceeded, CertificationRequest, GenerationError, GenerationStore,
     StructuralBuildRequest,
 )
-from graphify.workspace.gc import GcProtection, GcStore
+from graphify.workspace.gc import GcPlanStale, GcProtection, GcStore
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import StagedBuildLeaseRecoveryRequired, StaleLease
@@ -511,6 +511,60 @@ def test_gc_preview_is_read_only_and_does_not_adopt_unowned_generations(tmp_path
     )
     assert preview.candidates == ()
     assert tree_snapshot(harness.state_root) == before
+
+
+def test_gc_reused_epoch_rejects_changed_plan_before_durable_intent(tmp_path):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        first_plan = gc._plan_locked(
+            operation, capacity_policy=POLICY, protections=protections,
+            probe_locks=True,
+        )
+    assert first_plan.candidates == ()
+    gc.execute(
+        grant, first_plan, capacity_policy=POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+
+    changed_policy = POLICY.to_dict()
+    changed_policy["reserve_bytes"] += 1
+    second_policy = CapacityPolicy.from_mapping(changed_policy)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_003, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        second_plan = gc._plan_locked(
+            operation, capacity_policy=second_policy, protections=protections,
+            probe_locks=True,
+        )
+    assert second_plan.sha256 != first_plan.sha256
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcPlanStale, match="already completed another plan"):
+        gc.execute(
+            grant, second_plan, capacity_policy=second_policy,
+            protections=protections,
+            occurred_at=START + timedelta(seconds=2), monotonic_ns=10_004,
+        )
+    assert tree_snapshot(harness.state_root) == before
+    assert not gc._intent_path(REPO_UUID).exists()
 
 
 def test_semantic_queue_policy_has_explicit_bounds():

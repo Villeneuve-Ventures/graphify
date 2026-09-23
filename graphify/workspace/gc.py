@@ -1106,6 +1106,16 @@ class GcStore:
             )
             if refreshed.canonical != plan.canonical:
                 raise GcPlanStale("GC dry-run plan no longer matches reachability")
+            prior_completion = self._read_operation_completion_locked(
+                operation.repo_uuid,
+                operation.grant.operation_epoch,
+                deadline_ns=deadline_ns,
+            )
+            if (
+                prior_completion is not None
+                and prior_completion.plan_sha256 != plan.sha256
+            ):
+                raise GcPlanStale("GC operation epoch already completed another plan")
             intent = self._intent(operation, plan, occurred_at=occurred_at)
             completion = self._read_completion(
                 intent,

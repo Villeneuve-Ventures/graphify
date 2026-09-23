@@ -587,7 +587,7 @@ class StructuralComposition:
 
         root = self.inputs.state_root
         # Constructor qualification is read-only; mutation methods repeat it.
-        DurableStateRoot(root).capabilities.require_supported()
+        capabilities = DurableStateRoot(root).capabilities
         policy = StructuralPolicy.from_mapping(
             self.inputs.authority.to_dict()["structural_policy"]
         )
@@ -609,20 +609,22 @@ class StructuralComposition:
             retry_budget=0,
             max_claimed_tasks=policy.max_claimed_tasks,
         )
-        registry = RegistryStore(root)
-        leases = LeaseStore(root, registry)
-        journal = JournalStore(root, leases)
-        queue = SemanticQueueStore(root, leases, policy=queue_policy)
+        registry = RegistryStore(root, capabilities=capabilities)
+        leases = LeaseStore(root, registry, capabilities=capabilities)
+        journal = JournalStore(root, leases, capabilities=capabilities)
+        queue = SemanticQueueStore(root, leases, policy=queue_policy, capabilities=capabilities)
         generations = GenerationStore(
             root, leases, journal,
             compatibility_manifest=self.inputs.expected,
             semantic_queue=queue,
+            capabilities=capabilities,
         )
         pointers = PointerStore(
             root, leases, generations, journal,
             compatibility_manifest=self.inputs.expected,
+            capabilities=capabilities,
         )
-        gc = GcStore(root, leases, generations, pointers)
+        gc = GcStore(root, leases, generations, pointers, capabilities=capabilities)
         return LifecycleStores(
             registry, leases, journal, queue, generations, pointers, gc, capacity, queue_policy
         )
