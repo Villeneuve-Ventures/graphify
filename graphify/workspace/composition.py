@@ -571,76 +571,7 @@ class StructuralComposition:
     inputs: WorkspaceRuntimeInputs
 
     def require_runtime(self):
-        raise WorkspaceAuthorityInvalid("S4 operational adapter is not implemented")
-
-    def require_lifecycle_stores(self):
-        """Construct S3 stores without creating state or enabling an adapter."""
-        from .generations import GenerationStore
-        from .gc import GcStore
-        from .journal import JournalStore
-        from .leases import LeaseStore
-        from .lifecycle_contracts import CapacityPolicy
-        from .persistence import DurableStateRoot
-        from .pointers import PointerStore
-        from .registry import RegistryStore
-        from .semantic_queue import SemanticQueuePolicy, SemanticQueueStore
-
-        root = self.inputs.state_root
-        # Constructor qualification is read-only; mutation methods repeat it.
-        capabilities = DurableStateRoot(root).capabilities
-        policy = StructuralPolicy.from_mapping(
-            self.inputs.authority.to_dict()["structural_policy"]
-        )
-        total_bytes = policy.max_generations * policy.max_payload_bytes
-        if total_bytes > 2**63 - 1:
-            raise WorkspaceAuthorityInvalid("explicit capacity product exceeds supported range")
-        capacity = CapacityPolicy.from_mapping({
-            "contract": "graphify.workspace.capacity_policy.internal",
-            "format_version": 1,
-            "global_max_bytes": total_bytes,
-            "global_max_generations": policy.max_generations,
-            "workspace_max_bytes": total_bytes,
-            "workspace_max_generations": policy.max_generations,
-            "reserve_bytes": policy.max_payload_bytes,
-        })
-        queue_policy = SemanticQueuePolicy(
-            max_items=policy.max_pending_tasks,
-            max_bytes=policy.max_pending_bytes,
-            retry_budget=0,
-            max_claimed_tasks=policy.max_claimed_tasks,
-        )
-        registry = RegistryStore(root, capabilities=capabilities)
-        leases = LeaseStore(root, registry, capabilities=capabilities)
-        journal = JournalStore(root, leases, capabilities=capabilities)
-        queue = SemanticQueueStore(root, leases, policy=queue_policy, capabilities=capabilities)
-        generations = GenerationStore(
-            root, leases, journal,
-            compatibility_manifest=self.inputs.expected,
-            semantic_queue=queue,
-            capabilities=capabilities,
-        )
-        pointers = PointerStore(
-            root, leases, generations, journal,
-            compatibility_manifest=self.inputs.expected,
-            capabilities=capabilities,
-        )
-        gc = GcStore(root, leases, generations, pointers, capabilities=capabilities)
-        return LifecycleStores(
-            registry, leases, journal, queue, generations, pointers, gc, capacity, queue_policy
-        )
-
-
-@dataclass(frozen=True)
-class LifecycleStores:
-    registry: object
-    leases: object
-    journal: object
-    queue: object
-    generations: object
-    pointers: object
-    gc: object
-    capacity_policy: object
-    queue_policy: object
+        raise WorkspaceAuthorityInvalid("S3 stores and S4 operational adapter are not implemented")
 
 
 def compose_workspace_runtime(inputs):
