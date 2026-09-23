@@ -18,6 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from graphify.workspace.lifecycle_contracts import (
     ContractError,
     WorkspaceConfig,
+    canonical_registry_source,
     canonical_sha256,
 )
 
@@ -625,6 +626,10 @@ def discover_source(
         "remote_aliases": remote_aliases,
         "worktree_id": worktree_id,
     }
+    try:
+        registry_source = canonical_registry_source(registry_source)
+    except ContractError:
+        raise SourceDiscoveryError("source identity is not canonical") from None
     if _git(root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns) == "true":
         raise SourceDiscoveryError("shallow repositories require complete history before enrollment")
     head = _git(root, "rev-parse", "HEAD", deadline_ns=deadline_ns)

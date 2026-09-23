@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
+from itertools import chain
 import json
 from pathlib import Path
 from typing import Any, cast, Iterator, TYPE_CHECKING
@@ -26,6 +27,7 @@ from graphify.workspace.identity import (
     identity_evidence,
 )
 from graphify.workspace.persistence import (
+    CommitUnknown,
     DurableStateRoot,
     FaultHook,
     REGISTRY_INITIALIZATION_LOCK_RANK,
@@ -42,6 +44,10 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from graphify.workspace.leases import LeaseGrant, LeaseOwner, LeaseStore
+
+
+REGISTRY_MAX_BYTES = 16 * 1024 * 1024
+IDENTITY_EVIDENCE_MAX_RECORDS = 4096
 
 
 class RegistryError(RuntimeError):
@@ -181,6 +187,7 @@ class RegistryStore:
             "decoder": decoder,
             "revision": lambda document: int(document.to_dict()["revision"]),
             "allow_missing": allow_missing,
+            "max_bytes": REGISTRY_MAX_BYTES,
         }
         if recover:
             if deadline_ns is None:
@@ -275,6 +282,8 @@ class RegistryStore:
 
     def _persist_evidence(self, value: dict[str, Any]) -> str:
         payload = canonical_json_bytes(value)
+        if len(payload) > REGISTRY_MAX_BYTES:
+            raise StateCorrupt("registry evidence exceeds its byte limit")
         digest = hashlib.sha256(payload).hexdigest()
         self.state.write_once(Path("evidence") / f"{digest}.json", payload)
         return digest
@@ -301,6 +310,7 @@ class RegistryStore:
         try:
             payload = self.state.read_existing_bytes(
                 path.relative_to(self.state.root),
+                max_bytes=REGISTRY_MAX_BYTES,
                 deadline_ns=deadline_ns,
             )
             value = json.loads(payload)
@@ -470,7 +480,23 @@ class RegistryStore:
             for field in ("active_source_revision", "operation_epoch", "fence_token"):
                 if rebind[field] != active_evidence[field]:
                     raise StateCorrupt(f"active-source evidence {field} is stale for {repo_uuid}")
-            for evidence in (immutable, current, rebind):
+            retained = (
+                self._validate_identity_evidence(
+                    digest,
+                    repo_uuid=repo_uuid,
+                    allowed_actions={"ENROLL", "ADOPT", "REBIND", "ROTATE", "ACTIVATE"},
+                    maximum_registry_revision=revision,
+                    bound_sources=bound_sources,
+                    deadline_ns=deadline_ns,
+                )
+                for digest in sorted({
+                    *self._retained_identity_digests(current),
+                    *self._retained_identity_digests(rebind),
+                })
+            )
+            covered_sources: set[str] = set()
+            for evidence in chain((immutable, current, rebind), retained):
+                covered_sources.add(evidence["source_sha256"])
                 common_identity = (
                     int(evidence["git_common_device"]),
                     int(evidence["git_common_inode"]),
@@ -482,8 +508,13 @@ class RegistryStore:
                         f"{common_identity}"
                     )
 
+            if any(canonical_sha256(source) not in covered_sources for source in bound_sources):
+                raise StateCorrupt(f"bound source lacks identity evidence for {repo_uuid}")
+
     def _commit_locked(self, value: dict[str, Any]) -> Registry:
         document = Registry.from_mapping(value)
+        if len(document.canonical) > REGISTRY_MAX_BYTES:
+            raise StateCorrupt("registry exceeds its byte limit")
         return cast(
             Registry,
             self.state.commit_record(
@@ -518,6 +549,41 @@ class RegistryStore:
             "workspaces": entries,
         }
 
+    @staticmethod
+    def _retained_identity_digests(evidence: dict[str, Any]) -> list[str]:
+        # A flat inventory, never a recursively followed evidence chain.
+        digests = evidence.get("bound_identity_evidence_sha256", [])
+        if (not isinstance(digests, list)
+                or len(digests) > IDENTITY_EVIDENCE_MAX_RECORDS
+                or any(not isinstance(digest, str) or len(digest) != 64
+                       or any(char not in "0123456789abcdef" for char in digest)
+                       for digest in digests)
+                or digests != sorted(set(digests))):
+            raise StateCorrupt("bound identity evidence inventory is invalid")
+        return digests
+
+    def _identity_evidence_digests(self, entry: dict[str, Any]) -> list[str]:
+        enrollment = entry["uuid_enrollment"]
+        current = self.read_evidence(enrollment["current_evidence_sha256"])
+        active = self.read_evidence(entry["active_source_evidence"]["rebind_evidence_sha256"])
+        digests = {
+            enrollment["immutable_evidence_sha256"],
+            enrollment["current_evidence_sha256"],
+            entry["active_source_evidence"]["rebind_evidence_sha256"],
+            *self._retained_identity_digests(current),
+            *self._retained_identity_digests(active),
+        }
+        # Rotations and activations need not accumulate duplicate identity proofs.
+        identities: dict[tuple[str, int, int], str] = {}
+        for digest in sorted(digests):
+            proof = self.read_evidence(digest)
+            key = (proof["source_sha256"], proof["git_common_device"], proof["git_common_inode"])
+            identities.setdefault(key, digest)
+        retained = sorted(identities.values())
+        if len(retained) > IDENTITY_EVIDENCE_MAX_RECORDS:
+            raise StateCorrupt("bound identity evidence inventory exceeds its limit")
+        return retained
+
     def _authorized_evidence(
         self,
         source: SourceIdentity,
@@ -527,6 +593,7 @@ class RegistryStore:
         active_source_revision: int,
         operation_epoch: int,
         fence_token: int,
+        bound_identity_evidence: list[str] | None = None,
     ) -> str:
         self._persist_source_evidence(source)
         return self._persist_evidence(
@@ -537,6 +604,8 @@ class RegistryStore:
                 "active_source_revision": active_source_revision,
                 "operation_epoch": operation_epoch,
                 "fence_token": fence_token,
+                **({"bound_identity_evidence_sha256": bound_identity_evidence}
+                   if bound_identity_evidence is not None else {}),
             }
         )
 
@@ -567,11 +636,7 @@ class RegistryStore:
     ) -> None:
         self._assert_source_binding_available(entries, source)
         for entry in entries:
-            evidence_digests = {
-                entry["uuid_enrollment"]["immutable_evidence_sha256"],
-                entry["uuid_enrollment"]["current_evidence_sha256"],
-                entry["active_source_evidence"]["rebind_evidence_sha256"],
-            }
+            evidence_digests = self._identity_evidence_digests(entry)
             for digest in evidence_digests:
                 evidence = self.read_evidence(digest)
                 if (
@@ -758,6 +823,7 @@ class RegistryStore:
                 active_source_revision=int(entry["active_source_revision"]),
                 operation_epoch=int(active_evidence["operation_epoch"]),
                 fence_token=int(active_evidence["fence_token"]),
+                bound_identity_evidence=self._identity_evidence_digests(entry),
             )
             entry["aliases"].append(source.registry_source)
             entry["uuid_enrollment"]["current_evidence_sha256"] = evidence_digest
@@ -805,6 +871,7 @@ class RegistryStore:
                 active_source_revision=int(entry["active_source_revision"]),
                 operation_epoch=int(active_evidence["operation_epoch"]),
                 fence_token=int(active_evidence["fence_token"]),
+                bound_identity_evidence=self._identity_evidence_digests(entry),
             )
             if not self._known_source(entry, source):
                 entry["aliases"].append(source.registry_source)
@@ -846,6 +913,7 @@ class RegistryStore:
                 active_source_revision=int(entry["active_source_revision"]),
                 operation_epoch=int(active_evidence["operation_epoch"]),
                 fence_token=int(active_evidence["fence_token"]),
+                bound_identity_evidence=self._identity_evidence_digests(entry),
             )
             entry["uuid_enrollment"]["current_evidence_sha256"] = evidence_digest
             return self._commit_locked(self._document_value(current, revision + 1, entries))
@@ -864,7 +932,6 @@ class RegistryStore:
         acquired_at: "datetime",
         monotonic_ns: int,
         ttl_ns: int,
-        require_source_change: bool = False,
     ) -> ActivationResult:
         authorization.require(IdentityAction.ACTIVATE)
         self.state.assert_external_to(source.root)
@@ -894,7 +961,7 @@ class RegistryStore:
                     "active_source_revision expected "
                     f"{expected_active_source_revision}, found {actual_active_revision}"
                 )
-            if require_source_change and source.registry_source == entry["active_source"]:
+            if source.registry_source == entry["active_source"]:
                 raise SourceAlreadyActive("activation target is already selected")
             grant = leases._acquire_under_registry_lock(
                 current,
@@ -910,27 +977,39 @@ class RegistryStore:
                 ttl_ns=ttl_ns,
                 verify_active=False,
             )
-            evidence_digest = self._authorized_evidence(
-                source,
-                authorization,
-                registry_revision=revision + 1,
-                active_source_revision=actual_active_revision + 1,
-                operation_epoch=grant.operation_epoch,
-                fence_token=int(grant.lease.to_dict()["fence_token"]),
-            )
-            prior_active = entry["active_source"]
-            entry["active_source_revision"] = actual_active_revision + 1
-            entry["active_source"] = source.registry_source
-            entry["active_source_evidence"] = {
-                "active_source_revision": actual_active_revision + 1,
-                "source_sha256": source.source_sha256,
-                "rebind_evidence_sha256": evidence_digest,
-                "operation_epoch": grant.operation_epoch,
-                "fence_token": grant.lease.to_dict()["fence_token"],
-            }
-            entry["aliases"].append(prior_active)
-            self._normalized_entry(entry)
-            committed = self._commit_locked(self._document_value(current, revision + 1, entries))
+            registry_commit_started = False
+            try:
+                evidence_digest = self._authorized_evidence(
+                    source,
+                    authorization,
+                    registry_revision=revision + 1,
+                    active_source_revision=actual_active_revision + 1,
+                    operation_epoch=grant.operation_epoch,
+                    fence_token=int(grant.lease.to_dict()["fence_token"]),
+                    bound_identity_evidence=self._identity_evidence_digests(entry),
+                )
+                prior_active = entry["active_source"]
+                entry["active_source_revision"] = actual_active_revision + 1
+                entry["active_source"] = source.registry_source
+                entry["active_source_evidence"] = {
+                    "active_source_revision": actual_active_revision + 1,
+                    "source_sha256": source.source_sha256,
+                    "rebind_evidence_sha256": evidence_digest,
+                    "operation_epoch": grant.operation_epoch,
+                    "fence_token": grant.lease.to_dict()["fence_token"],
+                }
+                entry["aliases"].append(prior_active)
+                self._normalized_entry(entry)
+                registry_commit_started = True
+                committed = self._commit_locked(self._document_value(current, revision + 1, entries))
+            except CommitUnknown:
+                # Only registry intent can make the selected source uncertain.
+                if not registry_commit_started:
+                    leases._release_under_registry_lock(grant, current, validate_active=False)
+                raise
+            except BaseException:
+                leases._release_under_registry_lock(grant, current, validate_active=False)
+                raise
             leases._release_under_registry_lock(grant, committed, validate_active=False)
             return ActivationResult(registry=committed, grant=grant)
 

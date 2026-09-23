@@ -487,6 +487,7 @@ class DurableStateRoot:
                     parent_descriptor,
                     self.root.name,
                     self.root,
+                    allow_mount_point=True,
                 )
             except FileNotFoundError:
                 if not ensure:
@@ -508,6 +509,7 @@ class DurableStateRoot:
                     parent_descriptor,
                     self.root.name,
                     self.root,
+                    allow_mount_point=True,
                 )
             try:
                 if ensure and created:
@@ -724,6 +726,7 @@ class DurableStateRoot:
         *,
         allowed_modes: frozenset[int] | None,
         allow_missing: bool = False,
+        allow_mount_point: bool = False,
     ) -> int | None:
         try:
             descriptor = os.open(name, self._directory_open_flags(), dir_fd=parent_descriptor)
@@ -737,13 +740,17 @@ class DurableStateRoot:
             ) from exc
         try:
             if allowed_modes is None:
-                self._require_owned_directory_descriptor(descriptor, path)
+                details = self._require_owned_directory_descriptor(descriptor, path)
             else:
-                self._require_directory_descriptor(
+                details = self._require_directory_descriptor(
                     descriptor,
                     path,
                     allowed_modes=allowed_modes,
                 )
+            # Descendants inherit the held root device through each verified parent.
+            # Only opening the state root itself may cross a filesystem boundary.
+            if not allow_mount_point and details.st_dev != os.fstat(parent_descriptor).st_dev:
+                raise StatePathError(f"state directory crosses filesystem boundary: {path}")
         except BaseException:
             os.close(descriptor)
             raise
@@ -754,12 +761,15 @@ class DurableStateRoot:
         parent_descriptor: int,
         name: str,
         path: Path,
+        *,
+        allow_mount_point: bool = False,
     ) -> int:
         descriptor = self._open_directory_at(
             parent_descriptor,
             name,
             path,
             allowed_modes=None,
+            allow_mount_point=allow_mount_point,
         )
         if descriptor is None:  # pragma: no cover - allow_missing is false
             raise StatePathError(f"state directory is missing: {path}")

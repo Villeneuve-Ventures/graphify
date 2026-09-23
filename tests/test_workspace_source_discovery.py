@@ -59,6 +59,53 @@ def test_discovery_errors_do_not_disclose_remote_credentials(source_repository, 
     assert "TEST_SECRET" not in "".join(traceback.format_exception(raised.value))
 
 
+@pytest.mark.parametrize("remote", [
+    "https://example.test/org/repo%20name.git",
+    "https://example.test/org/../repo.git",
+    "https://example.test/org//repo.git",
+    "https://invalid_host.test/org/repo.git",
+    "ssh://bad%20user@example.test/org/repo.git",
+])
+def test_noncanonical_remote_is_rejected_before_enrollment(
+    source_repository, tmp_path, remote,
+):
+    from graphify.workspace.identity import IdentityAction, OperatorAuthorization
+    from graphify.workspace.registry import RegistryStore
+
+    _git(source_repository, "remote", "add", "origin", remote)
+    store = RegistryStore(
+        tmp_path.resolve() / "state",
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+    )
+    with pytest.raises(SourceDiscoveryError, match="canonical"):
+        source = discover_source(source_repository)
+        store.enroll(source, OperatorAuthorization(
+            IdentityAction.ENROLL, "fixture", "test enrollment", "2026-09-23T00:00:00Z", "enroll",
+        ))
+    assert not store.state.root.exists()
+
+
+@pytest.mark.parametrize("remote,expected", [
+    ("https://EXAMPLE.test/org/repo.git/", "https://example.test/org/repo.git"),
+    ("git@EXAMPLE.test:org/repo.git", "ssh://git@example.test/org/repo.git"),
+])
+def test_normalized_remotes_remain_enrollable(source_repository, tmp_path, remote, expected):
+    from graphify.workspace.identity import IdentityAction, OperatorAuthorization
+    from graphify.workspace.registry import RegistryStore
+
+    _git(source_repository, "remote", "add", "origin", remote)
+    source = discover_source(source_repository)
+    assert source.registry_source["remote_aliases"][0]["url"] == expected
+    store = RegistryStore(
+        tmp_path.resolve() / "state",
+        capabilities=RuntimeCapabilities.supported_test_fixture(),
+    )
+    store.enroll(source, OperatorAuthorization(
+        IdentityAction.ENROLL, "fixture", "test enrollment", "2026-09-23T00:00:00Z", "enroll",
+    ))
+    assert store.resolve_active_source(source.repo_uuid) == source
+
+
 def test_shallow_repository_requires_complete_history(source_repository, tmp_path):
     clone = tmp_path.resolve() / "shallow"
     _git(tmp_path, "clone", "--depth=1", source_repository.as_uri(), str(clone))
