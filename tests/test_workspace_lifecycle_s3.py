@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from pathlib import Path
+import time
 
 import pytest
 
@@ -14,14 +15,16 @@ from graphify.workspace.generations import (
     CapacityExceeded, CertificationRequest, GenerationError, GenerationStore,
     StructuralBuildRequest,
 )
+from graphify.workspace.gc import GcProtection, GcStore
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
 from graphify.workspace.journal import JournalStore
 from graphify.workspace.leases import StagedBuildLeaseRecoveryRequired, StaleLease
 from graphify.workspace.lifecycle_contracts import (
-    CapacityPolicy, payload_manifest_sha256,
+    CapacityPolicy, ContractError, GenerationReceipt, payload_manifest_sha256,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
 from graphify.workspace.persistence import InjectedFault
+from graphify.workspace.pointers import PointerCAS, PointerStore
 from graphify.workspace.registry import RevisionConflict, SourceAlreadyActive
 from graphify.workspace.semantic_queue import (
     SemanticCertificationBlocked, SemanticQueueConflict, SemanticQueueError, SemanticQueuePolicy,
@@ -73,9 +76,13 @@ def _runtime(tmp_path: Path, *, fault_hook=None):
         root, leases, journal, compatibility_manifest=COMPATIBILITY_MANIFEST,
         semantic_queue=queue, capabilities=capabilities, fault_hook=fault_hook,
     )
+    pointers = PointerStore(
+        root, leases, generations, journal,
+        compatibility_manifest=COMPATIBILITY_MANIFEST, capabilities=capabilities,
+    )
     observations = _observations(harness.repo)
     trust_source_observations(generations, observations)
-    return harness, generations, None, observations
+    return harness, generations, pointers, observations
 
 
 def _request(harness, observations):
@@ -203,6 +210,91 @@ def test_s3_certification_refuses_changed_trusted_consumed_inputs(tmp_path, miss
             source_observations=trusted, declared_entries=completion.entries,
             staged_completion=completion, occurred_at=START + timedelta(seconds=1),
             monotonic_ns=10_006,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path):
+    harness, generations, pointers, observations = _runtime(tmp_path)
+    request, attempt, completion = _complete(harness, generations, observations)
+    binding = completion.state.completion_binding.to_dict()
+    assert binding["initial_detection_sha256"] == observations[0].initial_detection.sha256
+    assert binding["consumed_inputs_sha256"] == observations[0].consumed_inputs.sha256
+    assert completion.state.request.sha256 == request.sha256
+    assert generations._reuse_staged_completion_locked(completion.state, completion.allocation).state == completion.state
+    queue = generations.semantic_queue
+    assert queue is not None
+    queue.reconcile(
+        attempt.grant, (), source_epoch=1, policy_sha256=observations[0].policy_sha256,
+        source_observations=observations, desired_watermark=1, semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    queue.bind_sealed_inputs(
+        attempt.grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", completion.entries),
+        monotonic_ns=10_005,
+    )
+    receipt = generations.certify(
+        attempt.grant, completion.allocation,
+        CertificationRequest(
+            source_commit=observations[0].source_commit, source_epoch=1,
+            policy_sha256=observations[0].policy_sha256,
+            observation_manifest_sha256=observations[0].inventory_sha256,
+            queue_watermark=1, semantic_completeness="not_required",
+            compatibility_sha256=COMPATIBILITY_MANIFEST.sha256,
+            validations=("payload_manifest", "coordination_lock_precreated", "stable_semantic_queue"),
+        ),
+        source_observations=observations, declared_entries=completion.entries,
+        staged_completion=completion, occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=10_006,
+    )
+    assert receipt.to_dict()["semantic_completeness"] == "not_required"
+    assert receipt.to_dict()["completion_binding"] == binding
+    assert generations.verify_generation(REPO_UUID, GENERATION_ID) == receipt
+    insufficient = receipt.to_dict()
+    insufficient["validations"] = ["coordination_lock_precreated", "payload_manifest"]
+    with pytest.raises(ContractError, match="structural certification proofs"):
+        GenerationReceipt.from_mapping(insufficient)
+    promotion = generations.acquire_staged_recovery(
+        REPO_UUID, GENERATION_ID, request, attempt_sha256="7" * 64,
+        acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_000,
+        ttl_ns=1_000_000,
+    )
+    lease = promotion.grant.lease.to_dict()
+    pointer = pointers.promote(
+        promotion.grant,
+        PointerCAS(
+            expected_pointer_revision=0,
+            expected_active_source_revision=1,
+            expected_source_epoch=1,
+            expected_operation_epoch=promotion.grant.operation_epoch,
+            expected_migration_epoch=promotion.grant.migration_epoch,
+            expected_state_schema_version=2,
+            expected_fence_token=lease["fence_token"],
+            candidate_generation_id=GENERATION_ID,
+            candidate_receipt_sha256=receipt.sha256,
+            expected_current_receipt_sha256=None,
+        ),
+        occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+    )
+    assert pointer.to_dict()["pointer_revision"] == 1
+    assert generations.complete_staged_promotion(
+        promotion, pointer, monotonic_ns=2_000_002,
+    ).lifecycle_state == "PROMOTED"
+    terminal = generations.acquire_staged_recovery(
+        REPO_UUID, GENERATION_ID, request, attempt_sha256="7" * 64,
+        acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_003,
+        ttl_ns=1_000_000,
+    )
+    assert terminal.state.lifecycle_state == "PROMOTED"
+    binding_path = harness.state_root / queue._certification_binding_path(REPO_UUID, GENERATION_ID)
+    binding_path.unlink()
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GenerationError, match="certification binding"):
+        generations.acquire_staged_recovery(
+            REPO_UUID, GENERATION_ID, request, attempt_sha256="7" * 64,
+            acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_004,
+            ttl_ns=1_000_000,
         )
     assert tree_snapshot(harness.state_root) == before
 
@@ -398,6 +490,27 @@ def test_explicit_capacity_limit_rejects_reservation(tmp_path):
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_gc_preview_is_read_only_and_does_not_adopt_unowned_generations(tmp_path):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    empty = frozenset()
+    before = tree_snapshot(harness.state_root)
+    preview = gc.preview(
+        REPO_UUID, expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        expected_pointer_revision=0, capacity_policy=POLICY,
+        protections=GcProtection(empty, empty, empty, empty, empty, empty),
+        deadline_ns=time.monotonic_ns() + 5_000_000_000,
+    )
+    assert preview.candidates == ()
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_semantic_queue_policy_has_explicit_bounds():
