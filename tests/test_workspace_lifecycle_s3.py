@@ -292,7 +292,7 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
         generations.fault_hook = lambda _label: None
         counters = harness.leases.inspect(REPO_UUID)
         before = tree_snapshot(harness.state_root)
-        with pytest.raises(StagedBuildLeaseRecoveryRequired, match="promoted cleanup"):
+        with pytest.raises(StagedBuildLeaseRecoveryRequired, match="terminal cleanup"):
             harness.leases.acquire(
                 REPO_UUID, "SEMANTIC_CLAIM", harness.leases.current_owner(),
                 expected_registry_revision=1, expected_active_source_revision=1,

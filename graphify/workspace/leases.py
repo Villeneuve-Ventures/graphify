@@ -988,6 +988,26 @@ class LeaseStore:
     ) -> LeaseGrant:
         """Reuse or replace only one exact retained promotion cleanup grant."""
 
+        return self.acquire_terminal_staged_cleanup(
+            repo_uuid, generation_id, request, terminal_state="PROMOTED",
+            attempt_sha256=attempt_sha256, acquired_at=acquired_at,
+            monotonic_ns=monotonic_ns, ttl_ns=ttl_ns,
+        )
+
+    def acquire_terminal_staged_cleanup(
+        self,
+        repo_uuid: str,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        *,
+        terminal_state: str,
+        attempt_sha256: str,
+        acquired_at: datetime,
+        monotonic_ns: int,
+        ttl_ns: int,
+    ) -> LeaseGrant:
+        """Reuse or replace only one exact retained terminal cleanup grant."""
+
         try:
             request = StructuralBuildRequest.from_mapping(request.to_dict())
         except Exception as exc:
@@ -997,7 +1017,9 @@ class LeaseStore:
             with self.workspace_lock(repo_uuid):
                 state = self._load_state_locked(document, repo_uuid)
                 staged_build = self._load_staged_build_locked(repo_uuid)
-                operation = self._require_promoted_staged_cleanup_attempt_locked(
+                if staged_build is None or staged_build.lifecycle_state != terminal_state:
+                    raise LeaseRecoveryRequired("terminal cleanup lifecycle changed")
+                operation = self._require_terminal_staged_cleanup_attempt_locked(
                     state,
                     staged_build,
                     repo_uuid=repo_uuid,
@@ -1023,7 +1045,7 @@ class LeaseStore:
                 staged_request=(generation_id, request),
                 staged_attempt_sha256=attempt_sha256,
                 allow_stale_staged_authority=True,
-                promoted_staged_cleanup=True,
+                terminal_staged_cleanup=terminal_state,
             )
 
     def acquire_certified_build_cleanup(
@@ -1095,7 +1117,7 @@ class LeaseStore:
         staged_attempt_sha256: str | None = None,
         allow_stale_staged_authority: bool = False,
         certified_build_cleanup: bool = False,
-        promoted_staged_cleanup: bool = False,
+        terminal_staged_cleanup: str | None = None,
         existing_only: bool = False,
         deadline_ns: int | None = None,
     ) -> LeaseGrant:
@@ -1108,13 +1130,14 @@ class LeaseStore:
             staged_request is None or operation != "BUILD" or not allow_stale_staged_authority
         ):
             raise LeaseError("certification cleanup requires exact stale staged BUILD authority")
-        if promoted_staged_cleanup and (
-            staged_request is None
-            or operation not in {"PROMOTE", "POINTER_RECOVERY"}
+        if terminal_staged_cleanup and (
+            terminal_staged_cleanup not in _STAGED_BUILD_TERMINAL_STATES
+            or staged_request is None
+            or operation not in {"BUILD", "PROMOTE", "POINTER_RECOVERY"}
             or not allow_stale_staged_authority
             or certified_build_cleanup
         ):
-            raise LeaseError("promotion cleanup requires exact stale staged promotion authority")
+            raise LeaseError("terminal cleanup requires exact stale staged authority")
         if staged_request is None:
             if staged_attempt_sha256 is not None:
                 raise LeaseError("staged attempt requires a staged request")
@@ -1188,14 +1211,14 @@ class LeaseStore:
                 # terminal cleanup authoritative until its paired lease is released.
                 if (
                     staged_build is not None
-                    and staged_build.lifecycle_state == "PROMOTED"
+                    and staged_build.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES
                     and (
                         state.leases.get("workspace") is not None
                         or state.staged_attempt_sha256 is not None
                     )
                 ):
                     raise StagedBuildLeaseRecoveryRequired(
-                        "promoted cleanup requires request-bound terminal authority"
+                        "terminal cleanup requires request-bound terminal authority"
                     )
                 self._check_expected(
                     document,
@@ -1226,7 +1249,7 @@ class LeaseStore:
                     request=request,
                     allow_stale_authority=allow_stale_staged_authority,
                     allow_certified_build_cleanup=certified_build_cleanup,
-                    allow_promoted_staged_cleanup=promoted_staged_cleanup,
+                    allow_terminal_staged_cleanup=terminal_staged_cleanup is not None,
                 )
                 if certified_build_cleanup:
                     self._require_certified_build_cleanup_attempt_locked(
@@ -1237,8 +1260,10 @@ class LeaseStore:
                         request=request,
                         expected_attempt_sha256=staged_attempt_sha256,
                     )
-                if promoted_staged_cleanup:
-                    retained_operation = self._require_promoted_staged_cleanup_attempt_locked(
+                if terminal_staged_cleanup:
+                    if staged_build is None or staged_build.lifecycle_state != terminal_staged_cleanup:
+                        raise LeaseRecoveryRequired("terminal cleanup lifecycle changed before acquisition")
+                    retained_operation = self._require_terminal_staged_cleanup_attempt_locked(
                         state,
                         staged_build,
                         repo_uuid=repo_uuid,
@@ -1248,7 +1273,7 @@ class LeaseStore:
                     )
                     if retained_operation != operation:
                         raise LeaseRecoveryRequired(
-                            "promotion cleanup operation changed before acquisition"
+                            "terminal cleanup operation changed before acquisition"
                         )
             self._assert_recovery_barriers_locked(
                 repo_uuid,
@@ -1382,7 +1407,7 @@ class LeaseStore:
         return attempt_sha256
 
     @staticmethod
-    def _require_promoted_staged_cleanup_attempt_locked(
+    def _require_terminal_staged_cleanup_attempt_locked(
         state: WorkspaceLeaseState,
         staged_build: StagedBuildState | None,
         *,
@@ -1393,41 +1418,52 @@ class LeaseStore:
     ) -> str:
         if (
             staged_build is None
-            or staged_build.lifecycle_state != "PROMOTED"
+            or staged_build.lifecycle_state not in _STAGED_BUILD_TERMINAL_STATES
             or staged_build.repo_uuid != repo_uuid
             or staged_build.generation_id != generation_id
             or staged_build.request.sha256 != request.sha256
             or staged_build.abandonment_intent is not None
-            or staged_build.abandoned_from is not None
-            or staged_build.abandon_reason is not None
-            or staged_build.abandon_evidence is not None
-            or staged_build.abandon_evidence_sha256 is not None
             or staged_build.operation_epoch is None
             or staged_build.fence_token is None
-            or staged_build.payload_manifest_sha256 is None
-            or staged_build.receipt_sha256 is None
-            or staged_build.pointer_revision is None
+            or (
+                staged_build.lifecycle_state == "PROMOTED"
+                and (
+                    staged_build.abandoned_from is not None
+                    or staged_build.abandon_reason is not None
+                    or staged_build.abandon_evidence is not None
+                    or staged_build.abandon_evidence_sha256 is not None
+                    or staged_build.payload_manifest_sha256 is None
+                    or staged_build.receipt_sha256 is None
+                    or staged_build.pointer_revision is None
+                )
+            )
         ):
             raise LeaseRecoveryRequired(
-                "promotion cleanup is not bound to one exact PROMOTED request"
+                "terminal cleanup is not bound to one exact terminal request"
             )
         attempt_sha256 = state.staged_attempt_sha256
         existing = state.leases.get("workspace")
         lease_epoch = state.lease_epochs.get("workspace")
         if attempt_sha256 is None or existing is None or lease_epoch is None:
             raise LeaseRecoveryRequired(
-                "promotion cleanup requires a paired staged promotion attempt"
+                "terminal cleanup requires a paired staged attempt"
             )
         if expected_attempt_sha256 is not None and attempt_sha256 != expected_attempt_sha256:
             raise LeaseRecoveryRequired(
-                "promotion cleanup staged attempt changed before acquisition"
+                "terminal cleanup staged attempt changed before acquisition"
             )
         existing_value = existing.to_dict()
         operation = str(existing_value["operation"])
         fence_token = int(existing_value["fence_token"])
+        expected_operations = (
+            {"BUILD"}
+            if staged_build.lifecycle_state == "ABANDONED"
+            and staged_build.abandoned_from != "CERTIFIED"
+            else {"PROMOTE", "POINTER_RECOVERY"}
+        )
         if (
             existing_value["repo_uuid"] != repo_uuid
-            or operation not in {"PROMOTE", "POINTER_RECOVERY"}
+            or operation not in expected_operations
             or lease_epoch != state.operation_epoch
             or fence_token != state.fence_high_watermark
             or lease_epoch < staged_build.operation_epoch
@@ -1436,7 +1472,7 @@ class LeaseStore:
             != (fence_token == staged_build.fence_token)
         ):
             raise LeaseRecoveryRequired(
-                "promotion cleanup grant is not the latest fenced authority"
+                "terminal cleanup grant is not the latest fenced authority"
             )
         return operation
 
@@ -1453,7 +1489,7 @@ class LeaseStore:
         request: StructuralBuildRequest,
         allow_stale_authority: bool = False,
         allow_certified_build_cleanup: bool = False,
-        allow_promoted_staged_cleanup: bool = False,
+        allow_terminal_staged_cleanup: bool = False,
     ) -> None:
         if staged_build is None:
             raise LeaseRecoveryRequired("staged build request is not durable")
@@ -1472,8 +1508,10 @@ class LeaseStore:
         }
         if allow_certified_build_cleanup and operation == "BUILD":
             allowed["BUILD"].add("CERTIFIED")
-        if allow_promoted_staged_cleanup and operation in {"PROMOTE", "POINTER_RECOVERY"}:
-            allowed[operation].add("PROMOTED")
+        if allow_terminal_staged_cleanup:
+            allowed[operation].add("ABANDONED")
+            if operation in {"PROMOTE", "POINTER_RECOVERY"}:
+                allowed[operation].add("PROMOTED")
         if staged_build.lifecycle_state not in allowed[operation]:
             raise LeaseRecoveryRequired(
                 f"staged build in {staged_build.lifecycle_state} cannot acquire {operation}"
@@ -1560,7 +1598,26 @@ class LeaseStore:
         attempt_sha256: str,
         monotonic_ns: int,
     ) -> Iterator[LeaseOperation]:
-        """Validate one exact retained promotion grant without recovery writes."""
+        """Validate only one exact retained PROMOTED cleanup grant."""
+
+        with self.current_terminal_staged_cleanup(
+            grant, generation_id, request, terminal_state="PROMOTED",
+            attempt_sha256=attempt_sha256, monotonic_ns=monotonic_ns,
+        ) as operation:
+            yield operation
+
+    @contextmanager
+    def current_terminal_staged_cleanup(
+        self,
+        grant: LeaseGrant,
+        generation_id: str,
+        request: StructuralBuildRequest,
+        *,
+        terminal_state: str,
+        attempt_sha256: str,
+        monotonic_ns: int,
+    ) -> Iterator[LeaseOperation]:
+        """Validate one exact retained terminal grant without recovery writes."""
 
         self._require_grant_owner(grant)
         repo_uuid = str(grant.lease.to_dict()["repo_uuid"])
@@ -1577,6 +1634,8 @@ class LeaseStore:
                     repo_uuid,
                     recover=False,
                 )
+                if staged_build is None or staged_build.lifecycle_state != terminal_state:
+                    raise LeaseRecoveryRequired("terminal cleanup lifecycle changed")
                 self._check_staged_request_locked(
                     document,
                     entry,
@@ -1587,9 +1646,9 @@ class LeaseStore:
                     operation=operation,
                     request=request,
                     allow_stale_authority=True,
-                    allow_promoted_staged_cleanup=True,
+                    allow_terminal_staged_cleanup=True,
                 )
-                self._require_promoted_staged_cleanup_attempt_locked(
+                self._require_terminal_staged_cleanup_attempt_locked(
                     state,
                     staged_build,
                     repo_uuid=repo_uuid,
