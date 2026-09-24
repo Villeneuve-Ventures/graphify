@@ -179,8 +179,10 @@ _SAFE_GRAPHLESS_RUNTIME_ENTRIES = frozenset(
 _PLATFORM = "windows" if os.name == "nt" else "posix"
 _MAX_STATE_BYTES = 1024 * 1024
 _MAX_TOKEN_TRANSITION_BYTES = 4 * _MAX_STATE_BYTES
+_MAX_REPORT_AUXILIARY_BYTES = 50 * 1024 * 1024
 _ARTIFACT_READ_LIMITS = {
-    ".graphify_analysis.json": _MAX_STATE_BYTES,
+    # Analysis grows with graph membership, unlike coordination state.
+    ".graphify_analysis.json": _MAX_REPORT_AUXILIARY_BYTES,
     ".graphify_labels.json": _MAX_STATE_BYTES,
     "GRAPH_REPORT.md": 50 * 1024 * 1024,
     "sections.json": _MAX_STATE_BYTES,
@@ -191,7 +193,6 @@ _DETACHED_MAX_BYTES = 50 * 1024 * 1024
 _DETACHED_MAX_NODES = 100_000
 _MAX_RECEIPT_ARTIFACTS = 4096
 _MAX_RECEIPT_AGGREGATE_BYTES = 1024 * 1024 * 1024
-_MAX_REPORT_AUXILIARY_BYTES = 50 * 1024 * 1024
 _MAX_QUEUE_ITEMS = 4096
 _MAX_QUEUE_PATHS = 4096
 _MAX_QUEUE_PATH_LENGTH = 4096
@@ -8949,6 +8950,7 @@ def _legacy_owned_dynamic_inventory(
     capability: OutputCapability,
     *,
     budget: _LegacyInventoryBudget | None = None,
+    obsidian_vaults: Sequence[str] = (),
 ) -> dict[str, bytes]:
     """Inventory receiptless dynamic exports through pinned relative handles."""
     inventory: dict[str, bytes] = {}
@@ -9113,15 +9115,30 @@ def _legacy_owned_dynamic_inventory(
 
     manifest_name = ".graphify_obsidian_manifest.json"
 
-    def retain_vault_manifest(vault: OutputCapability, parts: tuple[str, ...]) -> None:
-        if _entry_stat(vault, manifest_name) is None:
+    def retain_vault_manifest(
+        vault: OutputCapability, parts: tuple[str, ...], *, from_root: bool = False
+    ) -> None:
+        if not from_root and _entry_stat(vault, manifest_name) is None:
             return
-        scoped_manifest = Path(*parts, manifest_name).as_posix()
+        scoped_manifest = _validated_relative_name(
+            Path(*parts, manifest_name).as_posix()
+        )
         if ledger.count >= _MAX_RECEIPT_ARTIFACTS or ledger.remaining <= 0:
             raise PendingTransactionError("legacy dynamic inventory exceeds bounds")
-        manifest_payload = _read_bytes(
-            vault, manifest_name, min(_MAX_STATE_BYTES, ledger.remaining)
-        )
+        try:
+            manifest_payload = (
+                _read_relative_bytes(
+                    vault, scoped_manifest, min(_MAX_STATE_BYTES, ledger.remaining)
+                )
+                if from_root
+                else _read_bytes(
+                    vault, manifest_name, min(_MAX_STATE_BYTES, ledger.remaining)
+                )
+            )
+        except PendingTransactionError as exc:
+            if from_root and "is missing" in str(exc):
+                return
+            raise
         try:
             manifest = json.loads(manifest_payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -9135,7 +9152,6 @@ def _legacy_owned_dynamic_inventory(
             or not all(type(name) is str for name in files)
         ):
             raise PendingTransactionError("legacy Obsidian manifest is malformed")
-        scoped_manifest = _validated_relative_name(scoped_manifest)
         if scoped_manifest in inventory:
             raise PendingTransactionError("legacy Obsidian manifest is malformed")
         ledger.retain(scoped_manifest, manifest_payload)
@@ -9151,7 +9167,9 @@ def _legacy_owned_dynamic_inventory(
         for raw_name, scoped in zip(cast(list[str], files), scoped_names, strict=True):
             retain(
                 scoped,
-                _read_relative_bytes(vault, raw_name, ledger.remaining),
+                _read_relative_bytes(
+                    vault, scoped if from_root else raw_name, ledger.remaining
+                ),
             )
 
     def discover_vaults(parent: OutputCapability, parts: tuple[str, ...]) -> None:
@@ -9159,7 +9177,12 @@ def _legacy_owned_dynamic_inventory(
         if len(parts) > 32:
             raise PendingTransactionError("legacy dynamic path exceeds bound")
         retain_vault_manifest(parent, parts)
-        for child in sorted(_list_entries(parent)):
+        entries = _list_entries(parent)
+        # A nested checkout owns its own exports. Keep any explicit vault
+        # manifest at its root, but do not inventory its source tree or Git data.
+        if parts and ".git" in entries:
+            return
+        for child in sorted(entries):
             scanned += 1
             if scanned > _MAX_RECEIPT_ARTIFACTS:
                 raise PendingTransactionError("legacy dynamic inventory exceeds bounds")
@@ -9221,6 +9244,15 @@ def _legacy_owned_dynamic_inventory(
                 nested.close()
 
     discover_vaults(capability, ())
+    # Explicit selection admits just that vault, even below a Git boundary.
+    for vault_name in dict.fromkeys(obsidian_vaults):
+        parts = () if vault_name == "." else Path(
+            _validated_relative_name(vault_name)
+        ).parts
+        if len(parts) > 32:
+            raise PendingTransactionError("legacy dynamic path exceeds bound")
+        if Path(*parts, manifest_name).as_posix() not in inventory:
+            retain_vault_manifest(capability, parts, from_root=True)
     _reject_casefold_collisions(tuple(inventory))
     return inventory
 
@@ -9492,6 +9524,7 @@ def open_graph_snapshot(
     purpose: str,
     retain_artifacts: Sequence[str] = (),
     retain_limits: Mapping[str, int] | None = None,
+    retain_obsidian_vaults: Sequence[str] = (),
     allow_absent: bool = False,
 ) -> GraphSnapshot:
     requested = Path(path).expanduser()
@@ -9651,13 +9684,21 @@ def open_graph_snapshot(
                 legacy_inventory[name] = artifact_payload
             legacy_inventory.update(
                 _legacy_owned_dynamic_inventory(
-                    capability, budget=legacy_budget
+                    capability,
+                    budget=legacy_budget,
+                    obsidian_vaults=retain_obsidian_vaults,
                 )
             )
             selected_names = {
                 *MANAGED_PUBLICATION_PATHS,
                 *legacy_inventory,
                 *(_validated_relative_name(name) for name in retain_artifacts),
+                *(
+                    _validated_relative_name(
+                        (Path(name) / ".graphify_obsidian_manifest.json").as_posix()
+                    )
+                    for name in retain_obsidian_vaults
+                ),
             }
             return GraphSnapshot(
                 data=data,

@@ -1203,6 +1203,15 @@ def _transactional_export() -> None:
                 retained_limits[selected.name] = (
                     50 * 1024 * 1024 if option == "--report" else 1024 * 1024
                 )
+    requested_destination = _export_destination_path(graph).resolve()
+    retained_obsidian_vaults: tuple[str, ...] = ()
+    if sys.argv[2] == "obsidian" and (
+        requested_destination == graph.parent
+        or graph.parent in requested_destination.parents
+    ):
+        retained_obsidian_vaults = (
+            requested_destination.relative_to(graph.parent).as_posix(),
+        )
     active_transaction = optional_current_transaction(graph.parent)
     if active_transaction is not None:
         source_snapshot = open_prepared_graph(active_transaction, graph)
@@ -1243,6 +1252,7 @@ def _transactional_export() -> None:
                     purpose="export-admission",
                     retain_artifacts=retained_overrides,
                     retain_limits=retained_limits,
+                    retain_obsidian_vaults=retained_obsidian_vaults,
                 )
                 source_managed = True
             else:
@@ -1253,6 +1263,7 @@ def _transactional_export() -> None:
                 purpose="export-admission",
                 retain_artifacts=retained_overrides,
                 retain_limits=retained_limits,
+                retain_obsidian_vaults=retained_obsidian_vaults,
             )
             source_managed = True
     explicit_artifacts: dict[str, tuple[str, bytes | None]] = {}
@@ -1275,7 +1286,6 @@ def _transactional_export() -> None:
                 canonical_name=canonical_name,
             ),
         )
-    requested_destination = _export_destination_path(graph).resolve()
     destination_authority = managed_output_containing(requested_destination)
     prepared_destination = active_transaction is not None and (
         requested_destination == graph.parent

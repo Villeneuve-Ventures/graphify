@@ -1103,6 +1103,41 @@ def test_issue89_external_obsidian_destination_stays_unmanaged(tmp_path):
     assert not (out / ".graphify_protocol.json").exists()
 
 
+@pytest.mark.parametrize("git_directory", [False, True])
+def test_legacy_obsidian_export_below_git_root_preserves_ownership(tmp_path, git_directory):
+    out = _make_graph(tmp_path)
+    repo = out / "repo"
+    vault = repo / "vault"
+    vault.mkdir(parents=True)
+    if git_directory:
+        (repo / ".git").mkdir()
+    else:
+        (repo / ".git").write_text("gitdir: /unrelated/metadata\n")
+    stale = vault / "stale-owned.md"
+    stale.write_text("old owned note\n")
+    foreign = vault / "foreign-note.md"
+    foreign.write_text("user note\n")
+    manifest_path = vault / ".graphify_obsidian_manifest.json"
+    manifest_path.write_text(json.dumps({"files": [stale.name]}))
+
+    result = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not stale.exists()
+    assert foreign.read_text() == "user note\n"
+    manifest = json.loads(manifest_path.read_text())
+    assert stale.name not in manifest["files"]
+    assert foreign.name not in manifest["files"]
+    assert "Transformer.md" in manifest["files"]
+    assert (vault / "Transformer.md").is_file()
+    _assert_transactional_export(out)
+    receipt = json.loads((out / ".graphify_generation.json").read_text())
+    assert "repo/vault/.graphify_obsidian_manifest.json" in receipt["required_artifacts"]
+    assert "repo/vault/Transformer.md" in receipt["required_artifacts"]
+    assert "repo/vault/stale-owned.md" not in receipt["required_artifacts"]
+    assert "repo/vault/foreign-note.md" not in receipt["required_artifacts"]
+
+
 def test_issue89_external_obsidian_preserves_foreign_and_prunes_owned_stale(
     tmp_path,
 ):
