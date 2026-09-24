@@ -73,7 +73,9 @@ def test_completion_stops_before_reading_payload_over_reservation(
         return real_read(descriptor, size)
 
     monkeypatch.setattr(os, "read", tracked_read)
-    with pytest.raises(CapacityExceeded):
+    # Abandonment unlinks this file, then reads newly written state records.
+    # Keep its inode alive so Linux cannot recycle it into a tracked record.
+    with oversized.open("rb"), pytest.raises(CapacityExceeded):
         generations.complete_staged_build(
             preparation, source_observations=observations, monotonic_ns=10_003,
         )
@@ -105,7 +107,8 @@ def test_completion_bounds_reads_when_payload_grows_after_stat(tmp_path, monkeyp
         return chunk
 
     monkeypatch.setattr(os, "read", grow_then_read)
-    with pytest.raises(CapacityExceeded):
+    # Pin the tracked inode across abandonment and its subsequent state writes.
+    with growing.open("rb"), pytest.raises(CapacityExceeded):
         generations.complete_staged_build(
             preparation, source_observations=observations, monotonic_ns=10_003,
         )
