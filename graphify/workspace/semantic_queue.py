@@ -191,6 +191,8 @@ class SemanticQueuePolicy:
         _integer(self.max_claimed_tasks, "$.max_claimed_tasks", minimum=1)
         if self.max_claimed_tasks > self.max_items:
             raise SemanticQueueError("claimed task limit exceeds queue item limit")
+        if self.max_claimed_tasks != 1:
+            raise SemanticQueueError("semantic queues support exactly one claimed task")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -1321,6 +1323,7 @@ class SemanticQueueStore:
                 "decoder": SemanticQueueSnapshot.from_json,
                 "revision": lambda value: value.revision,
                 "allow_missing": True,
+                "max_bytes": self.policy.max_bytes,
             }
             if recover:
                 snapshot = self.state.recover_record(
@@ -1418,15 +1421,26 @@ class SemanticQueueStore:
         *,
         monotonic_ns: int,
         deadline_ns: int | None = None,
+        read_only: bool = False,
     ) -> Iterator[LeaseOperation]:
         try:
-            with self.leases.current_operation(
-                grant,
-                monotonic_ns=monotonic_ns,
-                allowed_operations=frozenset({"SEMANTIC_CLAIM"}),
-                registry_required=True,
-                deadline_ns=deadline_ns,
-            ) as operation:
+            operation_context = (
+                self.leases.current_operation_read_only(
+                    grant,
+                    monotonic_ns=monotonic_ns,
+                    allowed_operations=frozenset({"SEMANTIC_CLAIM"}),
+                    deadline_ns=deadline_ns,
+                )
+                if read_only
+                else self.leases.current_operation(
+                    grant,
+                    monotonic_ns=monotonic_ns,
+                    allowed_operations=frozenset({"SEMANTIC_CLAIM"}),
+                    registry_required=True,
+                    deadline_ns=deadline_ns,
+                )
+            )
+            with operation_context as operation:
                 yield operation
         except (LeaseExpired, StaleLease) as exc:
             raise StaleSemanticClaim(str(exc)) from exc
@@ -1692,6 +1706,11 @@ class SemanticQueueStore:
                     has_unfinished_predecessor
                 ):
                     causal_items.append(item)
+                    continue
+                if item.status == "completed":
+                    causal_items.append(
+                        replace(item, status="pending", last_error=None, claim=None)
+                    )
                     continue
                 failures = item.failure_count + 1
                 causal_items.append(
@@ -2094,6 +2113,13 @@ class SemanticQueueStore:
                 expected_desired_watermark=expected_desired_watermark,
             )
             index, item = self._claimed_item(current, claim, operation)
+            checkpoint = cast(SemanticClaim, item.claim).checkpoint
+            if (
+                checkpoint is None
+                or not checkpoint.startswith("result:")
+                or _DIGEST_RE.fullmatch(checkpoint[len("result:"):]) is None
+            ):
+                raise SemanticQueueError("completion requires a durable result checkpoint")
             items = list(current.items)
             items[index] = replace(
                 item,
@@ -2470,14 +2496,23 @@ class SemanticQueueStore:
     ) -> SemanticQueueSnapshot:
         """Finish persistence recovery only after a caller proves exact current bytes."""
 
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (
+                expected_registry_revision,
+                expected_queue_revision,
+                expected_desired_watermark,
+            )
+        ):
+            raise SemanticQueueConflict("recovery requires all expected worker coordinates")
         with self._semantic_operation(
             grant,
             monotonic_ns=monotonic_ns,
             deadline_ns=deadline_ns,
+            read_only=True,
         ) as operation:
-            snapshot = self._load_locked(
+            snapshot, _pending = self.read_uncertain_snapshot_locked(
                 operation.repo_uuid,
-                recover=True,
                 deadline_ns=deadline_ns,
             )
             self._require_current_source(snapshot, operation)
@@ -2488,8 +2523,11 @@ class SemanticQueueStore:
                 expected_queue_revision=expected_queue_revision,
                 expected_desired_watermark=expected_desired_watermark,
             )
-            self._bounded(snapshot)
-            return snapshot
+            return self._load_locked(
+                operation.repo_uuid,
+                recover=True,
+                deadline_ns=deadline_ns,
+            )
 
     def inspect(
         self,
