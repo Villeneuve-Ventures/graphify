@@ -1714,6 +1714,15 @@ class StagedBuildAbandonmentIntent:
             raise ContractError(
                 "$.abandonment_intent.evidence_sha256: must match canonical evidence"
             )
+        operation_epoch = _integer(
+            data["operation_epoch"],
+            "$.abandonment_intent.operation_epoch",
+            minimum=1,
+        )
+        if operation_epoch > evidence.operation_epoch:
+            raise ContractError(
+                "$.abandonment_intent.operation_epoch: exceeds recorded evidence epoch"
+            )
         return cls(
             repo_uuid=_uuid(
                 data["repo_uuid"],
@@ -1734,11 +1743,7 @@ class StagedBuildAbandonmentIntent:
                 "$.abandonment_intent.abandoned_from",
                 {"REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"},
             ),
-            operation_epoch=_integer(
-                data["operation_epoch"],
-                "$.abandonment_intent.operation_epoch",
-                minimum=1,
-            ),
+            operation_epoch=operation_epoch,
             fence_token=_integer(
                 data["fence_token"],
                 "$.abandonment_intent.fence_token",
@@ -1920,6 +1925,24 @@ class StagedBuildState:
                 raise ContractError(
                     "$.abandonment_intent: must bind the immediately preceding staged state"
                 )
+            if abandonment_intent.operation_epoch <= request.expected_operation_epoch:
+                raise ContractError(
+                    "$.abandonment_intent.operation_epoch: must follow the staged request epoch"
+                )
+            if operation_epoch is not None and fence_token is not None:
+                same_attempt = (
+                    abandonment_intent.operation_epoch == operation_epoch
+                    and abandonment_intent.fence_token == fence_token
+                )
+                newer_attempt = (
+                    abandonment_intent.operation_epoch > operation_epoch
+                    and abandonment_intent.fence_token > fence_token
+                )
+                if not (same_attempt or newer_attempt):
+                    raise ContractError(
+                        "$.abandonment_intent.operation_epoch/fence_token: "
+                        "must retain the prior attempt pair or advance both"
+                    )
             if abandonment_intent.evidence.reason_for(request) != abandonment_intent.reason:
                 raise ContractError(
                     "$.abandonment_intent.reason: must match canonical abandonment evidence"
@@ -2126,11 +2149,11 @@ class CapacityReservationState:
         serialized: list[dict[str, Any]] = []
         for item in ordered:
             value = item.to_dict()
-            if self.format_version == 1:
-                if item.compatibility_sha256 == _LEGACY_UNBOUND_COMPATIBILITY:
-                    del value["compatibility_sha256"]
-                else:
-                    _digest(item.compatibility_sha256, "$.compatibility_sha256")
+            if (self.format_version == 1
+                    and item.compatibility_sha256 == _LEGACY_UNBOUND_COMPATIBILITY):
+                del value["compatibility_sha256"]
+            else:
+                _digest(item.compatibility_sha256, "$.compatibility_sha256")
             serialized.append(value)
         return {
             "contract": "graphify.workspace.capacity_reservations.internal",
@@ -2190,15 +2213,9 @@ class CapacityReservationState:
                 raise ContractError(f"{path}.generation_id: invalid generation identity")
             compatibility_sha256 = _LEGACY_UNBOUND_COMPATIBILITY
             if "compatibility_sha256" in item:
-                raw_compatibility = _string(
+                compatibility_sha256 = _digest(
                     item["compatibility_sha256"],
                     f"{path}.compatibility_sha256",
-                )
-                compatibility_sha256 = (
-                    raw_compatibility
-                    if format_version == _CAPACITY_STATE_FORMAT_VERSION
-                    and raw_compatibility == _LEGACY_UNBOUND_COMPATIBILITY
-                    else _digest(raw_compatibility, f"{path}.compatibility_sha256")
                 )
             reservation = CapacityReservation(
                 repo_uuid=repo_uuid,
