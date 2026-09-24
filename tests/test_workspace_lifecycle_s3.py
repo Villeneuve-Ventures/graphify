@@ -366,7 +366,6 @@ def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_pa
         expected_operation_epoch=lease_state.operation_epoch,
         expected_migration_epoch=lease_state.migration_epoch,
         acquired_at=START, monotonic_ns=10_000, ttl_ns=1_000_000,
-        require_source_change=True,
     )
     assert selected.registry.to_dict()["workspaces"][0]["active_source"]["path"] == str(linked)
     assert harness.registry.resolve_active_source(REPO_UUID).root == linked
@@ -379,7 +378,6 @@ def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_pa
             expected_operation_epoch=lease_state.operation_epoch,
             expected_migration_epoch=lease_state.migration_epoch,
             acquired_at=START, monotonic_ns=11_000, ttl_ns=1_000_000,
-            require_source_change=True,
         )
 
 

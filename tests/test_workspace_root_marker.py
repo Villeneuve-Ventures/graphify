@@ -1,7 +1,9 @@
 """Initial ownership publication never exposes partial marker bytes."""
 
 from concurrent.futures import ThreadPoolExecutor
+import errno
 import os
+import stat
 import subprocess
 import sys
 from threading import Event
@@ -90,19 +92,62 @@ def test_concurrent_first_use_validates_winner_without_removing_active_temp(tmp_
 def test_marker_is_fsynced_before_exclusive_publication(tmp_path):
     root = tmp_path.resolve() / "state"
     synced = set()
+    publication = []
 
     class Observe(PosixSyscalls):
         def fsync(self, descriptor):
             super().fsync(descriptor)
             synced.add(os.fstat(descriptor).st_ino)
+            if publication and os.fstat(descriptor).st_ino == root.stat().st_ino:
+                publication.append("root_fsync")
 
         def rename_exclusive_at(self, source, destination, **kwargs):
             details = os.stat(source, dir_fd=kwargs["source_dir_fd"])
             assert details.st_ino in synced
             super().rename_exclusive_at(source, destination, **kwargs)
+            publication.append("rename")
+
+        def mkdir_at(self, path, mode, *, dir_fd):
+            if path == "workspaces":
+                assert publication == ["rename", "root_fsync"]
+                publication.append("descendant_mkdir")
+            super().mkdir_at(path, mode, dir_fd=dir_fd)
 
     _state(root, syscalls=Observe()).ensure_directory("workspaces")
-    assert root.stat().st_ino in synced
+    assert publication[:3] == ["rename", "root_fsync", "descendant_mkdir"]
+
+
+@pytest.mark.parametrize("stage", ["write", "fsync", "rename"])
+def test_marker_install_io_failure_uses_state_path_error_and_allows_retry(tmp_path, stage):
+    root = tmp_path.resolve() / "state"
+    failure = OSError(errno.ENOSPC, "injected marker installation failure")
+
+    class FailInstall(PosixSyscalls):
+        def write(self, descriptor, data):
+            if stage == "write":
+                os.write(descriptor, data[:1])
+                raise failure
+            return super().write(descriptor, data)
+
+        def fsync(self, descriptor):
+            if stage == "fsync" and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise failure
+            return super().fsync(descriptor)
+
+        def rename_exclusive_at(self, *args, **kwargs):
+            if stage == "rename":
+                raise failure
+            return super().rename_exclusive_at(*args, **kwargs)
+
+    with pytest.raises(StatePathError, match="ownership marker") as raised:
+        _state(root, syscalls=FailInstall()).ensure_directory("workspaces")
+    assert raised.value.__cause__ is failure
+    assert not (root / WORKSPACE_ROOT_MARKER).exists()
+    assert not (root / "workspaces").exists()
+    assert list(root.iterdir()) == []
+    _state(root).ensure_directory("workspaces")
+    StateRootMarker.from_json((root / WORKSPACE_ROOT_MARKER).read_bytes())
+    assert (root / "workspaces").is_dir()
 
 
 def test_exclusive_publication_loss_preserves_and_rejects_invalid_winner(tmp_path):
@@ -135,8 +180,8 @@ def test_initialization_preserves_unrelated_occupied_root(tmp_path, name):
     with pytest.raises(StatePathError, match="unmarked occupied"):
         _state(root).ensure_directory("workspaces")
     assert list(root.iterdir()) == [occupied]
-    assert occupied.read_bytes() == b"preserve"
     assert occupied.stat() == before
+    assert occupied.read_bytes() == b"preserve"
 
 
 def test_initialization_rejects_symlink_in_temporary_namespace(tmp_path):
@@ -150,3 +195,57 @@ def test_initialization_rejects_symlink_in_temporary_namespace(tmp_path):
         _state(root).ensure_directory("workspaces")
     assert temporary.is_symlink()
     assert target.read_bytes() == b"preserve"
+
+
+@pytest.mark.parametrize("damage", ["dangling_symlink", "directory", "hardlink", "mode",
+                                    "malformed", "oversized"])
+def test_bootstrap_rejects_unsafe_runtime_manifest_without_adoption(tmp_path, damage):
+    from graphify.workspace.composition import RUNTIME_AUTHORITY_MAX_BYTES
+    from tests.test_workspace_composition import authority
+
+    root = tmp_path.resolve() / "state"
+    root.mkdir(mode=0o700)
+    manifest = root / "runtime-manifest.json"
+    payload = authority().canonical
+    if damage == "dangling_symlink":
+        manifest.symlink_to(tmp_path / "absent")
+    elif damage == "directory":
+        manifest.mkdir(mode=0o700)
+    else:
+        if damage == "malformed":
+            payload = b"{}"
+        elif damage == "oversized":
+            payload = b" " * (RUNTIME_AUTHORITY_MAX_BYTES + 1)
+        manifest.write_bytes(payload)
+        manifest.chmod(0o644 if damage == "mode" else 0o600)
+        if damage == "hardlink":
+            os.link(manifest, tmp_path / "alias")
+    before = manifest.lstat()
+    with pytest.raises(StatePathError):
+        _state(root).ensure_directory("workspaces")
+    assert list(root.iterdir()) == [manifest]
+    after = manifest.lstat()
+    fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size",
+              "st_mtime_ns", "st_ctime_ns")
+    assert tuple(getattr(after, name) for name in fields) == tuple(
+        getattr(before, name) for name in fields
+    )
+    if manifest.is_file() and not manifest.is_symlink():
+        assert manifest.read_bytes() == payload
+
+
+def test_bootstrap_accepts_valid_private_runtime_authority(tmp_path):
+    from tests.test_workspace_composition import authority
+
+    root = tmp_path.resolve() / "state"
+    root.mkdir(mode=0o700)
+    manifest = root / "runtime-manifest.json"
+    payload = authority().canonical
+    manifest.write_bytes(payload)
+    manifest.chmod(0o600)
+    inode = manifest.stat().st_ino
+    _state(root).ensure_directory("workspaces")
+    assert manifest.read_bytes() == payload
+    assert manifest.stat().st_ino == inode
+    assert (root / "workspaces").is_dir()
+    StateRootMarker.from_json((root / WORKSPACE_ROOT_MARKER).read_bytes())
