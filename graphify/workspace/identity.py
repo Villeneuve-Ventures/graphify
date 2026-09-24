@@ -9,6 +9,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import selectors
 import stat
 import subprocess
 import time
@@ -18,8 +19,13 @@ from urllib.parse import urlsplit, urlunsplit
 from graphify.workspace.lifecycle_contracts import (
     ContractError,
     WorkspaceConfig,
+    canonical_registry_source,
     canonical_sha256,
 )
+
+
+WORKSPACE_CONFIG_MAX_BYTES = 1024 * 1024
+GIT_OUTPUT_MAX_BYTES = 1024 * 1024
 
 
 _RFC3339_UTC = re.compile(
@@ -158,6 +164,7 @@ def _git(
     root: Path,
     *arguments: str,
     deadline_ns: int | None = None,
+    strip_output: bool = True,
 ) -> str:
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
@@ -167,29 +174,56 @@ def _git(
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_GRAFT_FILE": os.devnull,
+            "GIT_NO_LAZY_FETCH": "1",
             "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
         }
     )
     command = ["git", *arguments]
-    try:
-        result = subprocess.run(
-            command,
-            cwd=root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=_remaining_timeout_seconds(deadline_ns),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise SourceDiscoveryTimeout("source discovery deadline expired") from exc
     _check_deadline(deadline_ns)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "git command failed"
-        raise SourceDiscoveryError(detail)
-    return result.stdout.strip()
+    with subprocess.Popen(
+        command, cwd=root, env=environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ) as process:
+        assert process.stdout is not None and process.stderr is not None
+        stdout = bytearray()
+        total_bytes = 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream in (process.stdout, process.stderr):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, selectors.EVENT_READ)
+                while selector.get_map():
+                    events = selector.select(_remaining_timeout_seconds(deadline_ns))
+                    _check_deadline(deadline_ns)
+                    for key, _events in events:
+                        chunk = os.read(key.fd, min(65536, GIT_OUTPUT_MAX_BYTES - total_bytes + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        total_bytes += len(chunk)
+                        if total_bytes > GIT_OUTPUT_MAX_BYTES:
+                            raise SourceDiscoveryError("Git output exceeds byte limit")
+                        if key.fileobj is process.stdout:
+                            stdout.extend(chunk)
+            process.wait(timeout=_remaining_timeout_seconds(deadline_ns))
+            _check_deadline(deadline_ns)
+        except subprocess.TimeoutExpired:
+            raise SourceDiscoveryTimeout("source discovery deadline expired") from None
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        if process.returncode != 0:
+            # Git diagnostics can contain credentials from repository configuration.
+            raise SourceDiscoveryError(f"Git command failed with status {process.returncode}")
+        try:
+            decoded = stdout.decode("utf-8")
+            return decoded.strip() if strip_output else decoded
+        except UnicodeDecodeError:
+            raise SourceDiscoveryError("Git output is not valid UTF-8") from None
+
 
 
 def _normalize_remote(raw: str) -> str:
@@ -197,15 +231,15 @@ def _normalize_remote(raw: str) -> str:
     if "://" not in value:
         match = re.fullmatch(r"(?P<user>[^@/:\s]+)@(?P<host>[^:/\s]+):(?P<path>.+)", value)
         if match is None:
-            raise SourceDiscoveryError(f"unsupported remote URL: {raw!r}")
+            raise SourceDiscoveryError("unsupported remote URL")
         value = (
             f"ssh://{match.group('user')}@{match.group('host')}/{match.group('path').lstrip('/')}"
         )
     try:
         parsed = urlsplit(value)
         port = parsed.port
-    except ValueError as exc:
-        raise SourceDiscoveryError(f"invalid remote URL: {raw!r}") from exc
+    except ValueError:
+        raise SourceDiscoveryError("invalid remote URL") from None
     if parsed.scheme.lower() not in {"https", "ssh"} or not parsed.hostname:
         raise SourceDiscoveryError("workspace remotes must use https:// or ssh://")
     if parsed.password is not None or port is not None or parsed.query or parsed.fragment:
@@ -413,6 +447,12 @@ def _read_workspace_config(
     deadline_ns: int | None = None,
     max_bytes: int | None = None,
 ) -> tuple[WorkspaceConfig, bytes]:
+    if max_bytes is None:
+        max_bytes = WORKSPACE_CONFIG_MAX_BYTES
+    elif isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    else:
+        max_bytes = min(max_bytes, WORKSPACE_CONFIG_MAX_BYTES)
     config_bytes = _read_source_regular(
         root,
         Path(".graphify") / "workspace.toml",
@@ -555,6 +595,7 @@ def discover_source(
     _check_deadline(deadline_ns)
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
+    root_identity = source_root_identity(root, deadline_ns=deadline_ns)
     top_level = Path(
         _git(root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns)
     ).resolve(strict=True)
@@ -584,13 +625,28 @@ def discover_source(
     _check_deadline(deadline_ns)
     worktree_id = "main" if git_dir == git_common_dir else git_dir.name
 
-    remote_output = _git(root, "remote", "-v", deadline_ns=deadline_ns)
+    # Human-readable remote -v output lets embedded URL newlines forge records.
+    # Enumerate complete config keys, then let Git resolve each fetch URL (including
+    # insteadOf rules) without discarding whitespace from the URL itself.
+    config_keys = _git(
+        root, "config", "--null", "--name-only", "--list",
+        deadline_ns=deadline_ns, strip_output=False,
+    )
+    remote_names = {
+        key[len("remote."):-len(".url")]
+        for key in config_keys.split("\0")
+        if key.startswith("remote.") and key.endswith(".url")
+    }
     remote_pairs: dict[str, str] = {}
-    for line in remote_output.splitlines():
-        fields = line.split()
-        if len(fields) < 3 or fields[2] != "(fetch)":
-            continue
-        name, raw_url = fields[0], fields[1]
+    for name in sorted(remote_names):
+        if not name or any(character.isspace() for character in name):
+            raise SourceDiscoveryError("malformed Git remote name")
+        raw_url = _git(
+            root, "remote", "get-url", "--", name,
+            deadline_ns=deadline_ns, strip_output=False,
+        ).removesuffix("\n")
+        if any(character.isspace() for character in raw_url):
+            raise SourceDiscoveryError("fetch remote URL contains whitespace")
         normalized = _normalize_remote(raw_url)
         prior = remote_pairs.get(normalized)
         if prior is None or name < prior:
@@ -615,6 +671,12 @@ def discover_source(
         "remote_aliases": remote_aliases,
         "worktree_id": worktree_id,
     }
+    try:
+        registry_source = canonical_registry_source(registry_source)
+    except ContractError:
+        raise SourceDiscoveryError("source identity is not canonical") from None
+    if _git(root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns) == "true":
+        raise SourceDiscoveryError("shallow repositories require complete history before enrollment")
     head = _git(root, "rev-parse", "HEAD", deadline_ns=deadline_ns)
     roots = tuple(
         sorted(
@@ -632,6 +694,21 @@ def discover_source(
     )
     if not roots:
         raise SourceDiscoveryError("source history has no root commit")
+    _config, verified_config_bytes = _read_workspace_config(
+        root, deadline_ns=deadline_ns, max_bytes=max_bytes,
+    )
+    if verified_config_bytes != config_bytes:
+        raise SourceDiscoveryError("workspace config changed during source discovery")
+    verify_source_checkout(
+        root,
+        expected_git_common_dir=git_common_dir,
+        expected_worktree_id=worktree_id,
+        expected_git_common_device=details.st_dev,
+        expected_git_common_inode=details.st_ino,
+        expected_root_identity=root_identity,
+        expected_head_commit=head,
+        deadline_ns=deadline_ns,
+    )
     return SourceIdentity(
         root=root,
         repo_uuid=repo_uuid,
