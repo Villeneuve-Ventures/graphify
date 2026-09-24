@@ -16,6 +16,8 @@ from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.contracts import CompatibilityManifest, CompletionBinding, InputManifest, MAX_DOCUMENT_BYTES
 from graphify.workspace.lifecycle_observation import ObservationError, SourceObservation
 from graphify.workspace.lifecycle_contracts import (
+    _CAPACITY_STATE_FORMAT_VERSION,
+    _LEGACY_UNBOUND_COMPATIBILITY,
     SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES,
     SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION,
     SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE,
@@ -2118,6 +2120,12 @@ class GenerationStore:
             revision=prior_revision + 1,
             reservations=tuple(
                 sorted(reservations, key=lambda item: (item.repo_uuid, item.generation_id))
+            ),
+            # Retain legacy evidence without inventing a compatibility binding.
+            format_version=(
+                1 if any(item.compatibility_sha256 == _LEGACY_UNBOUND_COMPATIBILITY
+                         for item in reservations)
+                else _CAPACITY_STATE_FORMAT_VERSION
             ),
         )
         return self.state.commit_record(
