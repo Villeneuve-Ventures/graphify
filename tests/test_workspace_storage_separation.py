@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import plistlib
+from subprocess import CompletedProcess
 from uuid import uuid4
 
 import networkx as nx
@@ -16,6 +18,10 @@ from graphify.storage_guard import (
     require_ordinary_output,
 )
 from graphify.transaction import ManagedAuthorityError, begin_transaction, pin_output, recover_transaction
+from graphify.workspace.contracts import StateRootMarker
+from graphify.workspace.persistence import (
+    DurableStateRoot, RuntimeCapabilities, StatePathError, UnsupportedRuntime,
+)
 
 
 def _tree(root: Path):
@@ -23,6 +29,24 @@ def _tree(root: Path):
                    p.lstat().st_ino, p.lstat().st_mtime_ns,
                    p.read_bytes() if p.is_file() else None)
                   for p in root.rglob("*"))
+
+
+def test_marker_is_installed_before_descendants_and_cannot_adopt_occupied_root(tmp_path):
+    root = tmp_path.resolve() / "state"
+    state = DurableStateRoot(root, capabilities=RuntimeCapabilities.supported_test_fixture())
+    state.ensure_directory("workspaces")
+    assert StateRootMarker.from_json((root / WORKSPACE_ROOT_MARKER).read_bytes()).to_dict() == {
+        "contract": "graphify.workspace.state-root", "state_schema_version": 2,
+        "owner": "graphify.workspace",
+    }
+    assert sorted(p.name for p in root.iterdir()) == [WORKSPACE_ROOT_MARKER, "workspaces"]
+    occupied = tmp_path.resolve() / "occupied"
+    occupied.mkdir(mode=0o700)
+    (occupied / "unowned.txt").write_text("preserve")
+    before = _tree(occupied)
+    with pytest.raises(StatePathError, match="unmarked occupied"):
+        DurableStateRoot(occupied, capabilities=RuntimeCapabilities.supported_test_fixture()).ensure_directory("workspaces")
+    assert _tree(occupied) == before
 
 
 def test_all_direct_output_sinks_refuse_marked_state_without_changes(tmp_path, monkeypatch):
@@ -649,3 +673,73 @@ def test_historical_workspace_probe_stops_at_first_matching_entry(tmp_path, monk
     with pytest.raises(ManagedWorkspaceOutputError):
         guard.require_ordinary_output(root / "output")
     assert entries_seen == 1
+
+
+@pytest.mark.parametrize("capabilities", [
+    RuntimeCapabilities("Linux", "ext4", False, True),
+    RuntimeCapabilities("Windows", "ntfs", False, True),
+    RuntimeCapabilities("Darwin", "apfs", True, True),
+    RuntimeCapabilities("Darwin", "nfs", False, False),
+])
+def test_workspace_mutation_refuses_unsupported_runtime_before_root_creation(tmp_path, capabilities):
+    root = tmp_path / "state"
+    with pytest.raises(UnsupportedRuntime):
+        DurableStateRoot(root, capabilities=capabilities).ensure_directory("workspaces")
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("filesystem", ["apfs", "nfs", "unknown"])
+def test_darwin_capability_probe_uses_containing_mount(tmp_path, monkeypatch, filesystem):
+    import graphify.workspace.persistence as persistence
+
+    monkeypatch.setattr(persistence.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(persistence.os, "geteuid", lambda: 501)
+    mount = "/Volumes/State Disk"
+
+    def probe(argv, **_kwargs):
+        if argv[0] == "df":
+            assert argv == ["df", "-P", str(tmp_path.resolve())]
+            return CompletedProcess(argv, 0, stdout=(
+                "Filesystem 512-blocks Used Available Capacity Mounted on\n"
+                f"/dev/disk4s1 100 10 90 10% {mount}\n"
+            ))
+        assert argv == ["diskutil", "info", "-plist", mount]
+        return CompletedProcess(argv, 0, stdout=plistlib.dumps({
+            "MountPoint": mount, "FilesystemType": filesystem,
+        }))
+
+    monkeypatch.setattr(persistence.subprocess, "run", probe)
+    capabilities = RuntimeCapabilities.detect(tmp_path / "not-yet-created")
+    assert capabilities.filesystem == filesystem
+    if filesystem == "apfs":
+        capabilities.require_supported()
+    else:
+        with pytest.raises(UnsupportedRuntime):
+            capabilities.require_supported()
+
+
+@pytest.mark.parametrize("response", ["malformed", "failed", "wrong-mount", "missing-type"])
+def test_darwin_capability_probe_fails_closed(tmp_path, monkeypatch, response):
+    import graphify.workspace.persistence as persistence
+
+    monkeypatch.setattr(persistence.platform, "system", lambda: "Darwin")
+
+    def probe(argv, **_kwargs):
+        if argv[0] == "df":
+            return CompletedProcess(argv, 0, stdout=(
+                "malformed" if response == "malformed" else
+                "header\n/dev/disk4s1 100 10 90 10% /Volumes/State\n"
+            ))
+        details = {"MountPoint": "/Volumes/State", "FilesystemType": "apfs"}
+        if response == "wrong-mount":
+            details["MountPoint"] = "/"
+        if response == "missing-type":
+            del details["FilesystemType"]
+        return CompletedProcess(argv, 1 if response == "failed" else 0,
+                                stdout=plistlib.dumps(details))
+
+    monkeypatch.setattr(persistence.subprocess, "run", probe)
+    capabilities = RuntimeCapabilities.detect(tmp_path)
+    assert capabilities.filesystem == "unknown"
+    with pytest.raises(UnsupportedRuntime):
+        capabilities.require_supported()
