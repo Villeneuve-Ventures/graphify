@@ -48,24 +48,20 @@ def test_verification_rejects_oversized_receipt_before_reading(tmp_path, monkeyp
     assert receipt_reads == []
 
 
-@pytest.mark.parametrize("nested_cumulative", [False, True])
+@pytest.mark.parametrize("cumulative", [False, True])
 def test_completion_stops_before_reading_payload_over_reservation(
-    tmp_path, monkeypatch, nested_cumulative,
+    tmp_path, monkeypatch, cumulative,
 ):
     harness, generations, _, observations = _runtime(tmp_path)
     _, _, preparation = _prepare(harness, generations, observations)
     payload = preparation.staging_path / "graphify-out"
     limit = preparation.allocation.expected_payload_bytes
-    if nested_cumulative:
-        first = payload / "a-first"
-        first.mkdir()
-        (first / "part.bin").write_bytes(b"a" * (limit // 2 + 1))
-        second = payload / "b-second"
-        second.mkdir()
-        oversized = second / "part.bin"
+    if cumulative:
+        (payload / "graph.json").write_bytes(b"a" * (limit // 2 + 1))
+        oversized = payload / "input-manifest.json"
         oversized.write_bytes(b"b" * (limit // 2 + 1))
     else:
-        oversized = payload / "a-oversized.bin"
+        oversized = payload / "graph.json"
         oversized.write_bytes(b"a" * (limit + 1))
     target_inode = _inode(oversized.stat())
     real_read = os.read
@@ -88,7 +84,7 @@ def test_completion_stops_before_reading_payload_over_reservation(
 def test_completion_bounds_reads_when_payload_grows_after_stat(tmp_path, monkeypatch):
     harness, generations, _, observations = _runtime(tmp_path)
     _, _, preparation = _prepare(harness, generations, observations)
-    growing = preparation.staging_path / "graphify-out" / "a-growing.bin"
+    growing = preparation.staging_path / "graphify-out" / "graph.json"
     growing.write_bytes(b"a")
     target_inode = _inode(growing.stat())
     limit = preparation.allocation.expected_payload_bytes
