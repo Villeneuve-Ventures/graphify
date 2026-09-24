@@ -16,6 +16,7 @@ from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.contracts import CompatibilityManifest, CompletionBinding, InputManifest, MAX_DOCUMENT_BYTES
 from graphify.workspace.lifecycle_observation import ObservationError, SourceObservation
 from graphify.workspace.lifecycle_contracts import (
+    LIFECYCLE_JSON_MAX_BYTES,
     _CAPACITY_STATE_FORMAT_VERSION,
     _LEGACY_UNBOUND_COMPATIBILITY,
     SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES,
@@ -103,6 +104,12 @@ class CapacityExceeded(GenerationError):
     code = "capacity_exceeded"
 
 
+class _PayloadCapacityExceeded(CapacityExceeded):
+    def __init__(self, observed_bytes: int) -> None:
+        self.observed_bytes = observed_bytes
+        super().__init__("staged payload exceeds its durable reservation")
+
+
 class _CapacityScanChanged(RuntimeError):
     pass
 
@@ -164,6 +171,12 @@ class CertificationRequest:
 
 @dataclass(frozen=True)
 class GenerationAllocation:
+    """A total generation-byte reservation, including payload and receipt.
+
+    ``expected_payload_bytes`` retains its historical field name; producers
+    must leave room for the canonical receipt within that durable budget.
+    """
+
     repo_uuid: str
     generation_id: str
     staging_path: Path
@@ -1687,7 +1700,9 @@ class GenerationStore:
                     receipt = cast(
                         GenerationReceipt,
                         GenerationReceipt.from_json(
-                            self.state.read_existing_bytes(staging / "receipt.json")
+                            self.state.read_existing_bytes(
+                                staging / "receipt.json", max_bytes=LIFECYCLE_JSON_MAX_BYTES,
+                            )
                         ),
                     )
                 except Exception as exc:
@@ -2643,7 +2658,7 @@ class GenerationStore:
             raise CapacityExceeded("workspace generation limit is already exceeded")
         if usage.global_generations > policy.global_max_generations:
             raise CapacityExceeded("global generation limit is already exceeded")
-        available = shutil.disk_usage(self.state.root.parent).free
+        available = shutil.disk_usage(self.state.root).free
         _require_inventory_deadline(deadline_ns)
         if available - usage.unconsumed_reserved_bytes < policy.reserve_bytes:
             raise CapacityExceeded("filesystem reserve threshold is already violated")
@@ -2693,7 +2708,7 @@ class GenerationStore:
             raise CapacityExceeded("workspace byte limit would be exceeded")
         if projected_global > policy.global_max_bytes:
             raise CapacityExceeded("global byte limit would be exceeded")
-        available = shutil.disk_usage(self.state.root.parent).free
+        available = shutil.disk_usage(self.state.root).free
         if (
             available
             - usage.unconsumed_reserved_bytes
@@ -2798,7 +2813,7 @@ class GenerationStore:
             raise CapacityExceeded("workspace generation limit would be exceeded")
         if usage.global_generations + additional_generation > policy.global_max_generations:
             raise CapacityExceeded("global generation limit would be exceeded")
-        available = shutil.disk_usage(self.state.root.parent).free
+        available = shutil.disk_usage(self.state.root).free
         additional_bytes = 0 if existing is not None else expected_payload_bytes
         if available - usage.unconsumed_reserved_bytes - additional_bytes < policy.reserve_bytes:
             raise CapacityExceeded("filesystem reserve threshold would be violated")
@@ -2878,7 +2893,7 @@ class GenerationStore:
             raise CapacityExceeded("workspace generation limit would be exceeded")
         if usage.global_generations + additional_generation > policy.global_max_generations:
             raise CapacityExceeded("global generation limit would be exceeded")
-        available = shutil.disk_usage(self.state.root.parent).free
+        available = shutil.disk_usage(self.state.root).free
         additional_reservation = 0 if existing_reservation is not None else expected_payload_bytes
         if (
             available
@@ -3177,10 +3192,10 @@ class GenerationStore:
         generation_id: str,
         expected_payload_bytes: int,
         capacity_policy: CapacityPolicy,
-    ) -> StagedBuildState | None:
+    ) -> StagedBuildState:
         state = self._load_staged_build_locked(operation.repo_uuid)
         if state is None or state.lifecycle_state in _STAGED_BUILD_TERMINAL_STATES:
-            return None
+            raise GenerationConflict("allocation requires active staged-build authority")
         expected = (
             state.repo_uuid,
             state.generation_id,
@@ -3281,6 +3296,7 @@ class GenerationStore:
         staged_receipt = (
             self.state.read_optional_existing_bytes(
                 staging_relative / "receipt.json",
+                max_bytes=LIFECYCLE_JSON_MAX_BYTES,
                 deadline_ns=deadline_ns,
             )
             if staging_exists
@@ -3306,6 +3322,7 @@ class GenerationStore:
                 )
         inventory = self._inventory(
             container,
+            max_bytes=allocation.expected_payload_bytes,
             allowed_root_entries=(
                 frozenset({"graphify-out", "receipt.json"})
                 if staged_receipt is not None or final_exists
@@ -3528,11 +3545,15 @@ class GenerationStore:
                     operation.fence_token,
                 ):
                     raise GenerationConflict("staged build publication belongs to another fence")
-                inventory = self._inventory(
-                    preparation.allocation.staging_path,
-                    allowed_root_entries=frozenset({"graphify-out"}),
-                )
-                payload_bytes = inventory.total_bytes
+                try:
+                    inventory = self._inventory(
+                        preparation.allocation.staging_path,
+                        allowed_root_entries=frozenset({"graphify-out"}),
+                        max_bytes=preparation.allocation.expected_payload_bytes,
+                    )
+                    payload_bytes = inventory.total_bytes
+                except _PayloadCapacityExceeded as exc:
+                    payload_bytes = exc.observed_bytes
                 if payload_bytes <= preparation.allocation.expected_payload_bytes:
                     self._sync_inventory(
                         operation.repo_uuid,
@@ -3545,6 +3566,7 @@ class GenerationStore:
                     reinventory = self._inventory(
                         preparation.allocation.staging_path,
                         allowed_root_entries=frozenset({"graphify-out"}),
+                        max_bytes=preparation.allocation.expected_payload_bytes,
                     )
                     if canonical_json_bytes(list(reinventory.entries)) != canonical_json_bytes(
                         list(inventory.entries)
@@ -3754,6 +3776,7 @@ class GenerationStore:
         prefix: str,
         entries: list[dict[str, str | int]],
         directories: list[str],
+        byte_budget: list[int] | None = None,
         deadline_ns: int | None = None,
     ) -> None:
         _require_inventory_deadline(deadline_ns)
@@ -3783,6 +3806,7 @@ class GenerationStore:
                         prefix=relative,
                         entries=entries,
                         directories=directories,
+                        byte_budget=byte_budget,
                         deadline_ns=deadline_ns,
                     )
                 finally:
@@ -3802,16 +3826,26 @@ class GenerationStore:
                 opened_before = os.fstat(file_descriptor)
                 if _identity(opened_before) != _identity(details):
                     raise PayloadChanged(f"payload file changed while opened: {relative}")
+                if byte_budget is not None and details.st_size > byte_budget[0]:
+                    raise _PayloadCapacityExceeded(byte_budget[1] + details.st_size)
                 digest = hashlib.sha256()
                 while True:
                     _require_inventory_deadline(deadline_ns)
                     try:
-                        chunk = os.read(file_descriptor, 1024 * 1024)
+                        read_size = 1024 * 1024
+                        if byte_budget is not None:
+                            read_size = min(read_size, byte_budget[0] + 1)
+                        chunk = os.read(file_descriptor, read_size)
                     except InterruptedError:
                         continue
                     _require_inventory_deadline(deadline_ns)
                     if not chunk:
                         break
+                    if byte_budget is not None:
+                        byte_budget[0] -= len(chunk)
+                        byte_budget[1] += len(chunk)
+                        if byte_budget[0] < 0:
+                            raise _PayloadCapacityExceeded(byte_budget[1])
                     digest.update(chunk)
                 opened_after = os.fstat(file_descriptor)
                 current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
@@ -3841,6 +3875,7 @@ class GenerationStore:
         container: Path,
         *,
         allowed_root_entries: frozenset[str],
+        max_bytes: int | None = None,
         deadline_ns: int | None = None,
     ) -> _PayloadInventory:
         _require_inventory_deadline(deadline_ns)
@@ -3878,6 +3913,7 @@ class GenerationStore:
                     prefix="graphify-out",
                     entries=entries,
                     directories=directories,
+                    byte_budget=None if max_bytes is None else [max_bytes, 0],
                     deadline_ns=deadline_ns,
                 )
             finally:
@@ -3911,6 +3947,7 @@ class GenerationStore:
             raise GenerationConflict("allocation staging path is not canonical")
         return self._inventory(
             expected,
+            max_bytes=allocation.expected_payload_bytes,
             allowed_root_entries=frozenset({"graphify-out"}),
         ).entries
 
@@ -4032,22 +4069,27 @@ class GenerationStore:
         # Constructing the frozen receipt validates every request and manifest
         # field before an immutable semantic binding can make the request
         # unrecoverable. The receipt itself is not installed at this boundary.
-        self._receipt(operation, allocation, request, declared_entries)
+        receipt = self._receipt(operation, allocation, request, declared_entries)
         staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
-        if self.state.read_optional_existing_bytes(staging_relative / "receipt.json") is not None:
+        if self.state.read_optional_existing_bytes(
+            staging_relative / "receipt.json", max_bytes=LIFECYCLE_JSON_MAX_BYTES,
+        ) is not None:
             raise SemanticCertificationBlocked(
                 "staged receipt has no durable semantic certification binding"
             )
         inventory = self._inventory(
             allocation.staging_path,
+            max_bytes=allocation.expected_payload_bytes,
             allowed_root_entries=frozenset({"graphify-out"}),
         )
         if canonical_json_bytes(list(inventory.entries)) != canonical_json_bytes(
             list(declared_entries)
         ):
             raise PayloadChanged("declared payload manifest differs from staged payload")
-        if inventory.total_bytes > allocation.expected_payload_bytes:
-            raise CapacityExceeded("staged payload exceeds its durable reservation")
+        if _bounded_capacity_sum((inventory.total_bytes, len(receipt.canonical))) > (
+            allocation.expected_payload_bytes
+        ):
+            raise CapacityExceeded("payload and receipt exceed the durable reservation")
 
     def _sync_inventory(
         self,
@@ -4097,6 +4139,7 @@ class GenerationStore:
         try:
             receipt_bytes = self.state.read_existing_bytes(
                 relative / "receipt.json",
+                max_bytes=LIFECYCLE_JSON_MAX_BYTES,
                 deadline_ns=deadline_ns,
             )
         except StateCorrupt as exc:
@@ -4303,7 +4346,9 @@ class GenerationStore:
         staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
         self.state.cleanup_atomic_temps(staging_relative)
         receipt_relative = staging_relative / "receipt.json"
-        receipt_bytes = self.state.read_optional_existing_bytes(receipt_relative)
+        receipt_bytes = self.state.read_optional_existing_bytes(
+            receipt_relative, max_bytes=LIFECYCLE_JSON_MAX_BYTES,
+        )
         receipt_present = receipt_bytes is not None
         latest_event = None if not events else events[-1]
         validating_requires_successor_recheck = (
@@ -4333,6 +4378,7 @@ class GenerationStore:
             raise GenerationConflict(f"generation cannot certify from lifecycle {latest}")
         inventory = self._inventory(
             allocation.staging_path,
+            max_bytes=allocation.expected_payload_bytes,
             allowed_root_entries=(
                 frozenset({"graphify-out", "receipt.json"})
                 if receipt_present
@@ -4361,12 +4407,15 @@ class GenerationStore:
             list(declared_entries)
         ):
             raise PayloadChanged("declared payload manifest differs from staged payload")
-        if inventory.total_bytes > allocation.expected_payload_bytes:
-            raise CapacityExceeded("staged payload exceeds its durable reservation")
+        if _bounded_capacity_sum((inventory.total_bytes, len(receipt.canonical))) > (
+            allocation.expected_payload_bytes
+        ):
+            raise CapacityExceeded("payload and receipt exceed the durable reservation")
         self._sync_inventory(operation.repo_uuid, allocation.generation_id, inventory)
         self.fault_hook(f"generation:{allocation.generation_id}:before_reinventory")
         reinventory = self._inventory(
             allocation.staging_path,
+            max_bytes=allocation.expected_payload_bytes,
             allowed_root_entries=(
                 frozenset({"graphify-out", "receipt.json"})
                 if receipt_present
