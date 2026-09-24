@@ -413,6 +413,7 @@ class GraphSnapshot:
     receipt_identity: OutputIdentity | None = None
     receipt_digest: str | None = None
     inventory_selector: tuple[tuple[str, str | None], ...] = ()
+    selected_inventory_selector: tuple[tuple[str, str | None], ...] = ()
     purpose: str = ""
     coordination_absent: bool = False
     graph_present: bool = True
@@ -8951,10 +8952,13 @@ def _legacy_owned_dynamic_inventory(
     *,
     budget: _LegacyInventoryBudget | None = None,
     obsidian_vaults: Sequence[str] = (),
+    selected_only: bool = False,
+    existing_inventory: Mapping[str, bytes] | None = None,
 ) -> dict[str, bytes]:
-    """Inventory receiptless dynamic exports through pinned relative handles."""
+    """Inventory dynamic exports through pinned relative handles."""
     inventory: dict[str, bytes] = {}
     ledger = _LegacyInventoryBudget() if budget is None else budget
+    existing = {} if existing_inventory is None else existing_inventory
     scanned = 0
 
     def retain(name: str, payload: bytes) -> None:
@@ -8965,7 +8969,11 @@ def _legacy_owned_dynamic_inventory(
             or len(inventory) >= _MAX_RECEIPT_ARTIFACTS
         ):
             raise PendingTransactionError("legacy dynamic path exceeds bound")
-        ledger.retain(name, payload)
+        if name in existing:
+            if existing[name] != payload:
+                raise PendingTransactionError("selected vault conflicts with existing inventory")
+        else:
+            ledger.retain(name, payload)
         inventory[name] = payload
 
     def walk_wiki(parent: OutputCapability, parts: tuple[str, ...]) -> None:
@@ -9032,12 +9040,16 @@ def _legacy_owned_dynamic_inventory(
                 if child_fd >= 0:
                     os.close(child_fd)
 
-    callflow_candidates = [
-        name
-        for name in sorted(_list_entries(capability))
-        if name.casefold().endswith("-callflow.html")
-        and name != "graphify-callflow.html"
-    ]
+    callflow_candidates = (
+        []
+        if selected_only
+        else [
+            name
+            for name in sorted(_list_entries(capability))
+            if name.casefold().endswith("-callflow.html")
+            and name != "graphify-callflow.html"
+        ]
+    )
     _reject_casefold_collisions(
         (*MANAGED_PUBLICATION_PATHS, *callflow_candidates)
     )
@@ -9087,21 +9099,23 @@ def _legacy_owned_dynamic_inventory(
         finally:
             os.close(fd)
 
-    try:
-        wiki_fd = (
-            _open_windows_relative_fd(capability, "wiki", directory=True)
-            if _PLATFORM == "windows"
-            else os.open(
-                "wiki",
-                os.O_RDONLY
-                | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=capability.fd,
+    wiki_fd = None
+    if not selected_only:
+        try:
+            wiki_fd = (
+                _open_windows_relative_fd(capability, "wiki", directory=True)
+                if _PLATFORM == "windows"
+                else os.open(
+                    "wiki",
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=capability.fd,
+                )
             )
-        )
-    except FileNotFoundError:
-        pass
-    else:
+        except FileNotFoundError:
+            pass
+    if wiki_fd is not None:
         wiki_info = os.fstat(wiki_fd)
         wiki = OutputCapability(
             capability.path / "wiki",
@@ -9123,12 +9137,19 @@ def _legacy_owned_dynamic_inventory(
         scoped_manifest = _validated_relative_name(
             Path(*parts, manifest_name).as_posix()
         )
-        if ledger.count >= _MAX_RECEIPT_ARTIFACTS or ledger.remaining <= 0:
+        if scoped_manifest not in existing and (
+            ledger.count >= _MAX_RECEIPT_ARTIFACTS or ledger.remaining <= 0
+        ):
             raise PendingTransactionError("legacy dynamic inventory exceeds bounds")
         try:
             manifest_payload = (
                 _read_relative_bytes(
-                    vault, scoped_manifest, min(_MAX_STATE_BYTES, ledger.remaining)
+                    vault,
+                    scoped_manifest,
+                    min(
+                        _MAX_STATE_BYTES,
+                        max(ledger.remaining, len(existing.get(scoped_manifest, b""))),
+                    ),
                 )
                 if from_root
                 else _read_bytes(
@@ -9154,7 +9175,11 @@ def _legacy_owned_dynamic_inventory(
             raise PendingTransactionError("legacy Obsidian manifest is malformed")
         if scoped_manifest in inventory:
             raise PendingTransactionError("legacy Obsidian manifest is malformed")
-        ledger.retain(scoped_manifest, manifest_payload)
+        if scoped_manifest in existing:
+            if existing[scoped_manifest] != manifest_payload:
+                raise PendingTransactionError("selected vault conflicts with existing inventory")
+        else:
+            ledger.retain(scoped_manifest, manifest_payload)
         inventory[scoped_manifest] = manifest_payload
         scoped_names: list[str] = []
         for raw_name in files:
@@ -9168,7 +9193,9 @@ def _legacy_owned_dynamic_inventory(
             retain(
                 scoped,
                 _read_relative_bytes(
-                    vault, scoped if from_root else raw_name, ledger.remaining
+                    vault,
+                    scoped if from_root else raw_name,
+                    max(ledger.remaining, len(existing.get(scoped, b""))),
                 ),
             )
 
@@ -9243,7 +9270,8 @@ def _legacy_owned_dynamic_inventory(
             finally:
                 nested.close()
 
-    discover_vaults(capability, ())
+    if not selected_only:
+        discover_vaults(capability, ())
     # Explicit selection admits just that vault, even below a Git boundary.
     for vault_name in dict.fromkeys(obsidian_vaults):
         parts = () if vault_name == "." else Path(
@@ -9347,6 +9375,24 @@ def _validate_expected_snapshot_locked(
         )
         if digest != snapshot.receipt_digest or selector != snapshot.inventory_selector:
             raise PendingTransactionError("admitted snapshot receipt changed before begin")
+        for name, expected_digest in snapshot.selected_inventory_selector:
+            try:
+                selected_payload = _read_relative_bytes(
+                    capability, name, _artifact_read_limit(Path(name).name)
+                )
+            except PendingTransactionError as exc:
+                if expected_digest is None and isinstance(exc.__cause__, FileNotFoundError):
+                    continue
+                raise PendingTransactionError(
+                    "admitted selected vault inventory changed before begin"
+                ) from exc
+            if (
+                expected_digest is None
+                or hashlib.sha256(selected_payload).hexdigest() != expected_digest
+            ):
+                raise PendingTransactionError(
+                    "admitted selected vault inventory changed before begin"
+                )
         return
     if snapshot.coordination_absent:
         drainer = _read_drainer(capability)
@@ -9764,6 +9810,40 @@ def open_graph_snapshot(
         if receipt_stat is None:
             raise PendingTransactionError("generation receipt identity is missing")
         artifact_digests = cast(Mapping[str, object], receipt["artifact_digests"])
+        retained_bytes = sum(map(len, inventory.values()))
+        selected_inventory = (
+            _legacy_owned_dynamic_inventory(
+                capability,
+                budget=_LegacyInventoryBudget(
+                    remaining=_MAX_RECEIPT_AGGREGATE_BYTES - retained_bytes,
+                    count=len(inventory),
+                ),
+                obsidian_vaults=retain_obsidian_vaults,
+                selected_only=True,
+                existing_inventory=inventory,
+            )
+            if retain_obsidian_vaults
+            else {}
+        )
+        selected_additions = {
+            name: selected_payload
+            for name, selected_payload in selected_inventory.items()
+            if name not in inventory
+        }
+        if (
+            len(inventory) + len(selected_additions) > _MAX_RECEIPT_ARTIFACTS
+            or retained_bytes + sum(map(len, selected_additions.values()))
+            > _MAX_RECEIPT_AGGREGATE_BYTES
+        ):
+            raise PendingTransactionError("selected vault exceeds bounded inventory")
+        selected_names = set(selected_additions)
+        selected_names.update(
+            _validated_relative_name(
+                (Path(name) / ".graphify_obsidian_manifest.json").as_posix()
+            )
+            for name in retain_obsidian_vaults
+        )
+        selected_names.difference_update(inventory)
         return GraphSnapshot(
             data=data,
             generation=int(generation),
@@ -9771,12 +9851,15 @@ def open_graph_snapshot(
             payload=payload,
             digest=hashlib.sha256(payload).hexdigest(),
             manifest_payload=inventory["manifest.json"],
-            artifacts=inventory,
+            artifacts={**inventory, **selected_additions},
             output_identity=capability.identity,
             receipt_identity=OutputIdentity(receipt_stat.st_dev, receipt_stat.st_ino),
             receipt_digest=receipt_digest,
             inventory_selector=tuple(
                 sorted((str(name), str(value)) for name, value in artifact_digests.items())
+            ),
+            selected_inventory_selector=_inventory_selector(
+                selected_names, selected_additions
             ),
             purpose=purpose,
         )
@@ -10115,7 +10198,12 @@ def open_external_graph_snapshot(
     )
 
 
-def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnapshot:
+def open_prepared_graph(
+    transaction: Transaction,
+    path: Path | str,
+    *,
+    retain_obsidian_vaults: Sequence[str] = (),
+) -> GraphSnapshot:
     """Read an unpublished graph only for its exact live transaction owner."""
     from graphify.security import _max_graph_file_bytes
 
@@ -10123,6 +10211,73 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
         _validate_authority(capability, transaction)
         prepared_capability = _pin_prepared_workspace(transaction, capability)
         try:
+            if retain_obsidian_vaults:
+                marker = _load_json(capability, PREPARED_FILE)
+                if marker is None or marker.get("state") != "ready":
+                    raise PendingTransactionError("prepared vault admission is unavailable")
+                prior_names = set(cast(list[str], marker["prior_inventory"]))
+                unadmitted_vaults = tuple(
+                    name
+                    for name in retain_obsidian_vaults
+                    if _validated_relative_name(
+                        (Path(name) / ".graphify_obsidian_manifest.json").as_posix()
+                    )
+                    not in prior_names
+                )
+                current = publication_plan_from_directory(
+                    prepared_capability.output.path
+                ).payloads
+                current_bytes = sum(map(len, current.values()))
+                selected = (
+                    _legacy_owned_dynamic_inventory(
+                        capability,
+                        budget=_LegacyInventoryBudget(
+                            remaining=_MAX_RECEIPT_AGGREGATE_BYTES - current_bytes,
+                            count=len(current),
+                        ),
+                        obsidian_vaults=unadmitted_vaults,
+                        selected_only=True,
+                        existing_inventory=current,
+                    )
+                    if unadmitted_vaults
+                    else {}
+                )
+                additions = {
+                    name: payload
+                    for name, payload in selected.items()
+                    if name not in prior_names
+                }
+                updated_marker = {
+                    **marker,
+                    "prior_inventory": sorted((*prior_names, *additions)),
+                }
+                if (
+                    len(updated_marker["prior_inventory"]) > _MAX_RECEIPT_ARTIFACTS
+                    or len(_json_bytes(updated_marker)) > _MAX_STATE_BYTES
+                ):
+                    raise PendingTransactionError(
+                        "prepared vault inventory exceeds state limit"
+                    )
+                if (
+                    len(set(current).union(additions)) > _MAX_RECEIPT_ARTIFACTS
+                    or current_bytes
+                    + sum(len(payload) for name, payload in additions.items() if name not in current)
+                    > _MAX_RECEIPT_AGGREGATE_BYTES
+                ):
+                    raise PendingTransactionError("selected vault exceeds bounded inventory")
+                _reject_casefold_collisions((*current, *additions))
+                for name, selected_payload in additions.items():
+                    if name in current and current[name] != selected_payload:
+                        raise PendingTransactionError(
+                            "selected vault conflicts with prepared workspace"
+                        )
+                for name, selected_payload in additions.items():
+                    if name not in current:
+                        _replace_relative_bytes(
+                            prepared_capability.output, name, selected_payload
+                        )
+                if additions:
+                    _replace_bytes(capability, PREPARED_FILE, _json_bytes(updated_marker))
             requested = Path(path).expanduser().absolute()
             expected = prepared_capability.output.path / requested.name
             live_alias = transaction.output / requested.name
@@ -10154,6 +10309,21 @@ def open_prepared_graph(transaction: Transaction, path: Path | str) -> GraphSnap
                     if isinstance(exc.__cause__, FileNotFoundError):
                         continue
                     raise
+            if retain_obsidian_vaults:
+                selected_prepared = _legacy_owned_dynamic_inventory(
+                    prepared_capability.output,
+                    budget=_LegacyInventoryBudget(
+                        remaining=(
+                            _MAX_RECEIPT_AGGREGATE_BYTES
+                            - sum(map(len, artifacts.values()))
+                        ),
+                        count=len(artifacts),
+                    ),
+                    obsidian_vaults=retain_obsidian_vaults,
+                    selected_only=True,
+                    existing_inventory=artifacts,
+                )
+                artifacts.update(selected_prepared)
         finally:
             prepared_capability.close()
         try:

@@ -232,7 +232,10 @@ def test_prepared_export_rejects_live_owner_loss_after_snapshot_admission(
     payload = b'{"directed":false,"multigraph":false,"graph":{},"nodes":[],"links":[]}'
     graph.write_bytes(payload)
 
-    def admitted_then_owner_removed(_transaction, selected_graph):
+    def admitted_then_owner_removed(
+        _transaction, selected_graph, *, retain_obsidian_vaults=()
+    ):
+        assert retain_obsidian_vaults == ()
         (output / transaction_module.TRANSACTION_FILE).unlink()
         return transaction_module.GraphSnapshot(
             data=json.loads(payload),
@@ -1136,6 +1139,124 @@ def test_legacy_obsidian_export_below_git_root_preserves_ownership(tmp_path, git
     assert "repo/vault/Transformer.md" in receipt["required_artifacts"]
     assert "repo/vault/stale-owned.md" not in receipt["required_artifacts"]
     assert "repo/vault/foreign-note.md" not in receipt["required_artifacts"]
+
+
+@pytest.mark.parametrize("prepared", [False, True])
+def test_selected_nested_vault_retains_ownership_after_other_publication(
+    tmp_path, prepared
+):
+    from graphify.transaction import (
+        begin_transaction,
+        run_prepared_token,
+        run_token,
+        stage_transaction_handoff,
+    )
+
+    out = _make_graph(tmp_path)
+    vault = out / "repo" / "vault"
+    vault.mkdir(parents=True)
+    (vault.parent / ".git").mkdir()
+    stale = vault / "stale-owned.md"
+    stale.write_text("old owned note\n")
+    foreign = vault / "foreign-note.md"
+    foreign.write_text("user note\n")
+    manifest_path = vault / ".graphify_obsidian_manifest.json"
+    manifest_path.write_text(json.dumps({"files": [stale.name]}))
+
+    if prepared:
+        token = stage_transaction_handoff(
+            begin_transaction("full", tmp_path, output=out)
+        )
+        run_prepared_token(
+            token.path,
+            ["-c", "from pathlib import Path; Path('manifest.json').write_text('{}')"],
+        )
+        export_command = [
+            "-c",
+            "import sys; from graphify.cli import dispatch_command; "
+            "sys.argv=['graphify','export','obsidian','--dir','repo/vault']; "
+            "dispatch_command('export')",
+        ]
+        run_prepared_token(token.path, export_command)
+        run_prepared_token(token.path, export_command)
+        run_token(
+            token.path,
+            [
+                "-c",
+                "from graphify.transaction import finalize_prepared_transaction; "
+                "finalize_prepared_transaction()",
+            ],
+        )
+    else:
+        first = _run(["export", "html"], tmp_path)
+        assert first.returncode == 0, first.stderr
+        second = _run(["export", "obsidian", "--dir", str(vault)], tmp_path)
+        assert second.returncode == 0, second.stderr
+
+    assert not stale.exists()
+    assert foreign.read_text() == "user note\n"
+    assert "Transformer.md" in json.loads(manifest_path.read_text())["files"]
+    receipt = json.loads((out / ".graphify_generation.json").read_text())
+    assert "repo/vault/Transformer.md" in receipt["required_artifacts"]
+    assert "repo/vault/stale-owned.md" not in receipt["required_artifacts"]
+
+
+def test_managed_selected_vault_change_blocks_transaction_begin(tmp_path):
+    from graphify.transaction import (
+        PendingTransactionError,
+        begin_transaction,
+        open_graph_snapshot,
+    )
+
+    out = _make_graph(tmp_path)
+    first = _run(["export", "html"], tmp_path)
+    assert first.returncode == 0, first.stderr
+    vault = out / "repo" / "vault"
+    vault.mkdir(parents=True)
+    (vault.parent / ".git").mkdir()
+    note = vault / "owned.md"
+    note.write_text("original")
+    (vault / ".graphify_obsidian_manifest.json").write_text(
+        json.dumps({"files": [note.name]})
+    )
+    snapshot = open_graph_snapshot(
+        out / "graph.json",
+        purpose="export-admission",
+        retain_obsidian_vaults=("repo/vault",),
+    )
+    note.write_text("changed")
+
+    with pytest.raises(PendingTransactionError, match="selected vault inventory changed"):
+        begin_transaction("runtime", tmp_path, output=out, expected_snapshot=snapshot)
+
+
+def test_managed_selected_vault_shares_receipt_budget(tmp_path, monkeypatch):
+    import graphify.transaction as transaction_module
+
+    out = _make_graph(tmp_path)
+    first = _run(["export", "html"], tmp_path)
+    assert first.returncode == 0, first.stderr
+    vault = out / "repo" / "vault"
+    vault.mkdir(parents=True)
+    (vault.parent / ".git").mkdir()
+    (vault / "owned.md").write_bytes(b"x" * 256)
+    manifest = vault / ".graphify_obsidian_manifest.json"
+    manifest.write_text(json.dumps({"files": ["owned.md"]}))
+    receipt_artifacts = transaction_module.open_graph_snapshot(
+        out / "graph.json", purpose="export-admission"
+    ).artifacts
+    monkeypatch.setattr(
+        transaction_module,
+        "_MAX_RECEIPT_AGGREGATE_BYTES",
+        sum(map(len, receipt_artifacts.values())) + manifest.stat().st_size + 128,
+    )
+
+    with pytest.raises(transaction_module.PendingTransactionError):
+        transaction_module.open_graph_snapshot(
+            out / "graph.json",
+            purpose="export-admission",
+            retain_obsidian_vaults=("repo/vault",),
+        )
 
 
 def test_issue89_external_obsidian_preserves_foreign_and_prunes_owned_stale(

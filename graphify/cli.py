@@ -1214,7 +1214,11 @@ def _transactional_export() -> None:
         )
     active_transaction = optional_current_transaction(graph.parent)
     if active_transaction is not None:
-        source_snapshot = open_prepared_graph(active_transaction, graph)
+        source_snapshot = open_prepared_graph(
+            active_transaction,
+            graph,
+            retain_obsidian_vaults=retained_obsidian_vaults,
+        )
         revalidated_transaction = optional_current_transaction(graph.parent)
         if (
             revalidated_transaction is None
