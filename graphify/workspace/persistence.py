@@ -31,6 +31,10 @@ _LOCK_STACK: ContextVar[tuple[tuple[int, str], ...]] = ContextVar(
     "graphify_workspace_lock_stack",
     default=(),
 )
+_HELD_LOCK_BINDINGS: ContextVar[tuple[Callable[[], None], ...]] = ContextVar(
+    "graphify_workspace_held_lock_bindings",
+    default=(),
+)
 _ATOMIC_TEMP_RE = re.compile(
     r"^\.(?P<destination>.+)\.tmp-(?P<pid>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$",
     re.ASCII,
@@ -455,6 +459,7 @@ class DurableStateRoot:
     ) -> Iterator[int | None]:
         """Hold the root and its verified parent across one contained operation."""
 
+        self._validate_held_lock_bindings()
         parent = self.root.parent
         if parent == self.root:
             raise StatePathError("state root must not be the filesystem root")
@@ -487,6 +492,7 @@ class DurableStateRoot:
                     parent_descriptor,
                     self.root.name,
                     self.root,
+                    allow_mount_point=True,
                 )
             except FileNotFoundError:
                 if not ensure:
@@ -508,6 +514,7 @@ class DurableStateRoot:
                     parent_descriptor,
                     self.root.name,
                     self.root,
+                    allow_mount_point=True,
                 )
             try:
                 if ensure and created:
@@ -534,10 +541,18 @@ class DurableStateRoot:
                         f"state root changed while opening: {self.root}"
                     )
                 require_parent_binding()
-                if created:
+                self._validate_held_lock_bindings()
+                if ensure:
+                    # An existing entry may be left by mkdir followed by a
+                    # failed parent sync in an earlier initialization attempt.
                     self.syscalls.fsync(parent_descriptor)
-                self._require_root_marker(root_descriptor, install=ensure)
+                try:
+                    self._require_root_marker(root_descriptor, install=ensure)
+                except OSError as exc:
+                    raise StatePathError("workspace root ownership marker is unsafe") from exc
+                self._validate_held_lock_bindings()
                 yield root_descriptor
+                self._validate_held_lock_bindings()
             finally:
                 os.close(root_descriptor)
         finally:
@@ -560,6 +575,26 @@ class DurableStateRoot:
             if WORKSPACE_ROOT_MARKER in names:
                 # A concurrent initializer published while we enumerated.
                 return self._require_root_marker(root_descriptor, install=False)
+            if "runtime-manifest.json" in names:
+                from .composition import (
+                    RUNTIME_AUTHORITY_FILENAME, RUNTIME_AUTHORITY_MAX_BYTES,
+                    WorkspaceRuntimeAuthority,
+                )
+
+                try:
+                    authority_descriptor = os.open(
+                        RUNTIME_AUTHORITY_FILENAME, self._regular_open_flags(),
+                        dir_fd=root_descriptor,
+                    )
+                    payload = self._read_regular_descriptor(
+                        authority_descriptor, self.root / RUNTIME_AUTHORITY_FILENAME,
+                        max_bytes=RUNTIME_AUTHORITY_MAX_BYTES,
+                        stable_parent_descriptor=root_descriptor,
+                        stable_name=RUNTIME_AUTHORITY_FILENAME,
+                    )
+                    WorkspaceRuntimeAuthority.from_json(payload)
+                except (OSError, ContractError, StateCorrupt) as exc:
+                    raise StatePathError("bootstrap runtime authority is invalid or unsafe") from exc
             for name in names - {"runtime-manifest.json"}:
                 if not _ROOT_MARKER_TEMP_RE.fullmatch(name):
                     raise StatePathError("unmarked occupied state root cannot be adopted")
@@ -721,6 +756,7 @@ class DurableStateRoot:
         *,
         allowed_modes: frozenset[int] | None,
         allow_missing: bool = False,
+        allow_mount_point: bool = False,
     ) -> int | None:
         try:
             descriptor = os.open(name, self._directory_open_flags(), dir_fd=parent_descriptor)
@@ -734,13 +770,17 @@ class DurableStateRoot:
             ) from exc
         try:
             if allowed_modes is None:
-                self._require_owned_directory_descriptor(descriptor, path)
+                details = self._require_owned_directory_descriptor(descriptor, path)
             else:
-                self._require_directory_descriptor(
+                details = self._require_directory_descriptor(
                     descriptor,
                     path,
                     allowed_modes=allowed_modes,
                 )
+            # Descendants inherit the held root device through each verified parent.
+            # Only opening the state root itself may cross a filesystem boundary.
+            if not allow_mount_point and details.st_dev != os.fstat(parent_descriptor).st_dev:
+                raise StatePathError(f"state directory crosses filesystem boundary: {path}")
         except BaseException:
             os.close(descriptor)
             raise
@@ -751,12 +791,15 @@ class DurableStateRoot:
         parent_descriptor: int,
         name: str,
         path: Path,
+        *,
+        allow_mount_point: bool = False,
     ) -> int:
         descriptor = self._open_directory_at(
             parent_descriptor,
             name,
             path,
             allowed_modes=None,
+            allow_mount_point=allow_mount_point,
         )
         if descriptor is None:  # pragma: no cover - allow_missing is false
             raise StatePathError(f"state directory is missing: {path}")
@@ -847,13 +890,20 @@ class DurableStateRoot:
         except ValueError as exc:
             raise StatePathError(f"state file escapes root: {path}") from exc
         flags = self._regular_open_flags()
-        with self._existing_private_directory(
-            relative_parent,
-            allow_missing=allow_missing_parent,
-        ) as parent_descriptor:
-            if parent_descriptor is None:
-                return None
-            return os.open(path.name, flags, dir_fd=parent_descriptor)
+        descriptor: int | None = None
+        try:
+            with self._existing_private_directory(
+                relative_parent,
+                allow_missing=allow_missing_parent,
+            ) as parent_descriptor:
+                if parent_descriptor is not None:
+                    descriptor = os.open(path.name, flags, dir_fd=parent_descriptor)
+            # Transfer ownership only after the enclosing binding checks pass.
+            return descriptor
+        except BaseException:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise
 
     @staticmethod
     def _contained_parts(relative: str | Path) -> tuple[str, ...]:
@@ -966,8 +1016,6 @@ class DurableStateRoot:
                             self.syscalls.mkdir_at(part, 0o700, dir_fd=descriptor)
                         except FileExistsError:
                             pass
-                        else:
-                            self.syscalls.fsync(descriptor)
                         child_descriptor = self._open_owned_directory_at(
                             descriptor,
                             part,
@@ -992,6 +1040,9 @@ class DurableStateRoot:
                             raise StatePathError(
                                 f"state directory changed while opening: {child_path}"
                             )
+                        # Complete durability even when a prior attempt created
+                        # this child but failed to sync its parent.
+                        self.syscalls.fsync(descriptor)
                     except BaseException:
                         os.close(child_descriptor)
                         raise
@@ -1013,6 +1064,55 @@ class DurableStateRoot:
             raise StatePathError(
                 f"external state root {self.root} overlaps source checkout {source}"
             )
+        # resolve() can retain case aliases on case-insensitive filesystems.
+        # Compare held directory identities, including existing ancestors of a
+        # root that has not been created yet, without adopting symlink paths.
+        with ExitStack() as stack:
+            bindings: list[tuple[int, str, int]] = []
+
+            def ancestry(
+                path: Path, *, allow_missing: bool
+            ) -> tuple[list[tuple[int, int]], tuple[int, int] | None]:
+                descriptor = os.open(path.anchor, self._directory_open_flags())
+                stack.callback(os.close, descriptor)
+                details = os.fstat(descriptor)
+                identity = (details.st_dev, details.st_ino)
+                identities = [identity]
+                for part in path.relative_to(path.anchor).parts:
+                    try:
+                        child = os.open(
+                            part, self._directory_open_flags(), dir_fd=descriptor
+                        )
+                    except FileNotFoundError:
+                        if allow_missing:
+                            return identities, None
+                        raise
+                    stack.callback(os.close, child)
+                    bindings.append((descriptor, part, child))
+                    details = os.fstat(child)
+                    identity = (details.st_dev, details.st_ino)
+                    identities.append(identity)
+                    descriptor = child
+                return identities, identity
+
+            try:
+                source_ancestors, source_identity = ancestry(source, allow_missing=False)
+                state_ancestors, state_identity = ancestry(self.root, allow_missing=True)
+                for parent, name, descriptor in bindings:
+                    named = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    held = os.fstat(descriptor)
+                    if not stat.S_ISDIR(named.st_mode) or (
+                        named.st_dev, named.st_ino
+                    ) != (held.st_dev, held.st_ino):
+                        raise StatePathError("directory changed during state separation check")
+            except OSError as exc:
+                raise StatePathError("cannot verify external state directory ancestry") from exc
+            if source_identity in state_ancestors or (
+                state_identity is not None and state_identity in source_ancestors
+            ):
+                raise StatePathError(
+                    f"external state root {self.root} overlaps source checkout {source}"
+                )
 
     def require_existing_directory_chain(self, relative: str | Path) -> Path:
         """Validate a private directory chain without mutating or following links."""
@@ -1576,6 +1676,65 @@ class DurableStateRoot:
                 self.syscalls.fsync(descriptor)
 
     @contextmanager
+    def _held_lock_binding(
+        self, descriptor: int, path: Path, *, kind: str,
+    ) -> Iterator[None]:
+        """Retain root and lock identities for every operation in this context."""
+
+        with self._root_directory(ensure=False) as root_descriptor:
+            if root_descriptor is None:  # pragma: no cover - missing root raises
+                raise StatePathError(f"{kind} lock root is missing: {self.root}")
+
+            def validate() -> None:
+                try:
+                    with ExitStack() as opened:
+                        parent = self._open_root_parent(allow_missing=False)
+                        if parent is None:  # pragma: no cover - missing parent raises
+                            raise StatePathError(f"{kind} lock root parent is missing")
+                        opened.callback(os.close, parent)
+                        current_root = self._open_owned_directory_at(
+                            parent, self.root.name, self.root, allow_mount_point=True,
+                        )
+                        opened.callback(os.close, current_root)
+                        held = self._require_private_directory_descriptor(root_descriptor, self.root)
+                        current = self._require_private_directory_descriptor(current_root, self.root)
+                        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                            raise StatePathError(f"{kind} lock root binding changed: {self.root}")
+                        if path == self.root:
+                            locked = self._require_private_directory_descriptor(descriptor, path)
+                            bound = current
+                        else:
+                            directory = opened.enter_context(self._existing_directory_beneath(
+                                current_root, self.root, path.parent.relative_to(self.root),
+                                allowed_modes=_PRIVATE_DIRECTORY_MODES,
+                            ))
+                            candidate = os.open(path.name, self._regular_open_flags(), dir_fd=directory)
+                            opened.callback(os.close, candidate)
+                            locked = self._require_regular_descriptor(
+                                descriptor, path, allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                            bound = self._require_regular_descriptor(
+                                candidate, path, allowed_modes=_PRIVATE_FILE_MODES,
+                            )
+                        if (locked.st_dev, locked.st_ino) != (bound.st_dev, bound.st_ino):
+                            raise StatePathError(f"{kind} lock binding changed: {path}")
+                except OSError as exc:
+                    raise StatePathError(f"{kind} lock binding changed: {path}") from exc
+
+            validate()
+            token = _HELD_LOCK_BINDINGS.set((*_HELD_LOCK_BINDINGS.get(), validate))
+            try:
+                yield
+                validate()
+            finally:
+                _HELD_LOCK_BINDINGS.reset(token)
+
+    @staticmethod
+    def _validate_held_lock_bindings() -> None:
+        for validate in _HELD_LOCK_BINDINGS.get():
+            validate()
+
+    @contextmanager
     def lock(
         self,
         relative: str | Path,
@@ -1693,9 +1852,11 @@ class DurableStateRoot:
                     kind=name,
                 )
                 token = _LOCK_STACK.set((*stack, (rank, name)))
-                self.fault_hook(f"lock:{name}:acquired")
                 try:
-                    yield
+                    with self._held_lock_binding(descriptor, path, kind=name):
+                        self.fault_hook(f"lock:{name}:acquired")
+                        self._validate_held_lock_bindings()
+                        yield
                 finally:
                     _LOCK_STACK.reset(token)
                     while True:
@@ -1756,9 +1917,11 @@ class DurableStateRoot:
                     f"{name} lock binding changed while acquiring: {self.root}"
                 )
             token = _LOCK_STACK.set((*stack, (rank, name)))
-            self.fault_hook(f"lock:{name}:acquired")
             try:
-                yield
+                with self._held_lock_binding(descriptor, self.root, kind=name):
+                    self.fault_hook(f"lock:{name}:acquired")
+                    self._validate_held_lock_bindings()
+                    yield
             finally:
                 _LOCK_STACK.reset(token)
                 while True:
@@ -1850,9 +2013,11 @@ class DurableStateRoot:
                 kind=kind,
             )
             token = _LOCK_STACK.set((*stack, (rank, name)))
-            self.fault_hook(f"lock:{name}:acquired")
             try:
-                yield
+                with self._held_lock_binding(descriptor, path, kind=kind):
+                    self.fault_hook(f"lock:{name}:acquired")
+                    self._validate_held_lock_bindings()
+                    yield
             finally:
                 _LOCK_STACK.reset(token)
                 while True:
@@ -1900,6 +2065,68 @@ class DurableStateRoot:
         finally:
             os.close(current_descriptor)
 
+    def _sync_existing_immutable(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        conflict_kind: str,
+        label: str | None = None,
+        deadline_ns: int | None = None,
+    ) -> None:
+        """Acknowledge matching bytes only after syncing their retained inode."""
+
+        parent_relative = path.parent.relative_to(self.root)
+        with self.existing_private_directory(parent_relative) as parent_descriptor:
+            try:
+                descriptor = os.open(
+                    path.name, self._regular_open_flags(), dir_fd=parent_descriptor,
+                )
+            except OSError as exc:
+                raise StateCorrupt(
+                    f"state record cannot be opened safely: {path}: {exc}"
+                ) from exc
+            try:
+                identity = self._stat_identity(os.fstat(descriptor))
+                if self._read_regular_descriptor(
+                    os.dup(descriptor),
+                    path,
+                    deadline_ns=deadline_ns,
+                    stable_parent_descriptor=parent_descriptor,
+                    stable_name=path.name,
+                ) != data:
+                    raise StateCorrupt(f"{conflict_kind} state conflicts at {path}")
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, path.parent,
+                )
+                try:
+                    self.syscalls.fsync(descriptor)
+                    self.syscalls.fsync(parent_descriptor)
+                except BaseException as exc:
+                    if label is not None:
+                        raise CommitUnknown(
+                            f"{label} is visible before durability acknowledgement"
+                        ) from exc
+                    raise
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, path.parent,
+                )
+                try:
+                    bound = os.stat(
+                        path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise StateCorrupt(
+                        f"immutable state path changed while syncing: {path}"
+                    ) from exc
+                if (
+                    self._stat_identity(os.fstat(descriptor)) != identity
+                    or self._stat_identity(bound) != identity
+                ):
+                    raise StateCorrupt(f"immutable state changed while syncing: {path}")
+            finally:
+                os.close(descriptor)
+
     def write_once(self, relative: str | Path, data: bytes) -> Path:
         self._ensure_root()
         path = self.path(relative)
@@ -1909,10 +2136,13 @@ class DurableStateRoot:
         except FileNotFoundError:
             pass
         else:
-            if self._read_regular(path) != data:
-                raise StateCorrupt(f"content-addressed state conflicts at {path}")
+            self._sync_existing_immutable(path, data, conflict_kind="content-addressed")
             return path
-        self._atomic_replace(path, data)
+        try:
+            self._atomic_replace(path, data, exclusive=True)
+        except FileExistsError:
+            self._sync_existing_immutable(path, data, conflict_kind="content-addressed")
+            return path
         if self._read_regular(path) != data:
             raise StateCorrupt(f"content-addressed state verification failed at {path}")
         return path
@@ -1936,8 +2166,10 @@ class DurableStateRoot:
         except FileNotFoundError:
             pass
         else:
-            if self._read_regular(path, deadline_ns=deadline_ns) != data:
-                raise StateCorrupt(f"immutable state conflicts at {path}")
+            self._sync_existing_immutable(
+                path, data, conflict_kind="immutable", label=label,
+                deadline_ns=deadline_ns,
+            )
             return path
         visible = False
 
@@ -1951,8 +2183,17 @@ class DurableStateRoot:
                 path,
                 data,
                 after_replace=replaced,
+                exclusive=True,
                 deadline_ns=deadline_ns,
             )
+        except FileExistsError:
+            if visible:
+                raise CommitUnknown(f"{label} became visible before durability acknowledgement")
+            self._sync_existing_immutable(
+                path, data, conflict_kind="immutable", label=label,
+                deadline_ns=deadline_ns,
+            )
+            return path
         except BaseException as exc:
             if visible:
                 raise CommitUnknown(
@@ -1971,7 +2212,11 @@ class DurableStateRoot:
         label: str,
         deadline_ns: int | None = None,
     ) -> Path:
-        """Create one exact private file without a temporary or parent creation."""
+        """Exclusively create a private file, rolling back definite write failures.
+
+        A post-file-sync failure retains complete bytes and raises CommitUnknown;
+        callers can reconcile those bytes with install_once_bytes before retrying.
+        """
 
         require_before_deadline(deadline_ns, "private file creation exceeded its deadline")
         path = self.path(relative)
@@ -1985,18 +2230,51 @@ class DurableStateRoot:
                 0o600,
                 dir_fd=parent_descriptor,
             )
+            durable = False
             try:
                 os.fchmod(descriptor, 0o600)
                 self.fault_hook(f"{label}:created")
                 self._write_all(descriptor, data)
                 self.fault_hook(f"{label}:written")
                 self.syscalls.fsync(descriptor)
+                durable = True
+                identity = self._stat_identity(os.fstat(descriptor))
                 self.fault_hook(f"{label}:durable")
+                self.syscalls.fsync(parent_descriptor)
+                self.fault_hook(f"{label}:parent_durable")
+                self.fault_hook(f"{label}:installed")
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, path.parent,
+                )
+                bound = os.stat(path.name, dir_fd=parent_descriptor, follow_symlinks=False)
+                if (self._stat_identity(bound) != identity
+                        or self._stat_identity(os.fstat(descriptor)) != identity):
+                    raise StateCorrupt(f"private state changed while installing: {path}")
+            except BaseException as exc:
+                if durable:
+                    raise CommitUnknown(
+                        f"{label} became visible before durability acknowledgement"
+                    ) from exc
+                try:
+                    owned = os.fstat(descriptor)
+                    try:
+                        bound = os.stat(
+                            path.name, dir_fd=parent_descriptor, follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        if (owned.st_dev, owned.st_ino) != (bound.st_dev, bound.st_ino):
+                            raise StatePathError(f"private state changed before rollback: {path}")
+                        self.syscalls.unlink_at(path.name, dir_fd=parent_descriptor)
+                    if os.fstat(descriptor).st_nlink != 0:
+                        raise StatePathError(f"private state remains linked after rollback: {path}")
+                    self.syscalls.fsync(parent_descriptor)
+                except BaseException as cleanup_error:
+                    raise CommitUnknown(f"{label} creation rollback is uncertain") from cleanup_error
+                raise
             finally:
                 os.close(descriptor)
-            self.syscalls.fsync(parent_descriptor)
-            self.fault_hook(f"{label}:parent_durable")
-            self.fault_hook(f"{label}:installed")
         return path
 
     def atomic_replace_bytes(
@@ -2044,66 +2322,16 @@ class DurableStateRoot:
 
         require_before_deadline(deadline_ns, "state rename exceeded its deadline")
         self._ensure_root()
-        source_path = self.path(source)
+        self.path(source)
         destination_path = self.path(destination)
         self._ensure_parent(destination_path)
-        source_parent_relative = source_path.parent.relative_to(self.root)
-        destination_parent_relative = destination_path.parent.relative_to(self.root)
-        visible = False
-        with self.existing_private_directory(source_parent_relative) as source_parent:
-            with self.existing_private_directory(
-                destination_parent_relative
-            ) as destination_parent:
-                source_descriptor = self._open_directory_at(
-                    source_parent,
-                    source_path.name,
-                    source_path,
-                    allowed_modes=_PRIVATE_DIRECTORY_MODES,
-                    allow_missing=True,
-                )
-                if source_descriptor is None:
-                    raise StatePathError(f"rename source is missing: {source_path}")
-                try:
-                    try:
-                        os.stat(
-                            destination_path.name,
-                            dir_fd=destination_parent,
-                            follow_symlinks=False,
-                        )
-                    except FileNotFoundError:
-                        pass
-                    else:
-                        raise StatePathError(
-                            f"rename destination already exists: {destination_path}"
-                        )
-                    self.fault_hook(f"{label}:before_rename")
-                    require_before_deadline(
-                        deadline_ns,
-                        "state rename exceeded its deadline",
-                    )
-                    try:
-                        self.syscalls.replace_at(
-                            source_path.name,
-                            destination_path.name,
-                            source_dir_fd=source_parent,
-                            destination_dir_fd=destination_parent,
-                        )
-                        visible = True
-                        self.fault_hook(f"{label}:renamed")
-                        self.syscalls.fsync(source_parent)
-                        self.fault_hook(f"{label}:source_parent_durable")
-                        if destination_parent_relative != source_parent_relative:
-                            self.syscalls.fsync(destination_parent)
-                        self.fault_hook(f"{label}:destination_parent_durable")
-                    except BaseException as exc:
-                        if visible:
-                            raise CommitUnknown(
-                                f"{label} rename became visible before both directories were durable"
-                            ) from exc
-                        raise
-                finally:
-                    os.close(source_descriptor)
-        return destination_path
+        return self.rename_exclusive_contained(
+            source,
+            destination,
+            source_kind="directory",
+            label=label,
+            deadline_ns=deadline_ns,
+        )
 
     def rename_exclusive_contained(
         self,
@@ -2258,6 +2486,7 @@ class DurableStateRoot:
                         if destination_parent_relative != source_parent_relative:
                             self.syscalls.fsync(destination_parent)
                         self.fault_hook(f"{label}:destination_parent_durable")
+                        require_visible_binding()
                     except BaseException as exc:
                         if visible:
                             if recover_commit_unknown:
@@ -2733,8 +2962,10 @@ class DurableStateRoot:
                     label=label,
                     deadline_ns=deadline_ns,
                 )
-            except Exception:
-                pass
+            except BaseException as exc:
+                raise CommitUnknown(
+                    f"{label} cleanup became visible before retained cleanup completed"
+                ) from exc
         return True
 
     def fsync_directory(self, relative: str | Path) -> None:
@@ -3229,6 +3460,30 @@ class DurableStateRoot:
         if "current" not in candidates and "pending" not in candidates:
             raise StateCorrupt(f"{label} current is missing and no pending commit can recover it")
 
+        current_candidate = candidates.get("current")
+        if current_candidate is not None:
+            current_bytes, _current_record, current_revision = current_candidate
+            previous_candidate = candidates.get("previous")
+            if previous_candidate is not None:
+                previous_bytes, _previous_record, previous_revision = previous_candidate
+                if previous_revision > current_revision:
+                    raise StateCorrupt(f"{label} previous record is newer than current")
+                if previous_revision == current_revision and previous_bytes != current_bytes:
+                    raise StateCorrupt(
+                        f"{label} has divergent records at revision {current_revision}"
+                    )
+            pending_candidate = candidates.get("pending")
+            if (pending_candidate is not None
+                    and pending_candidate[2] > current_revision
+                    and pending_candidate[2] != current_revision + 1):
+                raise StateCorrupt(f"{label} pending commit is not the exact current successor")
+        else:
+            # Without valid current authority, only durable pending intent can
+            # authorize recovery; a newer backup cannot become that authority.
+            previous_candidate = candidates.get("previous")
+            if previous_candidate is not None and previous_candidate[2] > candidates["pending"][2]:
+                raise StateCorrupt(f"{label} previous record is newer than pending commit")
+
         highest_revision = max(item[2] for item in candidates.values())
         highest = [(name, item) for name, item in candidates.items() if item[2] == highest_revision]
         highest_bytes = {item[0] for _name, item in highest}
@@ -3238,7 +3493,6 @@ class DurableStateRoot:
             "current" if any(name == "current" for name, _ in highest) else highest[0][0]
         )
         selected = candidates[preferred_name]
-        current_candidate = candidates.get("current")
         install_current = current_candidate is None or current_candidate[0] != selected[0]
         return DurableRecordRecovery(
             record=selected[1],
@@ -3550,6 +3804,7 @@ class DurableStateRoot:
         data: bytes,
         *,
         after_replace: Callable[[], None] | None = None,
+        exclusive: bool = False,
         deadline_ns: int | None = None,
     ) -> None:
         require_before_deadline(
@@ -3558,12 +3813,13 @@ class DurableStateRoot:
         )
         self._ensure_root()
         self._ensure_parent(destination)
-        if deadline_ns is None:
+        # Exclusive creators do not hold the writer lock needed to sweep temps.
+        if not exclusive and deadline_ns is None:
             self.cleanup_atomic_temps(
                 destination.parent.relative_to(self.root),
                 destination_name=destination.name,
             )
-        else:
+        elif not exclusive:
             self.cleanup_atomic_temps(
                 destination.parent.relative_to(self.root),
                 destination_name=destination.name,
@@ -3612,7 +3868,12 @@ class DurableStateRoot:
                     deadline_ns,
                     "atomic state replacement exceeded its deadline",
                 )
-                self.syscalls.replace_at(
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, destination.parent,
+                )
+                publish = (self.syscalls.rename_exclusive_at if exclusive
+                           else self.syscalls.replace_at)
+                publish(
                     temporary_name,
                     destination.name,
                     source_dir_fd=parent_descriptor,
@@ -3632,8 +3893,14 @@ class DurableStateRoot:
                     raise StateCorrupt(
                         f"installed state cannot be opened safely: {destination}: {exc}"
                     ) from exc
-                if self._read_regular_descriptor(installed_descriptor, destination) != data:
+                if self._read_regular_descriptor(
+                    installed_descriptor, destination,
+                    stable_parent_descriptor=parent_descriptor, stable_name=destination.name,
+                ) != data:
                     raise StateCorrupt(f"installed state verification failed at {destination}")
+                self._require_held_private_directory_binding(
+                    parent_relative, parent_descriptor, destination.parent,
+                )
             finally:
                 if not replaced:
                     try:

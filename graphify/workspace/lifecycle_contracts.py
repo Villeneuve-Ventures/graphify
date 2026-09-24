@@ -2,6 +2,7 @@
 
 The S2 compatibility and completion contracts remain in ``contracts.py``.
 This module validates versioned durable state and performs no filesystem I/O.
+Donor release, installer and artifact contracts are outside this lifecycle slice.
 """
 
 from __future__ import annotations
@@ -24,29 +25,14 @@ from graphify.workspace.contracts import CompletionBinding
 
 WORKSPACE_SCHEMA_VERSION = 2
 STATE_SCHEMA_VERSION = 2
-ADAPTER_CONTRACT_VERSION = 2
-CLI_CONTRACT_VERSION = 1
-ENGINE_BASELINE = "0.9.16"
-CANDIDATE_DISTRIBUTION_VERSION = "0.9.16+workspace.1"
-EXTRACTOR_CACHE_ABI = "graphify-0.9.16"
-UPSTREAM_BASELINE_COMMIT = "a0e4a1c6bd3a99edfdd84ad30927003f51face6a"
+# Generic parsing ceiling; record stores apply their narrower limits before I/O.
+LIFECYCLE_JSON_MAX_BYTES = 64 * 1024 * 1024
+LIFECYCLE_JSON_MAX_DEPTH = 32
 SEMANTIC_RELEASE_DECISION_BINDING_MAX_BYTES = 25 * 1024 * 1024
 SEMANTIC_RELEASE_DECISION_BINDINGS_PER_GENERATION = 64
 SEMANTIC_RELEASE_DECISION_BINDINGS_PER_WORKSPACE = 4_096
 SEMANTIC_RELEASE_DECISION_STAGING_MANIFEST_MAX_BYTES = 4 * 1024
 SEMANTIC_RELEASE_DECISION_STAGING_OVERHEAD_BYTES = 256 * 1024
-REQUIRED_COMPATIBILITY_ARTIFACTS = (
-    "contract-bundle.zip",
-    "fixture-bundle.zip",
-    "fixture-manifest.json",
-    f"graphifyy-{CANDIDATE_DISTRIBUTION_VERSION}-py3-none-any.whl",
-    "offline-rollback.zip",
-    "provenance.json",
-    "runtime-bundle.zip",
-    "runtime-requirements.txt",
-    "sbom.cdx.json",
-    "skill-bundle.zip",
-)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _GENERATION_RE = re.compile(r"^gen-[a-z0-9][a-z0-9._-]{0,62}$")
@@ -109,7 +95,9 @@ def _normalise_string(value: str, path: str) -> str:
     return unicodedata.normalize("NFC", value)
 
 
-def _normalise_json(value: object, path: str = "$") -> JsonValue:
+def _normalise_json(value: object, path: str = "$", *, depth: int = 0) -> JsonValue:
+    if depth > LIFECYCLE_JSON_MAX_DEPTH:
+        raise ContractError(f"{path}: JSON nesting limit exceeded")
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, int):
@@ -126,10 +114,11 @@ def _normalise_json(value: object, path: str = "$") -> JsonValue:
             key = _normalise_string(raw_key, path)
             if key in result:
                 raise ContractError(f"{path}: duplicate key after Unicode normalization: {key!r}")
-            result[key] = _normalise_json(raw_value, f"{path}.{key}")
+            result[key] = _normalise_json(raw_value, f"{path}.{key}", depth=depth + 1)
         return result
     if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray, memoryview)):
-        return [_normalise_json(item, f"{path}[{index}]") for index, item in enumerate(value)]
+        return [_normalise_json(item, f"{path}[{index}]", depth=depth + 1)
+                for index, item in enumerate(value)]
     raise ContractError(f"{path}: unsupported canonical JSON type {type(value).__name__}")
 
 
@@ -171,9 +160,15 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, o
 
 
 def _parse_json(value: str | bytes) -> object:
+    if len(value) > LIFECYCLE_JSON_MAX_BYTES:
+        raise ContractError("JSON byte limit exceeded")
     try:
+        if isinstance(value, str) and len(value.encode("utf-8")) > LIFECYCLE_JSON_MAX_BYTES:
+            raise ContractError("JSON byte limit exceeded")
         return json.loads(value, object_pairs_hook=_reject_duplicate_json_pairs)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except ContractError:
+        raise
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise ContractError(f"invalid JSON: {exc}") from exc
 
 
@@ -615,6 +610,9 @@ def _validate_generation_receipt(data: Mapping[str, object]) -> None:
         raise ContractError("$.sealed_query_payload: unexpected structural files")
     if completion_value["graph_sha256"] != paths["graphify-out/graph.json"]["sha256"]:
         raise ContractError("$.completion_binding: graph differs from sealed payload")
+    if (completion_value["consumed_inputs_sha256"]
+            != paths["graphify-out/input-manifest.json"]["sha256"]):
+        raise ContractError("$.completion_binding: consumed inputs differ from sealed payload")
     if manifest_sha256 != payload_manifest_sha256(
         root,
         cast(Sequence[Mapping[str, object]], payload["entries"]),
@@ -783,7 +781,7 @@ def _validate_prior_pointer(data: Mapping[str, object]) -> None:
     _date_time(data["retained_at"], "$.retained_at")
     replaced = _integer(data["replaced_by_revision"], "$.replaced_by_revision", minimum=2)
     pointer = _mapping(data["pointer_set"], "$.pointer_set")
-    _validate_pointer_set(pointer)
+    PointerSet.from_mapping(pointer)
     pointer_revision = _integer(pointer["pointer_revision"], "$.pointer_set.pointer_revision", minimum=1)
     if replaced <= pointer_revision:
         raise ContractError("$.replaced_by_revision: must exceed retained pointer revision")
@@ -818,332 +816,6 @@ def _validate_generation_lock(data: Mapping[str, object]) -> None:
     _enum(data["query_lock"], "$.query_lock", {"read_only_shared_advisory"})
     _enum(data["gc_lock"], "$.gc_lock", {"exclusive_then_reachability_recheck"})
     _enum(data["retention"], "$.retention", {"retain_v1"})
-
-
-def _validate_observation(value: object, path: str) -> None:
-    observation = _mapping(value, path)
-    _exact_keys(
-        observation,
-        path,
-        {
-            "pointer_revision",
-            "active_source_revision",
-            "operation_epoch",
-            "fence_token",
-            "state_schema_version",
-            "source_commit",
-            "inventory_sha256",
-            "policy_sha256",
-            "detector_id",
-            "receipt_sha256",
-            "payload_manifest_sha256",
-            "stable_inventory_passes",
-        },
-    )
-    for field in (
-        "pointer_revision",
-        "active_source_revision",
-        "operation_epoch",
-        "fence_token",
-    ):
-        _integer(observation[field], f"{path}.{field}", minimum=1)
-    _exact_version(
-        observation["state_schema_version"],
-        f"{path}.state_schema_version",
-        STATE_SCHEMA_VERSION,
-    )
-    _commit(observation["source_commit"], f"{path}.source_commit")
-    for field in (
-        "inventory_sha256",
-        "policy_sha256",
-        "receipt_sha256",
-        "payload_manifest_sha256",
-    ):
-        _digest(observation[field], f"{path}.{field}")
-    _string(observation["detector_id"], f"{path}.detector_id")
-    passes = _integer(observation["stable_inventory_passes"], f"{path}.stable_inventory_passes")
-    if passes != 2:
-        raise ContractError(f"{path}.stable_inventory_passes: v1 requires exactly two")
-
-
-def _validate_freshness(data: Mapping[str, object]) -> None:
-    _exact_keys(
-        data,
-        "$",
-        {
-            "contract",
-            "schema_version",
-            "policy",
-            "pre_observation",
-            "post_observation",
-            "release_decision",
-            "reason",
-            "limitations",
-        },
-    )
-    _enum(data["policy"], "$.policy", {"current_only"})
-    _validate_observation(data["pre_observation"], "$.pre_observation")
-    _validate_observation(data["post_observation"], "$.post_observation")
-    decision = _enum(data["release_decision"], "$.release_decision", {"release", "withhold"})
-    reason = _enum(
-        data["reason"],
-        "$.reason",
-        {"observed_current", "drift", "unstable", "unsupported", "timeout", "source_unavailable"},
-    )
-    if decision == "release" and reason != "observed_current":
-        raise ContractError("$.reason: release requires observed_current")
-    if decision == "release" and data["pre_observation"] != data["post_observation"]:
-        raise ContractError("$.pre_observation and $.post_observation: release requires equality")
-    limitations = _mapping(data["limitations"], "$.limitations")
-    _exact_keys(
-        limitations,
-        "$.limitations",
-        {"strict_source_linearizability", "inter_observation_aba_detection", "post_boundary_changes"},
-    )
-    if _boolean(limitations["strict_source_linearizability"], "$.limitations.strict_source_linearizability"):
-        raise ContractError("$.limitations.strict_source_linearizability: v1 must be false")
-    if _boolean(
-        limitations["inter_observation_aba_detection"],
-        "$.limitations.inter_observation_aba_detection",
-    ):
-        raise ContractError("$.limitations.inter_observation_aba_detection: v1 must be false")
-    _enum(limitations["post_boundary_changes"], "$.limitations.post_boundary_changes", {"out_of_scope"})
-
-
-def _validate_artifact_manifest(data: Mapping[str, object]) -> None:
-    _exact_keys(data, "$", {"contract", "schema_version", "manifest_version", "artifacts"})
-    _exact_version(data["manifest_version"], "$.manifest_version")
-    artifacts = _validate_payload_entries(data["artifacts"], "$.artifacts")
-    if not artifacts:
-        raise ContractError("$.artifacts: manifest must cover at least one artifact")
-
-
-def _validate_compatibility(data: Mapping[str, object]) -> None:
-    _exact_keys(
-        data,
-        "$",
-        {
-            "contract",
-            "schema_version",
-            "distribution",
-            "distribution_version",
-            "distribution_build",
-            "engine_baseline",
-            "upstream_commit",
-            "fork_commit",
-            "extractor_cache_abi",
-            "python",
-            "platform",
-            "state_schema_version",
-            "adapter_contract_version",
-            "cli_contract_version",
-            "runtime_lock_sha256",
-            "skill_bundle_sha256",
-            "contract_bundle_sha256",
-            "fixture_manifest_sha256",
-            "provenance_sha256",
-            "sbom_sha256",
-            "artifacts",
-        },
-    )
-    if data["distribution"] != "graphifyy":
-        raise ContractError("$.distribution: P1 freezes the single graphifyy distribution")
-    if data["distribution_version"] != CANDIDATE_DISTRIBUTION_VERSION:
-        raise ContractError("$.distribution_version: unsupported workspace candidate")
-    _string(data["distribution_build"], "$.distribution_build")
-    if data["engine_baseline"] != ENGINE_BASELINE:
-        raise ContractError("$.engine_baseline: P1 is pinned to Graphify 0.9.16")
-    upstream_commit = _commit(data["upstream_commit"], "$.upstream_commit")
-    if upstream_commit != UPSTREAM_BASELINE_COMMIT:
-        raise ContractError("$.upstream_commit: expected exact upstream baseline")
-    _commit(data["fork_commit"], "$.fork_commit")
-    if data["extractor_cache_abi"] != EXTRACTOR_CACHE_ABI:
-        raise ContractError("$.extractor_cache_abi: unsupported ABI")
-    _string(data["python"], "$.python")
-    _string(data["platform"], "$.platform")
-    for field, expected in (
-        ("state_schema_version", STATE_SCHEMA_VERSION),
-        ("adapter_contract_version", ADAPTER_CONTRACT_VERSION),
-        ("cli_contract_version", CLI_CONTRACT_VERSION),
-    ):
-        _exact_version(data[field], f"$.{field}", expected)
-    for field in (
-        "runtime_lock_sha256",
-        "skill_bundle_sha256",
-        "contract_bundle_sha256",
-        "fixture_manifest_sha256",
-        "provenance_sha256",
-        "sbom_sha256",
-    ):
-        _digest(data[field], f"$.{field}")
-    artifacts = _mapping(data["artifacts"], "$.artifacts")
-    if not artifacts:
-        raise ContractError("$.artifacts: at least one artifact digest is required")
-    for name, digest in artifacts.items():
-        _relative_path(name, f"$.artifacts.{name}")
-        _digest(digest, f"$.artifacts.{name}")
-    expected_artifacts = set(REQUIRED_COMPATIBILITY_ARTIFACTS)
-    actual_artifacts = set(artifacts)
-    if actual_artifacts != expected_artifacts:
-        missing = sorted(expected_artifacts - actual_artifacts)
-        extra = sorted(actual_artifacts - expected_artifacts)
-        raise ContractError(f"$.artifacts: incomplete artifact tuple: missing={missing}, extra={extra}")
-    for field, artifact_name in (
-        ("skill_bundle_sha256", "skill-bundle.zip"),
-        ("contract_bundle_sha256", "contract-bundle.zip"),
-        ("fixture_manifest_sha256", "fixture-manifest.json"),
-        ("provenance_sha256", "provenance.json"),
-        ("sbom_sha256", "sbom.cdx.json"),
-    ):
-        if data[field] != artifacts[artifact_name]:
-            raise ContractError(f"$.{field}: must match $.artifacts.{artifact_name}")
-
-
-def _validate_install_item(value: object, path: str) -> str:
-    item = _mapping(value, path)
-    _exact_keys(item, path, {"path", "before_sha256", "after_sha256"})
-    item_path = _absolute_path(item["path"], f"{path}.path")
-    before = item["before_sha256"]
-    if before is not None:
-        _digest(before, f"{path}.before_sha256")
-    _digest(item["after_sha256"], f"{path}.after_sha256")
-    return item_path
-
-
-def _validate_installer(data: Mapping[str, object]) -> None:
-    _exact_keys(
-        data,
-        "$",
-        {
-            "contract",
-            "schema_version",
-            "transaction_id",
-            "phase",
-            "home",
-            "codex_home",
-            "candidate_manifest_sha256",
-            "items",
-            "compensation_plan_sha256",
-            "generation_disposition",
-        },
-    )
-    _uuid(data["transaction_id"], "$.transaction_id")
-    _enum(
-        data["phase"],
-        "$.phase",
-        {"PREPARED", "STAGED", "SWITCHED", "VERIFIED", "COMPENSATING", "ROLLED_BACK"},
-    )
-    home = PurePosixPath(_absolute_path(data["home"], "$.home"))
-    codex_home = PurePosixPath(_absolute_path(data["codex_home"], "$.codex_home"))
-    if home == PurePosixPath("/"):
-        raise ContractError("$.home: installer root must not be the filesystem root")
-    if codex_home == PurePosixPath("/"):
-        raise ContractError("$.codex_home: installer root must not be the filesystem root")
-    _digest(data["candidate_manifest_sha256"], "$.candidate_manifest_sha256")
-    items = _list(data["items"], "$.items")
-    if not items:
-        raise ContractError("$.items: transaction must name at least one switched item")
-    seen_paths: set[str] = set()
-    for index, item in enumerate(items):
-        raw_item_path = _validate_install_item(item, f"$.items[{index}]")
-        if raw_item_path in seen_paths:
-            raise ContractError(f"$.items[{index}].path: installer item paths must be unique")
-        seen_paths.add(raw_item_path)
-        item_path = PurePosixPath(raw_item_path)
-        if home not in item_path.parents and codex_home not in item_path.parents:
-            raise ContractError(f"$.items[{index}].path: outside declared HOME/CODEX_HOME")
-    _digest(data["compensation_plan_sha256"], "$.compensation_plan_sha256")
-    _enum(data["generation_disposition"], "$.generation_disposition", {"preserve_untouched"})
-
-
-def _validate_compensation(data: Mapping[str, object]) -> None:
-    _exact_keys(
-        data,
-        "$",
-        {
-            "contract",
-            "schema_version",
-            "transaction_id",
-            "restore_order",
-            "remove_if_created",
-            "restore_artifacts",
-            "required_offline_artifacts",
-            "generation_disposition",
-        },
-    )
-    _uuid(data["transaction_id"], "$.transaction_id")
-    action_count = 0
-    normalized_arrays: dict[str, list[str]] = {}
-    for field in ("restore_order", "remove_if_created", "required_offline_artifacts"):
-        values = _list(data[field], f"$.{field}")
-        if field == "required_offline_artifacts" and not values:
-            raise ContractError("$.required_offline_artifacts: at least one artifact is required")
-        if field != "required_offline_artifacts":
-            action_count += len(values)
-        seen_values: set[str] = set()
-        normalized_values: list[str] = []
-        for index, value in enumerate(values):
-            if field == "required_offline_artifacts":
-                normalized = _relative_path(value, f"$.{field}[{index}]")
-            else:
-                normalized = _absolute_path(value, f"$.{field}[{index}]")
-            if normalized in seen_values:
-                raise ContractError(f"$.{field}: values must be unique")
-            seen_values.add(normalized)
-            normalized_values.append(normalized)
-        normalized_arrays[field] = normalized_values
-    if action_count == 0:
-        raise ContractError("$.restore_order/$.remove_if_created: at least one action is required")
-    restore_artifacts = _list(data["restore_artifacts"], "$.restore_artifacts")
-    mapped_paths: list[str] = []
-    seen_artifacts: set[str] = set()
-    for index, raw in enumerate(restore_artifacts):
-        path = f"$.restore_artifacts[{index}]"
-        mapping = _mapping(raw, path)
-        _exact_keys(mapping, path, {"path", "offline_artifact"})
-        mapped_paths.append(_absolute_path(mapping["path"], f"{path}.path"))
-        artifact = _relative_path(mapping["offline_artifact"], f"{path}.offline_artifact")
-        if artifact in seen_artifacts:
-            raise ContractError("$.restore_artifacts: offline artifacts must be unique")
-        if artifact not in normalized_arrays["required_offline_artifacts"]:
-            raise ContractError(
-                f"{path}.offline_artifact: must be named by required_offline_artifacts"
-            )
-        seen_artifacts.add(artifact)
-    if mapped_paths != normalized_arrays["restore_order"]:
-        raise ContractError(
-            "$.restore_artifacts: mapping paths must match restore_order exactly and in order"
-        )
-    _enum(data["generation_disposition"], "$.generation_disposition", {"preserve_untouched"})
-
-
-def _validate_offline_rollback(data: Mapping[str, object]) -> None:
-    _exact_keys(
-        data,
-        "$",
-        {
-            "contract",
-            "schema_version",
-            "bundle_version",
-            "offline",
-            "entries",
-            "restore_order",
-            "generation_disposition",
-        },
-    )
-    _exact_version(data["bundle_version"], "$.bundle_version")
-    if not _boolean(data["offline"], "$.offline"):
-        raise ContractError("$.offline: rollback bundle must be self-contained")
-    entry_paths = _validate_payload_entries(data["entries"], "$.entries")
-    if not entry_paths:
-        raise ContractError("$.entries: offline rollback requires at least one entry")
-    order = _list(data["restore_order"], "$.restore_order")
-    restore_order: list[str] = []
-    for index, value in enumerate(order):
-        restore_order.append(_relative_path(value, f"$.restore_order[{index}]"))
-    if len(restore_order) != len(set(restore_order)) or set(restore_order) != set(entry_paths):
-        raise ContractError("$.restore_order: must name every entry exactly once")
-    _enum(data["generation_disposition"], "$.generation_disposition", {"preserve_untouched"})
 
 
 _VALIDATORS = {
@@ -1206,7 +878,11 @@ class ContractDocument:
         parsed = _parse_json(value)
         if not isinstance(parsed, Mapping):
             raise ContractError("$: expected object")
-        return cls.from_mapping(parsed)
+        document = cls.from_mapping(parsed)
+        raw = value.encode("utf-8") if isinstance(value, str) else value
+        if document.canonical != raw:
+            raise ContractError("$: durable contract is not canonical JSON")
+        return document
 
     def to_dict(self) -> dict[str, Any]:
         result = json.loads(self.canonical)
@@ -1334,6 +1010,9 @@ class WorkspaceLeaseState:
             domain: _integer(epoch, f"$.lease_epochs.{domain}", minimum=1)
             for domain, epoch in raw_lease_epochs.items()
         }
+        for domain, epoch in lease_epochs.items():
+            if epoch > operation_epoch:
+                raise ContractError(f"$.lease_epochs.{domain}: exceeds operation_epoch")
         leases: dict[str, FencedLease] = {}
         for domain, raw_lease in raw_leases.items():
             lease_mapping = _mapping(raw_lease, f"$.leases.{domain}")
@@ -2035,6 +1714,15 @@ class StagedBuildAbandonmentIntent:
             raise ContractError(
                 "$.abandonment_intent.evidence_sha256: must match canonical evidence"
             )
+        operation_epoch = _integer(
+            data["operation_epoch"],
+            "$.abandonment_intent.operation_epoch",
+            minimum=1,
+        )
+        if operation_epoch > evidence.operation_epoch:
+            raise ContractError(
+                "$.abandonment_intent.operation_epoch: exceeds recorded evidence epoch"
+            )
         return cls(
             repo_uuid=_uuid(
                 data["repo_uuid"],
@@ -2055,11 +1743,7 @@ class StagedBuildAbandonmentIntent:
                 "$.abandonment_intent.abandoned_from",
                 {"REQUESTED", "PUBLISHING", "COMPLETE", "CERTIFIED"},
             ),
-            operation_epoch=_integer(
-                data["operation_epoch"],
-                "$.abandonment_intent.operation_epoch",
-                minimum=1,
-            ),
+            operation_epoch=operation_epoch,
             fence_token=_integer(
                 data["fence_token"],
                 "$.abandonment_intent.fence_token",
@@ -2241,6 +1925,24 @@ class StagedBuildState:
                 raise ContractError(
                     "$.abandonment_intent: must bind the immediately preceding staged state"
                 )
+            if abandonment_intent.operation_epoch <= request.expected_operation_epoch:
+                raise ContractError(
+                    "$.abandonment_intent.operation_epoch: must follow the staged request epoch"
+                )
+            if operation_epoch is not None and fence_token is not None:
+                same_attempt = (
+                    abandonment_intent.operation_epoch == operation_epoch
+                    and abandonment_intent.fence_token == fence_token
+                )
+                newer_attempt = (
+                    abandonment_intent.operation_epoch > operation_epoch
+                    and abandonment_intent.fence_token > fence_token
+                )
+                if not (same_attempt or newer_attempt):
+                    raise ContractError(
+                        "$.abandonment_intent.operation_epoch/fence_token: "
+                        "must retain the prior attempt pair or advance both"
+                    )
             if abandonment_intent.evidence.reason_for(request) != abandonment_intent.reason:
                 raise ContractError(
                     "$.abandonment_intent.reason: must match canonical abandonment evidence"
@@ -2447,11 +2149,11 @@ class CapacityReservationState:
         serialized: list[dict[str, Any]] = []
         for item in ordered:
             value = item.to_dict()
-            if self.format_version == 1:
-                if item.compatibility_sha256 == _LEGACY_UNBOUND_COMPATIBILITY:
-                    del value["compatibility_sha256"]
-                else:
-                    _digest(item.compatibility_sha256, "$.compatibility_sha256")
+            if (self.format_version == 1
+                    and item.compatibility_sha256 == _LEGACY_UNBOUND_COMPATIBILITY):
+                del value["compatibility_sha256"]
+            else:
+                _digest(item.compatibility_sha256, "$.compatibility_sha256")
             serialized.append(value)
         return {
             "contract": "graphify.workspace.capacity_reservations.internal",
@@ -2511,15 +2213,9 @@ class CapacityReservationState:
                 raise ContractError(f"{path}.generation_id: invalid generation identity")
             compatibility_sha256 = _LEGACY_UNBOUND_COMPATIBILITY
             if "compatibility_sha256" in item:
-                raw_compatibility = _string(
+                compatibility_sha256 = _digest(
                     item["compatibility_sha256"],
                     f"{path}.compatibility_sha256",
-                )
-                compatibility_sha256 = (
-                    raw_compatibility
-                    if format_version == _CAPACITY_STATE_FORMAT_VERSION
-                    and raw_compatibility == _LEGACY_UNBOUND_COMPATIBILITY
-                    else _digest(raw_compatibility, f"{path}.compatibility_sha256")
                 )
             reservation = CapacityReservation(
                 repo_uuid=repo_uuid,
@@ -2971,146 +2667,6 @@ class GenerationCoordinationLock(ContractDocument):
     CONTRACT = "graphify.workspace.generation_coordination_lock"
 
 
-class FreshnessRelease(ContractDocument):
-    CONTRACT = "graphify.workspace.freshness_release"
-
-
-class ArtifactManifest(ContractDocument):
-    CONTRACT = "graphify.workspace.artifact_manifest"
-
-
-class CompatibilityManifest(ContractDocument):
-    CONTRACT = "graphify.workspace.compatibility_manifest"
-
-
-class InstallerTransaction(ContractDocument):
-    CONTRACT = "graphify.workspace.installer_transaction"
-
-
-class CompensationPlan(ContractDocument):
-    CONTRACT = "graphify.workspace.compensation_plan"
-
-
-class OfflineRollback(ContractDocument):
-    CONTRACT = "graphify.workspace.offline_rollback"
-
-
-def validate_installer_compensation(
-    transaction: InstallerTransaction | Mapping[str, object],
-    plan: CompensationPlan | Mapping[str, object],
-    rollback: OfflineRollback | Mapping[str, object],
-) -> dict[str, JsonValue]:
-    """Validate the relational installer, compensation, and rollback invariants."""
-    transaction_document = (
-        transaction
-        if isinstance(transaction, InstallerTransaction)
-        else cast(InstallerTransaction, InstallerTransaction.from_mapping(transaction))
-    )
-    plan_document = (
-        plan
-        if isinstance(plan, CompensationPlan)
-        else cast(CompensationPlan, CompensationPlan.from_mapping(plan))
-    )
-    rollback_document = (
-        rollback
-        if isinstance(rollback, OfflineRollback)
-        else cast(OfflineRollback, OfflineRollback.from_mapping(rollback))
-    )
-    transaction_data = transaction_document.to_dict()
-    plan_data = plan_document.to_dict()
-    rollback_data = rollback_document.to_dict()
-
-    transaction_id = str(transaction_data["transaction_id"])
-    if plan_data["transaction_id"] != transaction_id:
-        raise ContractError("installer and compensation transaction IDs must match")
-    if transaction_data["compensation_plan_sha256"] != plan_document.sha256:
-        raise ContractError("installer compensation_plan_sha256 must match canonical plan bytes")
-
-    home = PurePosixPath(str(transaction_data["home"]))
-    codex_home = PurePosixPath(str(transaction_data["codex_home"]))
-    expected_restore: set[str] = set()
-    expected_remove: set[str] = set()
-    item_paths: set[str] = set()
-    for index, raw in enumerate(transaction_data["items"]):
-        item = cast(dict[str, Any], raw)
-        item_path = str(item["path"])
-        if item_path in item_paths:
-            raise ContractError(f"installer item path is duplicated: {item_path}")
-        item_paths.add(item_path)
-        pure = PurePosixPath(item_path)
-        if home not in pure.parents and codex_home not in pure.parents:
-            raise ContractError(f"installer item path is outside declared HOME/CODEX_HOME: {item_path}")
-        if item["before_sha256"] is None:
-            expected_remove.add(item_path)
-        else:
-            expected_restore.add(item_path)
-
-    restore_order = [str(path) for path in plan_data["restore_order"]]
-    remove_if_created = [str(path) for path in plan_data["remove_if_created"]]
-    restore_artifacts = [cast(dict[str, Any], value) for value in plan_data["restore_artifacts"]]
-    if len(restore_order) != len(set(restore_order)):
-        raise ContractError("compensation restore_order must be unique")
-    if len(remove_if_created) != len(set(remove_if_created)):
-        raise ContractError("compensation remove_if_created must be unique")
-    if set(restore_order) & set(remove_if_created):
-        raise ContractError("compensation restore and remove actions must not overlap")
-    if set(restore_order) != expected_restore:
-        raise ContractError("compensation restore_order must cover every preexisting item exactly once")
-    if set(remove_if_created) != expected_remove:
-        raise ContractError(
-            "compensation remove_if_created must cover every newly created item exactly once"
-        )
-    for action_path in (*restore_order, *remove_if_created):
-        pure = PurePosixPath(action_path)
-        if home not in pure.parents and codex_home not in pure.parents:
-            raise ContractError(
-                f"compensation action is outside declared HOME/CODEX_HOME: {action_path}"
-            )
-
-    required_artifacts = [str(path) for path in plan_data["required_offline_artifacts"]]
-    rollback_entries = {
-        str(entry["path"]): cast(dict[str, Any], entry) for entry in rollback_data["entries"]
-    }
-    missing_artifacts = sorted(set(required_artifacts) - set(rollback_entries))
-    if missing_artifacts:
-        raise ContractError(
-            "compensation required_offline_artifacts are absent from OfflineRollback entries: "
-            f"{missing_artifacts}"
-        )
-    mapping_by_path = {
-        str(mapping["path"]): str(mapping["offline_artifact"]) for mapping in restore_artifacts
-    }
-    if [str(mapping["path"]) for mapping in restore_artifacts] != restore_order:
-        raise ContractError("compensation restore mapping must follow restore_order")
-    item_by_path = {
-        str(cast(dict[str, Any], item)["path"]): cast(dict[str, Any], item)
-        for item in transaction_data["items"]
-    }
-    for target_path in restore_order:
-        artifact = mapping_by_path.get(target_path)
-        if artifact is None:
-            raise ContractError(f"compensation restore mapping is missing target: {target_path}")
-        rollback_entry = rollback_entries.get(artifact)
-        if rollback_entry is None:
-            raise ContractError(f"compensation restore mapping names missing artifact: {artifact}")
-        if rollback_entry["sha256"] != item_by_path[target_path]["before_sha256"]:
-            raise ContractError(
-                f"compensation restore mapping digest does not match installer preimage: {target_path}"
-            )
-
-    return {
-        "compensation_plan_sha256": plan_document.sha256,
-        "installer_item_count": len(item_paths),
-        "offline_rollback_sha256": rollback_document.sha256,
-        "remove_action_count": len(remove_if_created),
-        "required_offline_artifact_count": len(required_artifacts),
-        "restore_mapping_count": len(restore_artifacts),
-        "restore_action_count": len(restore_order),
-        "transaction_id": transaction_id,
-        "validated": True,
-    }
-
-
 _MODEL_BY_CONTRACT: dict[str, type[ContractDocument]] = {
     model.CONTRACT: model
     for model in (
@@ -3122,12 +2678,6 @@ _MODEL_BY_CONTRACT: dict[str, type[ContractDocument]] = {
         PointerSet,
         PriorPointerRecord,
         GenerationCoordinationLock,
-        FreshnessRelease,
-        ArtifactManifest,
-        CompatibilityManifest,
-        InstallerTransaction,
-        CompensationPlan,
-        OfflineRollback,
     )
     if model.CONTRACT is not None
 }
@@ -3168,7 +2718,7 @@ def parse_contract(
         raise ContractError(f"$.contract: unknown contract {contract!r}")
     if expected is not None and model is not expected:
         raise ContractError(f"$.contract: expected {expected.CONTRACT!r}, got {contract!r}")
-    document = model.from_mapping(parsed)
+    document = model.from_json(value) if isinstance(value, (str, bytes)) else model.from_mapping(parsed)
     return cast(ContractDocument | DocumentT, document)
 
 
