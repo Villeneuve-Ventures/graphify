@@ -8,6 +8,7 @@ import hashlib
 from itertools import chain
 import json
 from pathlib import Path
+import time
 from typing import Any, cast, Iterator, TYPE_CHECKING
 
 from graphify.workspace.lifecycle_contracts import (
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
 REGISTRY_MAX_BYTES = 16 * 1024 * 1024
 WORKSPACE_STATE_MAX_BYTES = 1024 * 1024
 IDENTITY_EVIDENCE_MAX_RECORDS = 4096
+# Bound each live Git verification performed while registry authority is held.
+LIVE_SOURCE_VERIFY_TIMEOUT_NS = 300 * 1_000_000_000
 
 
 class RegistryError(RuntimeError):
@@ -591,7 +594,10 @@ class RegistryStore:
     @staticmethod
     def _verify_live_source_identity(source: SourceIdentity) -> None:
         try:
-            live_source = discover_source(source.root)
+            live_source = discover_source(
+                source.root,
+                deadline_ns=time.monotonic_ns() + LIVE_SOURCE_VERIFY_TIMEOUT_NS,
+            )
         except (OSError, IdentityError) as exc:
             raise SourceAmbiguousError("source identity is unavailable") from exc
         if live_source != source:

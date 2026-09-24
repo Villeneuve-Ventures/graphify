@@ -258,8 +258,8 @@ def test_resolution_rejects_activation_during_discovery(registry_sources, monkey
     store.adopt(second, authorization("ADOPT"))
     original = registry.discover_source
 
-    def discover_and_activate(path):
-        source = original(path)
+    def discover_and_activate(path, **kwargs):
+        source = original(path, **kwargs)
         if path == first.root:
             activate(store, second, RecordingLeases(store))
         return source
