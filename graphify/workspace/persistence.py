@@ -3621,6 +3621,7 @@ class DurableStateRoot:
         payload: bytes,
         decoder: Callable[[bytes], RecordT],
         cleanup_parent_atomic_temps: bool = True,
+        max_bytes: int | None = None,
         deadline_ns: int | None = None,
     ) -> RecordT:
         require_before_deadline(
@@ -3663,6 +3664,7 @@ class DurableStateRoot:
 
             current_bytes = self.read_optional_existing_bytes(
                 current,
+                max_bytes=max_bytes,
                 deadline_ns=deadline_ns,
             )
             if current_bytes is not None:

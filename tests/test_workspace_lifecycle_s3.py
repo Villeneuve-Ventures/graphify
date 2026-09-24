@@ -1,11 +1,210 @@
-"""Coordination boundary tests for the S3 stack."""
+"""Disposable S3 lifecycle fixtures; S4 native adapter proof is separate."""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from pathlib import Path
 
 import pytest
 
+from graphify.source_io import SourceIO
+from graphify.workspace.adapters.base import SourceObservation as StructuralObservation
+from graphify.workspace.contracts import InputManifest
+from graphify.workspace.generations import (
+    CapacityExceeded, CertificationRequest, GenerationError, GenerationStore,
+    StructuralBuildRequest,
+)
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
+from graphify.workspace.journal import JournalStore
+from graphify.workspace.leases import StagedBuildLeaseRecoveryRequired, StaleLease
+from graphify.workspace.lifecycle_contracts import (
+    CapacityPolicy, payload_manifest_sha256,
+)
+from graphify.workspace.lifecycle_observation import SourceObservation
+from graphify.workspace.persistence import InjectedFault
 from graphify.workspace.registry import RevisionConflict, SourceAlreadyActive
-from graphify.workspace.semantic_queue import SemanticQueueError, SemanticQueuePolicy, SemanticQueueStore
-from tests.workspace_s3_helpers import REPO_UUID, START, create_harness, git_output, tree_snapshot
+from graphify.workspace.semantic_queue import (
+    SemanticCertificationBlocked, SemanticQueueConflict, SemanticQueueError, SemanticQueuePolicy,
+    SemanticQueueStore,
+)
+from tests.workspace_s3_helpers import (
+    COMPATIBILITY_MANIFEST, REPO_UUID, START, create_harness, git_output,
+    tree_snapshot, trust_source_observations,
+)
+
+
+POLICY = CapacityPolicy.from_mapping({
+    "contract": "graphify.workspace.capacity_policy.internal", "format_version": 1,
+    "global_max_bytes": 32 * 1024 * 1024, "global_max_generations": 16,
+    "workspace_max_bytes": 8 * 1024 * 1024, "workspace_max_generations": 8,
+    "reserve_bytes": 1024,
+})
+QUEUE_POLICY = SemanticQueuePolicy(
+    max_items=8, max_bytes=16384, retry_budget=0, max_claimed_tasks=1,
+)
+GENERATION_ID = "gen-s3-fixture"
+
+
+def _observations(repo: Path):
+    code = repo / "main.py"
+    with SourceIO(repo) as source_io:
+        source_io.listdir(repo)
+        source_io.probe(code)
+        initial = InputManifest.from_engine(source_io, phase="detection", code_inputs=[code])
+        source_io.read_bytes(code)
+        consumed = InputManifest.from_engine(
+            source_io, phase="consumed", code_inputs=[code],
+            outcomes=[{"path": code, "status": "success"}],
+        )
+    structural = StructuralObservation(initial, consumed, 2)
+    observation = SourceObservation(
+        discover_source(repo).head_commit, "b" * 64, structural,
+    )
+    return observation, observation
+
+
+def _runtime(tmp_path: Path, *, fault_hook=None):
+    harness = create_harness(tmp_path)
+    root, leases = harness.state_root, harness.leases
+    capabilities = leases.state.capabilities
+    journal = JournalStore(root, leases, capabilities=capabilities)
+    queue = SemanticQueueStore(root, leases, policy=QUEUE_POLICY, capabilities=capabilities)
+    generations = GenerationStore(
+        root, leases, journal, compatibility_manifest=COMPATIBILITY_MANIFEST,
+        semantic_queue=queue, capabilities=capabilities, fault_hook=fault_hook,
+    )
+    observations = _observations(harness.repo)
+    trust_source_observations(generations, observations)
+    return harness, generations, None, observations
+
+
+def _request(harness, observations):
+    registry = harness.registry.load().to_dict()
+    entry = registry["workspaces"][0]
+    lease_state = harness.leases.inspect(REPO_UUID)
+    observation = GenerationStore._source_observation_document(observations[0])
+    return StructuralBuildRequest.from_mapping({
+        "logical_request_sha256": "a" * 64,
+        "expected_registry_revision": registry["revision"],
+        "expected_active_source_revision": entry["active_source_revision"],
+        "expected_operation_epoch": lease_state.operation_epoch,
+        "expected_migration_epoch": lease_state.migration_epoch,
+        "expected_pointer_revision": 0,
+        "expected_current_receipt_sha256": None,
+        "source_commit": observations[0].source_commit,
+        "source_epoch": 1,
+        "policy_sha256": observations[0].policy_sha256,
+        "observation_manifest_sha256": observations[0].inventory_sha256,
+        "observation_evidence_sha256": GenerationStore.structural_observation_evidence_sha256(observations),
+        "observation_detector_id": observation["detector_id"],
+        "observation_entries_sha256": observation["entries_sha256"],
+        "expected_payload_bytes": 16384,
+        "capacity_policy_sha256": POLICY.sha256,
+        "compatibility_sha256": COMPATIBILITY_MANIFEST.sha256,
+    })
+
+
+def _prepare(harness, generations, observations, *, staged_consumed=None):
+    request = _request(harness, observations)
+    generations.request_staged_build(REPO_UUID, GENERATION_ID, request,
+                                     source_observations=observations)
+    attempt = generations.acquire_staged_operation(
+        REPO_UUID, GENERATION_ID, request, attempt_sha256="5" * 64,
+        operation="BUILD", acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    allocation = generations.allocate(
+        attempt.grant, expected_payload_bytes=request.expected_payload_bytes,
+        capacity_policy=POLICY, generation_id=GENERATION_ID,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+    )
+    preparation = generations.prepare_staged_build(attempt, allocation, monotonic_ns=10_002)
+    payload = preparation.staging_path / "graphify-out"
+    payload.mkdir(mode=0o700)
+    (payload / "graph.json").write_bytes(b"{}\n")
+    consumed = staged_consumed or observations[0].consumed_inputs
+    (payload / "input-manifest.json").write_bytes(consumed.canonical)
+    return request, attempt, preparation
+
+
+def _complete(harness, generations, observations):
+    request, attempt, preparation = _prepare(harness, generations, observations)
+    completion = generations.complete_staged_build(
+        preparation, source_observations=observations, monotonic_ns=10_003,
+    )
+    return request, attempt, completion
+
+
+@pytest.mark.parametrize("missing_consumed", [False, True])
+def test_s3_completion_refuses_unobserved_consumed_inputs(tmp_path, missing_consumed):
+    harness, generations, _pointers, observations = _runtime(tmp_path)
+    if missing_consumed:
+        structural = StructuralObservation(observations[0].initial_detection, None, 2)
+        final = SourceObservation(
+            observations[0].source_commit, observations[0].policy_sha256, structural,
+        )
+        trusted = (final, final)
+        staged = observations[0].consumed_inputs
+    else:
+        trusted = observations
+        changed = observations[0].consumed_inputs.to_dict()
+        changed["outcomes"][0]["status"] = "empty"
+        staged = InputManifest.from_mapping(changed)
+    _request_value, _attempt, preparation = _prepare(
+        harness, generations, observations, staged_consumed=staged,
+    )
+    trust_source_observations(generations, trusted)
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GenerationError, match="consumed inputs"):
+        generations.complete_staged_build(
+            preparation, source_observations=trusted, monotonic_ns=10_003,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
+@pytest.mark.parametrize("missing_consumed", [False, True])
+def test_s3_certification_refuses_changed_trusted_consumed_inputs(tmp_path, missing_consumed):
+    harness, generations, _pointers, observations = _runtime(tmp_path)
+    _request_value, attempt, completion = _complete(harness, generations, observations)
+    changed = observations[0].consumed_inputs.to_dict()
+    changed["outcomes"][0]["status"] = "empty"
+    consumed = InputManifest.from_mapping(changed)
+    structural = StructuralObservation(
+        observations[0].initial_detection, None if missing_consumed else consumed, 2,
+    )
+    final = SourceObservation(
+        observations[0].source_commit, observations[0].policy_sha256, structural,
+    )
+    trusted = (final, final)
+    trust_source_observations(generations, trusted)
+    queue = generations.semantic_queue
+    queue.reconcile(
+        attempt.grant, (), source_epoch=1, policy_sha256=final.policy_sha256,
+        source_observations=trusted, desired_watermark=1, semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    queue.bind_sealed_inputs(
+        attempt.grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", completion.entries),
+        monotonic_ns=10_005,
+    )
+    request = CertificationRequest(
+        source_commit=final.source_commit, source_epoch=1,
+        policy_sha256=final.policy_sha256,
+        observation_manifest_sha256=final.inventory_sha256,
+        queue_watermark=1, semantic_completeness="not_required",
+        compatibility_sha256=COMPATIBILITY_MANIFEST.sha256,
+        validations=("payload_manifest", "coordination_lock_precreated", "stable_semantic_queue"),
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(SemanticCertificationBlocked, match="consumed inputs"):
+        generations.certify(
+            attempt.grant, completion.allocation, request,
+            source_observations=trusted, declared_entries=completion.entries,
+            staged_completion=completion, occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=10_006,
+        )
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_path):
@@ -53,6 +252,150 @@ def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_pa
             expected_migration_epoch=lease_state.migration_epoch,
             acquired_at=START, monotonic_ns=11_000, ttl_ns=1_000_000,
         )
+
+
+@pytest.mark.parametrize("fault_stage", [
+    "receipt_durable", "installed", "staged_certified_durable",
+])
+def test_certification_recovers_exact_receipt_after_durable_fault(tmp_path, fault_stage):
+    fired = False
+
+    def fault(point):
+        nonlocal fired
+        if point == f"generation:{GENERATION_ID}:{fault_stage}" and not fired:
+            fired = True
+            raise InjectedFault(point)
+
+    harness, generations, _pointers, observations = _runtime(tmp_path, fault_hook=fault)
+    _request_value, attempt, completion = _complete(harness, generations, observations)
+    queue = generations.semantic_queue
+    assert queue is not None
+    queue.reconcile(
+        attempt.grant, (), source_epoch=1, policy_sha256=observations[0].policy_sha256,
+        source_observations=observations, desired_watermark=1, semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    queue.bind_sealed_inputs(
+        attempt.grant,
+        sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", completion.entries),
+        monotonic_ns=10_005,
+    )
+    request = CertificationRequest(
+        source_commit=observations[0].source_commit, source_epoch=1,
+        policy_sha256=observations[0].policy_sha256,
+        observation_manifest_sha256=observations[0].inventory_sha256,
+        queue_watermark=1, semantic_completeness="not_required",
+        compatibility_sha256=COMPATIBILITY_MANIFEST.sha256,
+        validations=("payload_manifest", "coordination_lock_precreated", "stable_semantic_queue"),
+    )
+    kwargs = dict(
+        source_observations=observations, declared_entries=completion.entries,
+        staged_completion=completion, occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=10_006,
+    )
+    with pytest.raises(InjectedFault):
+        generations.certify(attempt.grant, completion.allocation, request, **kwargs)
+    assert fired
+    if fault_stage == "staged_certified_durable":
+        with pytest.raises(StagedBuildLeaseRecoveryRequired):
+            generations.certify(attempt.grant, completion.allocation, request, **kwargs)
+        receipt = generations.verify_generation(REPO_UUID, GENERATION_ID)
+        resumed = generations.acquire_staged_recovery(
+            REPO_UUID, GENERATION_ID, _request_value,
+            attempt_sha256="9" * 64,
+            acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_000,
+            ttl_ns=1_000_000,
+        )
+        assert resumed.state.lifecycle_state == "CERTIFIED"
+    else:
+        receipt = generations.certify(attempt.grant, completion.allocation, request, **kwargs)
+    assert generations.verify_generation(REPO_UUID, GENERATION_ID) == receipt
+    events = generations.journal.read_stable(REPO_UUID).for_generation(GENERATION_ID)
+    assert sum(event.to_dict()["transition"] == "CERTIFIED" for event in events) == 1
+
+
+def test_successor_fence_rejects_old_attempt_without_writes(tmp_path):
+    harness, generations, _pointers, observations = _runtime(tmp_path)
+    request, attempt, _completion = _complete(harness, generations, observations)
+    successor = generations.acquire_staged_recovery(
+        REPO_UUID, GENERATION_ID, request, attempt_sha256="6" * 64,
+        acquired_at=START + timedelta(seconds=3), monotonic_ns=2_000_000,
+        ttl_ns=1_000_000,
+    )
+    assert (successor.grant.lease.to_dict()["fence_token"]
+            > attempt.grant.lease.to_dict()["fence_token"])
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(StaleLease):
+        with harness.leases.current_operation(attempt.grant, monotonic_ns=2_000_001):
+            pass
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_empty_queue_without_sealed_binding_cannot_certify(tmp_path):
+    harness, generations, _pointers, observations = _runtime(tmp_path)
+    _request_value, attempt, completion = _complete(harness, generations, observations)
+    queue = generations.semantic_queue
+    assert queue is not None
+    queue.reconcile(
+        attempt.grant, (), source_epoch=1, policy_sha256=observations[0].policy_sha256,
+        source_observations=observations, desired_watermark=2, semantic_required=False,
+        monotonic_ns=10_004,
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(SemanticQueueConflict):
+        queue.reconcile(
+            attempt.grant, (), source_epoch=1, policy_sha256=observations[0].policy_sha256,
+            source_observations=observations, desired_watermark=1, semantic_required=False,
+            monotonic_ns=10_005,
+        )
+    assert tree_snapshot(harness.state_root) == before
+    with pytest.raises(SemanticCertificationBlocked):
+        generations.certify(
+            attempt.grant, completion.allocation,
+            CertificationRequest(
+                source_commit=observations[0].source_commit, source_epoch=1,
+                policy_sha256=observations[0].policy_sha256,
+                observation_manifest_sha256=observations[0].inventory_sha256,
+                queue_watermark=2, semantic_completeness="not_required",
+                compatibility_sha256=COMPATIBILITY_MANIFEST.sha256,
+                validations=("payload_manifest", "coordination_lock_precreated", "stable_semantic_queue"),
+            ),
+            source_observations=observations, declared_entries=completion.entries,
+            staged_completion=completion, occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=10_005,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_explicit_capacity_limit_rejects_reservation(tmp_path):
+    harness, generations, _pointers, observations = _runtime(tmp_path)
+    limited = CapacityPolicy.from_mapping({
+        "contract": "graphify.workspace.capacity_policy.internal", "format_version": 1,
+        "global_max_bytes": 1024, "global_max_generations": 1,
+        "workspace_max_bytes": 1024, "workspace_max_generations": 1,
+        "reserve_bytes": 1024,
+    })
+    requested = _request(harness, observations).to_dict()
+    requested["capacity_policy_sha256"] = limited.sha256
+    request = StructuralBuildRequest.from_mapping(requested)
+    generations.request_staged_build(
+        REPO_UUID, GENERATION_ID, request, source_observations=observations,
+    )
+    attempt = generations.acquire_staged_operation(
+        REPO_UUID, GENERATION_ID, request, attempt_sha256="8" * 64,
+        operation="BUILD", acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(CapacityExceeded):
+        generations.allocate(
+            attempt.grant, expected_payload_bytes=request.expected_payload_bytes,
+            capacity_policy=limited, generation_id=GENERATION_ID,
+            occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
 
 
 def test_semantic_queue_policy_has_explicit_bounds():
