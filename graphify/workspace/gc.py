@@ -27,6 +27,7 @@ from graphify.workspace.persistence import (
     FaultHook,
     LockTimeout,
     RuntimeCapabilities,
+    StateCorrupt,
     StatePathError,
     Syscalls,
     require_before_deadline,
@@ -274,15 +275,17 @@ class GcStore:
         self,
         repo_uuid: str,
         *,
-        max_bytes: int | None = None,
         deadline_ns: int | None = None,
     ) -> GcIntentState | None:
         relative = self._intent_path(repo_uuid)
-        payload = self.state.read_optional_existing_bytes(
-            relative,
-            max_bytes=max_bytes,
-            deadline_ns=deadline_ns,
-        )
+        try:
+            payload = self.state.read_optional_existing_bytes(
+                relative,
+                max_bytes=_MAX_GC_INTENT_BYTES,
+                deadline_ns=deadline_ns,
+            )
+        except StateCorrupt as exc:
+            raise GcRecoveryRequired(f"GC intent cannot be read safely: {exc}") from exc
         if payload is None:
             return None
         try:
@@ -307,7 +310,6 @@ class GcStore:
         )
         intent = self._read_intent(
             repo_uuid,
-            max_bytes=_MAX_GC_INTENT_BYTES,
             deadline_ns=deadline_ns,
         )
         require_before_deadline(
@@ -528,6 +530,7 @@ class GcStore:
         *,
         protections: GcProtection,
         probe_locks: bool,
+        inherited_shared_locks: frozenset[str] = frozenset(),
         inspect_protected_locks: bool = False,
         deadline_ns: int | None = None,
         maximum_generations: int | None = None,
@@ -566,6 +569,8 @@ class GcStore:
             maximum_entries=maximum_generations,
             deadline_ns=deadline_ns,
         )
+        for generation_id in inherited_shared_locks.intersection(generations):
+            reasons.setdefault(generation_id, set()).add("shared_lock")
         try:
             decision_generations = self.generations.decision_state_generations_locked(
                 repo_uuid,
@@ -635,12 +640,14 @@ class GcStore:
         capacity_policy: CapacityPolicy,
         protections: GcProtection,
         probe_locks: bool,
+        inherited_shared_locks: frozenset[str] = frozenset(),
         deadline_ns: int | None = None,
     ) -> GcPlan:
         reachability = self._reachability_locked(
             operation.repo_uuid,
             protections=protections,
             probe_locks=probe_locks,
+            inherited_shared_locks=inherited_shared_locks,
             deadline_ns=deadline_ns,
             maximum_generations=GC_PREVIEW_MAX_GENERATIONS,
         )
@@ -1156,6 +1163,11 @@ class GcStore:
                     capacity_policy=capacity_policy,
                     protections=protections,
                     probe_locks=False,
+                    inherited_shared_locks=frozenset(
+                        generation_id
+                        for generation_id, reasons in plan.protected
+                        if "shared_lock" in reasons
+                    ),
                     deadline_ns=deadline_ns,
                 )
                 if locked_plan.canonical != plan.canonical:

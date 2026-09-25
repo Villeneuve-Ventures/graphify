@@ -579,6 +579,57 @@ class PointerStore:
                 return True
         return False
 
+    def _rollback_authorizes_superseded(
+        self,
+        snapshot: JournalSnapshot,
+        pointer: PointerSet,
+        pending: PointerSet | None,
+        prior: PriorPointerRecord | None,
+        *,
+        deadline_ns: int | None,
+    ) -> bool:
+        pointer_value = pointer.to_dict()
+        current_ref = cast(dict[str, Any], pointer_value["current"])
+        superseded_positions = [
+            position
+            for position, event in enumerate(snapshot.events)
+            if event.to_dict()["transition"] == "SUPERSEDED"
+            and event.to_dict()["generation_id"] == current_ref["generation_id"]
+        ]
+        if self._journal_records_pointer(
+            snapshot, pointer, transition="ROLLED_BACK", deadline_ns=deadline_ns,
+        ):
+            return any(
+                event.to_dict()["transition"] == "ROLLED_BACK"
+                and event.to_dict()["generation_id"] == current_ref["generation_id"]
+                and event.to_dict()["receipt_sha256"] == current_ref["receipt_sha256"]
+                and event.to_dict()["pointer_revision"] == pointer_value["pointer_revision"]
+                and event.to_dict()["operation_epoch"] == pointer_value["operation_epoch"]
+                and event.to_dict()["fence_token"] == pointer_value["fence_token"]
+                and all(earlier < position for earlier in superseded_positions)
+                for position, event in enumerate(snapshot.events)
+            )
+        if prior is None or pending is None or pending.canonical != pointer.canonical:
+            return False
+        if any(
+            int(snapshot.events[position].to_dict()["pointer_revision"])
+            >= int(pointer_value["pointer_revision"])
+            for position in superseded_positions
+        ):
+            return False
+        prior_value = prior.to_dict()
+        prior_pointer = cast(
+            PointerSet, PointerSet.from_mapping(prior_value["pointer_set"]),
+        )
+        prior_pointer_value = prior_pointer.to_dict()
+        return (
+            prior_value["replaced_by_revision"] == pointer_value["pointer_revision"]
+            and prior_pointer_value["pointer_revision"] + 1
+            == pointer_value["pointer_revision"]
+            and prior_pointer_value["last_good"] is not None
+            and pointer_value["current"] == prior_pointer_value["last_good"]
+        )
+
     def _verify_visible_pointer_journal(
         self,
         repo_uuid: str,
@@ -693,6 +744,54 @@ class PointerStore:
             )
         if int(candidate_value["active_source_revision"]) != operation.grant.active_source_revision:
             raise PointerConflict("candidate receipt was certified for another active source")
+
+    def _exact_promotion_replay(
+        self,
+        operation: LeaseOperation,
+        cas: PointerCAS,
+        current: PointerSet,
+        candidate: GenerationReceipt,
+        snapshot: JournalSnapshot,
+        *,
+        deadline_ns: int | None,
+    ) -> bool:
+        value = current.to_dict()
+        revision = int(value["pointer_revision"])
+        if (
+            revision != cas.expected_pointer_revision + 1
+            or value["operation_epoch"] != operation.grant.operation_epoch
+            or value["fence_token"] != operation.fence_token
+            or value["active_source_revision"] != operation.grant.active_source_revision
+            or value["source_epoch"] != candidate.to_dict()["source_epoch"]
+            or value["state_schema_version"] != STATE_SCHEMA_VERSION
+            or not self._journal_records_pointer(
+                snapshot, current, transition="PROMOTED", deadline_ns=deadline_ns,
+            )
+        ):
+            return False
+        if any(
+            int(event.to_dict()["pointer_revision"]) > revision
+            for event in snapshot.events
+            if event.to_dict()["pointer_revision"] is not None
+        ):
+            return False
+        prior = self.retained_prior(operation.repo_uuid, deadline_ns=deadline_ns)
+        if prior is None:
+            previous = None
+            if cas.expected_pointer_revision != 0:
+                return False
+        else:
+            prior_value = prior.to_dict()
+            if prior_value["replaced_by_revision"] != revision:
+                return False
+            previous = cast(
+                PointerSet, PointerSet.from_mapping(prior_value["pointer_set"]),
+            )
+        try:
+            self._validate_cas(operation, cas, previous, candidate)
+        except PointerConflict:
+            return False
+        return True
 
     def _pointer_document(
         self,
@@ -924,7 +1023,14 @@ class PointerStore:
                 try:
                     self._validate_cas(operation, cas, current, candidate)
                 except PointerSuperseded:
-                    if current is None or candidate_is_current:
+                    if current is not None and candidate_is_current:
+                        if transition == "PROMOTED" and self._exact_promotion_replay(
+                            operation, cas, current, candidate, snapshot,
+                            deadline_ns=deadline_ns,
+                        ):
+                            return current
+                        raise
+                    if current is None:
                         raise
                     require_before_deadline(
                         deadline_ns,
@@ -1308,6 +1414,9 @@ class PointerStore:
                     snapshot,
                     generation_id=str(current_receipt.to_dict()["generation_id"]),
                     receipt_sha256=current_receipt.sha256,
+                    allow_superseded=self._rollback_authorizes_superseded(
+                        snapshot, current, pending, prior, deadline_ns=deadline_ns,
+                    ),
                 )
             ):
                 last_good_receipt = current_receipts.get("last_good")
@@ -1371,11 +1480,20 @@ class PointerStore:
             if candidate is None:
                 raise PointerCorrupt("no fully verified pointer source can be repaired")
             chosen_name = "last_good"
+        chosen_pointer = by_name[chosen_name][0] if chosen_name in by_name else None
         if not self._journal_certifies(
             snapshot,
             generation_id=str(candidate.to_dict()["generation_id"]),
             receipt_sha256=candidate.sha256,
-            allow_superseded=chosen_name == "last_good",
+            allow_superseded=(
+                chosen_name == "last_good"
+                or (
+                    chosen_pointer is not None
+                    and self._rollback_authorizes_superseded(
+                        snapshot, chosen_pointer, pending, prior, deadline_ns=deadline_ns,
+                    )
+                )
+            ),
         ):
             raise PointerCorrupt("repair candidate is failed, superseded, or uncertified")
 

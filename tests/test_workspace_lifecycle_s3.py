@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
+from threading import Event
+from types import SimpleNamespace
 import time
 
 import pytest
@@ -16,16 +19,19 @@ from graphify.workspace.generations import (
     CapacityExceeded, CertificationRequest, GenerationError, GenerationStore,
     StructuralBuildRequest,
 )
-from graphify.workspace.gc import GcPlanStale, GcProtection, GcStore
+from graphify.workspace.gc import GcPlanStale, GcProtection, GcRecoveryRequired, GcStore
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
-from graphify.workspace.journal import JournalStore
+from graphify.workspace.journal import JournalRecoveryProjection, JournalSnapshot, JournalStore
 from graphify.workspace.leases import StagedBuildLeaseRecoveryRequired, StaleLease
 from graphify.workspace.lifecycle_contracts import (
-    CapacityPolicy, ContractError, GenerationReceipt, payload_manifest_sha256,
+    CapacityPolicy, ContractError, GenerationReceipt, PointerSet, PriorPointerRecord,
+    payload_manifest_sha256,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
 from graphify.workspace.persistence import InjectedFault, LockTimeout
-from graphify.workspace.pointers import PointerCAS, PointerConflict, PointerStore
+from graphify.workspace.pointers import (
+    PointerCAS, PointerConflict, PointerCorrupt, PointerStore, PointerSuperseded,
+)
 from graphify.workspace.registry import RevisionConflict, SourceAlreadyActive
 from graphify.workspace.semantic_queue import (
     SemanticCertificationBlocked, SemanticQueueConflict, SemanticQueueError, SemanticQueuePolicy,
@@ -289,6 +295,19 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
         deadline_ns=time.monotonic_ns() + 5_000_000_000,
     )
     assert pointer.to_dict()["pointer_revision"] == 1
+    promoted_state = tree_snapshot(harness.state_root)
+    assert pointers.promote(
+        promotion.grant, cas,
+        occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+    ) == pointer
+    assert tree_snapshot(harness.state_root) == promoted_state
+    with pytest.raises(PointerSuperseded):
+        pointers.promote(
+            promotion.grant,
+            replace(cas, expected_current_receipt_sha256="f" * 64),
+            occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+        )
+    assert tree_snapshot(harness.state_root) == promoted_state
     if interrupt_promotion:
         def interrupt(label):
             if label.endswith(":staged_promoted_durable"):
@@ -588,6 +607,104 @@ def test_operator_repair_requires_approved_plan_before_execution(tmp_path):
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path, monkeypatch):
+    _harness, _generations, pointers, _observations = _runtime(tmp_path)
+    previous = PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 2,
+        "active_source_revision": 1, "source_epoch": 1,
+        "operation_epoch": 2, "fence_token": 2, "state_schema_version": 2,
+        "current": {"generation_id": "gen-newer", "receipt_sha256": "b" * 64},
+        "last_good": {"generation_id": "gen-older", "receipt_sha256": "a" * 64},
+    })
+    rolled_back = PointerSet.from_mapping({
+        **previous.to_dict(), "pointer_revision": 3,
+        "operation_epoch": 3, "fence_token": 3,
+        "current": {"generation_id": "gen-older", "receipt_sha256": "a" * 64},
+        "last_good": {"generation_id": "gen-newer", "receipt_sha256": "b" * 64},
+    })
+    prior = PriorPointerRecord.from_mapping({
+        "contract": "graphify.workspace.prior_pointer", "schema_version": 2,
+        "retained_at": "2026-07-16T19:00:00Z", "replaced_by_revision": 3,
+        "pointer_set": previous.to_dict(),
+    })
+
+    def event(transition, revision):
+        return SimpleNamespace(
+            to_dict=lambda: {
+                "transition": transition, "generation_id": "gen-older",
+                "receipt_sha256": "a" * 64, "pointer_revision": revision,
+                "operation_epoch": 3, "fence_token": 3,
+            },
+            sha256=transition,
+        )
+
+    certified, superseded, rollback = (
+        event("CERTIFIED", None), event("SUPERSEDED", 2), event("ROLLED_BACK", 3),
+    )
+    snapshot = JournalSnapshot(None, (certified, superseded, rollback))
+    projection = JournalRecoveryProjection(snapshot, (), "c" * 64)
+    monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: projection)
+    older = SimpleNamespace(
+        sha256="a" * 64,
+        to_dict=lambda: {"generation_id": "gen-older", "active_source_revision": 1},
+    )
+    newer = SimpleNamespace(
+        sha256="b" * 64,
+        to_dict=lambda: {"generation_id": "gen-newer", "active_source_revision": 1},
+    )
+    def verified_refs(_repo_uuid, pointer, *, deadline_ns):
+        value = pointer.to_dict()
+        current_receipt = older if value["current"]["generation_id"] == "gen-older" else newer
+        last_good_receipt = (
+            older if value["last_good"]["generation_id"] == "gen-older" else newer
+        )
+        return {"current": current_receipt, "last_good": last_good_receipt}, set()
+
+    monkeypatch.setattr(pointers, "_verify_repair_refs", verified_refs)
+    analysis = pointers._derive_repair_analysis(
+        REPO_UUID, active_source_revision=1, operation_epoch=None,
+        fence_token=None, current=rolled_back, pending=None, prior=prior,
+        raw_evidence={"current_sha256": rolled_back.sha256},
+        allow_atomic_temps=False, deadline_ns=None,
+    )
+    assert analysis.plan.classification == "no_op"
+    assert analysis.plan.candidate["generation_id"] == "gen-older"
+
+    # A rollback interrupted before its journal append is still bound to the
+    # exact prior last_good reference by the retained prior record.
+    assert pointers._rollback_authorizes_superseded(
+        JournalSnapshot(None, (certified, superseded)),
+        rolled_back, rolled_back, prior, deadline_ns=None,
+    )
+    assert not pointers._rollback_authorizes_superseded(
+        JournalSnapshot(None, (certified, superseded, rollback, event("SUPERSEDED", 3))),
+        rolled_back, None, prior, deadline_ns=None,
+    )
+    interrupted = JournalRecoveryProjection(
+        JournalSnapshot(None, (certified, superseded)), (), "d" * 64,
+    )
+    monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: interrupted)
+    monkeypatch.setattr(
+        pointers, "verify_pointer",
+        lambda pointer, **kw: verified_refs(REPO_UUID, pointer, deadline_ns=None)[0],
+    )
+    pending_analysis = pointers._derive_repair_analysis(
+        REPO_UUID, active_source_revision=1, operation_epoch=3,
+        fence_token=3, current=rolled_back, pending=rolled_back, prior=prior,
+        raw_evidence={"current_sha256": rolled_back.sha256},
+        allow_atomic_temps=False, deadline_ns=None,
+    )
+    assert pending_analysis.plan.pointer_action == "resume_pending"
+    with pytest.raises(PointerCorrupt, match="superseded"):
+        pointers._derive_repair_analysis(
+            REPO_UUID, active_source_revision=1, operation_epoch=None,
+            fence_token=None, current=rolled_back, pending=None, prior=None,
+            raw_evidence={"current_sha256": rolled_back.sha256},
+            allow_atomic_temps=False, deadline_ns=None,
+        )
+
+
 def test_gc_preview_is_read_only_and_does_not_adopt_unowned_generations(tmp_path):
     harness, generations, pointers, _observations = _runtime(tmp_path)
     gc = GcStore(
@@ -663,6 +780,96 @@ def test_gc_reused_epoch_rejects_changed_plan_before_durable_intent(tmp_path):
         )
     assert tree_snapshot(harness.state_root) == before
     assert not gc._intent_path(REPO_UUID).exists()
+
+
+def test_gc_rejects_oversized_intent_before_decoding(tmp_path):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    path = gc.state.path(gc._intent_path(REPO_UUID))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = b" " * (1024 * 1024 + 1)
+    path.write_bytes(payload)
+    path.chmod(0o600)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    with pytest.raises(GcRecoveryRequired, match="read limit"):
+        gc.plan(
+            grant, capacity_policy=POLICY,
+            protections=GcProtection(empty, empty, empty, empty, empty, empty),
+            monotonic_ns=10_001,
+        )
+    assert path.read_bytes() == payload
+
+
+def test_gc_keeps_shared_lock_protection_during_locked_recheck(tmp_path):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    for generation_id in ("gen-candidate", "gen-reader"):
+        gc.state.ensure_directory(generations._generation(REPO_UUID, generation_id))
+        lock = gc.state.path(generations._lock(REPO_UUID, generation_id))
+        gc.state.ensure_directory(generations._lock(REPO_UUID, generation_id).parent)
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    held, release = Event(), Event()
+
+    def hold_reader():
+        with gc.state.existing_generation_lock(
+            generations._lock(REPO_UUID, "gen-reader"),
+            generation_id="gen-reader", exclusive=False,
+        ):
+            held.set()
+            assert release.wait(10)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        reader = pool.submit(hold_reader)
+        assert held.wait(5)
+        try:
+            plan = gc.plan(
+                grant, capacity_policy=POLICY, protections=protections,
+                monotonic_ns=10_001,
+            )
+            assert plan.candidates == ("gen-candidate",)
+            assert ("gen-reader", ("shared_lock",)) in plan.protected
+            gc.execute(
+                grant, plan, capacity_policy=POLICY, protections=protections,
+                occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+            )
+        finally:
+            release.set()
+            reader.result(timeout=5)
+    assert gc.state.path(generations._generation(REPO_UUID, "gen-reader")).is_dir()
+    assert gc.state.path(
+        gc._quarantine(REPO_UUID, "gen-candidate", grant.operation_epoch)
+    ).is_dir()
 
 
 @pytest.mark.parametrize("write_label", [
