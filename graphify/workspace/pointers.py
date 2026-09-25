@@ -326,10 +326,18 @@ class PointerStore:
             and prior_pointer.canonical == pending.canonical
             and replaced_by_revision > pending_revision
         )
+        prepared_successor = (
+            current is not None
+            and not pending_is_visible
+            and prior_pointer.canonical == current.canonical
+            and int(current.to_dict()["pointer_revision"]) < pending_revision
+            and pending_revision < replaced_by_revision
+        )
         if (
             not pending_is_visible
             and replaced_by_revision != pending_revision
             and not retained_pending_before_replacement
+            and not prepared_successor
         ) or (pending_is_visible and replaced_by_revision < pending_revision):
             raise PointerCorrupt("pending pointer revision does not match retained prior")
         if int(prior_pointer.to_dict()["pointer_revision"]) >= replaced_by_revision:
@@ -628,7 +636,14 @@ class PointerStore:
         exact_prior = (
             prior_value is not None
             and prior_pointer_value is not None
-            and prior_value["replaced_by_revision"] == pointer_revision
+            and (
+                prior_value["replaced_by_revision"] == pointer_revision
+                or (
+                    pending is not None
+                    and pending.canonical == pointer.canonical
+                    and prior_value["replaced_by_revision"] > pointer_revision
+                )
+            )
             and prior_revision is not None
             and prior_revision < pointer_revision
             and prior_pointer_value["last_good"] is not None
@@ -907,6 +922,11 @@ class PointerStore:
             deadline_ns=deadline_ns,
         )
 
+    def _corrupt_quarantine(
+        self, repo_uuid: str, generation_id: str, revision: int,
+    ) -> Path:
+        return self._workspace(repo_uuid) / "quarantine" / "corrupt" / f"{generation_id}.{revision}"
+
     def _quarantine_corrupt(
         self,
         repo_uuid: str,
@@ -916,12 +936,48 @@ class PointerStore:
         deadline_ns: int | None = None,
     ) -> None:
         source = self.generations._generation(repo_uuid, generation_id)
-        source_path = self.state.path(source)
-        if not source_path.exists():
+        destination = self._corrupt_quarantine(repo_uuid, generation_id, revision)
+        if not self.state.private_directory_exists(source):
+            if not self.state.private_directory_exists(destination):
+                return
+            with (
+                self.state.existing_private_directory(source.parent) as source_parent,
+                self.state.existing_private_directory(destination.parent) as destination_parent,
+                self.state.existing_private_directory(destination) as held_destination,
+            ):
+                for relative, descriptor in (
+                    (source.parent, source_parent),
+                    (destination.parent, destination_parent),
+                    (destination, held_destination),
+                ):
+                    self.state._require_held_private_directory_binding(
+                        relative, descriptor, self.state.path(relative),
+                    )
+                if self.state.private_directory_exists(source):
+                    raise PointerRecoveryRequired(
+                        f"corrupt generation reappeared during quarantine: {generation_id}"
+                    )
+                require_before_deadline(
+                    deadline_ns, "pointer quarantine exceeded its deadline",
+                )
+                self.state.syscalls.fsync(source_parent)
+                require_before_deadline(
+                    deadline_ns, "pointer quarantine exceeded its deadline",
+                )
+                self.state.syscalls.fsync(destination_parent)
+                for relative, descriptor in (
+                    (source.parent, source_parent),
+                    (destination.parent, destination_parent),
+                    (destination, held_destination),
+                ):
+                    self.state._require_held_private_directory_binding(
+                        relative, descriptor, self.state.path(relative),
+                    )
+                if self.state.private_directory_exists(source):
+                    raise PointerRecoveryRequired(
+                        f"corrupt generation reappeared during quarantine: {generation_id}"
+                    )
             return
-        destination = (
-            self._workspace(repo_uuid) / "quarantine" / "corrupt" / f"{generation_id}.{revision}"
-        )
         self.state.rename_contained(
             source,
             destination,
@@ -1603,8 +1659,8 @@ class PointerStore:
         pointer_action = "replace"
         next_revision: int
         last_good: dict[str, str] | None
-        visible_current = (
-            current if "current" in by_name else (pending if chosen_name == "pending" else None)
+        visible_current = current if current is not None else (
+            pending if chosen_name == "pending" else None
         )
         repaired_pointer: PointerSet | None = None
         journal_actions = journal.actions
@@ -1695,13 +1751,22 @@ class PointerStore:
                 *(() if last_good is None else (str(last_good["generation_id"]),)),
             }
         )
-        quarantine = tuple(
-            sorted(
-                generation_id
-                for generation_id in corrupt_generations
-                if generation_id not in repaired_refs
-            )
-        )
+        quarantine_ids = corrupt_generations - repaired_refs
+        if repaired_pointer is not None:
+            referenced = (
+                self._pointer_refs(current)
+                | self._pointer_refs(pending)
+                | self._pointer_refs(prior_pointer)
+            ) - repaired_refs
+            for generation_id in referenced:
+                require_before_deadline(
+                    deadline_ns, "pointer repair quarantine inspection exceeded its deadline",
+                )
+                if self.state.private_directory_exists(
+                    self._corrupt_quarantine(repo_uuid, generation_id, next_revision)
+                ):
+                    quarantine_ids.add(generation_id)
+        quarantine = tuple(sorted(quarantine_ids))
         evidence = {
             "active_source_revision": active_source_revision,
             "journal": self._journal_projection_evidence(journal),

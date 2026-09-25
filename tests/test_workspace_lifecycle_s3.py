@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import replace
 from datetime import timedelta
+import os
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
@@ -29,7 +30,7 @@ from graphify.workspace.lifecycle_contracts import (
     payload_manifest_sha256,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
-from graphify.workspace.persistence import InjectedFault, LockTimeout
+from graphify.workspace.persistence import CommitUnknown, InjectedFault, LockTimeout
 from graphify.workspace.pointers import (
     PointerCAS, PointerConflict, PointerCorrupt, PointerRepairPlan, PointerStore,
     PointerSuperseded,
@@ -811,8 +812,22 @@ def test_promotion_retains_only_current_source_last_good(
     assert moved.to_dict()["last_good"] == expected
 
 
-@pytest.mark.parametrize("switch_source", [False, True])
-def test_successor_pointer_recovery_retains_only_active_source_last_good(tmp_path, switch_source):
+@pytest.mark.parametrize(
+    ("switch_source", "repair_fault", "corrupt_current"),
+    [
+        (False, None, False), (True, None, False),
+        (False, "prior_durable", False), (True, "prior_durable", False),
+        (False, None, True),
+        (False, "prior_durable", True),
+        (False, "pending_durable", True),
+        (False, "visible", True),
+        (False, "journal_durable", True),
+        (False, "quarantine_renamed", True),
+    ],
+)
+def test_successor_pointer_recovery_retains_only_active_source_last_good(
+    tmp_path, monkeypatch, switch_source, repair_fault, corrupt_current,
+):
     harness, generations, pointers, observations = _runtime(tmp_path)
 
     def certify_and_promote(generation_id, tick, current=None, *, interrupt=False):
@@ -895,6 +910,18 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(tmp_pat
                 REPO_UUID, generation_id, request, attempt_sha256="8" * 64,
                 acquired_at=START, monotonic_ns=tick + 4_000_000, ttl_ns=1_000_000,
             )
+            if repair_fault is not None:
+                def repair_interrupt(label):
+                    if label == f"pointer:repaired:{repair_fault}":
+                        raise InjectedFault(label)
+
+                pointers.fault_hook = repair_interrupt
+                with pytest.raises(InjectedFault, match=repair_fault):
+                    pointers.recover(
+                        successor.grant, occurred_at=START,
+                        monotonic_ns=tick + 4_000_001,
+                    )
+                pointers.fault_hook = lambda _label: None
             pointer = pointers.recover(
                 successor.grant, occurred_at=START, monotonic_ns=tick + 4_000_001,
             )
@@ -913,6 +940,90 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(tmp_pat
     first = certify_and_promote("gen-a1", 10_000)
     second = certify_and_promote("gen-a2", 3_000_000, first)
     assert second.to_dict()["last_good"] == first.to_dict()["current"]
+    if corrupt_current:
+        generation = generations.state.path(generations._generation(REPO_UUID, "gen-a2"))
+        graph = next(generation.rglob("graph.json"))
+        graph.write_bytes(b"corrupt payload\n")
+        state = harness.leases.inspect(REPO_UUID)
+        repair = harness.leases.acquire(
+            REPO_UUID, "POINTER_RECOVERY", harness.leases.current_owner(),
+            expected_registry_revision=1, expected_active_source_revision=1,
+            expected_operation_epoch=state.operation_epoch,
+            expected_migration_epoch=state.migration_epoch,
+            acquired_at=START, monotonic_ns=6_000_000, ttl_ns=1_000_000,
+        )
+        plan = pointers.analyze_repair(
+            REPO_UUID, active_source_revision=1,
+            operation_epoch=repair.operation_epoch,
+            fence_token=repair.lease.to_dict()["fence_token"],
+        )
+        assert plan.candidate == first.to_dict()["current"]
+        assert plan.pointer_action == "replace"
+        if repair_fault == "quarantine_renamed":
+            def quarantine_interrupt(label):
+                if label == "pointer:quarantine:gen-a2:renamed":
+                    raise InjectedFault(label)
+
+            pointers.state.fault_hook = quarantine_interrupt
+            with pytest.raises(CommitUnknown, match="before both directories were durable"):
+                pointers.recover(
+                    repair, occurred_at=START, monotonic_ns=6_000_001,
+                )
+            pointers.state.fault_hook = lambda _label: None
+            source = generations._generation(REPO_UUID, "gen-a2")
+            destination = (
+                pointers._workspace(REPO_UUID) / "quarantine" / "corrupt"
+                / f"gen-a2.{plan.next_pointer_revision}"
+            )
+            assert not pointers.state.path(source).exists()
+            assert pointers.state.path(destination).is_dir()
+            parents = {}
+            for relative, name in ((source.parent, "source"), (destination.parent, "destination")):
+                stat = pointers.state.path(relative).stat()
+                parents[(stat.st_dev, stat.st_ino)] = name
+            original_fsync = pointers.state.syscalls.fsync
+            observed = []
+            fail_retry = True
+
+            def record_fsync(descriptor):
+                name = parents.get((os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino))
+                if name is not None:
+                    observed.append(name)
+                    if fail_retry and name == "source":
+                        raise OSError("injected quarantine parent sync failure")
+                original_fsync(descriptor)
+
+            monkeypatch.setattr(pointers.state.syscalls, "fsync", record_fsync)
+            with pytest.raises(OSError, match="injected quarantine parent sync failure"):
+                pointers.recover(
+                    repair, occurred_at=START, monotonic_ns=6_000_001,
+                )
+            assert pointers.state.path(pointers._pending(REPO_UUID)).exists()
+            fail_retry = False
+            observed.clear()
+        elif repair_fault is not None:
+            def repair_interrupt(label):
+                if label == f"pointer:repaired:{repair_fault}":
+                    raise InjectedFault(label)
+
+            pointers.fault_hook = repair_interrupt
+            with pytest.raises(InjectedFault, match=repair_fault):
+                pointers.recover(
+                    repair, occurred_at=START, monotonic_ns=6_000_001,
+                )
+            pointers.fault_hook = lambda _label: None
+        recovered = pointers.recover(
+            repair, occurred_at=START, monotonic_ns=6_000_001,
+        )
+        if repair_fault == "quarantine_renamed":
+            assert "source" in observed and "destination" in observed
+        assert recovered.to_dict()["current"] == first.to_dict()["current"]
+        assert recovered.to_dict()["pointer_revision"] >= second.to_dict()["pointer_revision"] + 1
+        assert not pointers.state.path(pointers._pending(REPO_UUID)).exists()
+        assert pointers.analyze_repair(
+            REPO_UUID, active_source_revision=1,
+        ).classification == "no_op"
+        return
     if switch_source:
         linked = tmp_path.resolve() / "linked"
         git_output(harness.repo, "worktree", "add", "--quiet", str(linked))
@@ -1124,6 +1235,34 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
     repair_prior = PriorPointerRecord.from_mapping({
         **prior.to_dict(), "replaced_by_revision": 4,
     })
+    advanced_prior_analysis = pointers._derive_repair_analysis(
+        REPO_UUID, active_source_revision=1, operation_epoch=4,
+        fence_token=4, current=rolled_back, pending=rolled_back, prior=repair_prior,
+        raw_evidence={"current_sha256": rolled_back.sha256},
+        allow_atomic_temps=False, deadline_ns=None,
+    )
+    assert advanced_prior_analysis.plan.pointer_action == "replace"
+    assert advanced_prior_analysis.plan.next_pointer_revision == 5
+    twice_advanced_prior = PriorPointerRecord.from_mapping({
+        **prior.to_dict(), "replaced_by_revision": 5,
+    })
+    repeated_analysis = pointers._derive_repair_analysis(
+        REPO_UUID, active_source_revision=1, operation_epoch=4,
+        fence_token=4, current=rolled_back, pending=rolled_back,
+        prior=twice_advanced_prior,
+        raw_evidence={"current_sha256": rolled_back.sha256},
+        allow_atomic_temps=False, deadline_ns=None,
+    )
+    assert repeated_analysis.plan.pointer_action == "replace"
+    assert repeated_analysis.plan.next_pointer_revision == 6
+    with pytest.raises(PointerCorrupt, match="retained prior"):
+        pointers._validate_pending_relationship(
+            rolled_back, repaired, twice_advanced_prior,
+        )
+    assert not pointers._rollback_authorizes_superseded(
+        JournalSnapshot(None, (certified, superseded)),
+        rolled_back, None, twice_advanced_prior, deadline_ns=None,
+    )
     for visible in (rolled_back, repaired):
         analysis = pointers._derive_repair_analysis(
             REPO_UUID, active_source_revision=1, operation_epoch=4,
