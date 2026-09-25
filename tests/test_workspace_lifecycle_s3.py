@@ -25,13 +25,14 @@ from graphify.workspace.identity import IdentityAction, OperatorAuthorization, d
 from graphify.workspace.journal import JournalRecoveryProjection, JournalSnapshot, JournalStore
 from graphify.workspace.leases import StagedBuildLeaseRecoveryRequired, StaleLease
 from graphify.workspace.lifecycle_contracts import (
-    CapacityPolicy, ContractError, GenerationReceipt, PointerSet, PriorPointerRecord,
+    CapacityPolicy, ContractError, GcCompletionState, GenerationReceipt, PointerSet, PriorPointerRecord,
     payload_manifest_sha256,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
 from graphify.workspace.persistence import InjectedFault, LockTimeout
 from graphify.workspace.pointers import (
-    PointerCAS, PointerConflict, PointerCorrupt, PointerStore, PointerSuperseded,
+    PointerCAS, PointerConflict, PointerCorrupt, PointerRepairPlan, PointerStore,
+    PointerSuperseded,
 )
 from graphify.workspace.registry import RevisionConflict, SourceAlreadyActive
 from graphify.workspace.semantic_queue import (
@@ -740,6 +741,135 @@ def test_operator_repair_requires_approved_plan_before_execution(tmp_path):
     assert tree_snapshot(harness.state_root) == before
 
 
+@pytest.mark.parametrize("old_source_revision", [1, 2])
+@pytest.mark.parametrize("current_corrupt", [False, True])
+def test_promotion_retains_only_current_source_last_good(
+    tmp_path, monkeypatch, old_source_revision, current_corrupt,
+):
+    _harness, _generations, pointers, _observations = _runtime(tmp_path)
+    current = PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 1,
+        "active_source_revision": old_source_revision, "source_epoch": 1,
+        "operation_epoch": 1, "fence_token": 1, "state_schema_version": 2,
+        "current": {"generation_id": "gen-old", "receipt_sha256": "a" * 64},
+        "last_good": {"generation_id": "gen-older", "receipt_sha256": "c" * 64},
+    })
+    operation = SimpleNamespace(
+        repo_uuid=REPO_UUID, fence_token=2,
+        grant=SimpleNamespace(active_source_revision=2, operation_epoch=2),
+    )
+    candidate = SimpleNamespace(
+        sha256="b" * 64,
+        to_dict=lambda: {
+            "generation_id": "gen-new", "active_source_revision": 2,
+            "source_epoch": 1,
+        },
+    )
+    old = SimpleNamespace(
+        sha256="a" * 64,
+        to_dict=lambda: {
+            "generation_id": "gen-old", "active_source_revision": old_source_revision,
+        },
+    )
+    older = SimpleNamespace(
+        sha256="c" * 64,
+        to_dict=lambda: {
+            "generation_id": "gen-older", "active_source_revision": old_source_revision,
+        },
+    )
+
+    def verify_ref(_repo_uuid, ref, **_kwargs):
+        if ref["generation_id"] == "gen-old":
+            if current_corrupt:
+                raise GenerationError("invalid old receipt")
+            return old
+        return older
+
+    monkeypatch.setattr(pointers.leases, "current_operation", lambda *a, **kw: nullcontext(operation))
+    monkeypatch.setattr(pointers, "_assert_no_gc_intent", lambda *a, **kw: None)
+    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda *a, **kw: current)
+    monkeypatch.setattr(pointers, "_lock_set", lambda *a, **kw: [])
+    monkeypatch.setattr(pointers, "_verify_visible_pointer_journal", lambda *a, **kw: None)
+    monkeypatch.setattr(pointers, "_verify_generation", lambda *a, **kw: candidate)
+    monkeypatch.setattr(pointers, "_verify_ref", verify_ref)
+    monkeypatch.setattr(pointers.state, "cleanup_atomic_temps", lambda *a, **kw: None)
+    monkeypatch.setattr(pointers.journal, "recover_locked", lambda *a, **kw: JournalSnapshot(None, ()))
+    monkeypatch.setattr(pointers, "_journal_certifies", lambda *a, **kw: True)
+    monkeypatch.setattr(pointers, "_validate_cas", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        pointers, "_persist_move", lambda _operation, *, pointer, **_kw: pointer,
+    )
+    cas = PointerCAS(1, 2, 1, 2, 0, 2, 2, "gen-new", "b" * 64, "a" * 64)
+    moved = pointers.promote(
+        SimpleNamespace(), cas, occurred_at=START, monotonic_ns=10_001,
+    )
+    expected = None if old_source_revision == 1 else {
+        "generation_id": "gen-older" if current_corrupt else "gen-old",
+        "receipt_sha256": "c" * 64 if current_corrupt else "a" * 64,
+    }
+    assert moved.to_dict()["last_good"] == expected
+
+
+def test_operator_repair_replays_only_matching_durable_result(tmp_path, monkeypatch):
+    harness, _generations, pointers, _observations = _runtime(tmp_path)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "REPAIR", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    fence_token = grant.lease.to_dict()["fence_token"]
+    current = PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 3,
+        "active_source_revision": 1, "source_epoch": 1,
+        "operation_epoch": grant.operation_epoch, "fence_token": fence_token,
+        "state_schema_version": 2,
+        "current": {"generation_id": "gen-repaired", "receipt_sha256": "a" * 64},
+        "last_good": None,
+    })
+    event = SimpleNamespace(to_dict=lambda: {
+        "transition": "REPAIRED", "generation_id": "gen-repaired",
+        "receipt_sha256": "a" * 64, "pointer_revision": 3,
+        "operation_epoch": grant.operation_epoch, "fence_token": fence_token,
+    })
+    snapshot = JournalSnapshot(None, (event,))
+    approved = PointerRepairPlan(
+        "repairable", current.to_dict()["current"], None, 3, "prior",
+        "replace", ("append_repair",), (), "b" * 64,
+    )
+    observed = PointerRepairPlan(
+        "no_op", current.to_dict()["current"], None, 3, "current",
+        "none", (), (), "c" * 64,
+    )
+    analysis = SimpleNamespace(
+        plan=observed, current=current, pending=None,
+        journal=JournalRecoveryProjection(snapshot, (), "d" * 64),
+    )
+    monkeypatch.setattr(
+        pointers, "_repair_analysis_locked", lambda *a, **kw: nullcontext(analysis),
+    )
+    before = tree_snapshot(harness.state_root)
+    assert pointers.recover(
+        grant, expected_plan=approved, occurred_at=START + timedelta(seconds=1),
+        monotonic_ns=10_001,
+    ) == current
+    assert tree_snapshot(harness.state_root) == before
+
+    wrong_result = replace(approved, next_pointer_revision=2)
+    with pytest.raises(PointerSuperseded, match="plan changed"):
+        pointers.recover(
+            grant, expected_plan=wrong_result,
+            occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+        )
+
+
 def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path, monkeypatch):
     _harness, _generations, pointers, _observations = _runtime(tmp_path)
     previous = PointerSet.from_mapping({
@@ -924,6 +1054,41 @@ def test_gc_preview_is_read_only_and_does_not_adopt_unowned_generations(tmp_path
     )
     assert preview.candidates == ()
     assert tree_snapshot(harness.state_root) == before
+
+
+def test_operational_gc_plan_accepts_policy_above_preview_limit(tmp_path, monkeypatch):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    accepted = POLICY.to_dict()
+    accepted["global_max_generations"] = 5000
+    accepted["workspace_max_generations"] = 5000
+    policy = CapacityPolicy.from_mapping(accepted)
+    generations_found = tuple(f"gen-{number:04d}" for number in range(4097))
+    monkeypatch.setattr(gc, "_generation_ids", lambda *a, **kw: generations_found)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        plan = gc._plan_locked(
+            operation, capacity_policy=policy, protections=protections,
+            probe_locks=False,
+        )
+    assert plan.candidates == generations_found
 
 
 @pytest.mark.parametrize("missing_pointer", [False, True])
@@ -1299,6 +1464,110 @@ def test_gc_deadline_reaches_purge_record_install(tmp_path, monkeypatch):
         )
 
     assert not gc.state.path(gc._purge_path(REPO_UUID, plan.sha256)).exists()
+
+
+@pytest.mark.parametrize("changed_field", ["operation_epoch", "quarantined"])
+def test_gc_purge_requires_index_bound_completion(tmp_path, changed_field):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    candidate = "gen-purge-candidate"
+    gc.state.ensure_directory(generations._generation(REPO_UUID, candidate))
+    lock = gc.state.path(generations._lock(REPO_UUID, candidate))
+    gc.state.ensure_directory(generations._lock(REPO_UUID, candidate).parent)
+    lock.write_bytes(b"")
+    lock.chmod(0o600)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    plan = gc.plan(grant, capacity_policy=POLICY, protections=protections, monotonic_ns=10_001)
+    completion = gc.execute(
+        grant, plan, capacity_policy=POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    assert completion.quarantined == (candidate,)
+    changed = completion.to_dict()
+    changed[changed_field] = (
+        completion.operation_epoch + 1
+        if changed_field == "operation_epoch" else []
+    )
+    completion_path = gc.state.path(gc._completion_path(REPO_UUID, plan.sha256))
+    completion_path.write_bytes(GcCompletionState.from_mapping(changed).canonical)
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcRecoveryRequired, match="index does not bind"):
+        gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=POLICY,
+            protections=protections, completed_at=START + timedelta(seconds=2),
+            monotonic_ns=10_003,
+        )
+    assert tree_snapshot(harness.state_root) == before
+    assert gc.state.path(gc._quarantine(REPO_UUID, candidate, grant.operation_epoch)).is_dir()
+
+
+def test_gc_reconcile_retry_returns_indexed_completion(tmp_path):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    plan = gc.plan(grant, capacity_policy=POLICY, protections=protections, monotonic_ns=10_001)
+
+    def interrupt_after_completion(point):
+        if point == "gc:completion_durable":
+            raise InjectedFault(point)
+
+    gc.fault_hook = interrupt_after_completion
+    with pytest.raises(InjectedFault):
+        gc.execute(
+            grant, plan, capacity_policy=POLICY, protections=protections,
+            occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+        )
+    gc.fault_hook = lambda _point: None
+    successor = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=grant.operation_epoch,
+        expected_migration_epoch=grant.migration_epoch,
+        acquired_at=START + timedelta(seconds=3),
+        monotonic_ns=2_000_000, ttl_ns=1_000_000,
+    )
+    completed = gc.reconcile(
+        successor, capacity_policy=POLICY, protections=protections,
+        completed_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+    )
+    assert completed is not None
+    before = tree_snapshot(harness.state_root)
+    assert gc.reconcile(
+        successor, capacity_policy=POLICY, protections=protections,
+        completed_at=START + timedelta(seconds=4), monotonic_ns=2_000_002,
+    ) == completed
+    assert tree_snapshot(harness.state_root) == before
 
 
 @pytest.mark.parametrize("site", ["completion", "purge_state", "purge_completion"])

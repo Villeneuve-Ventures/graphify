@@ -652,7 +652,6 @@ class GcStore:
             probe_locks=probe_locks,
             inherited_shared_locks=inherited_shared_locks,
             deadline_ns=deadline_ns,
-            maximum_generations=GC_PREVIEW_MAX_GENERATIONS,
         )
         plan = GcPlan(
             repo_uuid=operation.repo_uuid,
@@ -1249,7 +1248,11 @@ class GcStore:
             ):
                 raise GcPlanStale("GC reconcile pointer revision is stale")
             if intent is None:
-                return None
+                return self._read_operation_completion_locked(
+                    operation.repo_uuid,
+                    operation.grant.operation_epoch,
+                    deadline_ns=deadline_ns,
+                )
             if (
                 expected_pointer_revision is not None
                 and intent.pointer_revision != expected_pointer_revision
@@ -1407,6 +1410,15 @@ class GcStore:
                 or completion.plan_sha256 != plan_sha256
             ):
                 raise GcError("GC completion belongs to another workspace or plan")
+            indexed_completion = self._read_operation_completion_locked(
+                operation.repo_uuid,
+                completion.operation_epoch,
+                deadline_ns=deadline_ns,
+            )
+            if indexed_completion is None or indexed_completion != completion:
+                raise GcRecoveryRequired(
+                    "GC operation completion index does not bind its completion"
+                )
             refreshed = self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,

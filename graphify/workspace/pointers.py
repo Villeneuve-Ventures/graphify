@@ -1149,9 +1149,17 @@ class PointerStore:
                             except (GenerationError, PointerError):
                                 corrupt_generations.add(str(last_good_ref["generation_id"]))
                             else:
-                                last_good = self._ref(verified_last_good)
+                                if (
+                                    verified_last_good.to_dict()["active_source_revision"]
+                                    == operation.grant.active_source_revision
+                                ):
+                                    last_good = self._ref(verified_last_good)
                     else:
-                        last_good = self._ref(old_receipt)
+                        if (
+                            old_receipt.to_dict()["active_source_revision"]
+                            == operation.grant.active_source_revision
+                        ):
+                            last_good = self._ref(old_receipt)
                 revision = 1 if current is None else int(current.to_dict()["pointer_revision"]) + 1
                 pointer = self._pointer_document(
                     operation,
@@ -1834,6 +1842,42 @@ class PointerStore:
         ) as analysis:
             return analysis.plan
 
+    def _completed_repair_replay(
+        self,
+        operation: LeaseOperation,
+        approved: PointerRepairPlan,
+        analysis: _PointerRepairAnalysis,
+        *,
+        deadline_ns: int | None,
+    ) -> PointerSet | None:
+        current = analysis.current
+        if (
+            approved.classification != "repairable"
+            or approved.pointer_action not in {"replace", "resume_pending", "finalize_pending"}
+            or analysis.plan.classification != "no_op"
+            or analysis.plan.pointer_action != "none"
+            or analysis.pending is not None
+            or current is None
+        ):
+            return None
+        value = current.to_dict()
+        if (
+            value["current"] != approved.candidate
+            or value["last_good"] != approved.last_good
+            or value["pointer_revision"] != approved.next_pointer_revision
+            or value["active_source_revision"] != operation.grant.active_source_revision
+            or value["operation_epoch"] != operation.grant.operation_epoch
+            or value["fence_token"] != operation.fence_token
+            or not self._journal_records_pointer(
+                analysis.journal.snapshot,
+                current,
+                transition="REPAIRED",
+                deadline_ns=deadline_ns,
+            )
+        ):
+            return None
+        return current
+
     def recover(
         self,
         grant: LeaseGrant,
@@ -1885,7 +1929,15 @@ class PointerStore:
                 deadline_ns=deadline_ns,
             ) as analysis:
                 if expected_plan is not None and analysis.plan != expected_plan:
-                    raise PointerSuperseded("repair plan changed before execution")
+                    replay = (
+                        self._completed_repair_replay(
+                            operation, expected_plan, analysis, deadline_ns=deadline_ns,
+                        )
+                        if operation.operation == "REPAIR" else None
+                    )
+                    if replay is None:
+                        raise PointerSuperseded("repair plan changed before execution")
+                    return replay
                 require_before_deadline(
                     deadline_ns,
                     "pointer repair exceeded its lease deadline",
