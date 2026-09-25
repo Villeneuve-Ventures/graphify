@@ -395,6 +395,81 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_exact_rollback_replay_uses_journal_and_retained_prior(tmp_path, monkeypatch):
+    harness, _generations, pointers, _observations = _runtime(tmp_path)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "ROLLBACK", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    prior_pointer = PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 1,
+        "active_source_revision": 1, "source_epoch": 1,
+        "operation_epoch": 1, "fence_token": 1, "state_schema_version": 2,
+        "current": {"generation_id": "gen-newer", "receipt_sha256": "b" * 64},
+        "last_good": {"generation_id": "gen-older", "receipt_sha256": "a" * 64},
+    })
+    current = PointerSet.from_mapping({
+        **prior_pointer.to_dict(), "pointer_revision": 2,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": grant.lease.to_dict()["fence_token"],
+        "current": {"generation_id": "gen-older", "receipt_sha256": "a" * 64},
+        "last_good": {"generation_id": "gen-newer", "receipt_sha256": "b" * 64},
+    })
+    retained = PriorPointerRecord.from_mapping({
+        "contract": "graphify.workspace.prior_pointer", "schema_version": 2,
+        "retained_at": "2026-07-16T19:00:00Z", "replaced_by_revision": 2,
+        "pointer_set": prior_pointer.to_dict(),
+    })
+    candidate = SimpleNamespace(
+        sha256="a" * 64,
+        to_dict=lambda: {
+            "generation_id": "gen-older", "active_source_revision": 1,
+            "source_epoch": 1,
+        },
+    )
+    event = SimpleNamespace(to_dict=lambda: {
+        "transition": "ROLLED_BACK", "generation_id": "gen-older",
+        "receipt_sha256": "a" * 64, "pointer_revision": 2,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": grant.lease.to_dict()["fence_token"],
+    })
+    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda _repo: current)
+    monkeypatch.setattr(pointers, "_lock_set", lambda *args: [])
+    monkeypatch.setattr(pointers, "_verify_generation", lambda *args, **kw: candidate)
+    monkeypatch.setattr(pointers, "retained_prior", lambda *args, **kw: retained)
+    monkeypatch.setattr(
+        pointers.journal, "read_stable", lambda *args, **kw: JournalSnapshot(None, (event,)),
+    )
+    cas = PointerCAS(
+        expected_pointer_revision=1, expected_active_source_revision=1,
+        expected_source_epoch=1, expected_operation_epoch=grant.operation_epoch,
+        expected_migration_epoch=grant.migration_epoch,
+        expected_state_schema_version=2,
+        expected_fence_token=grant.lease.to_dict()["fence_token"],
+        candidate_generation_id="gen-older", candidate_receipt_sha256="a" * 64,
+        expected_current_receipt_sha256="b" * 64,
+    )
+    before = tree_snapshot(harness.state_root)
+    assert pointers.rollback(
+        grant, cas, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+    ) == current
+    assert tree_snapshot(harness.state_root) == before
+    with pytest.raises(PointerConflict):
+        pointers.rollback(
+            grant, replace(cas, expected_current_receipt_sha256="f" * 64),
+            occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_path):
     harness = create_harness(tmp_path)
     linked = tmp_path.resolve() / "linked"
@@ -728,6 +803,57 @@ def test_gc_preview_is_read_only_and_does_not_adopt_unowned_generations(tmp_path
     assert tree_snapshot(harness.state_root) == before
 
 
+@pytest.mark.parametrize("missing_pointer", [False, True])
+def test_gc_plan_rejects_pointer_behind_durable_journal(
+    tmp_path, monkeypatch, missing_pointer,
+):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    stale_pointer = PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 1,
+        "active_source_revision": 1, "source_epoch": 1,
+        "operation_epoch": 1, "fence_token": 1, "state_schema_version": 2,
+        "current": {"generation_id": "gen-old", "receipt_sha256": "a" * 64},
+        "last_good": None,
+    })
+    monkeypatch.setattr(
+        pointers, "load", lambda *args, **kw: None if missing_pointer else stale_pointer,
+    )
+    monkeypatch.setattr(pointers, "verify_pointer", lambda *args, **kw: {})
+    event = SimpleNamespace(to_dict=lambda: {
+        "transition": "PROMOTED", "pointer_revision": 2,
+    })
+    monkeypatch.setattr(
+        pointers.journal, "read_stable", lambda *args, **kw: JournalSnapshot(None, (event,)),
+    )
+    if missing_pointer:
+        pointers.state.ensure_directory(pointers.journal._directory(REPO_UUID))
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(PointerCorrupt, match="stale relative|missing relative"):
+        gc.plan(
+            grant, capacity_policy=POLICY,
+            protections=GcProtection(empty, empty, empty, empty, empty, empty),
+            monotonic_ns=10_001,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_gc_reused_epoch_rejects_changed_plan_before_durable_intent(tmp_path):
     harness, generations, pointers, _observations = _runtime(tmp_path)
     gc = GcStore(
@@ -859,10 +985,26 @@ def test_gc_keeps_shared_lock_protection_during_locked_recheck(tmp_path):
             )
             assert plan.candidates == ("gen-candidate",)
             assert ("gen-reader", ("shared_lock",)) in plan.protected
-            gc.execute(
+            completion = gc.execute(
                 grant, plan, capacity_policy=POLICY, protections=protections,
                 occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
             )
+            completed_state = tree_snapshot(harness.state_root)
+            assert gc.execute(
+                grant, plan, capacity_policy=POLICY, protections=protections,
+                occurred_at=START + timedelta(seconds=2), monotonic_ns=10_003,
+            ) == completion
+            assert tree_snapshot(harness.state_root) == completed_state
+            changed_policy = POLICY.to_dict()
+            changed_policy["reserve_bytes"] += 1
+            with pytest.raises(GcPlanStale, match="replay authority"):
+                gc.execute(
+                    grant, plan,
+                    capacity_policy=CapacityPolicy.from_mapping(changed_policy),
+                    protections=protections,
+                    occurred_at=START + timedelta(seconds=2), monotonic_ns=10_004,
+                )
+            assert tree_snapshot(harness.state_root) == completed_state
         finally:
             release.set()
             reader.result(timeout=5)

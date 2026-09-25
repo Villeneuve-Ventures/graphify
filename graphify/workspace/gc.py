@@ -380,8 +380,9 @@ class GcStore:
             deadline_ns=deadline_ns,
         )
         if pointer is None:
+            self.pointers.verify_visible_absence(repo_uuid, deadline_ns=deadline_ns)
             return 0
-        self.pointers.verify_pointer(
+        self.pointers.verify_visible_pointer(
             pointer,
             expected_repo_uuid=repo_uuid,
             deadline_ns=deadline_ns,
@@ -546,8 +547,10 @@ class GcStore:
         )
         reasons = protections.reasons()
         pointer_revision = 0
-        if pointer is not None:
-            self.pointers.verify_pointer(
+        if pointer is None:
+            self.pointers.verify_visible_absence(repo_uuid, deadline_ns=deadline_ns)
+        else:
+            self.pointers.verify_visible_pointer(
                 pointer,
                 expected_repo_uuid=repo_uuid,
                 deadline_ns=deadline_ns,
@@ -1110,6 +1113,33 @@ class GcStore:
                 deadline_ns=deadline_ns,
             ) is not None:
                 raise GcRecoveryRequired("an unresolved GC intent must be reconciled")
+            prior_completion = self._read_operation_completion_locked(
+                operation.repo_uuid,
+                operation.grant.operation_epoch,
+                deadline_ns=deadline_ns,
+            )
+            if prior_completion is not None:
+                if prior_completion.plan_sha256 != plan.sha256:
+                    raise GcPlanStale("GC operation epoch already completed another plan")
+                if (
+                    plan.repo_uuid != operation.repo_uuid
+                    or plan.registry_revision != operation.registry.to_dict()["revision"]
+                    or plan.active_source_revision != operation.grant.active_source_revision
+                    or plan.operation_epoch != operation.grant.operation_epoch
+                    or plan.migration_epoch != operation.grant.migration_epoch
+                    or plan.fence_token != operation.fence_token
+                    or plan.capacity_policy_sha256 != capacity_policy.sha256
+                    or plan.pointer_revision != self._verified_pointer_revision(
+                        operation.repo_uuid, deadline_ns=deadline_ns,
+                    )
+                ):
+                    raise GcPlanStale("GC completion replay authority changed")
+                if (
+                    prior_completion.operation_epoch != operation.grant.operation_epoch
+                    or prior_completion.quarantined != plan.candidates
+                ):
+                    raise GcRecoveryRequired("GC completion does not bind its plan")
+                return prior_completion
             refreshed = self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,
@@ -1119,16 +1149,6 @@ class GcStore:
             )
             if refreshed.canonical != plan.canonical:
                 raise GcPlanStale("GC dry-run plan no longer matches reachability")
-            prior_completion = self._read_operation_completion_locked(
-                operation.repo_uuid,
-                operation.grant.operation_epoch,
-                deadline_ns=deadline_ns,
-            )
-            if (
-                prior_completion is not None
-                and prior_completion.plan_sha256 != plan.sha256
-            ):
-                raise GcPlanStale("GC operation epoch already completed another plan")
             intent = self._intent(operation, plan, occurred_at=occurred_at)
             completion = self._read_completion(
                 intent,

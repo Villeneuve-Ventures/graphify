@@ -473,6 +473,31 @@ class PointerStore:
             deadline_ns=deadline_ns,
         )
 
+    def verify_visible_absence(
+        self,
+        repo_uuid: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> None:
+        """Refuse a missing visible pointer when the journal records a committed move."""
+
+        if not self.state.private_directory_exists(self.journal._directory(repo_uuid)):
+            return
+        try:
+            snapshot = self.journal.read_stable(repo_uuid, deadline_ns=deadline_ns)
+        except JournalError as exc:
+            raise PointerCorrupt(
+                f"visible pointer journal authority is unavailable: {exc}"
+            ) from exc
+        for event in snapshot.events:
+            require_before_deadline(
+                deadline_ns, "visible pointer journal verification exceeded its deadline",
+            )
+            if event.to_dict()["transition"] in {"PROMOTED", "ROLLED_BACK", "REPAIRED"}:
+                raise PointerCorrupt(
+                    "visible pointer is missing relative to durable journal history"
+                )
+
     def _verify_repair_refs(
         self,
         repo_uuid: str,
@@ -745,7 +770,7 @@ class PointerStore:
         if int(candidate_value["active_source_revision"]) != operation.grant.active_source_revision:
             raise PointerConflict("candidate receipt was certified for another active source")
 
-    def _exact_promotion_replay(
+    def _exact_move_replay(
         self,
         operation: LeaseOperation,
         cas: PointerCAS,
@@ -753,6 +778,7 @@ class PointerStore:
         candidate: GenerationReceipt,
         snapshot: JournalSnapshot,
         *,
+        transition: str,
         deadline_ns: int | None,
     ) -> bool:
         value = current.to_dict()
@@ -765,7 +791,7 @@ class PointerStore:
             or value["source_epoch"] != candidate.to_dict()["source_epoch"]
             or value["state_schema_version"] != STATE_SCHEMA_VERSION
             or not self._journal_records_pointer(
-                snapshot, current, transition="PROMOTED", deadline_ns=deadline_ns,
+                snapshot, current, transition=transition, deadline_ns=deadline_ns,
             )
         ):
             return False
@@ -998,6 +1024,20 @@ class PointerStore:
                             and last_good_ref["receipt_sha256"] == candidate.sha256
                         )
                 if transition == "ROLLED_BACK" and not candidate_is_last_good:
+                    if candidate_is_current and current is not None:
+                        try:
+                            replay_snapshot = self.journal.read_stable(
+                                operation.repo_uuid, deadline_ns=deadline_ns,
+                            )
+                        except JournalError as exc:
+                            raise PointerCorrupt(
+                                f"rollback replay journal authority is unavailable: {exc}"
+                            ) from exc
+                        if self._exact_move_replay(
+                            operation, cas, current, candidate, replay_snapshot,
+                            transition=transition, deadline_ns=deadline_ns,
+                        ):
+                            return current
                     raise PointerConflict("rollback candidate is not the exact last_good generation")
                 self.state.cleanup_atomic_temps(
                     self._workspace(operation.repo_uuid),
@@ -1024,9 +1064,9 @@ class PointerStore:
                     self._validate_cas(operation, cas, current, candidate)
                 except PointerSuperseded:
                     if current is not None and candidate_is_current:
-                        if transition == "PROMOTED" and self._exact_promotion_replay(
+                        if transition == "PROMOTED" and self._exact_move_replay(
                             operation, cas, current, candidate, snapshot,
-                            deadline_ns=deadline_ns,
+                            transition=transition, deadline_ns=deadline_ns,
                         ):
                             return current
                         raise
