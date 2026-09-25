@@ -1173,9 +1173,14 @@ def test_selected_nested_vault_retains_ownership_after_other_publication(
         )
         export_command = [
             "-c",
-            "import sys; from graphify.cli import dispatch_command; "
-            "sys.argv=['graphify','export','obsidian','--dir','repo/vault']; "
-            "dispatch_command('export')",
+            "\n".join(
+                (
+                    "import sys",
+                    "from graphify.cli import dispatch_command",
+                    "sys.argv=['graphify','export','obsidian','--dir','repo/vault']",
+                    "dispatch_command('export')",
+                )
+            ),
         ]
         run_prepared_token(token.path, export_command)
         run_prepared_token(token.path, export_command)
@@ -1183,8 +1188,12 @@ def test_selected_nested_vault_retains_ownership_after_other_publication(
             token.path,
             [
                 "-c",
-                "from graphify.transaction import finalize_prepared_transaction; "
-                "finalize_prepared_transaction()",
+                "\n".join(
+                    (
+                        "from graphify.transaction import finalize_prepared_transaction",
+                        "finalize_prepared_transaction()",
+                    )
+                ),
             ],
         )
     else:
@@ -1231,7 +1240,7 @@ def test_managed_selected_vault_change_blocks_transaction_begin(tmp_path):
 
 
 def test_managed_selected_vault_shares_receipt_budget(tmp_path, monkeypatch):
-    import graphify.transaction as transaction_module
+    from graphify import transaction as transaction_module
 
     out = _make_graph(tmp_path)
     first = _run(["export", "html"], tmp_path)

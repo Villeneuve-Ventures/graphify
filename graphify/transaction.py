@@ -9101,7 +9101,8 @@ def _legacy_owned_dynamic_inventory(
 
     wiki_fd = None
     if not selected_only:
-        try:
+        # A legacy output may have no wiki export.
+        with contextlib.suppress(FileNotFoundError):
             wiki_fd = (
                 _open_windows_relative_fd(capability, "wiki", directory=True)
                 if _PLATFORM == "windows"
@@ -9113,8 +9114,6 @@ def _legacy_owned_dynamic_inventory(
                     dir_fd=capability.fd,
                 )
             )
-        except FileNotFoundError:
-            pass
     if wiki_fd is not None:
         wiki_info = os.fstat(wiki_fd)
         wiki = OutputCapability(
