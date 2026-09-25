@@ -356,7 +356,7 @@ class PointerStore:
     ) -> PointerSet | None:
         """Read one visible pointer without recovery or any mutating syscall."""
 
-        if self._exists(self._pending(repo_uuid)):
+        if self._exists(self._pending(repo_uuid), deadline_ns=deadline_ns):
             raise PointerRecoveryRequired("a durable pointer intent requires fenced recovery")
         return self._read_pointer(
             self._current(repo_uuid),

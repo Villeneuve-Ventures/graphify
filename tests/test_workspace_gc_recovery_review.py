@@ -6,10 +6,14 @@ from dataclasses import replace
 from datetime import timedelta
 import errno
 import os
+import time
 
 import pytest
 
-from graphify.workspace.gc import GcError, GcProtection, GcStore, _MAX_GC_INTENT_BYTES
+from graphify.workspace.gc import (
+    GcError, GcProtection, GcStore, _GcReachability, _MAX_GC_INTENT_BYTES,
+)
+from graphify.workspace.lifecycle_contracts import CapacityPolicy, GcPurgeState
 from graphify.workspace.persistence import CommitUnknown, InjectedFault
 from tests import test_workspace_lifecycle_s3 as fixtures
 from tests.workspace_s3_helpers import REPO_UUID, START, tree_snapshot
@@ -169,3 +173,128 @@ def test_gc_rejects_unreadable_intent_before_install(tmp_path, monkeypatch):
         )
     assert tree_snapshot(harness.state_root) == before
     assert not gc.state.path(gc._intent_path(REPO_UUID)).exists()
+
+
+def test_replayed_purge_must_match_indexed_completion(tmp_path):
+    harness, generations, gc, grant, plan, protections, candidate, registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    completion = gc.execute(
+        grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    assert completion.quarantined == (candidate,)
+    purge = gc.purge(
+        grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+        protections=protections, completed_at=START + timedelta(seconds=2),
+        monotonic_ns=10_003,
+    )
+    assert purge.purged == completion.quarantined
+    changed = purge.to_dict()
+    changed["purged"] = []
+    gc.state.path(gc._purge_path(REPO_UUID, plan.sha256)).write_bytes(
+        GcPurgeState.from_mapping(changed).canonical
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcError, match="purge record does not bind"):
+        gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+            protections=protections, completed_at=START + timedelta(seconds=3),
+            monotonic_ns=10_004,
+        )
+    with pytest.raises(GcError, match="purge record does not bind"):
+        gc.preflight_lifecycle(
+            REPO_UUID,
+            expected_registry_revision=registry["revision"],
+            expected_active_source_revision=grant.active_source_revision,
+            expected_operation_epoch=grant.operation_epoch,
+            expected_migration_epoch=grant.migration_epoch,
+            expected_pointer_revision=plan.pointer_revision,
+            plan_sha256=plan.sha256,
+            deadline_ns=time.monotonic_ns() + 5_000_000_000,
+        )
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_large_accepted_gc_policy_plans_recoverable_batches(tmp_path, monkeypatch):
+    harness, _generations, gc, grant, _plan, protections, _candidate, _registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    policy_data = fixtures.POLICY.to_dict()
+    policy_data["global_max_generations"] = 16_000
+    policy_data["workspace_max_generations"] = 16_000
+    policy = CapacityPolicy.from_mapping(policy_data)
+    candidates = tuple(f"gen-{number:05d}-{'x' * 57}" for number in range(16_000))
+    pending = candidates
+
+    def reachability(*_args, **_kwargs):
+        return _GcReachability(0, pending, ())
+
+    monkeypatch.setattr(gc, "_reachability_locked", reachability)
+    first = gc.plan(
+        grant, capacity_policy=policy, protections=protections,
+        monotonic_ns=10_001,
+    )
+    assert first.candidates == candidates[:8192]
+    with harness.leases.current_operation_read_only(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        intent = gc._intent(operation, first, occurred_at=START)
+    gc._require_recoverable_record_sizes(intent)
+    assert len(intent.canonical) < _MAX_GC_INTENT_BYTES
+
+    pending = candidates[8192:]
+    second = gc.plan(
+        grant, capacity_policy=policy, protections=protections,
+        monotonic_ns=10_001,
+    )
+    assert second.candidates == pending
+
+
+def test_operational_gc_batches_leave_remaining_generations_for_successor(tmp_path, monkeypatch):
+    harness, generations, gc, grant, _plan, protections, candidate, registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    monkeypatch.setattr("graphify.workspace.gc._GC_OPERATION_MAX_CANDIDATES", 2)
+    for generation_id in ("gen-batch-a", "gen-batch-b"):
+        gc.state.ensure_directory(generations._generation(REPO_UUID, generation_id))
+        lock = gc.state.path(generations._lock(REPO_UUID, generation_id))
+        gc.state.ensure_directory(generations._lock(REPO_UUID, generation_id).parent)
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+
+    first = gc.plan(
+        grant, capacity_policy=fixtures.POLICY, protections=protections,
+        monotonic_ns=10_001,
+    )
+    assert first.candidates == ("gen-batch-a", "gen-batch-b")
+    first_completion = gc.execute(
+        grant, first, capacity_policy=fixtures.POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    assert first_completion.quarantined == first.candidates
+    gc.purge(
+        grant, plan_sha256=first.sha256, capacity_policy=fixtures.POLICY,
+        protections=protections, completed_at=START + timedelta(seconds=2),
+        monotonic_ns=10_003,
+    )
+    successor = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=grant.operation_epoch,
+        expected_migration_epoch=grant.migration_epoch,
+        acquired_at=START + timedelta(seconds=3),
+        monotonic_ns=2_000_000, ttl_ns=1_000_000,
+    )
+    second = gc.plan(
+        successor, capacity_policy=fixtures.POLICY, protections=protections,
+        monotonic_ns=2_000_001,
+    )
+    assert second.candidates == (candidate,)
+    second_completion = gc.execute(
+        successor, second, capacity_policy=fixtures.POLICY,
+        protections=protections, occurred_at=START + timedelta(seconds=3),
+        monotonic_ns=2_000_002,
+    )
+    assert second_completion.quarantined == second.candidates

@@ -46,6 +46,8 @@ class StructuralPolicy:
             integer(value, minimum=1)
         if self.max_claimed_tasks > self.max_pending_tasks:
             raise ContractError("claim limit exceeds pending task limit")
+        if self.max_claimed_tasks != 1:
+            raise ContractError("semantic queues support exactly one claimed task")
 
     def to_dict(self):
         return {name: getattr(self, name) for name in self.__dataclass_fields__}

@@ -40,6 +40,9 @@ _PURGE_ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _PURGE_ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
 _MAX_GC_INTENT_BYTES = 1024 * 1024
 _GC_RECORD_SCALAR_HEADROOM = 4096
+# A generation ID is at most 67 ASCII bytes; 8192 IDs leave ample room for
+# the remaining intent, completion, and purge fields under the 1 MiB read cap.
+_GC_OPERATION_MAX_CANDIDATES = 8192
 GC_PREVIEW_MAX_GENERATIONS = 4096
 
 
@@ -410,6 +413,11 @@ class GcStore:
             raise GcError(f"GC purge record is invalid: {exc}") from exc
         if purge.repo_uuid != repo_uuid or purge.plan_sha256 != plan_sha256:
             raise GcError("GC purge record belongs to another workspace or plan")
+        completion = self._read_indexed_completion_by_plan_locked(
+            repo_uuid, plan_sha256, deadline_ns=deadline_ns,
+        )
+        if purge.purged != completion.quarantined:
+            raise GcError("GC purge record does not bind its completion")
         return purge
 
     def _read_operation_completion_locked(
@@ -461,6 +469,36 @@ class GcStore:
             or completion.plan_sha256 != index.plan_sha256
             or canonical_sha256(completion.to_dict()) != index.completion_sha256
         ):
+            raise GcRecoveryRequired(
+                "GC operation completion index does not bind its completion"
+            )
+        return completion
+
+    def _read_indexed_completion_by_plan_locked(
+        self,
+        repo_uuid: str,
+        plan_sha256: str,
+        *,
+        deadline_ns: int | None = None,
+    ) -> GcCompletionState:
+        try:
+            completion = GcCompletionState.from_json(
+                self.state.read_existing_bytes(
+                    self._completion_path(repo_uuid, plan_sha256),
+                    max_bytes=_MAX_GC_INTENT_BYTES,
+                    deadline_ns=deadline_ns,
+                )
+            )
+        except LockTimeout:
+            raise
+        except Exception as exc:
+            raise GcError(f"GC completion is unavailable: {exc}") from exc
+        if completion.repo_uuid != repo_uuid or completion.plan_sha256 != plan_sha256:
+            raise GcError("GC completion belongs to another workspace or plan")
+        indexed_completion = self._read_operation_completion_locked(
+            repo_uuid, completion.operation_epoch, deadline_ns=deadline_ns,
+        )
+        if indexed_completion is None or indexed_completion != completion:
             raise GcRecoveryRequired(
                 "GC operation completion index does not bind its completion"
             )
@@ -663,7 +701,7 @@ class GcStore:
             fence_token=operation.fence_token,
             pointer_revision=reachability.pointer_revision,
             capacity_policy_sha256=capacity_policy.sha256,
-            candidates=reachability.candidates,
+            candidates=reachability.candidates[:_GC_OPERATION_MAX_CANDIDATES],
             protected=reachability.protected,
         )
         return plan
@@ -1456,32 +1494,9 @@ class GcStore:
                 completion_relative.parent,
                 deadline_ns=deadline_ns,
             )
-            try:
-                completion = GcCompletionState.from_json(
-                    self.state.read_existing_bytes(
-                        completion_relative,
-                        max_bytes=_MAX_GC_INTENT_BYTES,
-                        deadline_ns=deadline_ns,
-                    )
-                )
-            except LockTimeout:
-                raise
-            except Exception as exc:
-                raise GcError(f"GC completion is unavailable: {exc}") from exc
-            if (
-                completion.repo_uuid != operation.repo_uuid
-                or completion.plan_sha256 != plan_sha256
-            ):
-                raise GcError("GC completion belongs to another workspace or plan")
-            indexed_completion = self._read_operation_completion_locked(
-                operation.repo_uuid,
-                completion.operation_epoch,
-                deadline_ns=deadline_ns,
+            completion = self._read_indexed_completion_by_plan_locked(
+                operation.repo_uuid, plan_sha256, deadline_ns=deadline_ns,
             )
-            if indexed_completion is None or indexed_completion != completion:
-                raise GcRecoveryRequired(
-                    "GC operation completion index does not bind its completion"
-                )
             refreshed = self._plan_locked(
                 operation,
                 capacity_policy=capacity_policy,
