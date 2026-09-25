@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 import time
@@ -24,7 +25,7 @@ from graphify.workspace.lifecycle_contracts import (
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
 from graphify.workspace.persistence import InjectedFault, LockTimeout
-from graphify.workspace.pointers import PointerCAS, PointerStore
+from graphify.workspace.pointers import PointerCAS, PointerConflict, PointerStore
 from graphify.workspace.registry import RevisionConflict, SourceAlreadyActive
 from graphify.workspace.semantic_queue import (
     SemanticCertificationBlocked, SemanticQueueConflict, SemanticQueueError, SemanticQueuePolicy,
@@ -262,21 +263,30 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
         ttl_ns=1_000_000,
     )
     lease = promotion.grant.lease.to_dict()
+    cas = PointerCAS(
+        expected_pointer_revision=0,
+        expected_active_source_revision=1,
+        expected_source_epoch=1,
+        expected_operation_epoch=promotion.grant.operation_epoch,
+        expected_migration_epoch=promotion.grant.migration_epoch,
+        expected_state_schema_version=2,
+        expected_fence_token=lease["fence_token"],
+        candidate_generation_id=GENERATION_ID,
+        candidate_receipt_sha256=receipt.sha256,
+        expected_current_receipt_sha256=None,
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(LockTimeout):
+        pointers.promote(
+            promotion.grant, cas,
+            occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+            deadline_ns=time.monotonic_ns() - 1,
+        )
+    assert tree_snapshot(harness.state_root) == before
     pointer = pointers.promote(
-        promotion.grant,
-        PointerCAS(
-            expected_pointer_revision=0,
-            expected_active_source_revision=1,
-            expected_source_epoch=1,
-            expected_operation_epoch=promotion.grant.operation_epoch,
-            expected_migration_epoch=promotion.grant.migration_epoch,
-            expected_state_schema_version=2,
-            expected_fence_token=lease["fence_token"],
-            candidate_generation_id=GENERATION_ID,
-            candidate_receipt_sha256=receipt.sha256,
-            expected_current_receipt_sha256=None,
-        ),
+        promotion.grant, cas,
         occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+        deadline_ns=time.monotonic_ns() + 5_000_000_000,
     )
     assert pointer.to_dict()["pointer_revision"] == 1
     if interrupt_promotion:
@@ -329,9 +339,41 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
     assert tree_snapshot(harness.state_root) == before
 
     binding_path.write_bytes(saved_binding)
+    binding_path.chmod(0o600)
     released = harness.leases.release(terminal.grant)
     assert released.staged_attempt_sha256 is None
     assert "workspace" not in released.leases
+
+    registry = harness.registry.load().to_dict()
+    rollback_grant = harness.leases.acquire(
+        REPO_UUID, "ROLLBACK", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=released.operation_epoch,
+        expected_migration_epoch=released.migration_epoch,
+        acquired_at=START + timedelta(seconds=4),
+        monotonic_ns=2_100_000, ttl_ns=1_000_000,
+    )
+    rollback_lease = rollback_grant.lease.to_dict()
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(PointerConflict, match="last_good"):
+        pointers.rollback(
+            rollback_grant,
+            PointerCAS(
+                expected_pointer_revision=pointer.to_dict()["pointer_revision"],
+                expected_active_source_revision=1,
+                expected_source_epoch=1,
+                expected_operation_epoch=rollback_grant.operation_epoch,
+                expected_migration_epoch=rollback_grant.migration_epoch,
+                expected_state_schema_version=2,
+                expected_fence_token=rollback_lease["fence_token"],
+                candidate_generation_id=GENERATION_ID,
+                candidate_receipt_sha256=receipt.sha256,
+                expected_current_receipt_sha256=receipt.sha256,
+            ),
+            occurred_at=START + timedelta(seconds=4), monotonic_ns=2_100_001,
+        )
+    assert tree_snapshot(harness.state_root) == before
 
 
 def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_path):
@@ -523,6 +565,29 @@ def test_explicit_capacity_limit_rejects_reservation(tmp_path):
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_operator_repair_requires_approved_plan_before_execution(tmp_path):
+    harness, _generations, pointers, _observations = _runtime(tmp_path)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "REPAIR", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    before = tree_snapshot(harness.state_root)
+
+    with pytest.raises(PointerConflict, match="approved repair plan"):
+        pointers.recover(
+            grant, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+        )
+
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_gc_preview_is_read_only_and_does_not_adopt_unowned_generations(tmp_path):
     harness, generations, pointers, _observations = _runtime(tmp_path)
     gc = GcStore(
@@ -598,6 +663,170 @@ def test_gc_reused_epoch_rejects_changed_plan_before_durable_intent(tmp_path):
         )
     assert tree_snapshot(harness.state_root) == before
     assert not gc._intent_path(REPO_UUID).exists()
+
+
+@pytest.mark.parametrize("write_label", [
+    "gc:intent", "gc:completion", "gc:completion_epoch",
+])
+def test_gc_deadline_reaches_each_durable_install(tmp_path, monkeypatch, write_label):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        plan = gc._plan_locked(
+            operation, capacity_policy=POLICY, protections=protections,
+            probe_locks=True,
+        )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    original_install = gc.state.install_once_bytes
+
+    def expire_at_install(relative, data, *, label, **kwargs):
+        if label == write_label:
+            with monkeypatch.context() as clock:
+                clock.setattr(
+                    "graphify.workspace.persistence.time.monotonic_ns",
+                    lambda: deadline_ns,
+                )
+                return original_install(relative, data, label=label, **kwargs)
+        return original_install(relative, data, label=label, **kwargs)
+
+    monkeypatch.setattr(gc.state, "install_once_bytes", expire_at_install)
+    with pytest.raises(LockTimeout):
+        gc.execute(
+            grant, plan, capacity_policy=POLICY, protections=protections,
+            occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+            deadline_ns=deadline_ns,
+        )
+
+    intent_path = gc.state.path(gc._intent_path(REPO_UUID))
+    completion_path = gc.state.path(gc._completion_path(REPO_UUID, plan.sha256))
+    index_path = gc.state.path(
+        gc._operation_completion_path(REPO_UUID, grant.operation_epoch)
+    )
+    assert intent_path.exists() == (write_label != "gc:intent")
+    assert completion_path.exists() == (write_label == "gc:completion_epoch")
+    assert not index_path.exists()
+
+
+def test_gc_deadline_reaches_candidate_quarantine_rename(tmp_path, monkeypatch):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        plan = gc._plan_locked(
+            operation, capacity_policy=POLICY, protections=protections,
+            probe_locks=True,
+        )
+        intent = gc._intent(
+            operation, replace(plan, candidates=("gen-orphan",)), occurred_at=START,
+        )
+    source = gc.state.ensure_directory(generations._generation(REPO_UUID, "gen-orphan"))
+    destination = gc.state.path(gc._quarantine(REPO_UUID, "gen-orphan", grant.operation_epoch))
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    original_rename = gc.state.rename_contained
+
+    def expire_at_rename(source_relative, destination_relative, **kwargs):
+        with monkeypatch.context() as clock:
+            clock.setattr(
+                "graphify.workspace.persistence.time.monotonic_ns",
+                lambda: deadline_ns,
+            )
+            return original_rename(source_relative, destination_relative, **kwargs)
+
+    monkeypatch.setattr(gc.state, "rename_contained", expire_at_rename)
+    with pytest.raises(LockTimeout):
+        gc._rename_candidates(intent, deadline_ns=deadline_ns)
+
+    assert source.is_dir()
+    assert not destination.exists()
+
+
+def test_gc_deadline_reaches_purge_record_install(tmp_path, monkeypatch):
+    harness, generations, pointers, _observations = _runtime(tmp_path)
+    gc = GcStore(
+        harness.state_root, harness.leases, generations, pointers,
+        capabilities=harness.leases.state.capabilities,
+    )
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    empty = frozenset()
+    protections = GcProtection(empty, empty, empty, empty, empty, empty)
+    with harness.leases.current_operation(
+        grant, monotonic_ns=10_001, allowed_operations=frozenset({"GC"}),
+    ) as operation:
+        plan = gc._plan_locked(
+            operation, capacity_policy=POLICY, protections=protections,
+            probe_locks=True,
+        )
+    gc.execute(
+        grant, plan, capacity_policy=POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    deadline_ns = time.monotonic_ns() + 5_000_000_000
+    original_install = gc.state.install_once_bytes
+
+    def expire_at_purge(relative, data, *, label, **kwargs):
+        if label == "gc:purge":
+            with monkeypatch.context() as clock:
+                clock.setattr(
+                    "graphify.workspace.persistence.time.monotonic_ns",
+                    lambda: deadline_ns,
+                )
+                return original_install(relative, data, label=label, **kwargs)
+        return original_install(relative, data, label=label, **kwargs)
+
+    monkeypatch.setattr(gc.state, "install_once_bytes", expire_at_purge)
+    with pytest.raises(LockTimeout):
+        gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=POLICY,
+            protections=protections, completed_at=START + timedelta(seconds=2),
+            monotonic_ns=10_003, deadline_ns=deadline_ns,
+        )
+
+    assert not gc.state.path(gc._purge_path(REPO_UUID, plan.sha256)).exists()
 
 
 @pytest.mark.parametrize("site", ["completion", "purge_state", "purge_completion"])

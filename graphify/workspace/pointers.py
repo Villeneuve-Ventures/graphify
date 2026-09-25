@@ -880,10 +880,6 @@ class PointerStore:
                     deadline_ns,
                     "pointer movement exceeded its lease deadline",
                 )
-                self.state.cleanup_atomic_temps(
-                    self._workspace(operation.repo_uuid),
-                    deadline_ns=deadline_ns,
-                )
                 candidate_is_current = False
                 candidate_is_last_good = False
                 if current is not None:
@@ -902,6 +898,12 @@ class PointerStore:
                             == cas.candidate_generation_id
                             and last_good_ref["receipt_sha256"] == candidate.sha256
                         )
+                if transition == "ROLLED_BACK" and not candidate_is_last_good:
+                    raise PointerConflict("rollback candidate is not the exact last_good generation")
+                self.state.cleanup_atomic_temps(
+                    self._workspace(operation.repo_uuid),
+                    deadline_ns=deadline_ns,
+                )
                 snapshot = self.journal.recover_locked(
                     operation,
                     deadline_ns=deadline_ns,
@@ -997,6 +999,7 @@ class PointerStore:
         *,
         occurred_at: datetime,
         monotonic_ns: int,
+        deadline_ns: int | None = None,
     ) -> PointerSet:
         return self._move(
             grant,
@@ -1005,6 +1008,7 @@ class PointerStore:
             allowed_operation="PROMOTE",
             occurred_at=occurred_at,
             monotonic_ns=monotonic_ns,
+            deadline_ns=deadline_ns,
         )
 
     def rollback(
@@ -1662,6 +1666,8 @@ class PointerStore:
             )
         )
         with operation_context as operation:
+            if operation.operation == "REPAIR" and expected_plan is None:
+                raise PointerConflict("operator repair requires an approved repair plan")
             self._assert_no_gc_intent(
                 operation.repo_uuid,
                 deadline_ns=deadline_ns,

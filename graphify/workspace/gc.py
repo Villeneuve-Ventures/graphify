@@ -983,6 +983,7 @@ class GcStore:
                     source,
                     destination,
                     label=f"gc:{generation_id}:quarantine",
+                    deadline_ns=deadline_ns,
                 )
                 self.fault_hook(f"gc:{generation_id}:quarantined")
             require_before_deadline(
@@ -1006,6 +1007,7 @@ class GcStore:
             self._completion_path(intent.repo_uuid, intent.plan_sha256),
             completion.canonical,
             label="gc:completion",
+            deadline_ns=deadline_ns,
         )
         for operation_epoch in sorted(
             {intent.operation_epoch, receipt_operation_epoch}
@@ -1028,6 +1030,7 @@ class GcStore:
                 self._operation_completion_path(intent.repo_uuid, operation_epoch),
                 index.canonical,
                 label="gc:completion_epoch",
+                deadline_ns=deadline_ns,
             )
         require_before_deadline(
             deadline_ns,
@@ -1132,6 +1135,7 @@ class GcStore:
                 self._intent_path(operation.repo_uuid),
                 intent.canonical,
                 label="gc:intent",
+                deadline_ns=deadline_ns,
             )
             self.fault_hook("gc:intent_durable")
             locks = [
@@ -1461,6 +1465,7 @@ class GcStore:
                 purge_relative,
                 purge.canonical,
                 label="gc:purge",
+                deadline_ns=deadline_ns,
             )
             require_before_deadline(
                 deadline_ns,
