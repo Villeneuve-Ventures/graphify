@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -470,6 +471,63 @@ def test_exact_rollback_replay_uses_journal_and_retained_prior(tmp_path, monkeyp
     assert tree_snapshot(harness.state_root) == before
 
 
+@pytest.mark.parametrize("missing_pointer", [False, True])
+def test_promotion_refuses_visible_pointer_without_journal_authority(
+    tmp_path, monkeypatch, missing_pointer,
+):
+    harness, _generations, pointers, _observations = _runtime(tmp_path)
+    visible = None if missing_pointer else PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 1,
+        "active_source_revision": 1, "source_epoch": 1,
+        "operation_epoch": 1, "fence_token": 1, "state_schema_version": 2,
+        "current": {"generation_id": "gen-older", "receipt_sha256": "a" * 64},
+        "last_good": None,
+    })
+    event = SimpleNamespace(to_dict=lambda: {
+        "transition": "PROMOTED", "generation_id": "gen-newer",
+        "receipt_sha256": "b" * 64, "pointer_revision": 3,
+        "operation_epoch": 3, "fence_token": 3,
+    })
+    candidate = SimpleNamespace(
+        sha256="c" * 64,
+        to_dict=lambda: {"generation_id": "gen-candidate", "source_epoch": 1},
+    )
+    operation = SimpleNamespace(repo_uuid=REPO_UUID)
+    touched = []
+    monkeypatch.setattr(pointers.leases, "current_operation", lambda *a, **kw: nullcontext(operation))
+    monkeypatch.setattr(pointers, "_assert_no_gc_intent", lambda *a, **kw: None)
+    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda *a: visible)
+    monkeypatch.setattr(pointers, "_lock_set", lambda *a: [])
+    monkeypatch.setattr(pointers.state, "existing_generation_locks", lambda *a, **kw: nullcontext())
+    monkeypatch.setattr(pointers.state, "private_directory_exists", lambda *a: True)
+    monkeypatch.setattr(pointers.journal, "read_stable", lambda *a, **kw: JournalSnapshot(None, (event,)))
+    monkeypatch.setattr(pointers, "_verify_generation", lambda *a, **kw: candidate)
+    monkeypatch.setattr(pointers, "_journal_certifies", lambda *a, **kw: True)
+    monkeypatch.setattr(pointers, "_validate_cas", lambda *a: None)
+    monkeypatch.setattr(pointers, "_verify_ref", lambda *a, **kw: candidate)
+    monkeypatch.setattr(pointers, "_pointer_document", lambda *a, **kw: visible)
+    monkeypatch.setattr(pointers.state, "cleanup_atomic_temps", lambda *a, **kw: touched.append("cleanup"))
+    monkeypatch.setattr(pointers.journal, "recover_locked", lambda *a, **kw: touched.append("journal") or JournalSnapshot(None, (event,)))
+    monkeypatch.setattr(pointers, "_persist_move", lambda *a, **kw: touched.append("persist") or visible)
+    cas = PointerCAS(
+        expected_pointer_revision=0 if missing_pointer else 1,
+        expected_active_source_revision=1, expected_source_epoch=1,
+        expected_operation_epoch=1, expected_migration_epoch=0,
+        expected_state_schema_version=2, expected_fence_token=1,
+        candidate_generation_id="gen-candidate", candidate_receipt_sha256="c" * 64,
+        expected_current_receipt_sha256=None,
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(PointerCorrupt, match="visible pointer"):
+        pointers.promote(
+            SimpleNamespace(), cas,
+            occurred_at=START, monotonic_ns=10_000,
+        )
+    assert touched == []
+    assert tree_snapshot(harness.state_root) == before
+
+
 def test_source_activation_requires_adopted_linked_worktree_and_exact_cas(tmp_path):
     harness = create_harness(tmp_path)
     linked = tmp_path.resolve() / "linked"
@@ -704,12 +762,12 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         "pointer_set": previous.to_dict(),
     })
 
-    def event(transition, revision):
+    def event(transition, revision, *, operation_epoch=3, fence_token=3):
         return SimpleNamespace(
             to_dict=lambda: {
                 "transition": transition, "generation_id": "gen-older",
                 "receipt_sha256": "a" * 64, "pointer_revision": revision,
-                "operation_epoch": 3, "fence_token": 3,
+                "operation_epoch": operation_epoch, "fence_token": fence_token,
             },
             sha256=transition,
         )
@@ -771,6 +829,71 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         allow_atomic_temps=False, deadline_ns=None,
     )
     assert pending_analysis.plan.pointer_action == "resume_pending"
+
+    # Successor recovery advances the interrupted rollback's revision while
+    # preserving its exact prior last_good. Both another interruption and a
+    # completed repair must retain that rollback authority.
+    repaired = PointerSet.from_mapping({
+        **rolled_back.to_dict(), "pointer_revision": 4,
+        "operation_epoch": 4, "fence_token": 4,
+    })
+    repair_prior = PriorPointerRecord.from_mapping({
+        **prior.to_dict(), "replaced_by_revision": 4,
+    })
+    for visible in (rolled_back, repaired):
+        analysis = pointers._derive_repair_analysis(
+            REPO_UUID, active_source_revision=1, operation_epoch=4,
+            fence_token=4, current=visible, pending=repaired, prior=repair_prior,
+            raw_evidence={"current_sha256": visible.sha256},
+            allow_atomic_temps=False, deadline_ns=None,
+        )
+        assert analysis.plan.pointer_action == "resume_pending"
+
+    repair_event = event("REPAIRED", 4, operation_epoch=4, fence_token=4)
+    repaired_snapshot = JournalSnapshot(None, (certified, superseded, repair_event))
+    monkeypatch.setattr(
+        pointers.journal, "project_recovery",
+        lambda *a, **kw: JournalRecoveryProjection(repaired_snapshot, (), "e" * 64),
+    )
+    finalized = pointers._derive_repair_analysis(
+        REPO_UUID, active_source_revision=1, operation_epoch=4,
+        fence_token=4, current=repaired, pending=repaired, prior=repair_prior,
+        raw_evidence={"current_sha256": repaired.sha256},
+        allow_atomic_temps=False, deadline_ns=None,
+    )
+    assert finalized.plan.pointer_action == "finalize_pending"
+    complete = pointers._derive_repair_analysis(
+        REPO_UUID, active_source_revision=1, operation_epoch=None,
+        fence_token=None, current=repaired, pending=None, prior=repair_prior,
+        raw_evidence={"current_sha256": repaired.sha256},
+        allow_atomic_temps=False, deadline_ns=None,
+    )
+    assert complete.plan.classification == "no_op"
+    assert not pointers._rollback_authorizes_superseded(
+        JournalSnapshot(None, (*repaired_snapshot.events, event("SUPERSEDED", 4))),
+        repaired, None, repair_prior, deadline_ns=None,
+    )
+    unrelated_prior = PriorPointerRecord.from_mapping({
+        **repair_prior.to_dict(),
+        "pointer_set": {
+            **previous.to_dict(),
+            "last_good": {"generation_id": "gen-unrelated", "receipt_sha256": "f" * 64},
+        },
+    })
+    assert not pointers._rollback_authorizes_superseded(
+        repaired_snapshot, repaired, None, unrelated_prior, deadline_ns=None,
+    )
+    unrelated_move = SimpleNamespace(to_dict=lambda: {
+        "transition": "PROMOTED", "generation_id": "gen-unrelated",
+        "receipt_sha256": "f" * 64, "pointer_revision": 3,
+        "operation_epoch": 3, "fence_token": 3,
+    })
+    assert not pointers._rollback_authorizes_superseded(
+        JournalSnapshot(None, (certified, superseded, unrelated_move)),
+        repaired, repaired, repair_prior, deadline_ns=None,
+    )
+
+    monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: interrupted)
     with pytest.raises(PointerCorrupt, match="superseded"):
         pointers._derive_repair_analysis(
             REPO_UUID, active_source_revision=1, operation_epoch=None,
