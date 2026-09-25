@@ -39,6 +39,7 @@ from graphify.workspace.semantic_queue import SemanticQueueStore
 _PURGE_ALLOWED_DIRECTORY_MODES = frozenset({0o700, 0o755})
 _PURGE_ALLOWED_FILE_MODES = frozenset({0o600, 0o644, 0o755})
 _MAX_GC_INTENT_BYTES = 1024 * 1024
+_GC_RECORD_SCALAR_HEADROOM = 4096
 GC_PREVIEW_MAX_GENERATIONS = 4096
 
 
@@ -959,6 +960,27 @@ class GcStore:
             }
         )
 
+    def _require_recoverable_record_sizes(self, intent: GcIntentState) -> None:
+        # A successor may add digits to the operation epoch and a timestamp may
+        # gain microseconds. Reserve room before publishing an intent that every
+        # later completion and purge reader must be able to decode.
+        longest_timestamp = datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+        completion = self._completion(intent, completed_at=longest_timestamp)
+        purge = GcPurgeState.from_mapping(
+            {
+                "contract": "graphify.workspace.gc_purge.internal",
+                "format_version": 1,
+                "repo_uuid": intent.repo_uuid,
+                "operation_epoch": intent.operation_epoch,
+                "plan_sha256": intent.plan_sha256,
+                "purged": list(intent.candidates),
+                "completed_at": _timestamp(longest_timestamp),
+            }
+        )
+        limit = _MAX_GC_INTENT_BYTES - _GC_RECORD_SCALAR_HEADROOM
+        if any(len(record.canonical) > limit for record in (intent, completion, purge)):
+            raise GcError("GC durable record would exceed its recovery read limit")
+
     def _rename_candidates(
         self,
         intent: GcIntentState,
@@ -995,6 +1017,46 @@ class GcStore:
                     deadline_ns=deadline_ns,
                 )
                 self.fault_hook(f"gc:{generation_id}:quarantined")
+            else:
+                with (
+                    self.state.existing_private_directory(source.parent) as source_parent,
+                    self.state.existing_private_directory(destination.parent) as destination_parent,
+                    self.state.existing_private_directory(destination) as held_destination,
+                ):
+                    for relative, descriptor in (
+                        (source.parent, source_parent),
+                        (destination.parent, destination_parent),
+                        (destination, held_destination),
+                    ):
+                        self.state._require_held_private_directory_binding(
+                            relative, descriptor, self.state.path(relative),
+                        )
+                    if self.state.private_directory_exists(source):
+                        raise GcRecoveryRequired(
+                            f"GC source reappeared while reconciling {generation_id}"
+                        )
+                    require_before_deadline(
+                        deadline_ns,
+                        "GC candidate quarantine exceeded its deadline",
+                    )
+                    self.state.syscalls.fsync(source_parent)
+                    require_before_deadline(
+                        deadline_ns,
+                        "GC candidate quarantine exceeded its deadline",
+                    )
+                    self.state.syscalls.fsync(destination_parent)
+                    for relative, descriptor in (
+                        (source.parent, source_parent),
+                        (destination.parent, destination_parent),
+                        (destination, held_destination),
+                    ):
+                        self.state._require_held_private_directory_binding(
+                            relative, descriptor, self.state.path(relative),
+                        )
+                    if self.state.private_directory_exists(source):
+                        raise GcRecoveryRequired(
+                            f"GC source reappeared while reconciling {generation_id}"
+                        )
             require_before_deadline(
                 deadline_ns,
                 "GC candidate quarantine exceeded its deadline",
@@ -1149,6 +1211,7 @@ class GcStore:
             if refreshed.canonical != plan.canonical:
                 raise GcPlanStale("GC dry-run plan no longer matches reachability")
             intent = self._intent(operation, plan, occurred_at=occurred_at)
+            self._require_recoverable_record_sizes(intent)
             completion = self._read_completion(
                 intent,
                 deadline_ns=deadline_ns,

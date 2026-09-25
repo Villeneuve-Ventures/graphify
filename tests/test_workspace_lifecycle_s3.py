@@ -811,6 +811,160 @@ def test_promotion_retains_only_current_source_last_good(
     assert moved.to_dict()["last_good"] == expected
 
 
+@pytest.mark.parametrize("switch_source", [False, True])
+def test_successor_pointer_recovery_retains_only_active_source_last_good(tmp_path, switch_source):
+    harness, generations, pointers, observations = _runtime(tmp_path)
+
+    def certify_and_promote(generation_id, tick, current=None, *, interrupt=False):
+        request_value = _request(harness, observations).to_dict()
+        request_value.update(
+            expected_pointer_revision=0 if current is None else current.to_dict()["pointer_revision"],
+            expected_current_receipt_sha256=(
+                None if current is None else current.to_dict()["current"]["receipt_sha256"]
+            ),
+        )
+        request = StructuralBuildRequest.from_mapping(request_value)
+        generations.request_staged_build(
+            REPO_UUID, generation_id, request, source_observations=observations,
+        )
+        attempt = generations.acquire_staged_operation(
+            REPO_UUID, generation_id, request, attempt_sha256="5" * 64,
+            operation="BUILD", acquired_at=START, monotonic_ns=tick, ttl_ns=1_000_000,
+        )
+        allocation = generations.allocate(
+            attempt.grant, expected_payload_bytes=request.expected_payload_bytes,
+            capacity_policy=POLICY, generation_id=generation_id,
+            occurred_at=START, monotonic_ns=tick + 1,
+        )
+        preparation = generations.prepare_staged_build(attempt, allocation, monotonic_ns=tick + 2)
+        payload = preparation.staging_path / "graphify-out"
+        payload.mkdir(mode=0o700)
+        (payload / "graph.json").write_bytes(b"{}\n")
+        (payload / "input-manifest.json").write_bytes(observations[0].consumed_inputs.canonical)
+        completion = generations.complete_staged_build(
+            preparation, source_observations=observations, monotonic_ns=tick + 3,
+        )
+        queue = generations.semantic_queue
+        queue.reconcile(
+            attempt.grant, (), source_epoch=1, policy_sha256=observations[0].policy_sha256,
+            source_observations=observations,
+            desired_watermark=request.expected_active_source_revision, semantic_required=False,
+            monotonic_ns=tick + 4,
+        )
+        queue.bind_sealed_inputs(
+            attempt.grant,
+            sealed_input_manifest_sha256=payload_manifest_sha256("graphify-out", completion.entries),
+            monotonic_ns=tick + 5,
+        )
+        receipt = generations.certify(
+            attempt.grant, allocation,
+            CertificationRequest(
+                source_commit=observations[0].source_commit, source_epoch=1,
+                policy_sha256=observations[0].policy_sha256,
+                observation_manifest_sha256=observations[0].inventory_sha256,
+                queue_watermark=request.expected_active_source_revision,
+                semantic_completeness="not_required",
+                compatibility_sha256=COMPATIBILITY_MANIFEST.sha256,
+                validations=("payload_manifest", "coordination_lock_precreated", "stable_semantic_queue"),
+            ),
+            source_observations=observations, declared_entries=completion.entries,
+            staged_completion=completion, occurred_at=START, monotonic_ns=tick + 6,
+        )
+        promotion = generations.acquire_staged_recovery(
+            REPO_UUID, generation_id, request, attempt_sha256="7" * 64,
+            acquired_at=START, monotonic_ns=tick + 2_000_000, ttl_ns=1_000_000,
+        )
+        cas = PointerCAS(
+            request.expected_pointer_revision, promotion.grant.active_source_revision, 1,
+            promotion.grant.operation_epoch, promotion.grant.migration_epoch, 2,
+            promotion.grant.lease.to_dict()["fence_token"], generation_id, receipt.sha256,
+            request.expected_current_receipt_sha256,
+        )
+        if interrupt:
+            def fault(label):
+                if label == "pointer:promoted:pending_durable":
+                    raise InjectedFault(label)
+
+            pointers.fault_hook = fault
+            with pytest.raises(InjectedFault, match="pending_durable"):
+                pointers.promote(
+                    promotion.grant, cas, occurred_at=START, monotonic_ns=tick + 2_000_001,
+                )
+            pointers.fault_hook = lambda _label: None
+            successor = generations.acquire_staged_recovery(
+                REPO_UUID, generation_id, request, attempt_sha256="8" * 64,
+                acquired_at=START, monotonic_ns=tick + 4_000_000, ttl_ns=1_000_000,
+            )
+            pointer = pointers.recover(
+                successor.grant, occurred_at=START, monotonic_ns=tick + 4_000_001,
+            )
+            assert successor.grant.operation_epoch > promotion.grant.operation_epoch
+            promotion = successor
+            completed_at = tick + 4_000_002
+        else:
+            pointer = pointers.promote(
+                promotion.grant, cas, occurred_at=START, monotonic_ns=tick + 2_000_001,
+            )
+            completed_at = tick + 2_000_002
+        generations.complete_staged_promotion(promotion, pointer, monotonic_ns=completed_at)
+        harness.leases.release(promotion.grant)
+        return pointer
+
+    first = certify_and_promote("gen-a1", 10_000)
+    second = certify_and_promote("gen-a2", 3_000_000, first)
+    assert second.to_dict()["last_good"] == first.to_dict()["current"]
+    if switch_source:
+        linked = tmp_path.resolve() / "linked"
+        git_output(harness.repo, "worktree", "add", "--quiet", str(linked))
+        source = discover_source(linked)
+        harness.registry.adopt(
+            source, OperatorAuthorization(
+                IdentityAction.ADOPT, "operator:s3-test", "linked fixture",
+                "2026-07-16T19:00:00Z", "adopt-linked",
+            ), expected_revision=1,
+        )
+        state = harness.leases.inspect(REPO_UUID)
+        harness.registry.activate_source(
+            source, OperatorAuthorization(
+                IdentityAction.ACTIVATE, "operator:s3-test", "select linked fixture",
+                "2026-07-16T19:00:00Z", "activate-linked",
+            ), leases=harness.leases, owner=harness.leases.current_owner(),
+            expected_registry_revision=2, expected_active_source_revision=1,
+            expected_operation_epoch=state.operation_epoch,
+            expected_migration_epoch=state.migration_epoch,
+            acquired_at=START, monotonic_ns=6_000_000, ttl_ns=1_000_000,
+        )
+        observations = _observations(linked)
+        trust_source_observations(generations, observations)
+    recovered = certify_and_promote("gen-new", 7_000_000, second, interrupt=True)
+    value = recovered.to_dict()
+    assert value["current"]["generation_id"] == "gen-new"
+    assert value["active_source_revision"] == (2 if switch_source else 1)
+    assert value["last_good"] == (None if switch_source else second.to_dict()["current"])
+
+    if not switch_source:
+        state = harness.leases.inspect(REPO_UUID)
+        rollback = harness.leases.acquire(
+            REPO_UUID, "ROLLBACK", harness.leases.current_owner(),
+            expected_registry_revision=1, expected_active_source_revision=1,
+            expected_operation_epoch=state.operation_epoch,
+            expected_migration_epoch=state.migration_epoch,
+            acquired_at=START, monotonic_ns=12_000_000, ttl_ns=1_000_000,
+        )
+        rolled_back = pointers.rollback(
+            rollback,
+            PointerCAS(
+                value["pointer_revision"], 1, 1, rollback.operation_epoch,
+                rollback.migration_epoch, 2, rollback.lease.to_dict()["fence_token"],
+                "gen-a2", second.to_dict()["current"]["receipt_sha256"],
+                value["current"]["receipt_sha256"],
+            ),
+            occurred_at=START, monotonic_ns=12_000_001,
+        )
+        assert rolled_back.to_dict()["current"] == second.to_dict()["current"]
+        harness.leases.release(rollback)
+
+
 def test_operator_repair_replays_only_matching_durable_result(tmp_path, monkeypatch):
     harness, _generations, pointers, _observations = _runtime(tmp_path)
     registry = harness.registry.load().to_dict()

@@ -1671,6 +1671,8 @@ class PointerStore:
                     receipt = verified_by_name.get(source_name, {}).get("last_good")
                     if (
                         receipt is not None
+                        and int(receipt.to_dict()["active_source_revision"])
+                        == active_source_revision
                         and receipt.to_dict()["generation_id"]
                         != candidate.to_dict()["generation_id"]
                     ):
