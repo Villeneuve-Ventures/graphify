@@ -132,7 +132,7 @@ class _PointerRepairAnalysis:
 
 
 def _timestamp(value: datetime) -> str:
-    if value.tzinfo is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise PointerError("pointer timestamps must be timezone-aware")
     normalized = value.astimezone(timezone.utc)
     timespec = "microseconds" if normalized.microsecond else "seconds"
@@ -639,15 +639,28 @@ class PointerStore:
         prior_revision = (
             None if prior_pointer_value is None else int(prior_pointer_value["pointer_revision"])
         )
+        # A successor can advance retained prior before publishing pending.
+        # In that window only the latest committed move may use the old root;
+        # the exact journal event and supersession ordering are checked below.
         exact_prior = (
             prior_value is not None
             and prior_pointer_value is not None
             and (
                 prior_value["replaced_by_revision"] == pointer_revision
                 or (
-                    pending is not None
-                    and pending.canonical == pointer.canonical
-                    and prior_value["replaced_by_revision"] > pointer_revision
+                    prior_value["replaced_by_revision"] > pointer_revision
+                    and (
+                        (pending is not None and pending.canonical == pointer.canonical)
+                        or (
+                            pending is None
+                            and not any(
+                                event.to_dict()["transition"]
+                                in {"PROMOTED", "ROLLED_BACK", "REPAIRED"}
+                                and int(event.to_dict()["pointer_revision"]) > pointer_revision
+                                for event in snapshot.events
+                            )
+                        )
+                    )
                 )
             )
             and prior_revision is not None
@@ -699,7 +712,7 @@ class PointerStore:
             ):
                 continue
             if (
-                value["transition"] != "ROLLED_BACK"
+                value["transition"] not in {"ROLLED_BACK", "REPAIRED"}
                 or value["generation_id"] != current_ref["generation_id"]
                 or value["receipt_sha256"] != current_ref["receipt_sha256"]
                 or any(earlier >= position for earlier in superseded_positions)
@@ -1069,6 +1082,8 @@ class PointerStore:
         monotonic_ns: int,
         deadline_ns: int | None = None,
     ) -> PointerSet:
+        # Normalize before any mutation, including first publication and replay.
+        _timestamp(occurred_at)
         with self.leases.current_operation(
             grant,
             monotonic_ns=monotonic_ns,
@@ -1896,12 +1911,23 @@ class PointerStore:
                         last_good = self._ref(receipt)
                         break
             journal_actions = (*journal_actions, "append_repair")
-            if (
-                visible_current is not None
-                and pending is not None
-                and visible_current.canonical == pending.canonical
-                and prior is not None
+            if prior_pointer is not None and (
+                (
+                    visible_current is not None
+                    and pending is not None
+                    and visible_current.canonical == pending.canonical
+                )
+                or (
+                    chosen_pointer is not None
+                    and prior_pointer.to_dict()["last_good"] == self._ref(candidate)
+                    and self._rollback_authorizes_superseded(
+                        snapshot, chosen_pointer, pending, prior, deadline_ns=deadline_ns,
+                    )
+                )
             ):
+                # Keep the exact last_good root through same-target repairs,
+                # even when current is damaged or absent. Retaining the repaired
+                # pointer instead would discard its rollback authorization.
                 visible_current = prior_pointer
 
         repaired_refs = (
@@ -2130,6 +2156,8 @@ class PointerStore:
         expected_plan: PointerRepairPlan | None = None,
         deadline_ns: int | None = None,
     ) -> PointerSet:
+        # Pending resumption can publish without passing through _persist_move.
+        _timestamp(occurred_at)
         operation_name = str(grant.lease.to_dict()["operation"])
         operation_context = (
             self.leases.current_operation_read_only(

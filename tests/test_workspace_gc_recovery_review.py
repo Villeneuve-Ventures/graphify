@@ -274,6 +274,52 @@ def test_purge_replay_syncs_visible_record_after_uncertain_install(tmp_path, mon
     assert attempts == ["purge_parent", "purge_parent"]
 
 
+def test_purge_rejects_naive_timestamp_before_deleting_quarantine(tmp_path):
+    harness, _, gc, grant, plan, protections, candidate, _ = _gc_with_candidate(
+        tmp_path, fault_hook=lambda _point: None,
+    )
+    gc.execute(
+        grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+        occurred_at=START, monotonic_ns=10_002,
+    )
+    quarantine = gc.state.path(gc._quarantine(REPO_UUID, candidate, grant.operation_epoch))
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcError, match="timezone-aware"):
+        gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+            protections=protections, completed_at=START.replace(tzinfo=None),
+            monotonic_ns=10_003,
+        )
+    assert quarantine.is_dir()
+    assert tree_snapshot(harness.state_root) == before
+    assert not gc.state.path(gc._purge_path(REPO_UUID, plan.sha256)).exists()
+
+
+def test_reconcile_rejects_naive_timestamp_before_quarantine(tmp_path):
+    def fault(event):
+        if event == "gc:intent_durable":
+            raise InjectedFault(event)
+
+    harness, generations, gc, grant, plan, protections, candidate, _ = _gc_with_candidate(
+        tmp_path, fault_hook=fault,
+    )
+    with pytest.raises(InjectedFault, match="intent_durable"):
+        gc.execute(
+            grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+            occurred_at=START, monotonic_ns=10_002,
+        )
+    gc.fault_hook = lambda _point: None
+    source = gc.state.path(generations._generation(REPO_UUID, candidate))
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcError, match="timezone-aware"):
+        gc.reconcile(
+            grant, capacity_policy=fixtures.POLICY, protections=protections,
+            completed_at=START.replace(tzinfo=None), monotonic_ns=10_003,
+        )
+    assert source.is_dir()
+    assert tree_snapshot(harness.state_root) == before
+
+
 @pytest.mark.parametrize("replay", ["execute", "reconcile"])
 def test_gc_replay_syncs_absent_intent_after_uncertain_clear(
     tmp_path, monkeypatch, replay,

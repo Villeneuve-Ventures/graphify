@@ -619,6 +619,7 @@ class StructuralComposition:
             root, leases, journal,
             compatibility_manifest=self.inputs.expected,
             semantic_queue=queue,
+            max_payload_bytes=policy.max_payload_bytes,
             capabilities=capabilities,
         )
         pointers = PointerStore(

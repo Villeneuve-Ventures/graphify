@@ -203,7 +203,7 @@ class _GcReachability:
 
 
 def _timestamp(value: datetime) -> str:
-    if value.tzinfo is None:
+    if value.tzinfo is None or value.utcoffset() is None:
         raise GcError("GC timestamps must be timezone-aware")
     normalized = value.astimezone(timezone.utc)
     timespec = "microseconds" if normalized.microsecond else "seconds"
@@ -1205,6 +1205,7 @@ class GcStore:
         monotonic_ns: int,
         deadline_ns: int | None = None,
     ) -> GcCompletionState:
+        _timestamp(occurred_at)
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
@@ -1350,6 +1351,7 @@ class GcStore:
         monotonic_ns: int,
         deadline_ns: int | None = None,
     ) -> GcCompletionState | None:
+        _timestamp(completed_at)
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
@@ -1476,6 +1478,7 @@ class GcStore:
         monotonic_ns: int,
         deadline_ns: int | None = None,
     ) -> GcPurgeState:
+        completed_timestamp = _timestamp(completed_at)
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
@@ -1545,6 +1548,17 @@ class GcStore:
             protected = {generation_id for generation_id, _reasons in refreshed.protected}
             if any(generation_id in protected for generation_id in completion.quarantined):
                 raise GcPlanStale("quarantined generation became protected before purge")
+            purge = GcPurgeState.from_mapping(
+                {
+                    "contract": "graphify.workspace.gc_purge.internal",
+                    "format_version": 1,
+                    "repo_uuid": operation.repo_uuid,
+                    "operation_epoch": operation.grant.operation_epoch,
+                    "plan_sha256": plan_sha256,
+                    "purged": list(completion.quarantined),
+                    "completed_at": completed_timestamp,
+                }
+            )
             for generation_id in completion.quarantined:
                 with self.state.existing_generation_lock(
                     self.generations._lock(operation.repo_uuid, generation_id),
@@ -1591,21 +1605,6 @@ class GcStore:
                             f"gc:{generation_id}:semantic_binding_parent_durable"
                         )
                     self.fault_hook(f"gc:{generation_id}:semantic_binding_removed")
-            require_before_deadline(
-                deadline_ns,
-                "GC purge exceeded its deadline",
-            )
-            purge = GcPurgeState.from_mapping(
-                {
-                    "contract": "graphify.workspace.gc_purge.internal",
-                    "format_version": 1,
-                    "repo_uuid": operation.repo_uuid,
-                    "operation_epoch": operation.grant.operation_epoch,
-                    "plan_sha256": plan_sha256,
-                    "purged": list(completion.quarantined),
-                    "completed_at": _timestamp(completed_at),
-                }
-            )
             require_before_deadline(
                 deadline_ns,
                 "GC purge exceeded its deadline",
