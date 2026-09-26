@@ -1,4 +1,5 @@
 """Pure composition and existing-only authority refusal before any state write."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -46,15 +47,42 @@ def test_composition_does_not_create_missing_state(tmp_path):
     root = tmp_path / "absent"
     auth = authority()
     result = compose_workspace_runtime(WorkspaceRuntimeInputs(root, auth, auth.compatibility))
-    with pytest.raises(WorkspaceAuthorityInvalid, match="S3"):
+    with pytest.raises(WorkspaceAuthorityInvalid, match="S4"):
         result.require_runtime()
     assert not root.exists()
+
+
+def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_path, monkeypatch):
+    from graphify.workspace.persistence import RuntimeCapabilities
+
+    detections = []
+    def detect(_cls, path):
+        detections.append(path)
+        return RuntimeCapabilities.supported_test_fixture()
+
+    monkeypatch.setattr(
+        RuntimeCapabilities, "detect",
+        classmethod(detect),
+    )
+    root = tmp_path / "absent"
+    auth = authority()
+    composition = compose_workspace_runtime(
+        WorkspaceRuntimeInputs(root, auth, auth.compatibility)
+    )
+    stores = composition.require_lifecycle_stores()
+    assert detections == [root]
+    assert stores.generations.state.root == root
+    assert stores.capacity_policy.workspace_max_generations == 4
+    assert stores.queue_policy.max_claimed_tasks == 1
+    assert not root.exists()
+    with pytest.raises(WorkspaceAuthorityInvalid, match="S4"):
+        composition.require_runtime()
     with pytest.raises(WorkspaceAuthorityInvalid):
         load_workspace_runtime_inputs(state_root=root, expected=auth.compatibility)
     assert not root.exists()
 
 
-@pytest.mark.parametrize("damage", ["none", "mode", "root-mode", "root-mode-race", "symlink", "ancestor-link", "hardlink", "truncated", "duplicate", "oversized", "wrong-tuple", "no-policy"])
+@pytest.mark.parametrize("damage", ["none", "mode", "root-mode", "root-mode-race", "symlink", "ancestor-link", "hardlink", "truncated", "duplicate", "oversized", "wrong-tuple", "no-policy", "multiple-claims"])
 def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
     import graphify.workspace.composition as composition
     root = tmp_path.resolve() / "state"
@@ -67,6 +95,10 @@ def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
     if damage == "oversized": payload = b" " * (composition.RUNTIME_AUTHORITY_MAX_BYTES + 1)
     if damage == "no-policy":
         data = auth.to_dict(); del data["structural_policy"]
+        from graphify.workspace.contracts import canonical_json_bytes
+        payload = canonical_json_bytes(data)
+    if damage == "multiple-claims":
+        data = auth.to_dict(); data["structural_policy"]["max_claimed_tasks"] = 2
         from graphify.workspace.contracts import canonical_json_bytes
         payload = canonical_json_bytes(data)
     path.write_bytes(payload); path.chmod(0o600)
@@ -107,10 +139,24 @@ def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
     assert path.read_bytes() == payload
 
 
-@pytest.mark.parametrize("values", [(0, 1, 1, 1, 1), (True, 2, 1, 1, 1), (1, 2, 2, 1, 1)])
+@pytest.mark.parametrize("values", [(0, 1, 1, 1, 1), (True, 2, 1, 1, 1), (1, 2, 2, 1, 1), (8, 16384, 2, 4, 1048576)])
 def test_policy_has_no_defaults_or_invalid_limits(values):
     with pytest.raises(ContractError): StructuralPolicy(*values)
     with pytest.raises(ContractError): StructuralPolicy.from_mapping({})
+
+
+def test_runtime_authority_schema_and_parser_require_one_claim():
+    from jsonschema import Draft202012Validator
+
+    schema_path = Path(__file__).resolve().parents[1] / "graphify/workspace/schemas/runtime-authority.schema.json"
+    schema = json.loads(schema_path.read_text())
+    validator = Draft202012Validator(schema["properties"]["structural_policy"])
+    data = authority().to_dict()
+    validator.validate(data["structural_policy"])
+    data["structural_policy"]["max_claimed_tasks"] = 2
+    assert list(validator.iter_errors(data["structural_policy"]))
+    with pytest.raises(ContractError, match="exactly one claimed task"):
+        WorkspaceRuntimeAuthority.from_mapping(data)
 
 
 def test_cold_imports_have_no_platform_semantic_or_state_side_effects(tmp_path):

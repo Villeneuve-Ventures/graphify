@@ -44,8 +44,7 @@
         },
         "max_claimed_tasks": {
           "type": "integer",
-          "minimum": 1,
-          "maximum": 9223372036854775807
+          "const": 1
         },
         "max_generations": {
           "type": "integer",
