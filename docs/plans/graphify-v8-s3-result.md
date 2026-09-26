@@ -45,6 +45,12 @@ uv run --frozen python -m tools.skillgen --monolith-roundtrip
 uv run --frozen python -m tools.skillgen --always-on-roundtrip
 ```
 
+### Historical receipts for earlier S3 candidates
+
+The following receipts predate the September 26 acceptance candidate. They do
+not cover the later pointer, GC, and capacity repairs. The revision-bound
+receipt below supersedes them for those repairs.
+
 After review repairs, the full serial gate passed **6,019 tests, with 41 skipped
 and 235 subtests passed** (316.23 s). Focused lifecycle, storage separation,
 export, and cache checks passed 132 tests. The optimized protected verifier
@@ -61,6 +67,43 @@ graphs were not modified. The current CI help and install smoke commands both
 passed with a disposable `HOME` at
 `/private/tmp/graphify-s3-install-smoke-w01wj41l/home`; no real user
 installation was changed.
+
+### September 26 acceptance receipt
+
+The tested source and test contents were committed as
+`d4329ea88d957f6f2a1c746219b27723a416787f`, based on v8
+`4227a4bc48ac5126814eb6360cc59687dc7e11d3`. The serial run finished before
+commit creation; all 13 changed-file hashes were then checked against the
+committed contents, and the worktree was clean. The review manifest's SHA-256
+was `6ff0494cb3c15f4095521a25a406b0845338e7d3fe0e0c5df3bf4490bce322c8`.
+Raw logs and the manifest remain session-local; the results below are the
+repository-visible receipt, not a claim that those artifacts are committed.
+
+The environment was prepared with `uv sync --all-extras --frozen`, using
+CPython 3.14.3 and Git 2.55.0. The final full-suite invocation was:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen pytest tests/ -q --tb=short -p no:cacheprovider
+```
+
+It passed **6,618 tests, with 41 skipped and 235 subtests passed**, in
+**792.03 seconds**. Six warnings concerned existing jieba escape sequences
+and expected cache-safety refusals. This run includes the capacity and pointer
+acceptance suites and the final GC recovery regressions. An earlier run with
+missing extras and a different interpreter entry point failed; it is not the
+acceptance run.
+
+The optimized-Python verifier passed **80 tests** in 10.14 seconds. All five
+skillgen commands listed above passed, as did Ruff F checks on the seven
+repair/test paths, `git diff --check`, and `graphify --help`. The AST-only graph
+refresh completed after the final source edits. A new wheel build, installation
+smoke, and native crash test were not part of this acceptance run.
+
+Independent code-review and architecture lanes reviewed the complete 13-path
+candidate and the final correction round. They returned **APPROVE** and
+**CLEAR**, with no remaining substantiated P0–P2 finding. CI was not awaited.
+This receipt is bound to the commit above; this later documentation-only
+clarification does not claim another full-suite run or widen the S3 boundary.
 
 ## Independent review
 
