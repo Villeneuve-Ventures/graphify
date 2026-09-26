@@ -12,10 +12,11 @@ import time
 import pytest
 
 from graphify.workspace.gc import (
-    GcError, GcProtection, GcStore, _GcReachability, _MAX_GC_INTENT_BYTES,
+    GcError, GcPreviewAuthorityConflict, GcProtection, GcStore,
+    _GcReachability, _MAX_GC_INTENT_BYTES,
 )
 from graphify.workspace.lifecycle_contracts import CapacityPolicy, GcPurgeState
-from graphify.workspace.persistence import CommitUnknown, InjectedFault
+from graphify.workspace.persistence import CommitUnknown, InjectedFault, LockTimeout
 from tests import test_workspace_lifecycle_s3 as fixtures
 from tests.workspace_s3_helpers import REPO_UUID, START, tree_snapshot
 
@@ -214,6 +215,77 @@ def test_replayed_purge_must_match_indexed_completion(tmp_path):
             plan_sha256=plan.sha256,
             deadline_ns=time.monotonic_ns() + 5_000_000_000,
         )
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_purge_preflight_replay_rejects_stale_lifecycle_authority(tmp_path):
+    harness, _generations, gc, grant, plan, protections, _candidate, registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    gc.execute(
+        grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    purge = gc.purge(
+        grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+        protections=protections, completed_at=START + timedelta(seconds=2),
+        monotonic_ns=10_003,
+    )
+    expected = {
+        "expected_registry_revision": registry["revision"],
+        "expected_active_source_revision": grant.active_source_revision,
+        "expected_operation_epoch": grant.operation_epoch,
+        "expected_migration_epoch": grant.migration_epoch,
+        "expected_pointer_revision": plan.pointer_revision,
+        "plan_sha256": plan.sha256,
+        "deadline_ns": time.monotonic_ns() + 5_000_000_000,
+    }
+    assert gc.preflight_lifecycle(REPO_UUID, **expected) == purge
+
+    harness.leases.acquire(
+        REPO_UUID, "GC", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=grant.active_source_revision,
+        expected_operation_epoch=grant.operation_epoch,
+        expected_migration_epoch=grant.migration_epoch,
+        acquired_at=START + timedelta(seconds=3),
+        monotonic_ns=2_000_000, ttl_ns=1_000_000,
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcPreviewAuthorityConflict, match="operation_epoch"):
+        gc.preflight_lifecycle(REPO_UUID, **expected)
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_gc_generation_enumeration_stops_at_deadline_between_entries(
+    tmp_path, monkeypatch,
+):
+    harness, generations, gc, _grant, _plan, _protections, _candidate, _registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    generation_root = generations._workspace(REPO_UUID) / "generations"
+    for index in range(4):
+        gc.state.ensure_directory(generation_root / f"gen-deadline-{index}")
+    before = tree_snapshot(harness.state_root)
+    opened = []
+    clock_ns = 0
+    original_open = gc.state._open_directory_at
+    generation_path = gc.state.path(generation_root)
+
+    def expire_after_first_entry(descriptor, name, child_path, **kwargs):
+        nonlocal clock_ns
+        if child_path.parent == generation_path:
+            opened.append(name)
+        result = original_open(descriptor, name, child_path, **kwargs)
+        if child_path.parent == generation_path and len(opened) == 1:
+            clock_ns = 100
+        return result
+
+    monkeypatch.setattr(gc.state, "_open_directory_at", expire_after_first_entry)
+    monkeypatch.setattr("graphify.workspace.persistence.time.monotonic_ns", lambda: clock_ns)
+    with pytest.raises(LockTimeout):
+        gc._generation_ids(REPO_UUID, deadline_ns=100)
+    assert len(opened) == 1
     assert tree_snapshot(harness.state_root) == before
 
 

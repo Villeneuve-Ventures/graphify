@@ -339,6 +339,7 @@ class GcStore:
                 relative,
                 allow_missing=True,
                 maximum_entries=maximum_entries,
+                deadline_ns=deadline_ns,
             )
         except StatePathError as exc:
             raise GcError(f"generations path is unsafe: {exc}") from exc
@@ -834,14 +835,6 @@ class GcStore:
                 repo_uuid,
                 deadline_ns=deadline_ns,
             ):
-                if plan_sha256 is not None:
-                    purge = self._read_purge_state_locked(
-                        repo_uuid,
-                        plan_sha256,
-                        deadline_ns=deadline_ns,
-                    )
-                    if purge is not None:
-                        return purge
                 lease_state = self.leases.read_only_snapshot_locked(
                     registry,
                     repo_uuid,
@@ -902,6 +895,13 @@ class GcStore:
                     raise GcRecoveryRequired(
                         "GC intent must be reconciled before purge"
                     )
+                purge = self._read_purge_state_locked(
+                    repo_uuid,
+                    plan_sha256,
+                    deadline_ns=deadline_ns,
+                )
+                if purge is not None:
+                    return purge
                 completion_data = self.state.read_optional_existing_bytes(
                     self._completion_path(repo_uuid, plan_sha256),
                     max_bytes=_MAX_GC_INTENT_BYTES,
