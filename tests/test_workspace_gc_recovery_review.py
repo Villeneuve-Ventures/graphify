@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import timedelta
 import errno
@@ -298,3 +299,82 @@ def test_operational_gc_batches_leave_remaining_generations_for_successor(tmp_pa
         monotonic_ns=2_000_002,
     )
     assert second_completion.quarantined == second.candidates
+
+
+@pytest.mark.parametrize("stage", ["execute", "reconcile", "purge"])
+def test_gc_batch_uses_bounded_simultaneous_generation_locks(tmp_path, monkeypatch, stage):
+    harness, generations, gc, grant, _plan, protections, candidate, _registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    for number in range(23):
+        generation_id = f"gen-descriptor-{number:02d}"
+        gc.state.ensure_directory(generations._generation(REPO_UUID, generation_id))
+        lock = gc.state.path(generations._lock(REPO_UUID, generation_id))
+        gc.state.ensure_directory(generations._lock(REPO_UUID, generation_id).parent)
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+    policy_value = fixtures.POLICY.to_dict()
+    policy_value["global_max_generations"] = 64
+    policy_value["workspace_max_generations"] = 64
+    policy = CapacityPolicy.from_mapping(policy_value)
+    plan = gc.plan(
+        grant, capacity_policy=policy, protections=protections, monotonic_ns=10_001,
+    )
+    assert len(plan.candidates) == 24
+    assert candidate in plan.candidates
+
+    if stage == "reconcile":
+        def interrupt(point):
+            if point == "gc:intent_durable":
+                raise InjectedFault(point)
+
+        gc.fault_hook = interrupt
+        with pytest.raises(InjectedFault, match="intent_durable"):
+            gc.execute(
+                grant, plan, capacity_policy=policy, protections=protections,
+                occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+            )
+        assert gc.state.path(gc._intent_path(REPO_UUID)).is_file()
+        gc.fault_hook = lambda _point: None
+
+    active_locks = 0
+    peak_locks = 0
+    original_lock = gc.state.existing_generation_lock
+
+    @contextmanager
+    def descriptor_limited_lock(*args, **kwargs):
+        nonlocal active_locks, peak_locks
+        with original_lock(*args, **kwargs):
+            active_locks += 1
+            peak_locks = max(peak_locks, active_locks)
+            try:
+                if active_locks > 2:
+                    raise OSError(errno.EMFILE, "injected generation lock descriptor limit")
+                yield
+            finally:
+                active_locks -= 1
+
+    if stage != "purge":
+        monkeypatch.setattr(gc.state, "existing_generation_lock", descriptor_limited_lock)
+    if stage == "reconcile":
+        completion = gc.reconcile(
+            grant, capacity_policy=policy, protections=protections,
+            completed_at=START + timedelta(seconds=2), monotonic_ns=10_003,
+        )
+    else:
+        completion = gc.execute(
+            grant, plan, capacity_policy=policy, protections=protections,
+            occurred_at=START + timedelta(seconds=2), monotonic_ns=10_003,
+        )
+    assert completion is not None
+    assert completion.quarantined == plan.candidates
+    assert not gc.state.path(gc._intent_path(REPO_UUID)).exists()
+    if stage == "purge":
+        monkeypatch.setattr(gc.state, "existing_generation_lock", descriptor_limited_lock)
+        purge = gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=policy,
+            protections=protections, completed_at=START + timedelta(seconds=3),
+            monotonic_ns=10_004,
+        )
+        assert purge.purged == plan.candidates
+    assert peak_locks <= 2

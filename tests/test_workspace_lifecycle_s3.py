@@ -298,6 +298,24 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
         deadline_ns=time.monotonic_ns() + 5_000_000_000,
     )
     assert pointer.to_dict()["pointer_revision"] == 1
+    with pointers.read_current(REPO_UUID) as reading:
+        assert reading.pointer == pointer
+        assert reading.receipt == receipt
+    for field in ("active_source_revision", "source_epoch"):
+        altered = PointerSet.from_mapping({**pointer.to_dict(), field: 2})
+        pointers.state.atomic_replace_bytes(
+            pointers._current(REPO_UUID), altered.canonical,
+            label=f"test:alter_{field}",
+        )
+        altered_state = tree_snapshot(harness.state_root)
+        with pytest.raises(PointerCorrupt, match="source authority"):
+            with pointers.read_current(REPO_UUID):
+                pytest.fail("read_current yielded an invalid source authority")
+        assert tree_snapshot(harness.state_root) == altered_state
+        pointers.state.atomic_replace_bytes(
+            pointers._current(REPO_UUID), pointer.canonical,
+            label=f"test:restore_{field}",
+        )
     promoted_state = tree_snapshot(harness.state_root)
     assert pointers.promote(
         promotion.grant, cas,
@@ -444,7 +462,7 @@ def test_exact_rollback_replay_uses_journal_and_retained_prior(tmp_path, monkeyp
         "operation_epoch": grant.operation_epoch,
         "fence_token": grant.lease.to_dict()["fence_token"],
     })
-    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda _repo: current)
+    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda _repo, **_kw: current)
     monkeypatch.setattr(pointers, "_lock_set", lambda *args: [])
     monkeypatch.setattr(pointers, "_verify_generation", lambda *args, **kw: candidate)
     monkeypatch.setattr(pointers, "retained_prior", lambda *args, **kw: retained)
@@ -499,7 +517,7 @@ def test_promotion_refuses_visible_pointer_without_journal_authority(
     touched = []
     monkeypatch.setattr(pointers.leases, "current_operation", lambda *a, **kw: nullcontext(operation))
     monkeypatch.setattr(pointers, "_assert_no_gc_intent", lambda *a, **kw: None)
-    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda *a: visible)
+    monkeypatch.setattr(pointers, "_preliminary_pointer", lambda *a, **kw: visible)
     monkeypatch.setattr(pointers, "_lock_set", lambda *a: [])
     monkeypatch.setattr(pointers.state, "existing_generation_locks", lambda *a, **kw: nullcontext())
     monkeypatch.setattr(pointers.state, "private_directory_exists", lambda *a: True)

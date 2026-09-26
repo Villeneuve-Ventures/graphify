@@ -1023,9 +1023,10 @@ class GcStore:
         self,
         intent: GcIntentState,
         *,
+        generation_ids: tuple[str, ...] | None = None,
         deadline_ns: int | None = None,
     ) -> None:
-        for generation_id in intent.candidates:
+        for generation_id in intent.candidates if generation_ids is None else generation_ids:
             require_before_deadline(
                 deadline_ns,
                 "GC candidate quarantine exceeded its deadline",
@@ -1265,15 +1266,15 @@ class GcStore:
                 deadline_ns=deadline_ns,
             )
             self.fault_hook("gc:intent_durable")
-            locks = [
+            first_lock = [
                 (
                     generation_id,
                     self.generations._lock(operation.repo_uuid, generation_id),
                 )
-                for generation_id in plan.candidates
+                for generation_id in plan.candidates[:1]
             ]
             with self.state.existing_generation_locks(
-                locks,
+                first_lock,
                 exclusive=True,
                 deadline_ns=deadline_ns,
             ):
@@ -1293,10 +1294,24 @@ class GcStore:
                 if locked_plan.canonical != plan.canonical:
                     raise GcRecoveryRequired("GC reachability changed after durable intent")
                 self.fault_hook("gc:reachability_rechecked")
-                self._rename_candidates(
-                    intent,
+                if first_lock:
+                    self._rename_candidates(
+                        intent,
+                        generation_ids=(first_lock[0][0],),
+                        deadline_ns=deadline_ns,
+                    )
+            for generation_id in plan.candidates[1:]:
+                with self.state.existing_generation_lock(
+                    self.generations._lock(operation.repo_uuid, generation_id),
+                    generation_id=generation_id,
+                    exclusive=True,
                     deadline_ns=deadline_ns,
-                )
+                ):
+                    self._rename_candidates(
+                        intent,
+                        generation_ids=(generation_id,),
+                        deadline_ns=deadline_ns,
+                    )
             if completion is None:
                 completion = self._completion(intent, completed_at=occurred_at)
             self._write_completion(
@@ -1380,22 +1395,18 @@ class GcStore:
                 intent,
                 deadline_ns=deadline_ns,
             )
-            locks = [
-                (
-                    generation_id,
+            for generation_id in intent.candidates:
+                with self.state.existing_generation_lock(
                     self.generations._lock(operation.repo_uuid, generation_id),
-                )
-                for generation_id in intent.candidates
-            ]
-            with self.state.existing_generation_locks(
-                locks,
-                exclusive=True,
-                deadline_ns=deadline_ns,
-            ):
-                self._rename_candidates(
-                    intent,
+                    generation_id=generation_id,
+                    exclusive=True,
                     deadline_ns=deadline_ns,
-                )
+                ):
+                    self._rename_candidates(
+                        intent,
+                        generation_ids=(generation_id,),
+                        deadline_ns=deadline_ns,
+                    )
             if completion is None:
                 completion = self._completion(intent, completed_at=completed_at)
             self._write_completion(
@@ -1512,19 +1523,13 @@ class GcStore:
             protected = {generation_id for generation_id, _reasons in refreshed.protected}
             if any(generation_id in protected for generation_id in completion.quarantined):
                 raise GcPlanStale("quarantined generation became protected before purge")
-            locks = [
-                (
-                    generation_id,
+            for generation_id in completion.quarantined:
+                with self.state.existing_generation_lock(
                     self.generations._lock(operation.repo_uuid, generation_id),
-                )
-                for generation_id in completion.quarantined
-            ]
-            with self.state.existing_generation_locks(
-                locks,
-                exclusive=True,
-                deadline_ns=deadline_ns,
-            ):
-                for generation_id in completion.quarantined:
+                    generation_id=generation_id,
+                    exclusive=True,
+                    deadline_ns=deadline_ns,
+                ):
                     require_before_deadline(
                         deadline_ns,
                         "GC purge exceeded its deadline",

@@ -740,13 +740,16 @@ class PointerStore:
         ):
             raise PointerCorrupt("visible pointer has no matching durable journal event")
 
-    def _preliminary_pointer(self, repo_uuid: str) -> PointerSet | None:
-        if self._exists(self._pending(repo_uuid)):
+    def _preliminary_pointer(
+        self, repo_uuid: str, *, deadline_ns: int | None = None,
+    ) -> PointerSet | None:
+        if self._exists(self._pending(repo_uuid), deadline_ns=deadline_ns):
             raise PointerRecoveryRequired("a durable pointer intent requires fenced recovery")
         return self._read_pointer(
             self._current(repo_uuid),
             allow_missing=True,
             expected_repo_uuid=repo_uuid,
+            deadline_ns=deadline_ns,
         )
 
     def _lock_set(
@@ -1066,8 +1069,10 @@ class PointerStore:
             allowed_operations=frozenset({allowed_operation}),
             deadline_ns=deadline_ns,
         ) as operation:
-            self._assert_no_gc_intent(operation.repo_uuid)
-            preliminary = self._preliminary_pointer(operation.repo_uuid)
+            self._assert_no_gc_intent(operation.repo_uuid, deadline_ns=deadline_ns)
+            preliminary = self._preliminary_pointer(
+                operation.repo_uuid, deadline_ns=deadline_ns,
+            )
             locks = self._lock_set(
                 operation.repo_uuid,
                 cas.candidate_generation_id,
@@ -1082,7 +1087,9 @@ class PointerStore:
                     deadline_ns,
                     "pointer movement exceeded its lease deadline",
                 )
-                current = self._preliminary_pointer(operation.repo_uuid)
+                current = self._preliminary_pointer(
+                    operation.repo_uuid, deadline_ns=deadline_ns,
+                )
                 if current is None:
                     self.verify_visible_absence(
                         operation.repo_uuid,
@@ -2181,6 +2188,15 @@ class PointerStore:
                 )
                 if receipt.sha256 != current["receipt_sha256"]:
                     raise PointerCorrupt("current pointer receipt hash does not match generation")
+                receipt_value = receipt.to_dict()
+                if (
+                    int(value["active_source_revision"])
+                    != int(receipt_value["active_source_revision"])
+                    or int(value["source_epoch"]) != int(receipt_value["source_epoch"])
+                ):
+                    raise PointerCorrupt(
+                        "pointer source authority does not match its current receipt"
+                    )
                 self._verify_visible_pointer_journal(
                     repo_uuid,
                     pointer,

@@ -1,8 +1,11 @@
 # S3 lifecycle stores and storage separation
 
-S3 is delivered as a five-PR stack ending at `codex/v8-workspace-lifecycle`,
-based on v8 `7ecdef0859abfff9fb00469c7be4ce950c7815f7`. The donor was
-inspected at `workspace/v1` commit `01ad5a3ca345da879c2f0c35161c4c185eb30d66`.
+The initial S3 candidate was assembled as a five-PR stack ending at
+`codex/v8-workspace-lifecycle`, based on v8
+`7ecdef0859abfff9fb00469c7be4ce950c7815f7`. This integration PR is
+synchronized onto v8 `4227a4bc48ac5126814eb6360cc59687dc7e11d3` after
+PR #165. The donor was inspected at `workspace/v1` commit
+`01ad5a3ca345da879c2f0c35161c4c185eb30d66`.
 PR publication was separately authorized; this result does not authorize a
 merge, state migration, or S4.
 
