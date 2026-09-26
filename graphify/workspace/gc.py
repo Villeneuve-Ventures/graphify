@@ -909,17 +909,11 @@ class GcStore:
                 )
                 if completion_data is None:
                     raise GcPlanStale("GC completion is unavailable for selected plan")
-                try:
-                    completion = GcCompletionState.from_json(completion_data)
-                except Exception as exc:
-                    raise GcError(f"GC completion is unavailable: {exc}") from exc
-                if (
-                    completion.repo_uuid != repo_uuid
-                    or completion.plan_sha256 != plan_sha256
-                ):
-                    raise GcError(
-                        "GC completion belongs to another workspace or plan"
-                    )
+                self._read_indexed_completion_by_plan_locked(
+                    repo_uuid,
+                    plan_sha256,
+                    deadline_ns=deadline_ns,
+                )
                 require_before_deadline(
                     deadline_ns,
                     "GC lifecycle preflight exceeded its deadline",

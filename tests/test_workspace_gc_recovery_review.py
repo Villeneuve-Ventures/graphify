@@ -12,10 +12,12 @@ import time
 import pytest
 
 from graphify.workspace.gc import (
-    GcError, GcPreviewAuthorityConflict, GcProtection, GcStore,
+    GcError, GcPreviewAuthorityConflict, GcProtection, GcRecoveryRequired, GcStore,
     _GcReachability, _MAX_GC_INTENT_BYTES,
 )
-from graphify.workspace.lifecycle_contracts import CapacityPolicy, GcPurgeState
+from graphify.workspace.lifecycle_contracts import (
+    CapacityPolicy, GcCompletionState, GcPurgeState,
+)
 from graphify.workspace.persistence import CommitUnknown, InjectedFault, LockTimeout
 from tests import test_workspace_lifecycle_s3 as fixtures
 from tests.workspace_s3_helpers import REPO_UUID, START, tree_snapshot
@@ -254,6 +256,35 @@ def test_purge_preflight_replay_rejects_stale_lifecycle_authority(tmp_path):
     before = tree_snapshot(harness.state_root)
     with pytest.raises(GcPreviewAuthorityConflict, match="operation_epoch"):
         gc.preflight_lifecycle(REPO_UUID, **expected)
+    assert tree_snapshot(harness.state_root) == before
+
+
+def test_unpurged_preflight_requires_indexed_completion(tmp_path):
+    harness, _generations, gc, grant, plan, protections, candidate, registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    completion = gc.execute(
+        grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+    assert completion.quarantined == (candidate,)
+    changed = completion.to_dict()
+    changed["quarantined"] = []
+    gc.state.path(gc._completion_path(REPO_UUID, plan.sha256)).write_bytes(
+        GcCompletionState.from_mapping(changed).canonical
+    )
+    before = tree_snapshot(harness.state_root)
+    with pytest.raises(GcRecoveryRequired, match="index does not bind"):
+        gc.preflight_lifecycle(
+            REPO_UUID,
+            expected_registry_revision=registry["revision"],
+            expected_active_source_revision=grant.active_source_revision,
+            expected_operation_epoch=grant.operation_epoch,
+            expected_migration_epoch=grant.migration_epoch,
+            expected_pointer_revision=plan.pointer_revision,
+            plan_sha256=plan.sha256,
+            deadline_ns=time.monotonic_ns() + 5_000_000_000,
+        )
     assert tree_snapshot(harness.state_root) == before
 
 
