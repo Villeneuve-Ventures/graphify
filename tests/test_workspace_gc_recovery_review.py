@@ -220,6 +220,115 @@ def test_replayed_purge_must_match_indexed_completion(tmp_path):
     assert tree_snapshot(harness.state_root) == before
 
 
+def test_purge_replay_syncs_visible_record_after_uncertain_install(tmp_path, monkeypatch):
+    _harness, _generations, gc, grant, plan, protections, _candidate, _registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+    gc.execute(
+        grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+        occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+    )
+
+    def interrupt(point):
+        if point == "gc:purge:installed":
+            raise InjectedFault(point)
+
+    gc.state.fault_hook = interrupt
+    with pytest.raises(CommitUnknown):
+        gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+            protections=protections, completed_at=START + timedelta(seconds=2),
+            monotonic_ns=10_003,
+        )
+    gc.state.fault_hook = lambda _point: None
+    purge_path = gc.state.path(gc._purge_path(REPO_UUID, plan.sha256))
+    assert purge_path.is_file()
+    purge_parent = purge_path.parent.stat()
+    parent_identity = (purge_parent.st_dev, purge_parent.st_ino)
+    original_fsync = gc.state.syscalls.fsync
+    attempts = []
+    fail_sync = True
+
+    def sync(descriptor):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == parent_identity:
+            attempts.append("purge_parent")
+            if fail_sync:
+                raise OSError(errno.EIO, "injected purge parent sync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(gc.state.syscalls, "fsync", sync)
+    with pytest.raises(CommitUnknown):
+        gc.purge(
+            grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+            protections=protections, completed_at=START + timedelta(seconds=3),
+            monotonic_ns=10_004,
+        )
+    assert attempts == ["purge_parent"]
+    fail_sync = False
+    assert gc.purge(
+        grant, plan_sha256=plan.sha256, capacity_policy=fixtures.POLICY,
+        protections=protections, completed_at=START + timedelta(seconds=4),
+        monotonic_ns=10_005,
+    ).purged == ("gen-uncertain-rename",)
+    assert attempts == ["purge_parent", "purge_parent"]
+
+
+@pytest.mark.parametrize("replay", ["execute", "reconcile"])
+def test_gc_replay_syncs_absent_intent_after_uncertain_clear(
+    tmp_path, monkeypatch, replay,
+):
+    _harness, _generations, gc, grant, plan, protections, _candidate, _registry = (
+        _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)
+    )
+
+    def interrupt(point):
+        if point == "gc:intent_clear:unlinked":
+            raise InjectedFault(point)
+
+    gc.state.fault_hook = interrupt
+    with pytest.raises(CommitUnknown):
+        gc.execute(
+            grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+            occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+        )
+    gc.state.fault_hook = lambda _point: None
+    intent = gc.state.path(gc._intent_path(REPO_UUID))
+    assert not intent.exists()
+    gc_parent = intent.parent.stat()
+    parent_identity = (gc_parent.st_dev, gc_parent.st_ino)
+    original_fsync = gc.state.syscalls.fsync
+    attempts = []
+    fail_sync = True
+
+    def sync(descriptor):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == parent_identity:
+            attempts.append("gc_parent")
+            if fail_sync:
+                raise OSError(errno.EIO, "injected GC parent sync failure")
+        original_fsync(descriptor)
+
+    def retry(tick):
+        if replay == "execute":
+            return gc.execute(
+                grant, plan, capacity_policy=fixtures.POLICY, protections=protections,
+                occurred_at=START + timedelta(seconds=2), monotonic_ns=tick,
+            )
+        return gc.reconcile(
+            grant, capacity_policy=fixtures.POLICY, protections=protections,
+            completed_at=START + timedelta(seconds=2), monotonic_ns=tick,
+        )
+
+    monkeypatch.setattr(gc.state.syscalls, "fsync", sync)
+    with pytest.raises(CommitUnknown):
+        retry(10_003)
+    assert attempts == ["gc_parent"]
+    fail_sync = False
+    assert retry(10_004).quarantined == ("gen-uncertain-rename",)
+    assert attempts == ["gc_parent", "gc_parent"]
+
+
 def test_purge_preflight_replay_rejects_stale_lifecycle_authority(tmp_path):
     harness, _generations, gc, grant, plan, protections, _candidate, registry = (
         _gc_with_candidate(tmp_path, fault_hook=lambda _point: None)

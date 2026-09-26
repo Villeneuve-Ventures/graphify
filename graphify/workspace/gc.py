@@ -23,6 +23,7 @@ from graphify.workspace.lifecycle_contracts import (
 from graphify.workspace.generations import CapacityExceeded, GenerationStore
 from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
+    CommitUnknown,
     DurableStateRoot,
     FaultHook,
     LockTimeout,
@@ -299,6 +300,19 @@ class GcStore:
         if intent.repo_uuid != repo_uuid:
             raise GcRecoveryRequired("GC intent belongs to another workspace")
         return intent
+
+    def _acknowledge_cleared_intent(
+        self, repo_uuid: str, *, deadline_ns: int | None,
+    ) -> None:
+        require_before_deadline(
+            deadline_ns, "GC intent replay exceeded its deadline",
+        )
+        try:
+            self.state.fsync_directory(self._intent_path(repo_uuid).parent)
+        except OSError as exc:
+            raise CommitUnknown(
+                "GC intent clearance is visible before durability acknowledgement"
+            ) from exc
 
     def read_only_intent_locked(
         self,
@@ -1233,6 +1247,9 @@ class GcStore:
                     or prior_completion.quarantined != plan.candidates
                 ):
                     raise GcRecoveryRequired("GC completion does not bind its plan")
+                self._acknowledge_cleared_intent(
+                    operation.repo_uuid, deadline_ns=deadline_ns,
+                )
                 return prior_completion
             refreshed = self._plan_locked(
                 operation,
@@ -1358,11 +1375,16 @@ class GcStore:
             ):
                 raise GcPlanStale("GC reconcile pointer revision is stale")
             if intent is None:
-                return self._read_operation_completion_locked(
+                completion = self._read_operation_completion_locked(
                     operation.repo_uuid,
                     operation.grant.operation_epoch,
                     deadline_ns=deadline_ns,
                 )
+                if completion is not None:
+                    self._acknowledge_cleared_intent(
+                        operation.repo_uuid, deadline_ns=deadline_ns,
+                    )
+                return completion
             if (
                 expected_pointer_revision is not None
                 and intent.pointer_revision != expected_pointer_revision
@@ -1493,6 +1515,12 @@ class GcStore:
             except Exception as exc:
                 raise GcError(f"GC purge record is invalid: {exc}") from exc
             if purge is not None:
+                self.state.install_once_bytes(
+                    purge_relative,
+                    purge.canonical,
+                    label="gc:purge",
+                    deadline_ns=deadline_ns,
+                )
                 return purge
             completion_relative = self._completion_path(operation.repo_uuid, plan_sha256)
             self.state.cleanup_atomic_temps(

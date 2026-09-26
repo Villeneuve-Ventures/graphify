@@ -27,6 +27,7 @@ from graphify.workspace.journal import (
 )
 from graphify.workspace.leases import LeaseGrant, LeaseOperation, LeaseStore
 from graphify.workspace.persistence import (
+    CommitUnknown,
     DurableStateRoot,
     FaultHook,
     LockTimeout,
@@ -189,6 +190,19 @@ class PointerStore:
     @classmethod
     def _pending(cls, repo_uuid: str) -> Path:
         return cls._workspace(repo_uuid) / "pointers.pending.json"
+
+    def _acknowledge_cleared_pending(
+        self, repo_uuid: str, *, deadline_ns: int | None,
+    ) -> None:
+        require_before_deadline(
+            deadline_ns, "pointer replay exceeded its deadline",
+        )
+        try:
+            self.state.fsync_directory(self._pending(repo_uuid).parent)
+        except OSError as exc:
+            raise CommitUnknown(
+                "pointer pending clearance is visible before durability acknowledgement"
+            ) from exc
 
     @classmethod
     def _gc_intent(cls, repo_uuid: str) -> Path:
@@ -1134,6 +1148,9 @@ class PointerStore:
                             operation, cas, current, candidate, replay_snapshot,
                             transition=transition, deadline_ns=deadline_ns,
                         ):
+                            self._acknowledge_cleared_pending(
+                                operation.repo_uuid, deadline_ns=deadline_ns,
+                            )
                             return current
                     raise PointerConflict("rollback candidate is not the exact last_good generation")
                 self.state.cleanup_atomic_temps(
@@ -1159,6 +1176,9 @@ class PointerStore:
                             operation, cas, current, candidate, snapshot,
                             transition=transition, deadline_ns=deadline_ns,
                         ):
+                            self._acknowledge_cleared_pending(
+                                operation.repo_uuid, deadline_ns=deadline_ns,
+                            )
                             return current
                         raise
                     if current is None:
@@ -1179,6 +1199,9 @@ class PointerStore:
                     )
                     raise
                 if candidate_is_current:
+                    self._acknowledge_cleared_pending(
+                        operation.repo_uuid, deadline_ns=deadline_ns,
+                    )
                     return cast(PointerSet, current)
                 corrupt_generations: set[str] = set()
                 last_good = None
@@ -2093,6 +2116,9 @@ class PointerStore:
             )
         ):
             return None
+        self._acknowledge_cleared_pending(
+            operation.repo_uuid, deadline_ns=deadline_ns,
+        )
         return current
 
     def recover(
@@ -2176,6 +2202,9 @@ class PointerStore:
                 if plan.pointer_action == "none":
                     if current is None:  # pragma: no cover - analysis invariant
                         raise PointerCorrupt("repair no-op has no visible pointer")
+                    self._acknowledge_cleared_pending(
+                        operation.repo_uuid, deadline_ns=deadline_ns,
+                    )
                     return current
                 if plan.pointer_action == "finalize_pending":
                     if current is None or pending is None:  # pragma: no cover

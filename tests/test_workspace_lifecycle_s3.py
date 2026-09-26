@@ -225,7 +225,9 @@ def test_s3_certification_refuses_changed_trusted_consumed_inputs(tmp_path, miss
 
 
 @pytest.mark.parametrize("interrupt_promotion", [False, True])
-def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, interrupt_promotion):
+def test_s3_stage_persists_exact_input_completion_and_queue_barrier(
+    tmp_path, monkeypatch, interrupt_promotion,
+):
     harness, generations, pointers, observations = _runtime(tmp_path)
     request, attempt, completion = _complete(harness, generations, observations)
     binding = completion.state.completion_binding.to_dict()
@@ -321,6 +323,38 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(tmp_path, in
         promotion.grant, cas,
         occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
     ) == pointer
+    assert tree_snapshot(harness.state_root) == promoted_state
+    refreshed_cas = replace(
+        cas, expected_pointer_revision=pointer.to_dict()["pointer_revision"],
+        expected_current_receipt_sha256=receipt.sha256,
+    )
+    pending_parent = pointers.state.path(pointers._pending(REPO_UUID).parent).stat()
+    parent_identity = (pending_parent.st_dev, pending_parent.st_ino)
+    original_fsync = pointers.state.syscalls.fsync
+    attempts = []
+    fail_sync = True
+
+    def sync(descriptor):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == parent_identity:
+            attempts.append("pending_parent")
+            if fail_sync:
+                raise OSError("injected refreshed promotion replay sync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(pointers.state.syscalls, "fsync", sync)
+    with pytest.raises(CommitUnknown):
+        pointers.promote(
+            promotion.grant, refreshed_cas,
+            occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+        )
+    assert attempts == ["pending_parent"]
+    fail_sync = False
+    assert pointers.promote(
+        promotion.grant, refreshed_cas,
+        occurred_at=START + timedelta(seconds=3), monotonic_ns=2_000_001,
+    ) == pointer
+    assert attempts == ["pending_parent", "pending_parent"]
     assert tree_snapshot(harness.state_root) == promoted_state
     with pytest.raises(PointerSuperseded):
         pointers.promote(
@@ -478,10 +512,32 @@ def test_exact_rollback_replay_uses_journal_and_retained_prior(tmp_path, monkeyp
         candidate_generation_id="gen-older", candidate_receipt_sha256="a" * 64,
         expected_current_receipt_sha256="b" * 64,
     )
+    pending_parent = pointers.state.path(pointers._pending(REPO_UUID).parent).stat()
+    parent_identity = (pending_parent.st_dev, pending_parent.st_ino)
+    original_fsync = pointers.state.syscalls.fsync
+    sync_attempts = []
+    fail_sync = True
+
+    def sync(descriptor):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == parent_identity:
+            sync_attempts.append("pending_parent")
+            if fail_sync:
+                raise OSError("injected rollback replay sync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(pointers.state.syscalls, "fsync", sync)
     before = tree_snapshot(harness.state_root)
+    with pytest.raises(CommitUnknown):
+        pointers.rollback(
+            grant, cas, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+        )
+    assert sync_attempts == ["pending_parent"]
+    fail_sync = False
     assert pointers.rollback(
         grant, cas, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
     ) == current
+    assert sync_attempts == ["pending_parent", "pending_parent"]
     assert tree_snapshot(harness.state_root) == before
     with pytest.raises(PointerConflict):
         pointers.rollback(
@@ -1194,11 +1250,34 @@ def test_operator_repair_replays_only_matching_durable_result(tmp_path, monkeypa
     monkeypatch.setattr(
         pointers, "_repair_analysis_locked", lambda *a, **kw: nullcontext(analysis),
     )
+    pending_parent = pointers.state.path(pointers._pending(REPO_UUID).parent).stat()
+    parent_identity = (pending_parent.st_dev, pending_parent.st_ino)
+    original_fsync = pointers.state.syscalls.fsync
+    attempts = []
+    fail_sync = True
+
+    def sync(descriptor):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == parent_identity:
+            attempts.append("pending_parent")
+            if fail_sync:
+                raise OSError("injected repair replay sync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(pointers.state.syscalls, "fsync", sync)
     before = tree_snapshot(harness.state_root)
+    with pytest.raises(CommitUnknown):
+        pointers.recover(
+            grant, expected_plan=approved, occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=10_001,
+        )
+    assert attempts == ["pending_parent"]
+    fail_sync = False
     assert pointers.recover(
         grant, expected_plan=approved, occurred_at=START + timedelta(seconds=1),
         monotonic_ns=10_001,
     ) == current
+    assert attempts == ["pending_parent", "pending_parent"]
     assert tree_snapshot(harness.state_root) == before
 
     wrong_result = replace(approved, next_pointer_revision=2)
@@ -1207,6 +1286,90 @@ def test_operator_repair_replays_only_matching_durable_result(tmp_path, monkeypa
             grant, expected_plan=wrong_result,
             occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
         )
+
+
+def test_pointer_recovery_replay_syncs_absent_pending_after_uncertain_clear(
+    tmp_path, monkeypatch,
+):
+    harness, _generations, pointers, _observations = _runtime(tmp_path)
+    registry = harness.registry.load().to_dict()
+    lease = harness.leases.inspect(REPO_UUID)
+    grant = harness.leases.acquire(
+        REPO_UUID, "POINTER_RECOVERY", harness.leases.current_owner(),
+        expected_registry_revision=registry["revision"],
+        expected_active_source_revision=1,
+        expected_operation_epoch=lease.operation_epoch,
+        expected_migration_epoch=lease.migration_epoch,
+        acquired_at=START + timedelta(seconds=1),
+        monotonic_ns=10_000, ttl_ns=1_000_000,
+    )
+    current = PointerSet.from_mapping({
+        "contract": "graphify.workspace.pointer_set", "schema_version": 2,
+        "repo_uuid": REPO_UUID, "pointer_revision": 3,
+        "active_source_revision": 1, "source_epoch": 1,
+        "operation_epoch": grant.operation_epoch,
+        "fence_token": grant.lease.to_dict()["fence_token"],
+        "state_schema_version": 2,
+        "current": {"generation_id": "gen-repaired", "receipt_sha256": "a" * 64},
+        "last_good": None,
+    })
+    pending_relative = pointers._pending(REPO_UUID)
+    pointers.state.ensure_directory(pending_relative.parent)
+    pending_path = pointers.state.path(pending_relative)
+    pending_path.write_bytes(current.canonical)
+    pending_path.chmod(0o600)
+    snapshot = JournalSnapshot(None, ())
+
+    def analysis(*_args, **_kwargs):
+        pending = current if pending_path.exists() else None
+        plan = SimpleNamespace(
+            pointer_action="finalize_pending" if pending else "none",
+            next_pointer_revision=3, quarantine=(),
+        )
+        return nullcontext(SimpleNamespace(
+            plan=plan, current=current, pending=pending, candidate=None,
+            journal=SimpleNamespace(snapshot=snapshot),
+        ))
+
+    monkeypatch.setattr(pointers, "_repair_analysis_locked", analysis)
+    monkeypatch.setattr(pointers.journal, "recover_locked", lambda *_a, **_kw: snapshot)
+
+    def interrupt(point):
+        if point == "pointer:repaired:complete:unlinked":
+            raise InjectedFault(point)
+
+    pointers.state.fault_hook = interrupt
+    with pytest.raises(CommitUnknown):
+        pointers.recover(
+            grant, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_001,
+        )
+    pointers.state.fault_hook = lambda _point: None
+    assert not pending_path.exists()
+    parent = pending_path.parent.stat()
+    parent_identity = (parent.st_dev, parent.st_ino)
+    original_fsync = pointers.state.syscalls.fsync
+    attempts = []
+    fail_sync = True
+
+    def sync(descriptor):
+        details = os.fstat(descriptor)
+        if (details.st_dev, details.st_ino) == parent_identity:
+            attempts.append("pending_parent")
+            if fail_sync:
+                raise OSError("injected pending parent sync failure")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(pointers.state.syscalls, "fsync", sync)
+    with pytest.raises(CommitUnknown):
+        pointers.recover(
+            grant, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_002,
+        )
+    assert attempts == ["pending_parent"]
+    fail_sync = False
+    assert pointers.recover(
+        grant, occurred_at=START + timedelta(seconds=1), monotonic_ns=10_003,
+    ) == current
+    assert attempts == ["pending_parent", "pending_parent"]
 
 
 def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path, monkeypatch):
