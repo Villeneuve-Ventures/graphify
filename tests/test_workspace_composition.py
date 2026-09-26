@@ -82,7 +82,7 @@ def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_p
     assert not root.exists()
 
 
-@pytest.mark.parametrize("damage", ["none", "mode", "root-mode", "root-mode-race", "symlink", "ancestor-link", "hardlink", "truncated", "duplicate", "oversized", "wrong-tuple", "no-policy", "multiple-claims"])
+@pytest.mark.parametrize("damage", ["none", "mode", "root-mode", "root-mode-race", "symlink", "ancestor-link", "hardlink", "truncated", "duplicate", "oversized", "wrong-tuple", "no-policy", "multiple-claims", "capacity-product"])
 def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
     import graphify.workspace.composition as composition
     root = tmp_path.resolve() / "state"
@@ -99,6 +99,11 @@ def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
         payload = canonical_json_bytes(data)
     if damage == "multiple-claims":
         data = auth.to_dict(); data["structural_policy"]["max_claimed_tasks"] = 2
+        from graphify.workspace.contracts import canonical_json_bytes
+        payload = canonical_json_bytes(data)
+    if damage == "capacity-product":
+        data = auth.to_dict()
+        data["structural_policy"].update(max_generations=2, max_payload_bytes=2**62)
         from graphify.workspace.contracts import canonical_json_bytes
         payload = canonical_json_bytes(data)
     path.write_bytes(payload); path.chmod(0o600)
@@ -139,10 +144,26 @@ def test_authority_load_refuses_without_mutation(tmp_path, monkeypatch, damage):
     assert path.read_bytes() == payload
 
 
-@pytest.mark.parametrize("values", [(0, 1, 1, 1, 1), (True, 2, 1, 1, 1), (1, 2, 2, 1, 1), (8, 16384, 2, 4, 1048576)])
+@pytest.mark.parametrize("values", [(0, 1, 1, 1, 1), (True, 2, 1, 1, 1), (1, 2, 2, 1, 1), (8, 16384, 2, 4, 1048576), (8, 16384, 1, 2, 2**62)])
 def test_policy_has_no_defaults_or_invalid_limits(values):
     with pytest.raises(ContractError): StructuralPolicy(*values)
     with pytest.raises(ContractError): StructuralPolicy.from_mapping({})
+
+
+@pytest.mark.parametrize(
+    ("max_generations", "max_payload_bytes"),
+    [(1, 2**63 - 1), (2, (2**63 - 1) // 2)],
+)
+def test_policy_accepts_capacity_product_boundary(max_generations, max_payload_bytes):
+    policy = StructuralPolicy(8, 16384, 1, max_generations, max_payload_bytes)
+    assert policy.max_generations * policy.max_payload_bytes <= 2**63 - 1
+
+
+def test_authority_rejects_overflowing_capacity_product():
+    data = authority().to_dict()
+    data["structural_policy"].update(max_generations=2, max_payload_bytes=2**62)
+    with pytest.raises(ContractError, match="capacity product"):
+        WorkspaceRuntimeAuthority.from_mapping(data)
 
 
 def test_runtime_authority_schema_and_parser_require_one_claim():

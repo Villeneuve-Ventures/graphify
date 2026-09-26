@@ -48,6 +48,8 @@ class StructuralPolicy:
             raise ContractError("claim limit exceeds pending task limit")
         if self.max_claimed_tasks != 1:
             raise ContractError("semantic queues support exactly one claimed task")
+        if self.max_generations * self.max_payload_bytes > 2**63 - 1:
+            raise ContractError("capacity product exceeds supported range")
 
     def to_dict(self):
         return {name: getattr(self, name) for name in self.__dataclass_fields__}
@@ -594,8 +596,6 @@ class StructuralComposition:
             self.inputs.authority.to_dict()["structural_policy"]
         )
         total_bytes = policy.max_generations * policy.max_payload_bytes
-        if total_bytes > 2**63 - 1:
-            raise WorkspaceAuthorityInvalid("explicit capacity product exceeds supported range")
         capacity = CapacityPolicy.from_mapping({
             "contract": "graphify.workspace.capacity_policy.internal",
             "format_version": 1,

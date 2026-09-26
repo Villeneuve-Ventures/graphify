@@ -22,6 +22,7 @@
       "$ref": "compatibility.schema.json"
     },
     "structural_policy": {
+      "$comment": "StructuralPolicy also requires max_generations * max_payload_bytes <= 9223372036854775807; JSON Schema cannot compare sibling numeric values.",
       "type": "object",
       "additionalProperties": false,
       "required": [
