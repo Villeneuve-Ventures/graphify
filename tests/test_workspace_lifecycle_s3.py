@@ -841,6 +841,11 @@ def test_promotion_retains_only_current_source_last_good(
         (False, "visible", True),
         (False, "journal_durable", True),
         (False, "quarantine_renamed", True),
+        (False, None, "active_source_revision"),
+        (False, None, "source_epoch"),
+        (False, None, "restored"),
+        (False, None, "orphan"),
+        (False, None, "orphan_last_good"),
     ],
 )
 def test_successor_pointer_recovery_retains_only_active_source_last_good(
@@ -848,7 +853,9 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(
 ):
     harness, generations, pointers, observations = _runtime(tmp_path)
 
-    def certify_and_promote(generation_id, tick, current=None, *, interrupt=False):
+    def certify_and_promote(
+        generation_id, tick, current=None, *, interrupt=False, certify_only=False,
+    ):
         request_value = _request(harness, observations).to_dict()
         request_value.update(
             expected_pointer_revision=0 if current is None else current.to_dict()["pointer_revision"],
@@ -903,6 +910,13 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(
             source_observations=observations, declared_entries=completion.entries,
             staged_completion=completion, occurred_at=START, monotonic_ns=tick + 6,
         )
+        if certify_only:
+            recovery = harness.leases.acquire_staged_recovery(
+                REPO_UUID, generation_id, "POINTER_RECOVERY", harness.leases.current_owner(),
+                request, attempt_sha256="7" * 64, acquired_at=START,
+                monotonic_ns=tick + 2_000_000, ttl_ns=1_000_000,
+            )
+            return receipt, recovery
         promotion = generations.acquire_staged_recovery(
             REPO_UUID, generation_id, request, attempt_sha256="7" * 64,
             acquired_at=START, monotonic_ns=tick + 2_000_000, ttl_ns=1_000_000,
@@ -958,6 +972,48 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(
     first = certify_and_promote("gen-a1", 10_000)
     second = certify_and_promote("gen-a2", 3_000_000, first)
     assert second.to_dict()["last_good"] == first.to_dict()["current"]
+    if isinstance(corrupt_current, str):
+        if corrupt_current == "restored":
+            visible = first
+        elif corrupt_current in {"orphan", "orphan_last_good"}:
+            orphan, repair = certify_and_promote(
+                "gen-orphan", 8_000_000, second, certify_only=True,
+            )
+            visible = PointerSet.from_mapping({
+                **second.to_dict(),
+                ("current" if corrupt_current == "orphan" else "last_good"): pointers._ref(orphan),
+            })
+        else:
+            visible = PointerSet.from_mapping({
+                **second.to_dict(), corrupt_current: 99,
+            })
+        pointers.state.path(pointers._current(REPO_UUID)).write_bytes(visible.canonical)
+        before = tree_snapshot(harness.state_root)
+        plan = pointers.analyze_repair(REPO_UUID, active_source_revision=1)
+        assert tree_snapshot(harness.state_root) == before
+        assert plan.candidate == second.to_dict()["current"]
+        assert plan.next_pointer_revision > second.to_dict()["pointer_revision"]
+        assert plan.last_good != visible.to_dict()["current"] or corrupt_current == "restored"
+        if corrupt_current in {"orphan", "orphan_last_good"}:
+            assert plan.last_good != pointers._ref(orphan)
+        else:
+            state = harness.leases.inspect(REPO_UUID)
+            repair = harness.leases.acquire(
+                REPO_UUID, "POINTER_RECOVERY", harness.leases.current_owner(),
+                expected_registry_revision=1, expected_active_source_revision=1,
+                expected_operation_epoch=state.operation_epoch,
+                expected_migration_epoch=state.migration_epoch,
+                acquired_at=START, monotonic_ns=10_000_000, ttl_ns=1_000_000,
+            )
+        recovered = pointers.recover(repair, occurred_at=START, monotonic_ns=10_000_001)
+        assert recovered.to_dict()["current"] == second.to_dict()["current"]
+        assert recovered.to_dict()["active_source_revision"] == 1
+        assert recovered.to_dict()["source_epoch"] == 1
+        assert recovered.to_dict()["pointer_revision"] == plan.next_pointer_revision
+        assert recovered.to_dict()["last_good"] == plan.last_good
+        pointers.verify_visible_pointer(recovered, expected_repo_uuid=REPO_UUID)
+        assert pointers.analyze_repair(REPO_UUID, active_source_revision=1).classification == "no_op"
+        return
     if corrupt_current:
         generation = generations.state.path(generations._generation(REPO_UUID, "gen-a2"))
         graph = next(generation.rglob("graph.json"))
@@ -1175,11 +1231,14 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         "pointer_set": previous.to_dict(),
     })
 
-    def event(transition, revision, *, operation_epoch=3, fence_token=3):
+    def event(
+        transition, revision, *, operation_epoch=3, fence_token=3,
+        generation_id="gen-older", receipt_sha256="a" * 64,
+    ):
         return SimpleNamespace(
             to_dict=lambda: {
-                "transition": transition, "generation_id": "gen-older",
-                "receipt_sha256": "a" * 64, "pointer_revision": revision,
+                "transition": transition, "generation_id": generation_id,
+                "receipt_sha256": receipt_sha256, "pointer_revision": revision,
                 "operation_epoch": operation_epoch, "fence_token": fence_token,
             },
             sha256=transition,
@@ -1188,16 +1247,21 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
     certified, superseded, rollback = (
         event("CERTIFIED", None), event("SUPERSEDED", 2), event("ROLLED_BACK", 3),
     )
-    snapshot = JournalSnapshot(None, (certified, superseded, rollback))
+    newer_history = (
+        event("CERTIFIED", None, generation_id="gen-newer", receipt_sha256="b" * 64),
+        event("PROMOTED", 2, operation_epoch=2, fence_token=2,
+              generation_id="gen-newer", receipt_sha256="b" * 64),
+    )
+    snapshot = JournalSnapshot(None, (certified, *newer_history, superseded, rollback))
     projection = JournalRecoveryProjection(snapshot, (), "c" * 64)
     monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: projection)
     older = SimpleNamespace(
         sha256="a" * 64,
-        to_dict=lambda: {"generation_id": "gen-older", "active_source_revision": 1},
+        to_dict=lambda: {"generation_id": "gen-older", "active_source_revision": 1, "source_epoch": 1},
     )
     newer = SimpleNamespace(
         sha256="b" * 64,
-        to_dict=lambda: {"generation_id": "gen-newer", "active_source_revision": 1},
+        to_dict=lambda: {"generation_id": "gen-newer", "active_source_revision": 1, "source_epoch": 1},
     )
     def verified_refs(_repo_uuid, pointer, *, deadline_ns):
         value = pointer.to_dict()
@@ -1228,7 +1292,7 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         rolled_back, None, prior, deadline_ns=None,
     )
     interrupted = JournalRecoveryProjection(
-        JournalSnapshot(None, (certified, superseded)), (), "d" * 64,
+        JournalSnapshot(None, (certified, *newer_history, superseded)), (), "d" * 64,
     )
     monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: interrupted)
     monkeypatch.setattr(
@@ -1291,7 +1355,7 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         assert analysis.plan.pointer_action == "resume_pending"
 
     repair_event = event("REPAIRED", 4, operation_epoch=4, fence_token=4)
-    repaired_snapshot = JournalSnapshot(None, (certified, superseded, repair_event))
+    repaired_snapshot = JournalSnapshot(None, (certified, *newer_history, superseded, repair_event))
     monkeypatch.setattr(
         pointers.journal, "project_recovery",
         lambda *a, **kw: JournalRecoveryProjection(repaired_snapshot, (), "e" * 64),
@@ -1334,7 +1398,10 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         repaired, repaired, repair_prior, deadline_ns=None,
     )
 
-    monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: interrupted)
+    unbound = JournalRecoveryProjection(
+        JournalSnapshot(None, (certified, superseded)), (), "f" * 64,
+    )
+    monkeypatch.setattr(pointers.journal, "project_recovery", lambda *a, **kw: unbound)
     with pytest.raises(PointerCorrupt, match="superseded"):
         pointers._derive_repair_analysis(
             REPO_UUID, active_source_revision=1, operation_epoch=None,

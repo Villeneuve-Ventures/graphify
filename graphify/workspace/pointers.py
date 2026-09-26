@@ -555,14 +555,6 @@ class PointerStore:
                 continue
             if receipt.sha256 == ref["receipt_sha256"]:
                 receipts[name] = receipt
-        if "current" in receipts:
-            current_value = receipts["current"].to_dict()
-            if (
-                int(value["active_source_revision"])
-                != int(current_value["active_source_revision"])
-                or int(value["source_epoch"]) != int(current_value["source_epoch"])
-            ):
-                del receipts["current"]
         return receipts, corrupt_generations
 
     @staticmethod
@@ -1391,7 +1383,49 @@ class PointerStore:
         required = {"current"}
         if pointer.to_dict()["last_good"] is not None:
             required.add("last_good")
-        return required == set(receipts)
+        if required != set(receipts):
+            return False
+        value = pointer.to_dict()
+        current = receipts["current"].to_dict()
+        return (
+            value["active_source_revision"] == current["active_source_revision"]
+            and value["source_epoch"] == current["source_epoch"]
+        )
+
+    @staticmethod
+    def _latest_pointer_transition(snapshot: JournalSnapshot) -> dict[str, Any] | None:
+        for event in reversed(snapshot.events):
+            value = event.to_dict()
+            if value["transition"] in {"PROMOTED", "ROLLED_BACK", "REPAIRED"}:
+                return value
+        return None
+
+    @staticmethod
+    def _receipt_has_pointer_lineage(
+        snapshot: JournalSnapshot, receipt: GenerationReceipt,
+    ) -> bool:
+        return any(
+            event.to_dict()["transition"] in {"PROMOTED", "ROLLED_BACK", "REPAIRED"}
+            and event.to_dict()["generation_id"] == receipt.to_dict()["generation_id"]
+            and event.to_dict()["receipt_sha256"] == receipt.sha256
+            for event in snapshot.events
+        )
+
+    def _repair_last_good_eligible(
+        self,
+        snapshot: JournalSnapshot,
+        receipt: GenerationReceipt | None,
+        *,
+        active_source_revision: int,
+    ) -> bool:
+        return receipt is None or (
+            receipt.to_dict()["active_source_revision"] == active_source_revision
+            and self._receipt_has_pointer_lineage(snapshot, receipt)
+            and self._journal_certifies(
+                snapshot, generation_id=str(receipt.to_dict()["generation_id"]),
+                receipt_sha256=receipt.sha256, allow_superseded=True,
+            )
+        )
 
     @staticmethod
     def _journal_projection_evidence(
@@ -1479,6 +1513,7 @@ class PointerStore:
         raw_evidence: dict[str, str | None],
         allow_atomic_temps: bool,
         deadline_ns: int | None,
+        journal: JournalRecoveryProjection | None = None,
     ) -> _PointerRepairAnalysis:
         prior_pointer = (
             None
@@ -1486,12 +1521,28 @@ class PointerStore:
             else cast(PointerSet, PointerSet.from_mapping(prior.to_dict()["pointer_set"]))
         )
         self._validate_pending_relationship(current, pending, prior)
-        journal = self.journal.project_recovery(
-            repo_uuid,
-            allow_atomic_temps=allow_atomic_temps,
-            deadline_ns=deadline_ns,
-        )
+        if journal is None:
+            journal = self.journal.project_recovery(
+                repo_uuid,
+                allow_atomic_temps=allow_atomic_temps,
+                deadline_ns=deadline_ns,
+            )
         snapshot = journal.snapshot
+        latest = self._latest_pointer_transition(snapshot)
+        if pending is not None and latest is not None:
+            pending_value = pending.to_dict()
+            pending_revision = int(pending_value["pointer_revision"])
+            committed_revision = int(latest["pointer_revision"])
+            if pending_revision < committed_revision or (
+                pending_revision == committed_revision
+                and (
+                    pending_value["current"]["generation_id"] != latest["generation_id"]
+                    or pending_value["current"]["receipt_sha256"] != latest["receipt_sha256"]
+                    or pending_value["operation_epoch"] != latest["operation_epoch"]
+                    or pending_value["fence_token"] != latest["fence_token"]
+                )
+            ):
+                raise PointerCorrupt("pending pointer is obsolete relative to committed journal history")
         valid: list[tuple[str, PointerSet, dict[str, GenerationReceipt]]] = []
         last_good_candidates: list[GenerationReceipt] = []
         verified_by_name: dict[str, dict[str, GenerationReceipt]] = {}
@@ -1519,6 +1570,15 @@ class PointerStore:
                 current_receipt is not None
                 and int(current_receipt.to_dict()["active_source_revision"])
                 == active_source_revision
+                and (
+                    (name == "pending" and self._fully_verified(pointer, receipts))
+                    or (name != "pending" and any(
+                        self._journal_records_pointer(
+                            snapshot, pointer, transition=transition, deadline_ns=deadline_ns,
+                        )
+                        for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
+                    ))
+                )
             ):
                 valid.append((name, pointer, receipts))
             last_good_receipt = receipts.get("last_good")
@@ -1540,6 +1600,10 @@ class PointerStore:
         if pending is None and current is not None and "current" in by_name:
             current_receipts = by_name["current"][1]
             current_receipt = current_receipts["current"]
+            last_good_receipt = current_receipts.get("last_good")
+            last_good_authorized = self._repair_last_good_eligible(
+                snapshot, last_good_receipt, active_source_revision=active_source_revision,
+            )
             current_revision = int(current.to_dict()["pointer_revision"])
             prior_revision = 0 if prior is None else int(prior.to_dict()["replaced_by_revision"])
             visible_event_matches = any(
@@ -1551,10 +1615,16 @@ class PointerStore:
                 )
                 for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")
             )
-            if journal_revisions and max(journal_revisions) > current_revision:
-                raise PointerCorrupt("visible pointer is stale relative to durable journal history")
             if (
-                self._fully_verified(current, current_receipts)
+                not (journal_revisions and max(journal_revisions) > current_revision)
+                and latest is not None
+                and latest["generation_id"] == current_receipt.to_dict()["generation_id"]
+                and latest["receipt_sha256"] == current_receipt.sha256
+                and latest["pointer_revision"] == current_revision
+                and latest["operation_epoch"] == current.to_dict()["operation_epoch"]
+                and latest["fence_token"] == current.to_dict()["fence_token"]
+                and self._fully_verified(current, current_receipts)
+                and last_good_authorized
                 and visible_event_matches
                 and prior_revision <= current_revision
                 and self._journal_certifies(
@@ -1602,10 +1672,57 @@ class PointerStore:
                     journal=journal,
                 )
 
-        if valid:
+        # Select only the latest committed move, without scanning older journal
+        # targets when its exact receipt or active source is invalid.
+        if latest is not None and "pending" not in by_name:
+            latest_ref = {
+                "generation_id": latest["generation_id"],
+                "receipt_sha256": latest["receipt_sha256"],
+            }
+            latest_receipt = next(
+                (
+                    receipt
+                    for receipts in verified_by_name.values()
+                    for receipt in receipts.values()
+                    if self._ref(receipt) == latest_ref
+                ),
+                None,
+            )
+            if latest_receipt is None:
+                try:
+                    latest_receipt = self._verify_ref(
+                        repo_uuid, latest_ref, deadline_ns=deadline_ns,
+                    )
+                except (GenerationError, PointerCorrupt):
+                    # Retained last_good recovery remains available for a
+                    # damaged committed payload.
+                    latest_receipt = None
+            if latest_receipt is not None:
+                if latest_receipt.to_dict()["active_source_revision"] != active_source_revision:
+                    raise PointerCorrupt("committed repair target belongs to another active source")
+                journal_pointer = cast(PointerSet, PointerSet.from_mapping({
+                    "contract": "graphify.workspace.pointer_set",
+                    "schema_version": STATE_SCHEMA_VERSION,
+                    "repo_uuid": repo_uuid,
+                    "pointer_revision": latest["pointer_revision"],
+                    "active_source_revision": active_source_revision,
+                    "source_epoch": latest_receipt.to_dict()["source_epoch"],
+                    "operation_epoch": latest["operation_epoch"],
+                    "fence_token": latest["fence_token"],
+                    "state_schema_version": STATE_SCHEMA_VERSION,
+                    "current": latest_ref,
+                    "last_good": None,
+                }))
+                by_name["journal"] = (journal_pointer, {"current": latest_receipt})
+            # Older visible/prior pointers cannot replace the committed target.
+            valid = [entry for entry in valid if self._ref(entry[2]["current"]) == latest_ref]
+
+        if "pending" in by_name or "journal" in by_name or valid:
             if "pending" in by_name:
                 chosen_name = "pending"
-            elif "current" in by_name:
+            elif "journal" in by_name:
+                chosen_name = "journal"
+            elif "current" in by_name and any(name == "current" for name, _, _ in valid):
                 chosen_name = "current"
             else:
                 chosen_name = "prior"
@@ -1615,17 +1732,16 @@ class PointerStore:
                 (
                     receipt
                     for receipt in last_good_candidates
-                    if self._journal_certifies(
-                        snapshot,
-                        generation_id=str(receipt.to_dict()["generation_id"]),
-                        receipt_sha256=receipt.sha256,
-                        allow_superseded=True,
+                    if self._repair_last_good_eligible(
+                        snapshot, receipt, active_source_revision=active_source_revision,
                     )
                 ),
                 None,
             )
             if candidate is None:
-                raise PointerCorrupt("no fully verified pointer source can be repaired")
+                raise PointerCorrupt(
+                    "no fully verified pointer source can be repaired; missing lineage or superseded"
+                )
             chosen_name = "last_good"
         chosen_pointer = by_name[chosen_name][0] if chosen_name in by_name else None
         if not self._journal_certifies(
@@ -1679,6 +1795,10 @@ class PointerStore:
             and "current" in by_name
             and "pending" in by_name
             and self._fully_verified(current, by_name["current"][1])
+            and self._repair_last_good_eligible(
+                snapshot, by_name["current"][1].get("last_good"),
+                active_source_revision=active_source_revision,
+            )
             and self._journal_records_pointer(
                 snapshot,
                 current,
@@ -1699,6 +1819,10 @@ class PointerStore:
             and pending is not None
             and "pending" in by_name
             and self._fully_verified(pending, by_name["pending"][1])
+            and self._repair_last_good_eligible(
+                snapshot, by_name["pending"][1].get("last_good"),
+                active_source_revision=active_source_revision,
+            )
         ):
             pointer_action = "resume_pending"
             candidate = by_name["pending"][1]["current"]
@@ -1727,17 +1851,24 @@ class PointerStore:
             if "current" in by_name:
                 former, former_receipts = by_name["current"]
                 former_ref = cast(dict[str, Any], former.to_dict()["current"])
-                if former_ref["generation_id"] != candidate.to_dict()["generation_id"]:
+                if (
+                    former_ref["generation_id"] != candidate.to_dict()["generation_id"]
+                    and self._repair_last_good_eligible(
+                        snapshot, former_receipts["current"],
+                        active_source_revision=active_source_revision,
+                    )
+                ):
                     last_good = self._ref(former_receipts["current"])
             if last_good is None:
                 for source_name in dict.fromkeys((chosen_name, "current", "pending", "prior")):
                     receipt = verified_by_name.get(source_name, {}).get("last_good")
                     if (
                         receipt is not None
-                        and int(receipt.to_dict()["active_source_revision"])
-                        == active_source_revision
                         and receipt.to_dict()["generation_id"]
                         != candidate.to_dict()["generation_id"]
+                        and self._repair_last_good_eligible(
+                            snapshot, receipt, active_source_revision=active_source_revision,
+                        )
                     ):
                         last_good = self._ref(receipt)
                         break
@@ -1851,6 +1982,12 @@ class PointerStore:
             | self._pointer_refs(pending)
             | self._pointer_refs(prior_pointer)
         )
+        journal = self.journal.project_recovery(
+            repo_uuid, allow_atomic_temps=allow_atomic_temps, deadline_ns=deadline_ns,
+        )
+        latest = self._latest_pointer_transition(journal.snapshot)
+        if latest is not None:
+            generation_ids.add(str(latest["generation_id"]))
         locks: list[tuple[str, Path]] = []
         for generation_id in sorted(generation_ids):
             lock = self.generations._lock(repo_uuid, generation_id)
@@ -1871,6 +2008,11 @@ class PointerStore:
             exclusive=exclusive,
             deadline_ns=deadline_ns,
         ):
+            locked_journal = self.journal.project_recovery(
+                repo_uuid, allow_atomic_temps=allow_atomic_temps, deadline_ns=deadline_ns,
+            )
+            if locked_journal != journal:
+                raise PointerConflict("journal changed during repair lock acquisition")
             analysis = self._derive_repair_analysis(
                 repo_uuid,
                 active_source_revision=active_source_revision,
@@ -1879,6 +2021,7 @@ class PointerStore:
                 current=current,
                 pending=pending,
                 prior=prior,
+                journal=locked_journal,
                 raw_evidence={
                     "current_sha256": current_sha256,
                     "pending_sha256": pending_sha256,
