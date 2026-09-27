@@ -575,7 +575,21 @@ class StructuralComposition:
     inputs: WorkspaceRuntimeInputs
 
     def require_runtime(self):
-        raise WorkspaceAuthorityInvalid("S4 operational adapter is not implemented")
+        # Re-admit both the on-disk authority and installed package here. A
+        # caller-constructed WorkspaceRuntimeInputs is not installed authority.
+        inputs = load_workspace_runtime_inputs(
+            state_root=self.inputs.state_root, expected=self.inputs.expected,
+        )
+        if inputs != self.inputs:
+            raise WorkspaceAuthorityInvalid("runtime authority changed")
+        selection = select_adapter(
+            CompatibilityTuple(inputs.expected), expected=CompatibilityTuple(inputs.expected),
+            intent=AdapterIntent.EXECUTE,
+        )
+        adapter = selection.require_adapter()
+        stores = self.require_lifecycle_stores()
+        stores.generations.observer = adapter.observe_lifecycle
+        return StructuralRuntime(inputs, stores, adapter)
 
     def require_lifecycle_stores(self):
         """Construct S3 stores without creating state or enabling an adapter."""
@@ -653,3 +667,18 @@ def compose_workspace_runtime(inputs):
     select_adapter(CompatibilityTuple(inputs.authority.compatibility),
                    expected=CompatibilityTuple(inputs.expected), intent=AdapterIntent.PROBE)
     return StructuralComposition(inputs)
+
+
+@dataclass(frozen=True)
+class StructuralRuntime:
+    """Qualified structural library runtime; no public CLI or semantic service."""
+    inputs: WorkspaceRuntimeInputs
+    stores: LifecycleStores
+    adapter: object
+
+    def validate_authority(self):
+        current = load_workspace_runtime_inputs(
+            state_root=self.inputs.state_root, expected=self.inputs.expected,
+        )
+        if current != self.inputs:
+            raise WorkspaceAuthorityInvalid("runtime authority changed")

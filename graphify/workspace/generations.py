@@ -467,7 +467,7 @@ class GenerationStore:
         journal: JournalStore,
         *,
         compatibility_manifest: CompatibilityManifest,
-        observer: Callable[[Path], SourceObservation] | None = None,
+        observer: Callable[..., SourceObservation] | None = None,
         semantic_queue: SemanticQueueStore | None = None,
         max_payload_bytes: int | None = None,
         capabilities: RuntimeCapabilities | None = None,
@@ -507,10 +507,10 @@ class GenerationStore:
         if self.max_payload_bytes is not None and expected_payload_bytes > self.max_payload_bytes:
             raise CapacityExceeded("reservation exceeds the per-generation payload limit")
 
-    def _observe(self, source_root: Path) -> SourceObservation:
+    def _observe(self, source_root: Path, *, input_manifest: InputManifest | None = None) -> SourceObservation:
         if self.observer is None:
             raise ObservationError("S4 source observer is not installed")
-        observation = self.observer(source_root)
+        observation = self.observer(source_root, input_manifest=input_manifest)
         if type(observation) is not SourceObservation:
             raise ObservationError("source observer returned unvalidated evidence")
         return observation
@@ -697,8 +697,8 @@ class GenerationStore:
         try:
             source = self.leases.registry.resolve_active_source(repo_uuid)
             trusted = (
-                self._observe(source.root),
-                self._observe(source.root),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
             )
             confirmed_source = self.leases.registry.resolve_active_source(repo_uuid)
         except (ObservationError, IdentityError, OSError, StateCorrupt, StatePathError) as exc:
@@ -4649,8 +4649,8 @@ class GenerationStore:
         try:
             source = self.leases.registry.resolve_active_source(repo_uuid)
             trusted = (
-                self._observe(source.root),
-                self._observe(source.root),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
             )
             confirmed_source = self.leases.registry.resolve_active_source(repo_uuid)
         except (ObservationError, IdentityError, OSError, StateCorrupt, StatePathError) as exc:

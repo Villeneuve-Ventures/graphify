@@ -1,4 +1,4 @@
-"""Engine-neutral S2 adapter protocol. No operational adapter is shipped yet."""
+"""Engine-neutral structural adapter protocol."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -183,7 +183,7 @@ class QueryRequest:
 
 
 class EngineAdapter(Protocol):
-    """S4 supplies implementation; paths are explicit, never cwd-derived authority.
+    """Paths are explicit, never cwd-derived authority.
 
     The lifecycle owns pinned staging descriptors and fences. Implementations must
     validate those capabilities before writing, and never publish ordinary output.
@@ -193,7 +193,7 @@ class EngineAdapter(Protocol):
     detector_id: str
 
     def build_structural(self, source_root: Path, *, payload_fd: int,
-                         scratch_fd: int, initial_detection: InputManifest) -> StructuralBuild: ...
+                         scratch_fd: int, initial_detection: InputManifest, write_guard=None) -> StructuralBuild: ...
 
     def query_structural(self, payload_fd: int, request: QueryRequest) -> str: ...
 
@@ -209,4 +209,7 @@ class AdapterSelection:
     promotable: bool = False
 
     def require_adapter(self) -> EngineAdapter:
-        raise UnsupportedCompatibility("S2 has no operational adapter; S4 is required")
+        if not self.executable or self.intent is AdapterIntent.PROBE:
+            raise UnsupportedCompatibility("selection does not grant engine execution")
+        from .v8 import V8Adapter
+        return V8Adapter()

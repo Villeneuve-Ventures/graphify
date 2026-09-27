@@ -1,8 +1,7 @@
 # Graphify consolidation delivery status
 
-Status as of 2026-09-27 UTC, based on v8 merge commit
-`d7f6972be1ce62674bbb96c77e8c2d626952fe4b`.
-This publishes the local consolidation tracker's S3 delivery update.
+Status as of 2026-09-27 UTC, with merged delivery through v8
+`8798f3981847f98c7ce5c647f0a9338398c3489f` and a separate S4 draft candidate.
 The [original consolidation plan](graphify-product-consolidation-2026-09-18.md)
 and [structural design](graphify-v8-structural-workspace-design.md) retain their
 historical planning claims. This status record does not authorize successor
@@ -18,7 +17,9 @@ implementation, release, migration, installation, or consumer adoption.
 
 S3 provides lifecycle stores, pointer transitions and recovery, internal GC,
 structural-policy enforcement, and ordinary-write refusal for managed state.
-The operational adapter remains unavailable until S4. The final S3 integration
+The operational adapter and structural library orchestration are implemented in
+the separate [S4 draft candidate](graphify-v8-s4-result.md); that candidate is
+not a merged delivery or release certification. The final S3 integration
 branch and its completed repair checkout were retired after merge; S2's former
 contracts branch is a historical delivery reference, not a current assignment.
 
@@ -29,11 +30,13 @@ The batch and capability IDs retain their meanings from the original plan.
 | Batch | Status | Remaining endpoint |
 | --- | --- | --- |
 | B1 / T3f, T2a; preserve T6–T10 | S1 and S2 merged | Later exact-candidate and aggregate qualification belongs to S7; these merges do not establish release certification. |
-| B2 / T3a–c, T3f, T3j | Partially complete: S3 merged; S4 incomplete | v8 adapter and structural orchestration, real source observations and drift handling, engine build, certification/promotion, and a provider-neutral certified query round trip. |
+| B2 / T3a–c, T3f, T3j | S3 merged; S4 implemented in a draft candidate | Acceptance and merge of the S4 adapter, structural orchestration, and certified query round trip. |
 | B3 / T3d–f, T2a | Incomplete | S5 public one-shot commands and diagnostics, then S7 exact-candidate aggregate proof. |
 | B4 / T3g–i, T11f | S3 core recovery and GC safety dependencies merged; S6 transports incomplete | Public maintenance transports; an optional legacy reader only if D3 selects that option. |
 
-S4 is the next dependency-ordered structural implementation slice. S6 maintenance
+S4 has a separate [draft implementation and validation record](graphify-v8-s4-result.md).
+Its delivery status remains distinct from the merged S1–S3 rows above. S5 is the
+next dependency after S4 acceptance, and is not activated by this record. S6 maintenance
 work can start after S3, with public dispatch integration depending on S5, as
 specified in the design. Later implementation owners remain unassigned; no
 successor task is activated by this status update.
