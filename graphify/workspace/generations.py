@@ -4443,15 +4443,21 @@ class GenerationStore:
         occurred_at: datetime,
         expected_compatibility_sha256: str | None = None,
     ) -> GenerationReceipt:
-        self._require_payload_limit(allocation.expected_payload_bytes)
         final_relative = self._generation(operation.repo_uuid, allocation.generation_id)
+        staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
+        final_exists = self.state.private_directory_exists(final_relative)
+        # Finish an already-sealed receipt under its original reservation, even
+        # if admission policy has since tightened. Both recovery branches still
+        # verify its exact payload, request, queue binding, and journal authority.
+        if not final_exists and not self.state.private_file_exists(staging_relative / "receipt.json"):
+            self._require_payload_limit(allocation.expected_payload_bytes)
         snapshot = self.journal.recover_locked(operation)
         events = snapshot.for_generation(allocation.generation_id)
         latest = None if not events else str(events[-1].to_dict()["transition"])
         validating_events = tuple(
             event for event in events if event.to_dict()["transition"] == "VALIDATING"
         )
-        if self.state.private_directory_exists(final_relative):
+        if final_exists:
             receipt = self.verify_generation(
                 operation.repo_uuid,
                 allocation.generation_id,
@@ -4500,7 +4506,6 @@ class GenerationStore:
                 occurred_at=occurred_at,
             )
             latest = "BUILT"
-        staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
         self.state.cleanup_atomic_temps(staging_relative)
         receipt_relative = staging_relative / "receipt.json"
         receipt_bytes = self.state.read_optional_existing_bytes(

@@ -8,9 +8,10 @@ from graphify.workspace.composition import (
     StructuralPolicy, WorkspaceRuntimeAuthority, WorkspaceRuntimeInputs,
     compose_workspace_runtime,
 )
-from graphify.workspace.generations import CapacityExceeded, StructuralBuildRequest
-from graphify.workspace.persistence import RuntimeCapabilities
+from graphify.workspace.generations import CapacityExceeded, GenerationError, StructuralBuildRequest
+from graphify.workspace.persistence import InjectedFault, RuntimeCapabilities
 from tests import test_workspace_lifecycle_s3 as fixtures
+from tests.test_workspace_generation_capacity_review import _certification
 from tests.test_workspace_generation_recovery_review import _bound_without_receipt, _recover
 from tests.workspace_s3_helpers import (
     COMPATIBILITY_MANIFEST, REPO_UUID, START, tree_snapshot, trust_source_observations,
@@ -84,6 +85,79 @@ def test_stale_certification_recovery_enforces_composed_limit(tmp_path, monkeypa
         stores.generations.recover_staged_certification(recovered, monotonic_ns=2_000_001)
     assert tree_snapshot(harness.state_root) == before
     assert not (completion.allocation.staging_path / "receipt.json").exists()
+
+
+@pytest.mark.parametrize("fault_stage", ["receipt_durable", "installed", "certified_journal"])
+@pytest.mark.parametrize("damage", [None, "receipt", "payload"])
+def test_lowered_limit_allows_recovery_of_exact_sealed_receipt(
+    tmp_path, monkeypatch, fault_stage, damage,
+):
+    def fault(point):
+        if point == f"generation:{fixtures.GENERATION_ID}:{fault_stage}":
+            raise InjectedFault(point)
+
+    harness, generations, _, observations = fixtures._runtime(tmp_path, fault_hook=fault)
+    if fault_stage == "certified_journal":
+        def interrupt_staged_commit(*args, **kwargs):
+            raise InjectedFault("certified journal before staged commit")
+
+        monkeypatch.setattr(generations, "_mark_staged_certified_locked", interrupt_staged_commit)
+    request, attempt, completion = fixtures._complete(harness, generations, observations)
+    certification = _certification(generations, attempt, completion, observations)
+    with pytest.raises(InjectedFault):
+        generations.certify(
+            attempt.grant, completion.allocation, certification,
+            source_observations=observations, declared_entries=completion.entries,
+            staged_completion=completion, occurred_at=START + timedelta(seconds=1),
+            monotonic_ns=10_006,
+        )
+    location = (
+        completion.allocation.staging_path
+        if fault_stage == "receipt_durable"
+        else generations.state.path(generations._generation(REPO_UUID, fixtures.GENERATION_ID))
+    )
+    sealed_receipt = (location / "receipt.json").read_bytes()
+    stores = _composed(harness, observations, monkeypatch, limit=1)
+    recovered = _recover(stores.generations, request)
+    assert recovered.state.lifecycle_state == "COMPLETE"
+    if damage is not None:
+        damaged = location / ("receipt.json" if damage == "receipt" else "graphify-out/graph.json")
+        damaged.write_bytes(b'{"changed":true}\n')
+        before = tree_snapshot(harness.state_root)
+        with pytest.raises(GenerationError):
+            stores.generations.recover_staged_certification(recovered, monotonic_ns=2_000_001)
+        assert tree_snapshot(harness.state_root) == before
+        return
+    original_mark = stores.generations._mark_staged_certified_locked
+    interrupted = False
+
+    def interrupt_recovery_once(*args, **kwargs):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise InjectedFault("recovery certified before staged commit")
+        return original_mark(*args, **kwargs)
+
+    monkeypatch.setattr(stores.generations, "_mark_staged_certified_locked", interrupt_recovery_once)
+    with pytest.raises(InjectedFault):
+        stores.generations.recover_staged_certification(recovered, monotonic_ns=2_000_001)
+    certified = stores.generations.recover_staged_certification(
+        recovered, monotonic_ns=2_000_001,
+    )
+    assert certified.lifecycle_state == "CERTIFIED"
+    receipt = stores.generations.verify_generation(REPO_UUID, fixtures.GENERATION_ID)
+    assert receipt.canonical == sealed_receipt
+    assert certified.receipt_sha256 == receipt.sha256
+    events = stores.journal.read_stable(REPO_UUID).for_generation(fixtures.GENERATION_ID)
+    assert sum(event.to_dict()["transition"] == "CERTIFIED" for event in events) == 1
+    stores.leases.release(recovered.grant)
+    promotion = stores.generations.acquire_staged_operation(
+        REPO_UUID, fixtures.GENERATION_ID, request, attempt_sha256="8" * 64,
+        operation="PROMOTE", acquired_at=START + timedelta(seconds=4),
+        monotonic_ns=3_000_001, ttl_ns=1_000_000,
+    )
+    assert promotion.state.lifecycle_state == "CERTIFIED"
+    stores.leases.release(promotion.grant)
 
 
 def test_composition_accepts_exact_reservation_limit(tmp_path, monkeypatch):
