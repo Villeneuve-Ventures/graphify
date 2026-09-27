@@ -3618,10 +3618,18 @@ class GenerationStore:
         *,
         source_observations: Sequence[SourceObservation],
         monotonic_ns: int,
+        required_payload_bytes: int | None = None,
     ) -> StagedBuildCompletion:
-        """Seal complete staged bytes only after trusted source re-observation."""
+        """Seal complete bytes, or close a bounded producer's proved capacity failure.
+
+        A producer may report the minimum serialized payload size before writing
+        files. That path requires empty staging and the same trusted observations,
+        allocation and fence checks as ordinary completion.
+        """
 
         request = self._validated_structural_request(preparation.state.request)
+        if required_payload_bytes is not None:
+            integer(required_payload_bytes, minimum=preparation.allocation.expected_payload_bytes + 1)
         with self.leases.current_operation(
             preparation.grant,
             monotonic_ns=monotonic_ns,
@@ -3641,6 +3649,8 @@ class GenerationStore:
             )
             self._require_allocation(recovery_operation, preparation.allocation)
             self._require_structural_allocation(recovery_state, preparation.allocation)
+            if required_payload_bytes is not None and recovery_state.lifecycle_state != "PUBLISHING":
+                raise GenerationConflict("producer capacity failure requires publishing state")
             if recovery_state.lifecycle_state == "COMPLETE":
                 lock = self._lock(
                     recovery_operation.repo_uuid,
@@ -3704,15 +3714,23 @@ class GenerationStore:
                     operation.fence_token,
                 ):
                     raise GenerationConflict("staged build publication belongs to another fence")
-                try:
-                    inventory = self._inventory(
-                        preparation.allocation.staging_path,
-                        allowed_root_entries=frozenset({"graphify-out"}),
-                        max_bytes=preparation.allocation.expected_payload_bytes,
-                    )
-                    payload_bytes = inventory.total_bytes
-                except _PayloadCapacityExceeded as exc:
-                    payload_bytes = exc.observed_bytes
+                if required_payload_bytes is not None:
+                    if self._staging_names(state.repo_uuid, state.generation_id) != ["graphify-out"]:
+                        raise GenerationConflict("producer capacity failure requires empty staging")
+                    relative = self._staging(state.repo_uuid, state.generation_id) / "graphify-out"
+                    with self.state.existing_private_directory(relative) as descriptor:
+                        _directory_names(descriptor, deadline_ns=None, max_entries=0)
+                    payload_bytes = required_payload_bytes
+                else:
+                    try:
+                        inventory = self._inventory(
+                            preparation.allocation.staging_path,
+                            allowed_root_entries=frozenset({"graphify-out"}),
+                            max_bytes=preparation.allocation.expected_payload_bytes,
+                        )
+                        payload_bytes = inventory.total_bytes
+                    except _PayloadCapacityExceeded as exc:
+                        payload_bytes = exc.observed_bytes
                 if payload_bytes <= preparation.allocation.expected_payload_bytes:
                     self._sync_inventory(
                         operation.repo_uuid,

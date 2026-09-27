@@ -18,13 +18,13 @@ import time
 
 from graphify.source_io import SourceIO, SourceError, SourceChanged, SourceUnsupported
 from graphify.workspace.contracts import (
-    DETECTOR_ID, MAX_TOTAL_BYTES, InputManifest, ContractError, input_label,
+    DETECTOR_ID, MAX_TOTAL_BYTES, InputManifest, ContractError, input_label, integer,
 )
 from graphify.workspace.identity import (
     discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation as LifecycleObservation
-from .base import QueryRejected, QueryRequest, SourceObservation, StructuralBuild
+from .base import PayloadBudgetExceeded, QueryRejected, QueryRequest, SourceObservation, StructuralBuild
 
 
 def _deadline(deadline_ns):
@@ -169,6 +169,29 @@ def read_payload_file(payload_fd, name, *, max_bytes=MAX_TOTAL_BYTES):
         os.close(fd)
 
 
+class _BoundedGraphBuffer(io.BytesIO):
+    """Accept the existing text serializer without buffering beyond its budget."""
+
+    def __init__(self, max_bytes, manifest):
+        super().__init__()
+        self.max_bytes = max_bytes
+        self.manifest = manifest
+
+    def _exceeded(self, size):
+        raise PayloadBudgetExceeded(len(self.manifest.canonical) + self.tell() + size,
+                                    self.manifest)
+
+    def write(self, text):
+        remaining = self.max_bytes - self.tell()
+        if len(text) > remaining:
+            self._exceeded(len(text))
+        raw = text.encode("utf-8")
+        if len(raw) > remaining:
+            self._exceeded(len(raw))
+        super().write(raw)
+        return len(text)
+
+
 class V8Adapter:
     adapter_id = "graphify-v8/structural-v2"
     detector_id = DETECTOR_ID
@@ -229,7 +252,7 @@ class V8Adapter:
         return LifecycleObservation(source.head_commit, source.config_sha256, structural)
 
     def build_structural(self, source_root, *, payload_fd, scratch_fd, initial_detection,
-                         write_guard=None):
+                         write_guard=None, max_payload_bytes=MAX_TOTAL_BYTES):
         from contextlib import nullcontext
         from graphify.extract import extract
         from graphify.build import build_from_json
@@ -237,6 +260,8 @@ class V8Adapter:
 
         if type(initial_detection) is not InputManifest or initial_detection.to_dict()["phase"] != "detection":
             raise ContractError("validated initial detection required")
+        integer(max_payload_bytes, minimum=1)
+        max_payload_bytes = min(max_payload_bytes, MAX_TOTAL_BYTES)
         with self._inputs(source_root) as (inputs, initial, source, code):
             if initial != initial_detection:
                 raise SourceChanged("initial detection changed before build")
@@ -260,12 +285,14 @@ class V8Adapter:
             value["evidence"] = [evidence[key] for key in sorted(evidence)]
             consumed = InputManifest.from_mapping(value)
             SourceObservation(initial, consumed, 2)
+            manifest_raw = consumed.canonical
+            graph_budget = max_payload_bytes - len(manifest_raw)
+            if graph_budget <= 0:
+                raise PayloadBudgetExceeded(len(manifest_raw) + 1, consumed)
             graph = build_from_json(extraction, directed=True, root=source_root)
-            stream = io.StringIO()
-            write_json(graph, {}, stream, built_at_commit=source.head_commit)
-            raw = stream.getvalue().encode("utf-8")
-        if len(raw) > MAX_TOTAL_BYTES:
-            raise SourceUnsupported("structural graph exceeds payload bound")
+            with _BoundedGraphBuffer(graph_budget, consumed) as stream:
+                write_json(graph, {}, stream, built_at_commit=source.head_commit)
+                raw = stream.getvalue()
         # The lifecycle supplies a fence/descriptor binding guard. Low-level
         # callers own their descriptors; the adapter never allocates authority.
         with write_guard() if write_guard is not None else nullcontext():
@@ -276,7 +303,7 @@ class V8Adapter:
                     raise SourceUnsupported("owned private output descriptors required")
             if os.listdir(payload_fd):
                 raise SourceUnsupported("structural payload destination is not empty")
-            for name, data in (("graph.json", raw), ("input-manifest.json", consumed.canonical)):
+            for name, data in (("graph.json", raw), ("input-manifest.json", manifest_raw)):
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=payload_fd)
                 with os.fdopen(fd, "wb") as stream:

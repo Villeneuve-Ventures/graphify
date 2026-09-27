@@ -169,6 +169,25 @@ still count against that pass's limit; this does not change the S1 I/O contract.
 Focused regressions cover promotion and a no-write query, inter-pass source drift,
 and the combined unique-input ceiling with detection-only and extraction-only inputs.
 
+The review of `ed68b9df6056b62aa36571c220f395bcf9021b73` added two
+resource-lifetime findings (nine conversation comments, six reviews, thirteen
+inline threads, no linked issues), repaired in this order:
+
+1. [Payload reservation](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4116735049):
+   the adapter receives the durable allocation ceiling. Its UTF-8 serialization
+   buffer stops at the remaining budget after charging the input manifest, before
+   either payload file is created. A proved overflow follows the existing fenced
+   capacity-abandonment path after trusted source re-observation and an empty
+   staging check, freeing the reservation for a later valid request. Interruption
+   after durable abandonment intent remains recoverable. S3 still checks the
+   payload plus canonical receipt before any certification write.
+2. [Lease lifetime](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4116735056):
+   heartbeat now covers the acquired build/certification and promotion sections,
+   including source observations. It joins before lease release. Five-second
+   lease fixtures with six-second observations reproduce the former expiry at
+   allocation, completion, and promotion, and now complete without retained
+   leases or heartbeat threads.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -179,9 +198,10 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,721 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,698.02 seconds (28m 18s). |
-| Optimized Python protected-verifier suite | 80 passed in 10.96 seconds. |
+| Full serial `pytest tests/ -q --tb=short` | 6,730 passed, 41 skipped, 6 warnings, and 235 subtests passed in 1,998.40 seconds (33m18s). |
+| Optimized Python protected-verifier suite | 80 passed in 9.79 seconds. |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
+| Focused resource and capacity regressions | 15 passed in 87.53 seconds, including bounded serialization, manifest accounting, recoverable abandonment, slow observations, and existing receipt-capacity checks. |
 | Focused extraction-budget regressions | Build/promotion/no-write query passed for code and non-code inputs; inter-pass drift and oversized combined evidence refused before payload writes. |
 | Focused admission tests | Prior candidate: 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
 | Adapter/review/installed-wheel tests | Prior candidate: 47 passed, including actual installed-candidate admission and absent/misleading-cache no-write checks; also included in the current full suite. |

@@ -14,6 +14,7 @@ from threading import Event, Thread
 import time
 
 from .contracts import InputManifest, MAX_DOCUMENT_BYTES, canonical_json_bytes, decode_canonical, digest, exact, integer
+from .adapters.base import PayloadBudgetExceeded
 from .generations import (
     CertificationRequest, GenerationConflict, GenerationStore, StagedBuildStillCurrent,
     StagedBuildReadRecoveryRequired,
@@ -315,9 +316,9 @@ def _build(runtime, request, preparation, source, initial):
                             if (os.fstat(live).st_dev, os.fstat(live).st_ino) != (os.fstat(payload).st_dev, os.fstat(payload).st_ino):
                                 raise GenerationConflict("staging descriptor was replaced")
                             yield
-            with _heartbeat(runtime, preparation.grant):
-                return runtime.adapter.build_structural(source.root, payload_fd=payload,
-                    scratch_fd=scratch, initial_detection=initial, write_guard=guard)
+            return runtime.adapter.build_structural(source.root, payload_fd=payload,
+                scratch_fd=scratch, initial_detection=initial, write_guard=guard,
+                max_payload_bytes=preparation.allocation.expected_payload_bytes)
 
 
 def _manifest(stores, request, *, certified=False):
@@ -390,7 +391,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
         _fault(runtime, request, "request_staged")
     if staged.lifecycle_state != "CERTIFIED":
         attempt = _acquire(runtime, request, attempt_sha256, recovering=recovering)
-        with _released(runtime, attempt.grant):
+        with _released(runtime, attempt.grant), _heartbeat(runtime, attempt.grant):
             _fault(runtime, request, "build_acquired")
             # Certification binding is an already-authorized durable boundary.
             # Finish it before consulting potentially newer source contents.
@@ -415,7 +416,16 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
                 preparation = stores.generations.prepare_staged_build(attempt, allocation, monotonic_ns=time.monotonic_ns())
                 _fault(runtime, request, "staging_prepared")
                 if preparation.state.lifecycle_state != "COMPLETE":
-                    built = _build(runtime, request, preparation, source, observations[0].initial_detection)
+                    try:
+                        built = _build(runtime, request, preparation, source, observations[0].initial_detection)
+                    except PayloadBudgetExceeded as exc:
+                        if exc.required_bytes <= preparation.allocation.expected_payload_bytes:
+                            raise  # The adapter's independent ceiling, not reservation exhaustion.
+                        _source, final = _observe(runtime, request.repo_uuid, exc.input_manifest)
+                        stores.generations.complete_staged_build(preparation,
+                            source_observations=final, monotonic_ns=time.monotonic_ns(),
+                            required_payload_bytes=exc.required_bytes)
+                        raise
                     manifest = built.input_manifest
                     _fault(runtime, request, "adapter_built")
                 else:
@@ -449,7 +459,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
     runtime.validate_authority()
     receipt = stores.generations.verify_generation(request.repo_uuid, request.generation_id)
     attempt = _acquire(runtime, request, attempt_sha256, recovering=True)
-    with _released(runtime, attempt.grant):
+    with _released(runtime, attempt.grant), _heartbeat(runtime, attempt.grant):
         _fault(runtime, request, "promotion_acquired")
         if attempt.grant.lease.to_dict()["operation"] == "POINTER_RECOVERY":
             pointer = stores.pointers.recover(attempt.grant, occurred_at=_now(), monotonic_ns=time.monotonic_ns())

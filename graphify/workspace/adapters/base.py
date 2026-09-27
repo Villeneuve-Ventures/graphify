@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from graphify.workspace.contracts import (
-    CompatibilityManifest, InputManifest, ContractError, _validate_input_extension,
+    CompatibilityManifest, InputManifest, ContractError, MAX_TOTAL_BYTES, _validate_input_extension,
 )
 
 _MAX_QUERY_DEPTH = 8
@@ -26,6 +26,15 @@ class UnsupportedCompatibility(ContractError):
 
 class QueryRejected(ContractError):
     """Query request exceeds the bounded adapter contract."""
+
+
+class PayloadBudgetExceeded(ContractError):
+    """A bounded serializer proved a minimum payload size before writing files."""
+
+    def __init__(self, required_bytes, input_manifest):
+        super().__init__("structural payload exceeds byte budget")
+        self.required_bytes = required_bytes
+        self.input_manifest = input_manifest
 
 
 class AdapterIntent(str, Enum):
@@ -193,7 +202,8 @@ class EngineAdapter(Protocol):
     detector_id: str
 
     def build_structural(self, source_root: Path, *, payload_fd: int,
-                         scratch_fd: int, initial_detection: InputManifest, write_guard=None) -> StructuralBuild: ...
+                         scratch_fd: int, initial_detection: InputManifest, write_guard=None,
+                         max_payload_bytes: int = MAX_TOTAL_BYTES) -> StructuralBuild: ...
 
     def query_structural(self, payload_fd: int, request: QueryRequest) -> str: ...
 
