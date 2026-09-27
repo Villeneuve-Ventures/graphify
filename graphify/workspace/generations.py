@@ -13,7 +13,9 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import UnsupportedCompatibility
-from graphify.workspace.contracts import CompatibilityManifest, CompletionBinding, InputManifest, MAX_DOCUMENT_BYTES
+from graphify.workspace.contracts import (
+    CompatibilityManifest, CompletionBinding, InputManifest, MAX_DOCUMENT_BYTES, integer,
+)
 from graphify.workspace.lifecycle_observation import ObservationError, SourceObservation
 from graphify.workspace.lifecycle_contracts import (
     LIFECYCLE_JSON_MAX_BYTES,
@@ -467,12 +469,16 @@ class GenerationStore:
         compatibility_manifest: CompatibilityManifest,
         observer: Callable[[Path], SourceObservation] | None = None,
         semantic_queue: SemanticQueueStore | None = None,
+        max_payload_bytes: int | None = None,
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
     ) -> None:
         if type(compatibility_manifest) is not CompatibilityManifest:
             raise UnsupportedCompatibility("validated S2 compatibility manifest required")
+        if max_payload_bytes is not None:
+            integer(max_payload_bytes, minimum=1)
+        self.max_payload_bytes = max_payload_bytes
         self.observer = observer
         self.compatibility_manifest = compatibility_manifest
         self.compatibility_sha256 = compatibility_manifest.sha256
@@ -494,6 +500,12 @@ class GenerationStore:
             )
         self.semantic_queue = semantic_queue
         self.fault_hook = fault_hook or (lambda _event: None)
+
+    def _require_payload_limit(self, expected_payload_bytes: int) -> None:
+        # Reservations already bound every completion/certification inventory.
+        # Apply the current operator ceiling without changing immutable receipts.
+        if self.max_payload_bytes is not None and expected_payload_bytes > self.max_payload_bytes:
+            raise CapacityExceeded("reservation exceeds the per-generation payload limit")
 
     def _observe(self, source_root: Path) -> SourceObservation:
         if self.observer is None:
@@ -839,6 +851,7 @@ class GenerationStore:
         """Durably install exact request authority before BUILD acquisition."""
 
         request = self._validated_structural_request(request)
+        self._require_payload_limit(request.expected_payload_bytes)
         self._lock_document(generation_id)
         try:
             with self.leases.registry.recovered_snapshot():
@@ -3173,6 +3186,7 @@ class GenerationStore:
         occurred_at: datetime,
         monotonic_ns: int,
     ) -> GenerationAllocation:
+        self._require_payload_limit(expected_payload_bytes)
         capacity_policy = self._validated_capacity_policy(capacity_policy)
         with self.leases.current_operation(
             grant,
@@ -4084,6 +4098,7 @@ class GenerationStore:
         operation: LeaseOperation,
         allocation: GenerationAllocation,
     ) -> None:
+        self._require_payload_limit(allocation.expected_payload_bytes)
         canonical_staging = self.state.path(
             self._staging(operation.repo_uuid, allocation.generation_id)
         )
@@ -4429,13 +4444,20 @@ class GenerationStore:
         expected_compatibility_sha256: str | None = None,
     ) -> GenerationReceipt:
         final_relative = self._generation(operation.repo_uuid, allocation.generation_id)
+        staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
+        final_exists = self.state.private_directory_exists(final_relative)
+        # Finish an already-sealed receipt under its original reservation, even
+        # if admission policy has since tightened. Both recovery branches still
+        # verify its exact payload, request, queue binding, and journal authority.
+        if not final_exists and not self.state.private_file_exists(staging_relative / "receipt.json"):
+            self._require_payload_limit(allocation.expected_payload_bytes)
         snapshot = self.journal.recover_locked(operation)
         events = snapshot.for_generation(allocation.generation_id)
         latest = None if not events else str(events[-1].to_dict()["transition"])
         validating_events = tuple(
             event for event in events if event.to_dict()["transition"] == "VALIDATING"
         )
-        if self.state.private_directory_exists(final_relative):
+        if final_exists:
             receipt = self.verify_generation(
                 operation.repo_uuid,
                 allocation.generation_id,
@@ -4484,7 +4506,6 @@ class GenerationStore:
                 occurred_at=occurred_at,
             )
             latest = "BUILT"
-        staging_relative = self._staging(operation.repo_uuid, allocation.generation_id)
         self.state.cleanup_atomic_temps(staging_relative)
         receipt_relative = staging_relative / "receipt.json"
         receipt_bytes = self.state.read_optional_existing_bytes(
