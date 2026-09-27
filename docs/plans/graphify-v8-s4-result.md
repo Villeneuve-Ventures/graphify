@@ -93,6 +93,33 @@ compare state/source/installed-tree bytes, modes, identities, and mtimes.
 The existing S1 cold tests independently qualify Chinese token/ranking parity
 and the missing-extra fallback. No public workspace CLI is added by this proof.
 
+## PR #167 review repairs
+
+The feedback snapshot at `1a17c3f01d72c73a849487958f184bfc9a988073` included
+three conversation comments, two reviews, and six inline threads, with no linked
+issues. Three independent execution-boundary defects were reproduced and repaired
+in this priority order:
+
+1. [Query bounds](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4114054405):
+   both library and adapter entry points reconstruct a validated request before
+   authority, locks, payload access, or traversal. Exact type alone is insufficient
+   for a deserialized or altered dataclass.
+2. [Payload modes](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4114054412):
+   the adapter sets mode `0600` on each newly opened payload descriptor before
+   writing, independent of umask. A `0277` fixture now completes and promotes.
+3. [Git refs](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4114054409):
+   reference names use Git's own validator through the existing bounded Git
+   helper, with the query deadline preserved. UTF-8 loose and packed refs accept
+   valid `+`, `@`, and Unicode names, including Unicode whitespace. Only Git's LF
+   delimiter is removed or split; invalid ref paths still refuse before probing.
+
+Regression tests reproduced all three defects and the Unicode whitespace
+edge cases. The focused run passed 44 tests, including the adapter and actual
+installed-wheel no-write proof. The remaining inline warnings require no repair: module and member imports serve
+distinct monkeypatch/call sites, the ellipsis is a standard protocol method stub,
+and heartbeat `BaseException` handling transfers thread failure to the caller
+after joining, preventing silent heartbeat loss. Review-thread state is unchanged.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -103,8 +130,8 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,676 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,617.41 seconds (26m 57s). |
-| Optimized Python protected-verifier suite | 80 passed in 18.58 seconds. |
+| Full serial `pytest tests/ -q --tb=short` | 6,705 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,349.52 seconds (22m 29s). |
+| Optimized Python protected-verifier suite | 80 passed in 11.27 seconds. |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
 | Installed-wheel cold-query fixture | Passed actual installed-candidate admission and absent/misleading-cache no-write checks. |
 | Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |

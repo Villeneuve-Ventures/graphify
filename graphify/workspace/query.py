@@ -1,6 +1,7 @@
 """Buffered, existing-only certified structural queries under GC protection."""
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import time
 
@@ -18,6 +19,7 @@ def query_structural(runtime, repo_uuid, request, *, deadline_ns=None):
     """
     if type(request) is not QueryRequest:
         raise QueryRejected("validated query request required")
+    request = replace(request)
     if deadline_ns is None:
         deadline_ns = time.monotonic_ns() + 30_000_000_000
     require_before_deadline(deadline_ns, "query deadline expired")

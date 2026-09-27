@@ -6,6 +6,7 @@ selects an explicit common-directory root; corpus metadata cannot widen it.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -19,7 +20,9 @@ from graphify.source_io import SourceIO, SourceError, SourceChanged, SourceUnsup
 from graphify.workspace.contracts import (
     DETECTOR_ID, MAX_TOTAL_BYTES, InputManifest, ContractError,
 )
-from graphify.workspace.identity import discover_source
+from graphify.workspace.identity import (
+    discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
+)
 from graphify.workspace.lifecycle_observation import SourceObservation as LifecycleObservation
 from .base import QueryRejected, QueryRequest, SourceObservation, StructuralBuild
 
@@ -40,7 +43,7 @@ def _optional(inputs, path):
     return None if inputs.probe(path) is None else inputs.read_bytes(path)
 
 
-def _git_inputs(inputs, source):
+def _git_inputs(inputs, source, *, deadline_ns=None):
     """Bind local routing/ref files, refusing Git modes with unaccounted readers.
 
     Only ordinary files-based repositories and standard linked worktrees are
@@ -79,23 +82,29 @@ def _git_inputs(inputs, source):
         if inputs.probe(common / name) is not None:
             raise SourceUnsupported("unsupported Git object/history routing")
     packed = _optional(inputs, common / "packed-refs")
-    head = inputs.read_bytes(git_dir / "HEAD").decode("ascii").strip()
+    head = inputs.read_bytes(git_dir / "HEAD").decode("utf-8").removesuffix("\n")
     seen = set()
     while head.startswith("ref: "):
         ref = head[5:]
-        if (not re.fullmatch(r"refs/[A-Za-z0-9_./-]+", ref) or ".." in ref
+        if (not ref.startswith("refs/")
                 or ref in seen or len(seen) >= 8):
             raise SourceUnsupported("unsupported Git reference")
+        try:
+            _git(root, "check-ref-format", ref, deadline_ns=deadline_ns)
+        except SourceDiscoveryTimeout:
+            raise
+        except SourceDiscoveryError as exc:
+            raise SourceUnsupported("unsupported Git reference") from exc
         seen.add(ref)
         raw = _optional(inputs, common / ref)
         if raw is None:
-            rows = [] if packed is None else packed.decode("ascii").splitlines()
+            rows = [] if packed is None else packed.decode("utf-8").split("\n")
             matches = [line.split(" ")[0] for line in rows if line.endswith(" " + ref)]
             if len(matches) != 1:
                 raise SourceUnsupported("Git reference is unavailable")
             head = matches[0]
         else:
-            head = raw.decode("ascii").strip()
+            head = raw.decode("utf-8").removesuffix("\n")
     if head != source.head_commit:
         raise SourceChanged("Git HEAD changed during observation")
     policy = inputs.read_bytes(root / ".graphify" / "workspace.toml")
@@ -168,7 +177,7 @@ class V8Adapter:
             source = discover_source(root, deadline_ns=deadline_ns)
         common = Path(source.registry_source["git_common_dir"])
         with SourceIO(root, extra_roots={"git": common}) as inputs:
-            _git_inputs(inputs, source)
+            _git_inputs(inputs, source, deadline_ns=deadline_ns)
             detection = detect(root, source_io=inputs, quiet=True)
             if detection.get("walk_errors"):
                 raise SourceUnsupported("incomplete source enumeration")
@@ -176,7 +185,7 @@ class V8Adapter:
             initial = InputManifest.from_engine(inputs, phase="detection", code_inputs=code)
             yield inputs, initial, source, code
             _deadline(deadline_ns)
-            _git_inputs(inputs, source)
+            _git_inputs(inputs, source, deadline_ns=deadline_ns)
             if discover_source(root, deadline_ns=deadline_ns) != source:
                 raise SourceChanged("source identity changed during observation")
 
@@ -240,16 +249,19 @@ class V8Adapter:
                 fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                              0o600, dir_fd=payload_fd)
                 with os.fdopen(fd, "wb") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
                     stream.write(data)
         return StructuralBuild(consumed, hashlib.sha256(raw).hexdigest(),
                                graph.number_of_nodes(), graph.number_of_edges())
 
     def query_structural(self, payload_fd, request):
+        if type(request) is not QueryRequest:
+            raise QueryRejected("validated query request required")
+        request = replace(request)
+
         from networkx.readwrite import json_graph
         from graphify.serve import _query_graph_text, memory_query_segmenter
 
-        if type(request) is not QueryRequest:
-            raise QueryRejected("validated query request required")
         try:
             data = json.loads(read_payload_file(payload_fd, "graph.json"))
             if data.get("directed") is not True or data.get("multigraph") is not False:
