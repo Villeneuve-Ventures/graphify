@@ -1,5 +1,9 @@
 # Graphify capability consolidation into v8
 
+For delivery status after the S3 merge, see the
+[consolidation status record](graphify-product-consolidation-status.md).
+The planning snapshot below remains historical.
+
 > Publication note (2026-09-19): this is a portable snapshot of the completed
 > bounded design task and its macOS context note. Status and inspection claims
 > below are historical to that task. Separate S1 implementation now has
