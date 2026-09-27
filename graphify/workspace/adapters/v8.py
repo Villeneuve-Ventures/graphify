@@ -240,10 +240,25 @@ class V8Adapter:
         with self._inputs(source_root) as (inputs, initial, source, code):
             if initial != initial_detection:
                 raise SourceChanged("initial detection changed before build")
-            extraction = extract(code, source_io=inputs, source_root=source_root,
-                                 quiet=True, ambient_output=False)
-            consumed = InputManifest.from_engine(inputs, phase="consumed", code_inputs=code,
-                                                 outcomes=extraction["outcomes"])
+            # Detection and extraction are separately bounded passes. Retain both
+            # sets of evidence, rejecting disagreements instead of overwriting them.
+            with SourceIO(inputs.root,
+                          extra_roots={k: v for k, v in inputs.roots.items() if k != "source"},
+                          max_file_bytes=inputs.max_file_bytes,
+                          max_total_bytes=inputs.max_total_bytes,
+                          max_entries=inputs.max_entries) as extraction_inputs:
+                extraction = extract(code, source_io=extraction_inputs, source_root=source_root,
+                                     quiet=True, ambient_output=False)
+                value = InputManifest.from_engine(extraction_inputs, phase="consumed", code_inputs=code,
+                                                  outcomes=extraction["outcomes"]).to_dict()
+            evidence = {(e["operation"], e["path"]): e for e in initial.to_dict()["evidence"]}
+            for record in value["evidence"]:
+                key = record["operation"], record["path"]
+                if key in evidence and evidence[key] != record:
+                    raise SourceChanged("source evidence changed between detection and extraction")
+                evidence[key] = record
+            value["evidence"] = [evidence[key] for key in sorted(evidence)]
+            consumed = InputManifest.from_mapping(value)
             SourceObservation(initial, consumed, 2)
             graph = build_from_json(extraction, directed=True, root=source_root)
             stream = io.StringIO()

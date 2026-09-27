@@ -119,7 +119,8 @@ def test_reviewed_source_conditions_complete_and_promote(tmp_path, monkeypatch, 
     assert tree_snapshot(repo) == source_before
 
 
-def test_consumed_replay_has_separate_bounded_read_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize("large_input", ["notes.png", "main.py"])
+def test_build_and_replay_have_separate_bounded_read_budgets(tmp_path, monkeypatch, large_input):
     from graphify.source_io import SourceIO, SourceUnsupported
 
     class SmallBudgetInputs(SourceIO):
@@ -129,8 +130,12 @@ def test_consumed_replay_has_separate_bounded_read_budget(tmp_path, monkeypatch)
 
     monkeypatch.setattr("graphify.workspace.adapters.v8.SourceIO", SmallBudgetInputs)
     runtime, repo = runtime_fixture(tmp_path, monkeypatch)
-    # Detection consumes this non-code input once; extraction only needs the small code.
-    (repo / "notes.png").write_bytes(b"x" * 12_000)
+    # Detection reads both kinds; extraction rereads code, and replay reads both.
+    path = repo / large_input
+    # Python extraction makes three reads itself. Keep that pass below 20 KiB,
+    # while detection plus extraction exceeds it; non-code is read once per pass.
+    padding = 5_500 if large_input == "main.py" else 12_000
+    path.write_bytes((path.read_bytes() if path.exists() else b"") + b"\n#" + b"x" * padding)
     before = tree_snapshot(repo)
     request = request_for(runtime)
     result = synchronize_structural(runtime, request, attempt_sha256="c" * 64)
@@ -140,7 +145,7 @@ def test_consumed_replay_has_separate_bounded_read_budget(tmp_path, monkeypatch)
     assert tree_snapshot(runtime.inputs.state_root) == state
     assert tree_snapshot(repo) == before
     # Separate replay budgets must not relax the per-observation input ceiling.
-    (repo / "notes.png").write_bytes(b"x" * 21_000)
+    path.write_bytes(b"x" * 21_000)
     with pytest.raises(SourceUnsupported, match="input byte limit exceeded"):
         adapter().observe(repo)
 
@@ -183,3 +188,43 @@ def test_selected_non_utf8_ref_refuses_at_manifest_label_boundary(tmp_path):
     with pytest.raises(SourceUnsupported, match="Git reference requires a canonical UTF-8 input label"):
         adapter().observe(repo)
     assert tree_snapshot(repo) == before
+
+
+def test_extraction_budget_split_rejects_interpass_drift(tmp_path, monkeypatch):
+    from graphify import extract as extractor
+    from graphify.source_io import SourceChanged
+
+    repo = create_repo(tmp_path.resolve() / "repo")
+    path = repo / "main.py"
+    path.write_text("def leaf(): return 1\n")
+    original = extractor.extract
+    def changed(*args, **kwargs):
+        path.write_text("def leaf(): return 2\n")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(extractor, "extract", changed)
+    output = tmp_path / "payload"
+    with pytest.raises(SourceChanged, match="between detection and extraction"):
+        _build(adapter(), repo, output)
+    assert not list(output.iterdir())
+
+
+def test_separate_passes_retain_combined_manifest_limit(tmp_path, monkeypatch):
+    from graphify.workspace import contracts
+
+    repo = create_repo(tmp_path.resolve() / "repo")
+    (repo / "app.ts").write_text("import {value} from '@lib'; console.log(value);")
+    (repo / "lib.ts").write_text("export const value = 1;")
+    (repo / "tsconfig.json").write_text(
+        '{"compilerOptions":{"paths":{"@lib":["lib.ts"]}}}' + " " * 8000)
+    (repo / ".graphifyignore").write_text("tsconfig.json\n")
+    (repo / "notes.png").write_bytes(b"x" * 8000)
+    engine = adapter()
+    initial = engine.observe(repo).initial_detection.to_dict()
+    detection_bytes = sum(e["value"][0][3] for e in initial["evidence"] if e["operation"] == "read")
+    # Each pass fits alone; detection-only and extraction-only inputs together
+    # must still obey the unique-input manifest ceiling.
+    monkeypatch.setattr(contracts, "MAX_TOTAL_BYTES", detection_bytes + 4000)
+    output = tmp_path / "payload"
+    with pytest.raises(contracts.ContractError, match="aggregate evidence bound"):
+        _build(engine, repo, output)
+    assert not list(output.iterdir())

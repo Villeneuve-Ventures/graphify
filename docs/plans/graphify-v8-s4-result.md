@@ -157,6 +157,18 @@ did not reproduce: the existing `GenerationStore.request_staged_build` payload
 ceiling already runs before persistence. An S4 integration regression confirms
 unchanged source/state snapshots and a successful valid call after rejection.
 
+The review of `89414e4189de35687b351d0da122eefd86a7d178` added one
+[extraction-budget finding](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4116508830)
+(eight conversation comments, five reviews, eleven inline threads, no linked
+issues). Detection and extraction shared one cumulative read budget, so input
+that fit either pass could fail when their reads were added together. Extraction
+now uses a separate context with the same roots and limits. Its consumed evidence
+is combined with detection evidence, rejecting disagreements and revalidating the
+combined manifest bounds before payload writes. Repeated reads within extraction
+still count against that pass's limit; this does not change the S1 I/O contract.
+Focused regressions cover promotion and a no-write query, inter-pass source drift,
+and the combined unique-input ceiling with detection-only and extraction-only inputs.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -167,10 +179,11 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,718 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,446.60 seconds (24m 06s). |
-| Optimized Python protected-verifier suite | 80 passed in 10.49 seconds. |
+| Full serial `pytest tests/ -q --tb=short` | 6,721 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,698.02 seconds (28m 18s). |
+| Optimized Python protected-verifier suite | 80 passed in 10.96 seconds. |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
-| Focused admission tests | 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
+| Focused extraction-budget regressions | Build/promotion/no-write query passed for code and non-code inputs; inter-pass drift and oversized combined evidence refused before payload writes. |
+| Focused admission tests | Prior candidate: 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
 | Adapter/review/installed-wheel tests | Prior candidate: 47 passed, including actual installed-candidate admission and absent/misleading-cache no-write checks; also included in the current full suite. |
 | Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |
 | Focused S3 regressions | 112 passed, 24 subtests passed. |
