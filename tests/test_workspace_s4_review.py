@@ -117,3 +117,69 @@ def test_reviewed_source_conditions_complete_and_promote(tmp_path, monkeypatch, 
     assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
     assert tree_snapshot(runtime.inputs.state_root) == state_before
     assert tree_snapshot(repo) == source_before
+
+
+def test_consumed_replay_has_separate_bounded_read_budget(tmp_path, monkeypatch):
+    from graphify.source_io import SourceIO, SourceUnsupported
+
+    class SmallBudgetInputs(SourceIO):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("max_total_bytes", 20_000)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr("graphify.workspace.adapters.v8.SourceIO", SmallBudgetInputs)
+    runtime, repo = runtime_fixture(tmp_path, monkeypatch)
+    # Detection consumes this non-code input once; extraction only needs the small code.
+    (repo / "notes.png").write_bytes(b"x" * 12_000)
+    before = tree_snapshot(repo)
+    request = request_for(runtime)
+    result = synchronize_structural(runtime, request, attempt_sha256="c" * 64)
+    assert result.pointer_revision == 1
+    state = tree_snapshot(runtime.inputs.state_root)
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert tree_snapshot(runtime.inputs.state_root) == state
+    assert tree_snapshot(repo) == before
+    # Separate replay budgets must not relax the per-observation input ceiling.
+    (repo / "notes.png").write_bytes(b"x" * 21_000)
+    with pytest.raises(SourceUnsupported, match="input byte limit exceeded"):
+        adapter().observe(repo)
+
+
+def test_unrelated_non_utf8_packed_ref_does_not_break_observation(tmp_path):
+    repo = create_repo(tmp_path.resolve() / "repo")
+    (repo / "main.py").write_text("def leaf(): return 42\ndef caller(): return leaf()\n")
+    # Git accepts opaque non-UTF-8 ref bytes on POSIX. Only the unrelated ref's
+    # bytes live inside packed-refs; all consumed filesystem labels remain UTF-8.
+    opaque = os.fsdecode(b"refs/heads/feature-\xff")
+    git_output(repo, "check-ref-format", opaque)
+    git_output(repo, "pack-refs", "--all", "--prune")
+    packed = repo / ".git/packed-refs"
+    rows = [line for line in packed.read_bytes().splitlines(keepends=True)
+            if not line.startswith(b"#")]
+    rows.append(git_output(repo, "rev-parse", "HEAD").encode("ascii")
+                + b" " + os.fsencode(opaque) + b"\n")
+    packed.write_bytes(b"".join(sorted(rows)))
+    git_output(repo, "rev-parse", "HEAD")
+    before = tree_snapshot(repo)
+    engine = adapter()
+    initial, built = _build(engine, repo, tmp_path / "payload")
+    observed = engine.observe(repo, input_manifest=built.input_manifest)
+    assert observed.initial_detection == initial.initial_detection
+    assert observed.consumed_inputs == built.input_manifest
+    assert tree_snapshot(repo) == before
+
+
+def test_selected_non_utf8_ref_refuses_at_manifest_label_boundary(tmp_path):
+    from graphify.source_io import SourceUnsupported
+
+    repo = create_repo(tmp_path.resolve() / "repo")
+    opaque = os.fsdecode(b"refs/heads/feature-\xff")
+    git_output(repo, "check-ref-format", opaque)
+    head = git_output(repo, "rev-parse", "HEAD").encode("ascii")
+    (repo / ".git/packed-refs").write_bytes(head + b" " + os.fsencode(opaque) + b"\n")
+    (repo / ".git/HEAD").write_bytes(b"ref: " + os.fsencode(opaque) + b"\n")
+    assert git_output(repo, "rev-parse", "HEAD").encode("ascii") == head
+    before = tree_snapshot(repo)
+    with pytest.raises(SourceUnsupported, match="Git reference requires a canonical UTF-8 input label"):
+        adapter().observe(repo)
+    assert tree_snapshot(repo) == before

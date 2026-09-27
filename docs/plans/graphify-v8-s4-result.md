@@ -120,6 +120,24 @@ distinct monkeypatch/call sites, the ellipsis is a standard protocol method stub
 and heartbeat `BaseException` handling transfers thread failure to the caller
 after joining, preventing silent heartbeat loss. Review-thread state is unchanged.
 
+The subsequent feedback snapshot at `9f94657013d39acc8d14c40ae0ece1936f9a4875`
+contained four conversation comments, three reviews, and eight inline threads,
+with no linked issues. The two new findings concern adapter observation:
+
+1. [Replay budget](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115528274):
+   detection and consumed-manifest replay now use separate bounded `SourceIO`
+   contexts. Replay retains the selected roots and all reader limits, compares
+   the complete retained evidence, and must still extend the initial detection.
+   A tightened-budget fixture reproduces the former post-build failure and now
+   completes, promotes, and queries without writes; over-budget input still refuses.
+2. [Ref bytes](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115528275):
+   packed-ref matching preserves bytes, so an unrelated non-UTF-8 ref no longer
+   breaks a supported checkout. Selected refs still require the canonical UTF-8
+   filesystem labels mandated by S2, including absent loose-ref probes. Such
+   unsupported selected names now fail explicitly before probing, rather than
+   leaking a decoder exception. Arbitrary byte-path support would require a
+   separate input-manifest contract change and is not claimed here.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -130,10 +148,10 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,705 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,349.52 seconds (22m 29s). |
-| Optimized Python protected-verifier suite | 80 passed in 11.27 seconds. |
+| Full serial `pytest tests/ -q --tb=short` | 6,708 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,266.65 seconds (21m 06s). |
+| Optimized Python protected-verifier suite | 80 passed in 9.94 seconds. |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
-| Installed-wheel cold-query fixture | Passed actual installed-candidate admission and absent/misleading-cache no-write checks. |
+| Focused adapter/review/installed-wheel tests | 47 passed in 57.70 seconds, including actual installed-candidate admission and absent/misleading-cache no-write checks. |
 | Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |
 | Focused S3 regressions | 112 passed, 24 subtests passed. |
 | Diff review and Ruff F checks | Passed on task paths. |
@@ -156,6 +174,8 @@ made and reverted between observations. Power-loss and hostile concurrent-rename
 proof are not established. Git observation supports ordinary files-based Git
 repositories and standard linked worktrees; includes/extensions, alternate object
 stores, shallow history, and unsupported reference routing refuse explicitly.
+Selected Git ref paths must satisfy S2's canonical NFC UTF-8 input-label contract;
+unrelated ref names inside the byte-bound `packed-refs` file need not be UTF-8.
 Queries without retained migration lineage refuse nonzero migration epochs;
 S4 introduces no migration or historical-query compatibility promise.
 

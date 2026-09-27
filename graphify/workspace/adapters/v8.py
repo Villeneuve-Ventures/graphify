@@ -18,7 +18,7 @@ import time
 
 from graphify.source_io import SourceIO, SourceError, SourceChanged, SourceUnsupported
 from graphify.workspace.contracts import (
-    DETECTOR_ID, MAX_TOTAL_BYTES, InputManifest, ContractError,
+    DETECTOR_ID, MAX_TOTAL_BYTES, InputManifest, ContractError, input_label,
 )
 from graphify.workspace.identity import (
     discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
@@ -82,10 +82,11 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
         if inputs.probe(common / name) is not None:
             raise SourceUnsupported("unsupported Git object/history routing")
     packed = _optional(inputs, common / "packed-refs")
-    head = inputs.read_bytes(git_dir / "HEAD").decode("utf-8").removesuffix("\n")
+    head = inputs.read_bytes(git_dir / "HEAD").removesuffix(b"\n")
     seen = set()
-    while head.startswith("ref: "):
-        ref = head[5:]
+    while head.startswith(b"ref: "):
+        ref_bytes = head[5:]
+        ref = os.fsdecode(ref_bytes)
         if (not ref.startswith("refs/")
                 or ref in seen or len(seen) >= 8):
             raise SourceUnsupported("unsupported Git reference")
@@ -95,17 +96,23 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
             raise
         except SourceDiscoveryError as exc:
             raise SourceUnsupported("unsupported Git reference") from exc
+        # Git refs are bytes, but retained input paths use the S2 canonical UTF-8
+        # label contract. Do not replace undecodable bytes or invent path aliases.
+        try:
+            input_label("git:" + ref, {"git"})
+        except ContractError as exc:
+            raise SourceUnsupported("Git reference requires a canonical UTF-8 input label") from exc
         seen.add(ref)
         raw = _optional(inputs, common / ref)
         if raw is None:
-            rows = [] if packed is None else packed.decode("utf-8").split("\n")
-            matches = [line.split(" ")[0] for line in rows if line.endswith(" " + ref)]
+            rows = [] if packed is None else packed.split(b"\n")
+            matches = [line.split(b" ")[0] for line in rows if line.endswith(b" " + ref_bytes)]
             if len(matches) != 1:
                 raise SourceUnsupported("Git reference is unavailable")
             head = matches[0]
         else:
-            head = raw.decode("utf-8").removesuffix("\n")
-    if head != source.head_commit:
+            head = raw.removesuffix(b"\n")
+    if head != source.head_commit.encode("ascii"):
         raise SourceChanged("Git HEAD changed during observation")
     policy = inputs.read_bytes(root / ".graphify" / "workspace.toml")
     if hashlib.sha256(policy).hexdigest() != source.config_sha256:
@@ -198,7 +205,16 @@ class V8Adapter:
         previous = None
         for _ in range(max_inventory_passes):
             with self._inputs(source_root, deadline_ns) as (inputs, initial, source, _code):
-                consumed = None if input_manifest is None else _replay(inputs, input_manifest)
+                consumed = None
+                if input_manifest is not None:
+                    # Replay is a separate bounded observation. Detection already
+                    # consumed the source bytes; sharing its budget charges twice.
+                    with SourceIO(inputs.root,
+                                  extra_roots={k: v for k, v in inputs.roots.items() if k != "source"},
+                                  max_file_bytes=inputs.max_file_bytes,
+                                  max_total_bytes=inputs.max_total_bytes,
+                                  max_entries=inputs.max_entries) as replay:
+                        consumed = _replay(replay, input_manifest)
                 current = (initial, consumed, source.head_commit, source.config_sha256)
             if current == previous:
                 return SourceObservation(initial, consumed, 2), source
