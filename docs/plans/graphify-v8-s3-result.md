@@ -105,6 +105,44 @@ candidate and the final correction round. They returned **APPROVE** and
 This receipt is bound to the commit above; this later documentation-only
 clarification does not claim another full-suite run or widen the S3 boundary.
 
+### Post-receipt generation recovery correction
+
+The documentation-only clarification above was committed as
+`318a6858bb0bd0589803c2121347df2da7c719a8`. A subsequent production change,
+`26905efef580010cf516c3bd3cf047c4672624e1`, modified
+`graphify/workspace/generations.py` and
+`tests/test_workspace_capacity_acceptance.py`. The earlier 6,618-test run and
+13-path independent review do **not** cover this later change.
+
+The correction lets stale certification recovery finish an already-sealed
+staged or installed receipt under its original reservation after the configured
+payload limit is lowered. Receipt, payload, request, queue, journal, and fence
+validation remain in place. Admission, allocation, direct certification, and
+recovery without a receipt retain their current-limit checks.
+
+The final source and test contents were validated before commit creation and
+matched against the committed files. These focused commands passed:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen pytest tests/test_workspace_capacity_acceptance.py -q --tb=short -p no:cacheprovider
+PYTHONDONTWRITEBYTECODE=1 uv run --frozen pytest tests/test_workspace_generation_io_limits.py tests/test_workspace_generation_inventory_review.py tests/test_workspace_lifecycle_s3.py -q --tb=short -k 'certif or receipt or successor_fence or capacity' -p no:cacheprovider
+```
+
+The first passed **15 tests** in 25.01 seconds; the second passed **13 tests**,
+with 61 deselected, in 20.42 seconds. Coverage includes receipt-durable,
+installed-generation, and journal-CERTIFIED interruption points; rejection of
+damaged receipts or payloads with preserved state; repeated recovery with an
+unchanged receipt and one CERTIFIED event; and subsequent promotion-lease
+acquisition. The existing no-receipt limit-refusal case remains covered.
+
+Ruff F checks, AST parsing, and `git diff --check` passed. The AST-only graph
+refresh completed. Independent code review returned **APPROVE** and architecture
+review returned **CLEAR** for this two-file correction. Supporting results are
+session-local; this section records their revision and scope in the repository.
+The full suite and other aggregate gates from the earlier receipt were **not
+rerun** for this correction. CI was not awaited. Native power-loss proof and S4
+remain outside these results.
+
 ## Independent review
 
 The OMX code-review skill ran independent `code-reviewer` and `architect`
