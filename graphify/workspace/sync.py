@@ -108,6 +108,20 @@ def _queue_barrier(queue):
         raise GenerationConflict("existing semantic work blocks structural sync")
 
 
+def _queue_request(queue, request):
+    """Check reconciliation admission under the registry/workspace read locks."""
+    if request.desired_watermark < queue.desired_watermark:
+        raise GenerationConflict("desired watermark moved backward")
+    if request.desired_watermark == queue.desired_watermark:
+        bound = queue.reconciliation
+        build = request.build
+        if (queue.active_source_revision not in {None, build.expected_active_source_revision}
+                or bound is None or bound.source_epoch != build.source_epoch
+                or bound.policy_sha256 != build.policy_sha256
+                or bound.source_observations.evidence_sha256 != build.observation_evidence_sha256):
+            raise GenerationConflict("desired watermark is already bound to different source evidence")
+
+
 def prepare_structural_sync(runtime, *, repo_uuid, generation_id, source_epoch,
                             desired_watermark, expected_payload_bytes):
     """Freeze a read-only request. Enrollment and activation are separate calls."""
@@ -123,7 +137,10 @@ def prepare_structural_sync(runtime, *, repo_uuid, generation_id, source_epoch,
         with stores.leases.read_only_workspace_lock(repo_uuid):
             _semantic_barriers(stores, repo_uuid)
             lease = stores.leases.read_only_snapshot_locked(registry, repo_uuid)
-            _queue_barrier(stores.queue.read_only_snapshot_locked(repo_uuid))
+            if lease.leases:
+                raise GenerationConflict("active lease blocks structural preparation")
+            queue = stores.queue.read_only_snapshot_locked(repo_uuid)
+            _queue_barrier(queue)
             pointer = stores.pointers.load(repo_uuid, allow_missing=True)
             build = {
                 "expected_registry_revision": registry.to_dict()["revision"],
@@ -142,9 +159,11 @@ def prepare_structural_sync(runtime, *, repo_uuid, generation_id, source_epoch,
                 "capacity_policy_sha256": stores.capacity_policy.sha256,
                 "compatibility_sha256": runtime.inputs.expected.sha256,
             }
-    build["logical_request_sha256"] = StructuralSyncRequest.identity(repo_uuid, generation_id, desired_watermark, build)
-    return StructuralSyncRequest(repo_uuid, generation_id, desired_watermark,
-                                 StructuralBuildRequest.from_mapping(build))
+            build["logical_request_sha256"] = StructuralSyncRequest.identity(repo_uuid, generation_id, desired_watermark, build)
+            request = StructuralSyncRequest(repo_uuid, generation_id, desired_watermark,
+                                            StructuralBuildRequest.from_mapping(build))
+            _queue_request(queue, request)
+            return request
 
 
 def _semantic_barriers(stores, repo_uuid):
@@ -201,14 +220,21 @@ def _staged(runtime, request):
         _entry(registry, request.repo_uuid)
         with stores.leases.read_only_workspace_lock(request.repo_uuid):
             _semantic_barriers(stores, request.repo_uuid)
-            stores.leases.read_only_snapshot_locked(registry, request.repo_uuid)
-            _queue_barrier(stores.queue.read_only_snapshot_locked(request.repo_uuid))
+            lease = stores.leases.read_only_snapshot_locked(registry, request.repo_uuid)
+            queue = stores.queue.read_only_snapshot_locked(request.repo_uuid)
+            _queue_barrier(queue)
             staged = stores.generations.read_only_staged_build_locked(request.repo_uuid, deadline_ns=None)
             if staged is not None and (staged.generation_id != request.generation_id
                                       or staged.request != request.build):
                 if staged.lifecycle_state not in {"PROMOTED", "ABANDONED"}:
                     raise GenerationConflict("another exact request requires recovery")
-                return None
+                staged = None
+            if staged is None:
+                _queue_request(queue, request)
+                if lease.leases:
+                    raise GenerationConflict("active lease blocks a new structural request")
+                # A later queue writer must acquire a lease and advance the epoch;
+                # request_staged_build checks that epoch atomically before persisting.
             return staged
 
 

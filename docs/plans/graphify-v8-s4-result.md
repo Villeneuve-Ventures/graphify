@@ -138,6 +138,25 @@ with no linked issues. The two new findings concern adapter observation:
    leaking a decoder exception. Arbitrary byte-path support would require a
    separate input-manifest contract change and is not claimed here.
 
+The review of `319ced6361b513a5e9f14d33235bf056acc466f6` added two admission
+findings (eight conversation comments, four reviews, ten inline threads, no linked
+issues). The [watermark finding](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115711920)
+reproduced: invalid reconciliation coordinates could reach durable staging.
+Preparation now checks the locked queue snapshot, and execution repeats that
+check before staging. Backward watermarks and same-watermark requests bound to
+different source evidence refuse without state writes; matching evidence and
+exact retries remain valid. New requests also refuse an already-held lease:
+otherwise its holder could advance the queue and release without changing the
+request's operation epoch between admission and staging. After a lease-free
+snapshot, a new writer must advance that epoch, which S3 checks atomically before
+persisting the staged request. Existing exact staged recovery remains permitted.
+A later valid request can still promote.
+
+The [oversized-reservation finding](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115711915)
+did not reproduce: the existing `GenerationStore.request_staged_build` payload
+ceiling already runs before persistence. An S4 integration regression confirms
+unchanged source/state snapshots and a successful valid call after rejection.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -148,10 +167,11 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,708 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,266.65 seconds (21m 06s). |
-| Optimized Python protected-verifier suite | 80 passed in 9.94 seconds. |
+| Full serial `pytest tests/ -q --tb=short` | 6,718 passed, 41 skipped, 235 subtests passed, 6 warnings in 1,446.60 seconds (24m 06s). |
+| Optimized Python protected-verifier suite | 80 passed in 10.49 seconds. |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
-| Focused adapter/review/installed-wheel tests | 47 passed in 57.70 seconds, including actual installed-candidate admission and absent/misleading-cache no-write checks. |
+| Focused admission tests | 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
+| Adapter/review/installed-wheel tests | Prior candidate: 47 passed, including actual installed-candidate admission and absent/misleading-cache no-write checks; also included in the current full suite. |
 | Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |
 | Focused S3 regressions | 112 passed, 24 subtests passed. |
 | Diff review and Ruff F checks | Passed on task paths. |
