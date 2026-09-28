@@ -446,6 +446,78 @@ def _read_source_regular(
             os.close(directory_descriptor)
 
 
+def _preflight_git_refs(
+    git_dir: Path, common: Path, head: bytes, *, deadline_ns: int | None,
+) -> None:
+    """Check Git's selected loose-ref chain and packed-ref route without following links."""
+    extra_roots = {"worktree": git_dir} if git_dir != common else None
+    with SourceIO(
+        common, extra_roots=extra_roots,
+        max_file_bytes=WORKSPACE_CONFIG_MAX_BYTES,
+        max_total_bytes=9 * WORKSPACE_CONFIG_MAX_BYTES,
+    ) as inputs:
+        packed = inputs.probe(common / "packed-refs")
+        if packed is not None and not stat.S_ISREG(packed.st_mode):
+            raise SourceDiscoveryError("unsafe Git packed references")
+        seen: set[bytes] = set()
+        while True:
+            _check_deadline(deadline_ns)
+            head = head.strip()
+            if not head.startswith(b"ref:"):
+                if re.fullmatch(rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head) is None:
+                    raise SourceDiscoveryError("unsupported Git reference")
+                return
+            # Git accepts tabs, repeated spaces and newlines after ``ref:``.
+            # Normalize only its surrounding ASCII whitespace; reject control
+            # bytes inside the selected path before any Git process starts.
+            ref = head[4:].strip()
+            parts = ref.split(b"/")
+            if (
+                len(seen) >= 8 or ref in seen or len(parts) < 2
+                or parts[0] != b"refs" or any(
+                    not part or part in {b".", b".."}
+                    or b"\\" in part or any(byte < 32 or byte == 127 for byte in part)
+                    for part in parts
+                )
+            ):
+                raise SourceDiscoveryError("unsupported Git reference")
+            seen.add(ref)
+            relative = Path(os.fsdecode(ref))
+            # Standard refs are shared by linked worktrees. Per-worktree
+            # namespaces live in the linked Git directory.
+            local_ref = ref.startswith((b"refs/worktree/", b"refs/bisect/", b"refs/rewritten/"))
+            selected = git_dir if local_ref else common
+            loose: dict[Path, bytes] = {}
+            for directory in (common, git_dir) if git_dir != common else (common,):
+                path = directory
+                missing = False
+                for part in parts[:-1]:
+                    _check_deadline(deadline_ns)
+                    path /= os.fsdecode(part)
+                    info = inputs.probe(path)
+                    if info is None:
+                        missing = True
+                        break
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise SourceDiscoveryError("unsafe Git reference directory")
+                if missing:
+                    continue
+                path = directory / relative
+                info = inputs.probe(path)
+                if info is None:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise SourceDiscoveryError("unsafe Git loose reference")
+                if directory == selected:
+                    loose[directory] = inputs.read_bytes(
+                        path, max_bytes=WORKSPACE_CONFIG_MAX_BYTES,
+                    )
+            if selected not in loose:
+                # An absent loose ref may be packed (or an unborn branch).
+                return
+            head = loose[selected]
+
+
 def _preflight_git_inputs(
     root: Path, *, deadline_ns: int | None, inspect_object_tree: bool = True,
 ) -> None:
@@ -465,11 +537,12 @@ def _preflight_git_inputs(
             git_dir = Path(os.path.abspath(root / routing[8:]))
         # Even rev-parse opens HEAD. Reject FIFOs, symlinks and oversized inputs
         # before a subprocess can block on them, including linked-worktree HEADs.
-        read(git_dir, "HEAD")
+        head = read(git_dir, "HEAD")
         common = git_dir
         if (git_dir / "commondir").exists():
             routing = read(git_dir, "commondir").decode("utf-8").strip()
             common = Path(os.path.abspath(git_dir / routing))
+        _preflight_git_refs(git_dir, common, head, deadline_ns=deadline_ns)
         # Probe through no-follow descriptors. Presence alone is unsupported;
         # never open an alternate-store file (which could itself be a FIFO).
         with SourceIO(common) as inputs:

@@ -404,9 +404,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
             raise
         _recover_records(runtime, request, attempt_sha256)
         staged = _staged(runtime, request)
-    if staged is not None and staged.lifecycle_state == "ABANDONED":
-        raise GenerationConflict("exact request was abandoned")
-    if staged is not None and staged.lifecycle_state == "PROMOTED":
+    if staged is not None and staged.lifecycle_state in {"PROMOTED", "ABANDONED"}:
         # S3 validates terminal identity before admitting exact cleanup.
         with stores.registry.read_only_snapshot() as registry:
             with stores.leases.read_only_workspace_lock(request.repo_uuid):
@@ -415,6 +413,8 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
             attempt = _acquire(runtime, request, attempt_sha256, recovering=True)
             with _released(runtime, attempt.grant):
                 pass
+        if staged.lifecycle_state == "ABANDONED":
+            raise GenerationConflict("exact request was abandoned")
         return _success(runtime, request, staged)
     recovering = staged is not None
     if staged is None:

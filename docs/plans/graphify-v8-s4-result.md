@@ -385,6 +385,66 @@ with a disposable output directory populated that declared prerequisite. The
 installed no-write proof then passed separately, followed by the complete serial
 run above. No application-code change was made for either validation correction.
 
+## Independent-review corrections after `aa2df303`
+
+Two fresh reviewers inspected the full S4 diff before consulting prior feedback.
+They found two remaining boundary defects, repaired in this order:
+
+1. An interruption after durable `ABANDONED` state but before BUILD lease
+   release left exact retry refusing before terminal cleanup. Both terminal
+   states now use S3's existing request/attempt/fence-validated cleanup path.
+   Abandoned work still refuses after cleanup; a corrected source can start a
+   new request and query its result. A wrong attempt cannot clear the lease.
+   A different process still respects the existing lease TTL before takeover;
+   expiry alone does not remove a persisted lease.
+2. Git discovery could consume symlinked loose refs, ref ancestors, or
+   `packed-refs` before the adapter refused the source. Preflight now checks
+   these routes without following links before any Git subprocess. Selected
+   symbolic-ref chains are bounded, including Git's accepted whitespace after
+   `ref:`. Valid shared refs in linked worktrees remain supported. This is
+   observed preflight, not atomic protection against hostile concurrent rename.
+
+The new lease regression failed before the fix because the lease remained after
+exact retry. Five unsafe Git-route regressions and two alternate-whitespace
+cases also failed before their corresponding corrections because Git started.
+Both original reviewers rechecked only their affected contracts and found no
+remaining supported defect there; these are bounded correction verdicts, not
+new release qualification.
+
+Local validation for this edit batch:
+
+- 71 source-discovery, query-deadline and S4 integration cases passed in 84.73s,
+  including native round trip, promoted retry, pending lease release and
+  abandonment-intent recovery.
+- Both new terminal-cleanup cases passed against the final combined code in
+  39.67s. They cover interruption before release and at the durable pending
+  release record, exact cleanup, idempotent refusal, and a subsequent sync/query.
+  The earlier terminal-plus-S3-recovery batch passed 15 tests in 55.95s before
+  the Git correction was finalized.
+- 13 Git preflight cases and 16 adjacent valid-branch/ref/UTF-8 cases passed.
+- Repository Ruff checks extended to all F rules and `git diff --check` passed
+  on the changed Python files.
+- Task-owned AST graph refresh completed: 15,527 nodes, 38,687 edges and 913
+  communities. The same five zero-node fixture warnings remain; HTML generation
+  was skipped by the existing large-graph guard. No provider tokens were used.
+
+The final integrated patch passed the full serial gate through
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen --all-extras pytest tests/ -q --tb=short -p no:cacheprovider --durations=10 --maxfail=1`:
+**6,855 passed, 41 skipped, 3 known warnings, and 235 subtests passed** in
+2,470.55 seconds (41m10s). All 357 Python files in Git's tracked/untracked input
+inventory matched the pre-run hashes afterward. The slowest cases were CLI
+cluster-only export (47.50s), incomplete-extraction recovery (30.67–35.04s),
+and staged retry/admission cases (27.65–31.16s). This records observed timings,
+not a measured attribution of the runtime change to this patch.
+
+The optimized verifier passed 80 tests (9.48s, with its expected optimized-mode
+warning). All five skill-generation checks and disposable default/Codex
+help/install plus native Leiden smoke passed. Bandit completed with the same
+14 advisory finding records. The prior pip-audit receipt remains scoped to the
+unchanged default-plus-dev dependency lock. The three full-suite warnings are
+the existing semantic-cache scope and managed-state cleanup warnings. CI was
+not awaited.
+
 ## Prior validation receipt (`05f13bdc`)
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
