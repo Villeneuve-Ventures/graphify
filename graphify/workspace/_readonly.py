@@ -118,6 +118,7 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                # The process group has already exited; continue cleanup.
                 pass
             process.wait()
         if process.returncode != 0:
