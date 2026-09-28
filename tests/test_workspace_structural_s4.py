@@ -238,7 +238,7 @@ def test_competing_request_and_authority_mismatch_do_not_mutate(tmp_path, monkey
     assert tree_snapshot(runtime.inputs.state_root) == before
 
 
-@pytest.mark.parametrize("record", ["request", "lease_acquire", "lease_release", "queue"])
+@pytest.mark.parametrize("record", ["request", "lease_acquire", "lease_heartbeat", "lease_release", "queue"])
 def test_pending_record_commit_retries_exactly(tmp_path, monkeypatch, record):
     from graphify.workspace.persistence import CommitUnknown, InjectedFault
     runtime, _repo = runtime_fixture(tmp_path, monkeypatch)
@@ -248,14 +248,14 @@ def test_pending_record_commit_retries_exactly(tmp_path, monkeypatch, record):
     labels = []
     def fault(label):
         nonlocal counter
-        prefix = {"request": f"staged-build:{REPO_UUID}", "lease_acquire": "workspace",
+        prefix = {"request": f"staged-build:{REPO_UUID}", "lease_acquire": "workspace", "lease_heartbeat": "workspace",
                   "lease_release": "workspace", "queue": "semantic_queue"}[record]
         if label == prefix + ":pending_durable":
             counter += 1
-            if counter == (2 if record == "lease_release" else 1):
+            if counter == {"lease_heartbeat": 2, "lease_release": 3}.get(record, 1):
                 labels.append(label)
                 raise InjectedFault(label)
-    target = {"request": stores.generations.state, "lease_acquire": stores.leases.state,
+    target = {"request": stores.generations.state, "lease_acquire": stores.leases.state, "lease_heartbeat": stores.leases.state,
               "lease_release": stores.leases.state, "queue": stores.queue.state}[record]
     target.fault_hook = fault
     with pytest.raises((CommitUnknown, InjectedFault)):

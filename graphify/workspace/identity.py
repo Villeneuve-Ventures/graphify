@@ -166,6 +166,7 @@ def _git(
     deadline_ns: int | None = None,
     strip_output: bool = True,
 ) -> str:
+    _reject_git_includes(root, deadline_ns=deadline_ns)
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
     }
@@ -439,6 +440,37 @@ def _read_source_regular(
     finally:
         for directory_descriptor in reversed(directory_descriptors):
             os.close(directory_descriptor)
+
+
+def _reject_git_includes(root: Path, *, deadline_ns: int | None) -> None:
+    """Refuse external config readers before any Git command loads local config."""
+    def read(directory: Path, name: str) -> bytes:
+        return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
+                                    max_bytes=WORKSPACE_CONFIG_MAX_BYTES)
+
+    try:
+        marker = root / ".git"
+        if stat.S_ISDIR(marker.lstat().st_mode):
+            git_dir = marker
+        else:
+            routing = read(root, ".git").decode("utf-8").strip()
+            if not routing.startswith("gitdir: "):
+                raise SourceDiscoveryError("unsupported Git routing")
+            git_dir = Path(os.path.abspath(root / routing[8:]))
+        common = git_dir
+        if (git_dir / "commondir").exists():
+            routing = read(git_dir, "commondir").decode("utf-8").strip()
+            common = Path(os.path.abspath(git_dir / routing))
+        for directory, name in ((common, "config"), (git_dir, "config.worktree")):
+            try:
+                (directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            raw = read(directory, name).removeprefix(b"\xef\xbb\xbf")
+            if re.search(rb'(?im)^\s*\[\s*include(?:if)?(?:\s|\]|\.)', raw):
+                raise SourceDiscoveryError("Git includes require unsupported external input authority")
+    except (OSError, UnicodeError) as exc:
+        raise SourceDiscoveryError("cannot preflight local Git configuration") from exc
 
 
 def _read_workspace_config(

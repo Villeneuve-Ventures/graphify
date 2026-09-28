@@ -13,10 +13,10 @@ import os
 from threading import Event, Thread
 import time
 
-from .contracts import InputManifest, MAX_DOCUMENT_BYTES, canonical_json_bytes, decode_canonical, digest, exact, integer
+from .contracts import InputManifest, MAX_DOCUMENT_BYTES, MAX_TOTAL_BYTES, canonical_json_bytes, decode_canonical, digest, exact, integer
 from .adapters.base import PayloadBudgetExceeded
 from .generations import (
-    CertificationRequest, GenerationConflict, GenerationStore, StagedBuildStillCurrent,
+    CapacityExceeded, CertificationRequest, GenerationConflict, GenerationStore, StagedBuildStillCurrent,
     StagedBuildReadRecoveryRequired,
 )
 from .lifecycle_contracts import StructuralBuildRequest, payload_manifest_sha256
@@ -25,6 +25,27 @@ from .pointers import PointerCAS
 from .semantic_queue import SemanticQueueCorrupt
 
 _LEASE_TTL_NS = 3_600_000_000_000
+# S4 receipts have two fixed payload paths, fixed hashes/proof names, generation
+# IDs of at most 67 ASCII bytes, and payload sizes below MAX_TOTAL_BYTES. The
+# fixed portion is bounded by 4096 bytes; unbounded lifecycle counters are charged
+# separately. S3 still checks the exact final receipt size.
+_RECEIPT_HEADROOM_BYTES = 4096
+
+
+def _receipt_headroom(request, operation_epoch, fence_token):
+    return _RECEIPT_HEADROOM_BYTES + sum(len(str(value)) for value in (
+        request.build.source_epoch, request.build.expected_active_source_revision,
+        request.desired_watermark, operation_epoch, fence_token,
+    ))
+
+
+def _payload_budget(size, headroom=_RECEIPT_HEADROOM_BYTES):
+    integer(size, minimum=1)
+    if size > MAX_TOTAL_BYTES:
+        raise CapacityExceeded("reservation exceeds the adapter payload ceiling")
+    if size <= headroom:
+        raise CapacityExceeded("reservation cannot hold receipt headroom and payload")
+    return size - headroom
 
 
 def _now():
@@ -127,6 +148,7 @@ def prepare_structural_sync(runtime, *, repo_uuid, generation_id, source_epoch,
                             desired_watermark, expected_payload_bytes):
     """Freeze a read-only request. Enrollment and activation are separate calls."""
     runtime.validate_authority()
+    _payload_budget(expected_payload_bytes)
     stores = runtime.stores
     source, observations = _observe(runtime, repo_uuid)
     observation = observations[0]
@@ -163,6 +185,8 @@ def prepare_structural_sync(runtime, *, repo_uuid, generation_id, source_epoch,
             build["logical_request_sha256"] = StructuralSyncRequest.identity(repo_uuid, generation_id, desired_watermark, build)
             request = StructuralSyncRequest(repo_uuid, generation_id, desired_watermark,
                                             StructuralBuildRequest.from_mapping(build))
+            _payload_budget(expected_payload_bytes, _receipt_headroom(
+                request, lease.operation_epoch + 1, lease.fence_high_watermark + 1))
             _queue_request(queue, request)
             return request
 
@@ -222,6 +246,8 @@ def _staged(runtime, request):
         with stores.leases.read_only_workspace_lock(request.repo_uuid):
             _semantic_barriers(stores, request.repo_uuid)
             lease = stores.leases.read_only_snapshot_locked(registry, request.repo_uuid)
+            _payload_budget(request.build.expected_payload_bytes, _receipt_headroom(
+                request, lease.operation_epoch + 1, lease.fence_high_watermark + 1))
             queue = stores.queue.read_only_snapshot_locked(request.repo_uuid)
             _queue_barrier(queue)
             staged = stores.generations.read_only_staged_build_locked(request.repo_uuid, deadline_ns=None)
@@ -272,6 +298,9 @@ def _acquire(runtime, request, attempt_sha256, *, recovering):
 
 @contextmanager
 def _heartbeat(runtime, grant):
+    # Recovery can retain an unexpired grant whose original deadline is imminent.
+    runtime.stores.leases.heartbeat(grant, heartbeat_at=_now(),
+        monotonic_ns=time.monotonic_ns(), ttl_ns=_LEASE_TTL_NS)
     stop = Event()
     errors = []
     def beat():
@@ -318,7 +347,9 @@ def _build(runtime, request, preparation, source, initial):
                             yield
             return runtime.adapter.build_structural(source.root, payload_fd=payload,
                 scratch_fd=scratch, initial_detection=initial, write_guard=guard,
-                max_payload_bytes=preparation.allocation.expected_payload_bytes)
+                max_payload_bytes=_payload_budget(preparation.allocation.expected_payload_bytes,
+                    _receipt_headroom(request, preparation.grant.operation_epoch,
+                                      preparation.grant.lease.to_dict()["fence_token"])))
 
 
 def _manifest(stores, request, *, certified=False):
@@ -358,6 +389,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
     if type(request) is not StructuralSyncRequest:
         raise GenerationConflict("validated sync request required")
     request.__post_init__()
+    _payload_budget(request.build.expected_payload_bytes)
     digest(attempt_sha256)
     runtime.validate_authority()
     stores = runtime.stores
@@ -419,12 +451,15 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
                     try:
                         built = _build(runtime, request, preparation, source, observations[0].initial_detection)
                     except PayloadBudgetExceeded as exc:
-                        if exc.required_bytes <= preparation.allocation.expected_payload_bytes:
+                        required_bytes = exc.required_bytes + _receipt_headroom(
+                            request, preparation.grant.operation_epoch,
+                            preparation.grant.lease.to_dict()["fence_token"])
+                        if required_bytes <= preparation.allocation.expected_payload_bytes:
                             raise  # The adapter's independent ceiling, not reservation exhaustion.
                         _source, final = _observe(runtime, request.repo_uuid, exc.input_manifest)
                         stores.generations.complete_staged_build(preparation,
                             source_observations=final, monotonic_ns=time.monotonic_ns(),
-                            required_payload_bytes=exc.required_bytes)
+                            required_payload_bytes=required_bytes)
                         raise
                     manifest = built.input_manifest
                     _fault(runtime, request, "adapter_built")

@@ -188,6 +188,38 @@ inline threads, no linked issues), repaired in this order:
    allocation, completion, and promotion, and now complete without retained
    leases or heartbeat threads.
 
+The feedback snapshot at `a904c250e9088b919576751c621e6f22733648e2`
+contained ten conversation comments, nine reviews and eighteen inline threads,
+with no linked issues. Four current findings share late admission or incomplete
+resource accounting. Repairs are prioritized as follows:
+
+1. [Git includes](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117494292):
+   every discovery Git command first checks bounded, descriptor-read local config,
+   including common-directory and worktree config. Includes refuse before a Git
+   subprocess can read an external target, including FIFO targets and BOM-prefixed
+   config. Existing remote rewriting remains supported. This is observed preflight,
+   not a claim of safety against hostile concurrent configuration replacement.
+2. [Receipt headroom](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117009633):
+   reserve 4 KiB for the fixed structural receipt fields plus the decimal lengths
+   of its five lifecycle counters. The schema fixes hashes, proof names, two
+   payload paths and bounded generation/lock identifiers; maximal-field regression
+   coverage checks the bound, including large lifecycle counters. Charge the same
+   allowance to early serialization failures, preserving fenced abandonment and
+   subsequent valid requests. Tiny reservations refuse before staging.
+3. [Adapter ceiling](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117494287):
+   preparation and execution reject reservations above the adapter's 512 MiB
+   ceiling before staging, even if runtime capacity policy would admit them.
+4. [Retained lease](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117494290):
+   renew synchronously on heartbeat entry before waiting for periodic renewal.
+   An existing grant with less than one renewal interval remaining now survives
+   observation; release still follows heartbeat join.
+
+The repeated Protocol ellipsis warning remains intentional, as do the previously
+reviewed mixed imports and exception transfer. CodeRabbit's default docstring
+coverage warning does not identify a behavioral defect or an adopted repository
+gate; broad docstring generation is outside these repairs. No review threads or
+issue state were changed.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -198,10 +230,12 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,730 passed, 41 skipped, 6 warnings, and 235 subtests passed in 1,998.40 seconds (33m18s). |
-| Optimized Python protected-verifier suite | 80 passed in 9.79 seconds. |
+| Full serial `pytest tests/ -q --tb=short` | 6,745 passed, 41 skipped, 6 warnings, and 235 subtests passed in 1,805.92 seconds (30m05s). |
+| Optimized Python protected-verifier suite | 80 passed in 12.50 seconds (one optimized-mode pytest warning). |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
-| Focused resource and capacity regressions | 15 passed in 87.53 seconds, including bounded serialization, manifest accounting, recoverable abandonment, slow observations, and existing receipt-capacity checks. |
+| Current feedback regressions | 14 passed in 31.67 seconds; near-limit certification, maximal receipt bounds, early admission, capacity cleanup, retained renewal, and ordinary/linked/BOM Git includes. |
+| Current admission and recovery checks | 24 follow-up/admission cases passed in 194.10 seconds; 5 uncertain-commit recovery cases passed in 63.34 seconds. |
+| Focused resource and capacity regressions | Prior candidate: 15 passed in 87.53 seconds, including bounded serialization, manifest accounting, recoverable abandonment, slow observations, and existing receipt-capacity checks. |
 | Focused extraction-budget regressions | Build/promotion/no-write query passed for code and non-code inputs; inter-pass drift and oversized combined evidence refused before payload writes. |
 | Focused admission tests | Prior candidate: 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
 | Adapter/review/installed-wheel tests | Prior candidate: 47 passed, including actual installed-candidate admission and absent/misleading-cache no-write checks; also included in the current full suite. |
