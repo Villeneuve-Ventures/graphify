@@ -1344,6 +1344,10 @@ class StagedBuildAbandonmentEvidence:
     source_entries_sha256: str
     source_observation_evidence_sha256: str
     capacity_failure_payload_bytes: int | None = None
+    extraction_failure_manifest_sha256: str | None = None
+    extraction_failure_detection_sha256: str | None = None
+    extraction_failure_status: str | None = None
+    extraction_failure_failure_status: str | None = None
 
     def _observation_document(self) -> dict[str, object]:
         return {
@@ -1379,9 +1383,18 @@ class StagedBuildAbandonmentEvidence:
                 "observation_evidence_sha256": self.source_observation_evidence_sha256,
             },
         }
+        if self.capacity_failure_payload_bytes is not None and self.extraction_failure_manifest_sha256 is not None:
+            raise ContractError("$.abandon_evidence: multiple terminal failures")
         if self.capacity_failure_payload_bytes is not None:
             document["capacity_failure"] = {
                 "payload_bytes": self.capacity_failure_payload_bytes,
+            }
+        if self.extraction_failure_manifest_sha256 is not None:
+            document["extraction_failure"] = {
+                "initial_detection_sha256": self.extraction_failure_detection_sha256,
+                "input_manifest_sha256": self.extraction_failure_manifest_sha256,
+                "status": self.extraction_failure_status,
+                "failure_status": self.extraction_failure_failure_status,
             }
         return document
 
@@ -1446,6 +1459,18 @@ class StagedBuildAbandonmentEvidence:
                     "must exceed the staged reservation"
                 )
             return "CAPACITY_EXCEEDED"
+        if self.extraction_failure_manifest_sha256 is not None:
+            if (self.extraction_failure_detection_sha256 != request.observation_manifest_sha256
+                    or self.extraction_failure_status not in {
+                        "unsupported_extractor", "missing_parser", "failed_extraction",
+                        "unsupported_input",
+                    }
+                    or (self.extraction_failure_failure_status == "unsupported_input")
+                    != (self.extraction_failure_status == "unsupported_input")):
+                raise ContractError(
+                    "$.abandon_evidence.extraction_failure: requires an extraction failure"
+                )
+            return "EXTRACTION_INCOMPLETE"
         raise StagedBuildAuthorityCurrent(
             "$.abandon_evidence: does not prove stale staged-build authority"
         )
@@ -1471,7 +1496,7 @@ class StagedBuildAbandonmentEvidence:
                 "semantic_queue",
                 "source",
             },
-            {"capacity_failure"},
+            {"capacity_failure", "extraction_failure"},
         )
         pointer_revision = _integer(
             data["pointer_revision"],
@@ -1532,6 +1557,40 @@ class StagedBuildAbandonmentEvidence:
                 "$.abandon_evidence.capacity_failure.payload_bytes",
                 minimum=1,
             )
+        extraction_failure_manifest_sha256: str | None = None
+        extraction_failure_detection_sha256: str | None = None
+        extraction_failure_status: str | None = None
+        extraction_failure_failure_status: str | None = None
+        if "extraction_failure" in data:
+            extraction_failure = _mapping(
+                data["extraction_failure"], "$.abandon_evidence.extraction_failure"
+            )
+            _exact_keys(
+                extraction_failure, "$.abandon_evidence.extraction_failure",
+                {"initial_detection_sha256", "input_manifest_sha256", "status",
+                 "failure_status"},
+            )
+            extraction_failure_detection_sha256 = _digest(
+                extraction_failure["initial_detection_sha256"],
+                "$.abandon_evidence.extraction_failure.initial_detection_sha256",
+            )
+            extraction_failure_manifest_sha256 = _digest(
+                extraction_failure["input_manifest_sha256"],
+                "$.abandon_evidence.extraction_failure.input_manifest_sha256",
+            )
+            extraction_failure_status = _enum(
+                extraction_failure["status"],
+                "$.abandon_evidence.extraction_failure.status",
+                {"unsupported_extractor", "missing_parser", "failed_extraction",
+                 "unsupported_input"},
+            )
+            failure_status = extraction_failure["failure_status"]
+            if failure_status is not None:
+                extraction_failure_failure_status = _enum(
+                    failure_status,
+                    "$.abandon_evidence.extraction_failure.failure_status",
+                    {"unsupported_input"},
+                )
         source = _mapping(data["source"], "$.abandon_evidence.source")
         _exact_keys(
             source,
@@ -1627,6 +1686,10 @@ class StagedBuildAbandonmentEvidence:
                 "$.abandon_evidence.source.observation_evidence_sha256",
             ),
             capacity_failure_payload_bytes=capacity_failure_payload_bytes,
+            extraction_failure_manifest_sha256=extraction_failure_manifest_sha256,
+            extraction_failure_detection_sha256=extraction_failure_detection_sha256,
+            extraction_failure_status=extraction_failure_status,
+            extraction_failure_failure_status=extraction_failure_failure_status,
         )
         expected_observation_evidence = hashlib.sha256(
             canonical_json_bytes(
@@ -1760,6 +1823,7 @@ class StagedBuildAbandonmentIntent:
                     "COMPATIBILITY_CHANGED",
                     "SEMANTIC_SOURCE_EPOCH_CHANGED",
                     "CAPACITY_EXCEEDED",
+                    "EXTRACTION_INCOMPLETE",
                 },
             ),
             evidence=evidence,
@@ -1969,6 +2033,7 @@ class StagedBuildState:
                     "COMPATIBILITY_CHANGED",
                     "SEMANTIC_SOURCE_EPOCH_CHANGED",
                     "CAPACITY_EXCEEDED",
+                    "EXTRACTION_INCOMPLETE",
                 },
             )
             abandon_evidence_sha256 = _digest(

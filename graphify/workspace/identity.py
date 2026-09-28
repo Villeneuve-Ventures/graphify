@@ -166,8 +166,11 @@ def _git(
     *arguments: str,
     deadline_ns: int | None = None,
     strip_output: bool = True,
+    inspect_object_tree: bool = True,
 ) -> str:
-    _preflight_git_inputs(root, deadline_ns=deadline_ns)
+    _preflight_git_inputs(
+        root, deadline_ns=deadline_ns, inspect_object_tree=inspect_object_tree,
+    )
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
     }
@@ -443,7 +446,9 @@ def _read_source_regular(
             os.close(directory_descriptor)
 
 
-def _preflight_git_inputs(root: Path, *, deadline_ns: int | None) -> None:
+def _preflight_git_inputs(
+    root: Path, *, deadline_ns: int | None, inspect_object_tree: bool = True,
+) -> None:
     """Refuse external config and object readers before any Git command starts."""
     def read(directory: Path, name: str) -> bytes:
         return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
@@ -483,15 +488,16 @@ def _preflight_git_inputs(root: Path, *, deadline_ns: int | None) -> None:
             # Git also follows pack/loose-object paths. Validate their whole
             # bounded directory tree, without reading object contents, so a
             # lower symlink cannot recreate the same external-reader escape.
-            pending = [common / "objects"]
-            while pending:
-                _check_deadline(deadline_ns)
-                for path, mode in inputs.listdir(pending.pop()):
+            if inspect_object_tree:
+                pending = [common / "objects"]
+                while pending:
                     _check_deadline(deadline_ns)
-                    if stat.S_ISDIR(mode):
-                        pending.append(path)
-                    elif not stat.S_ISREG(mode):
-                        raise SourceDiscoveryError("unsafe Git object tree entry")
+                    for path, mode in inputs.listdir(pending.pop()):
+                        _check_deadline(deadline_ns)
+                        if stat.S_ISDIR(mode):
+                            pending.append(path)
+                        elif not stat.S_ISREG(mode):
+                            raise SourceDiscoveryError("unsafe Git object tree entry")
         for directory, name in ((common, "config"), (git_dir, "config.worktree")):
             try:
                 (directory / name).lstat()
@@ -659,8 +665,15 @@ def discover_source(
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
     root_identity = source_root_identity(root, deadline_ns=deadline_ns)
+    # Establish complete object-tree containment before the first Git subprocess.
+    # Metadata-only commands then repeat the routing/config/ancestor checks;
+    # object traversal and final verification each get a fresh full check.
+    _preflight_git_inputs(root, deadline_ns=deadline_ns)
     top_level = Path(
-        _git(root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns)
+        _git(
+            root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns,
+            inspect_object_tree=False,
+        )
     ).resolve(strict=True)
     _check_deadline(deadline_ns)
     if top_level != root:
@@ -675,12 +688,18 @@ def discover_source(
 
     git_common_dir = _resolve_git_path(
         root,
-        _git(root, "rev-parse", "--git-common-dir", deadline_ns=deadline_ns),
+        _git(
+            root, "rev-parse", "--git-common-dir", deadline_ns=deadline_ns,
+            inspect_object_tree=False,
+        ),
         deadline_ns=deadline_ns,
     )
     git_dir = _resolve_git_path(
         root,
-        _git(root, "rev-parse", "--git-dir", deadline_ns=deadline_ns),
+        _git(
+            root, "rev-parse", "--git-dir", deadline_ns=deadline_ns,
+            inspect_object_tree=False,
+        ),
         deadline_ns=deadline_ns,
     )
     _check_deadline(deadline_ns)
@@ -693,7 +712,7 @@ def discover_source(
     # insteadOf rules) without discarding whitespace from the URL itself.
     config_keys = _git(
         root, "config", "--null", "--name-only", "--list",
-        deadline_ns=deadline_ns, strip_output=False,
+        deadline_ns=deadline_ns, strip_output=False, inspect_object_tree=False,
     )
     remote_names = {
         key[len("remote."):-len(".url")]
@@ -706,7 +725,7 @@ def discover_source(
             raise SourceDiscoveryError("malformed Git remote name")
         raw_url = _git(
             root, "remote", "get-url", "--", name,
-            deadline_ns=deadline_ns, strip_output=False,
+            deadline_ns=deadline_ns, strip_output=False, inspect_object_tree=False,
         ).removesuffix("\n")
         if any(character.isspace() for character in raw_url):
             raise SourceDiscoveryError("fetch remote URL contains whitespace")
@@ -738,9 +757,15 @@ def discover_source(
         registry_source = canonical_registry_source(registry_source)
     except ContractError:
         raise SourceDiscoveryError("source identity is not canonical") from None
-    if _git(root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns) == "true":
+    if _git(
+        root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns,
+        inspect_object_tree=False,
+    ) == "true":
         raise SourceDiscoveryError("shallow repositories require complete history before enrollment")
-    head = _git(root, "rev-parse", "HEAD", deadline_ns=deadline_ns)
+    head = _git(
+        root, "rev-parse", "HEAD", deadline_ns=deadline_ns,
+        inspect_object_tree=False,
+    )
     roots = tuple(
         sorted(
             filter(

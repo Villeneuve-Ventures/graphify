@@ -37,6 +37,16 @@ class PayloadBudgetExceeded(ContractError):
         self.input_manifest = input_manifest
 
 
+class StructuralBuildIncomplete(ContractError):
+    """Adapter proved a bounded, non-retryable extraction disposition."""
+
+    def __init__(self, input_manifest):
+        if type(input_manifest) is not InputManifest:
+            raise ContractError("validated failed input manifest required")
+        super().__init__("structural extraction incomplete")
+        self.input_manifest = input_manifest
+
+
 class AdapterIntent(str, Enum):
     PROBE = "probe"
     EXECUTE = "execute"

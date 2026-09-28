@@ -88,26 +88,31 @@ def test_consumed_observation_rejects_material_drift(tmp_path, change):
         engine.observe(repo, input_manifest=built.input_manifest)
 
 
-@pytest.mark.parametrize("name,text", [("script.r", "x <- 1"), ("script.F90", "program a\nend program")])
-def test_incomplete_extraction_never_writes_a_payload(tmp_path, name, text):
-    from graphify.extract import ExtractionIncomplete
+@pytest.mark.parametrize("name,text,failure_status", [
+    ("script.r", "x <- 1", None),
+    ("script.F90", "program a\nend program", "unsupported_input"),
+])
+def test_incomplete_extraction_never_writes_a_payload(tmp_path, name, text, failure_status):
+    from graphify.workspace.adapters.base import StructuralBuildIncomplete
     repo = create_repo(tmp_path.resolve() / "repo")
     (repo / name).write_text(text)
     output = tmp_path / "payload"
-    with pytest.raises(ExtractionIncomplete):
+    with pytest.raises(StructuralBuildIncomplete) as caught:
         _build(adapter(), repo, output)
+    assert not caught.value.input_manifest.complete
+    assert caught.value.input_manifest.to_dict()["failure"] == failure_status
     assert list(output.iterdir()) == []
 
 
 def test_missing_parser_refuses_and_valid_empty_is_explicit(tmp_path, monkeypatch):
     import sys
-    from graphify.extract import ExtractionIncomplete
+    from graphify.workspace.adapters.base import StructuralBuildIncomplete
     repo = create_repo(tmp_path.resolve() / "repo")
     (repo / "empty.sql").write_text("")
     engine = adapter()
     with monkeypatch.context() as patch:
         patch.setitem(sys.modules, "tree_sitter_sql", None)
-        with pytest.raises(ExtractionIncomplete):
+        with pytest.raises(StructuralBuildIncomplete):
             _build(engine, repo, tmp_path / "failed")
     _initial, result = _build(engine, repo, tmp_path / "complete")
     assert {"path": "empty.sql", "status": "success"} in result.dispositions
@@ -172,15 +177,17 @@ def test_adapter_facts_ids_and_query_ranking_match_v8(tmp_path):
 
 
 def test_external_resolver_metadata_and_partial_enumeration_refuse(tmp_path, monkeypatch):
-    from graphify.extract import ExtractionIncomplete
-    from graphify.source_io import SourceIO, SourceError, SourceEnumerationFailed
+    from graphify.workspace.adapters.base import StructuralBuildIncomplete
+    from graphify.source_io import SourceIO, SourceEnumerationFailed
     repo = create_repo(tmp_path.resolve() / "repo")
     (tmp_path.resolve() / "outside.json").write_text('{"compilerOptions":{}}')
     (repo / "app.ts").write_text("import {value} from '@lib'; console.log(value);")
     (repo / "tsconfig.json").write_text('{"extends":"../outside.json"}')
     (repo / ".graphifyignore").write_text("tsconfig.json\n")
-    with pytest.raises((ExtractionIncomplete, SourceError)):
+    with pytest.raises(StructuralBuildIncomplete) as caught:
         _build(adapter(), repo, tmp_path / "payload")
+    assert caught.value.input_manifest.to_dict()["failure"] == "unsupported_input"
+    assert list((tmp_path / "payload").iterdir()) == []
     original_listdir = SourceIO.listdir
     def unavailable(self, path):
         # Exercise source detection, after the independent Git object preflight.

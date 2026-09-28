@@ -24,10 +24,10 @@ from graphify.workspace.contracts import (
 from graphify.workspace.identity import (
     discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
 )
-from graphify.workspace.lifecycle_observation import SourceObservation as LifecycleObservation
+from graphify.workspace.lifecycle_observation import ObservationError, SourceObservation as LifecycleObservation
 from graphify.workspace.persistence import require_before_deadline
 from graphify.workspace._readonly import ReadOnlyFailure, run_readonly
-from .base import PayloadBudgetExceeded, QueryRejected, QueryRequest, SourceObservation, StructuralBuild
+from .base import PayloadBudgetExceeded, QueryRejected, QueryRequest, SourceObservation, StructuralBuild, StructuralBuildIncomplete
 
 
 def _deadline(deadline_ns):
@@ -232,7 +232,7 @@ def _observation_child():
               "initial_detection": observed.initial_detection.to_dict(),
               "consumed_inputs": None if observed.consumed_inputs is None else observed.consumed_inputs.to_dict(),
               "stable_inventory_passes": observed.stable_inventory_passes}
-    sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+    sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def _query_with_deadline(payload_fd, request, deadline_ns, expected=None):
@@ -264,7 +264,7 @@ class V8Adapter:
                           "input_manifest": None if input_manifest is None else input_manifest.to_dict(),
                           "max_inventory_passes": max_inventory_passes, "deadline_ns": deadline_ns,
                           "expected": None if self.expected is None else self.expected.to_dict()},
-                         ensure_ascii=False).encode("utf-8")
+                         ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         try:
             raw = run_readonly(_OBSERVATION_CHILD_CODE, raw, deadline_ns=deadline_ns,
                                max_input_bytes=_CHILD_INPUT_LIMIT,
@@ -276,7 +276,7 @@ class V8Adapter:
                 None if value["consumed_inputs"] is None else InputManifest.from_mapping(value["consumed_inputs"]),
                 value["stable_inventory_passes"])
             result = LifecycleObservation(value["source_commit"], value["policy_sha256"], structural)
-        except ReadOnlyFailure as exc:
+        except (ReadOnlyFailure, ValueError, TypeError, ObservationError) as exc:
             raise SourceError(str(exc)) from None
         require_before_deadline(deadline_ns, "query deadline expired")
         return result
@@ -343,7 +343,7 @@ class V8Adapter:
     def build_structural(self, source_root, *, payload_fd, scratch_fd, initial_detection,
                          write_guard=None, max_payload_bytes=MAX_TOTAL_BYTES):
         from contextlib import nullcontext
-        from graphify.extract import extract
+        from graphify.extract import ExtractionIncomplete, extract
         from graphify.build import build_from_json
         from graphify.export import write_json
 
@@ -361,8 +361,40 @@ class V8Adapter:
                           max_file_bytes=inputs.max_file_bytes,
                           max_total_bytes=inputs.max_total_bytes,
                           max_entries=inputs.max_entries) as extraction_inputs:
-                extraction = extract(code, source_io=extraction_inputs, source_root=source_root,
-                                     quiet=True, ambient_output=False)
+                try:
+                    extraction = extract(code, source_io=extraction_inputs, source_root=source_root,
+                                         quiet=True, ambient_output=False)
+                except ExtractionIncomplete as exc:
+                    unsupported_input = (
+                        type(extraction_inputs.failure) is SourceUnsupported
+                        and isinstance(exc.failure, dict)
+                        and exc.failure.get("status") == "unsupported_input"
+                    )
+                    if (exc.failure is None and extraction_inputs.failure is None) or unsupported_input:
+                        failed = InputManifest.from_engine(
+                            extraction_inputs, phase="consumed", code_inputs=code,
+                            outcomes=exc.outcomes).to_dict()
+                        statuses = {item["status"] for item in failed["outcomes"]}
+                        if (statuses & ({"unsupported_extractor", "missing_parser",
+                                        "failed_extraction", "unsupported_input"}
+                                       if unsupported_input else
+                                       {"unsupported_extractor", "missing_parser",
+                                        "failed_extraction"})
+                                and statuses <= {"success", "empty", "not_processed",
+                                                 "unsupported_extractor", "missing_parser",
+                                                 "failed_extraction", "unsupported_input"}):
+                            evidence = {(e["operation"], e["path"]): e
+                                        for e in initial.to_dict()["evidence"]}
+                            for record in failed["evidence"]:
+                                key = record["operation"], record["path"]
+                                if key in evidence and evidence[key] != record:
+                                    raise SourceChanged("source evidence changed between detection and extraction")
+                                evidence[key] = record
+                            failed["evidence"] = [evidence[key] for key in sorted(evidence)]
+                            raise StructuralBuildIncomplete(
+                                InputManifest.from_mapping(failed)
+                            ) from exc
+                    raise
                 value = InputManifest.from_engine(extraction_inputs, phase="consumed", code_inputs=code,
                                                   outcomes=extraction["outcomes"]).to_dict()
             evidence = {(e["operation"], e["path"]): e for e in initial.to_dict()["evidence"]}

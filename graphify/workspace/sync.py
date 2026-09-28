@@ -14,7 +14,7 @@ from threading import Event, Thread
 import time
 
 from .contracts import InputManifest, MAX_DOCUMENT_BYTES, MAX_TOTAL_BYTES, canonical_json_bytes, decode_canonical, digest, exact, integer
-from .adapters.base import PayloadBudgetExceeded
+from .adapters.base import PayloadBudgetExceeded, StructuralBuildIncomplete
 from .generations import (
     CapacityExceeded, CertificationRequest, GenerationConflict, GenerationStore, StagedBuildStillCurrent,
     StagedBuildReadRecoveryRequired,
@@ -454,6 +454,14 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
                 if preparation.state.lifecycle_state != "COMPLETE":
                     try:
                         built = _build(runtime, request, preparation, source, observations[0].initial_detection)
+                    except StructuralBuildIncomplete as exc:
+                        _source, final = _observe(runtime, request.repo_uuid)
+                        runtime.validate_authority()
+                        stores.generations.fail_staged_extraction(
+                            preparation, failed_manifest=exc.input_manifest,
+                            source_observations=final, monotonic_ns=time.monotonic_ns(),
+                        )
+                        raise
                     except PayloadBudgetExceeded as exc:
                         required_bytes = exc.required_bytes + _receipt_headroom(
                             request, preparation.grant.operation_epoch,

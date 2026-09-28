@@ -1556,6 +1556,7 @@ class GenerationStore:
         source_document: Mapping[str, object],
         *,
         capacity_failure_payload_bytes: int | None = None,
+        extraction_failure_manifest: InputManifest | None = None,
     ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None] | None:
         registry_revision, entry = self._registry_workspace_entry(operation)
         active_source_revision = int(entry["active_source_revision"])
@@ -1601,6 +1602,22 @@ class GenerationStore:
         if capacity_failure_payload_bytes is not None:
             evidence_value["capacity_failure"] = {
                 "payload_bytes": capacity_failure_payload_bytes,
+            }
+        if extraction_failure_manifest is not None:
+            failed_value = extraction_failure_manifest.to_dict()
+            statuses = [item["status"] for item in failed_value["outcomes"]]
+            terminal = (
+                "unsupported_input"
+                if failed_value["failure"] == "unsupported_input"
+                else next(status for status in statuses if status in {
+                    "unsupported_extractor", "missing_parser", "failed_extraction",
+                })
+            )
+            evidence_value["extraction_failure"] = {
+                "initial_detection_sha256": state.request.observation_manifest_sha256,
+                "input_manifest_sha256": extraction_failure_manifest.sha256,
+                "status": terminal,
+                "failure_status": failed_value["failure"],
             }
         evidence = StagedBuildAbandonmentEvidence.from_mapping(evidence_value)
         try:
@@ -3496,6 +3513,7 @@ class GenerationStore:
         )
         if inventory.total_bytes > allocation.expected_payload_bytes:
             raise CapacityExceeded("staged payload exceeds its durable reservation")
+
         manifest = payload_manifest_sha256("graphify-out", inventory.entries)
         if manifest != state.payload_manifest_sha256:
             raise PayloadChanged("completed staged payload differs from durable manifest")
@@ -3804,6 +3822,87 @@ class GenerationStore:
                 occurred_at=occurred_at,
             )
             raise CapacityExceeded("staged payload exceeds its durable reservation")
+
+    def fail_staged_extraction(
+        self,
+        preparation: StagedBuildPreparation,
+        *,
+        failed_manifest: InputManifest,
+        source_observations: Sequence[SourceObservation],
+        monotonic_ns: int,
+    ) -> StagedBuildState:
+        """Close a fenced, empty publication after a validated extraction failure."""
+
+        if type(failed_manifest) is not InputManifest:
+            raise GenerationConflict("validated failed input manifest required")
+        request = self._validated_structural_request(preparation.state.request)
+        trusted = self._require_structural_evidence(
+            preparation.state.repo_uuid, request, source_observations,
+        )
+        initial = trusted[0].initial_detection.to_dict()
+        failed = failed_manifest.to_dict()
+        failed_evidence = {
+            (item["operation"], item["path"]): item for item in failed["evidence"]
+        }
+        if (failed["phase"] != "consumed" or failed["roots"] != initial["roots"]
+                or failed["code_inputs"] != initial["code_inputs"]
+                or any(failed_evidence.get((item["operation"], item["path"])) != item
+                       for item in initial["evidence"])
+                or failed["failure"] not in {None, "unsupported_input"}
+                or not any(item["status"] in {
+                    "unsupported_extractor", "missing_parser", "failed_extraction", "unsupported_input",
+                } for item in failed["outcomes"])
+                or any(item["status"] not in {
+                    "success", "empty", "not_processed",
+                    "unsupported_extractor", "missing_parser", "failed_extraction",
+                    "unsupported_input",
+                } for item in failed["outcomes"])
+                or (failed["failure"] == "unsupported_input"
+                    and not any(item["status"] == "unsupported_input" for item in failed["outcomes"]))
+                or (failed["failure"] is None
+                    and any(item["status"] == "unsupported_input" for item in failed["outcomes"]))):
+            raise GenerationConflict("failed extraction does not extend frozen detection")
+        with self.leases.current_operation(
+            preparation.grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({"BUILD"}),
+        ) as operation:
+            state = self._load_staged_build_locked(operation.repo_uuid)
+            if state is None:
+                raise GenerationConflict("staged build request is missing")
+            self._require_staged_binding(
+                state, repo_uuid=operation.repo_uuid,
+                generation_id=preparation.state.generation_id, request=request,
+            )
+            self._require_allocation(operation, preparation.allocation)
+            self._require_structural_allocation(state, preparation.allocation)
+            if (state.lifecycle_state != "PUBLISHING"
+                    or (state.operation_epoch, state.fence_token) != (
+                        operation.grant.operation_epoch, operation.fence_token)):
+                raise GenerationConflict("failed extraction belongs to another publication fence")
+            lock = self._lock(operation.repo_uuid, state.generation_id)
+            with self.state.existing_generation_lock(
+                lock, generation_id=state.generation_id, exclusive=True,
+            ):
+                if self._staging_names(state.repo_uuid, state.generation_id) != ["graphify-out"]:
+                    raise GenerationConflict("failed extraction requires empty staging")
+                relative = self._staging(state.repo_uuid, state.generation_id) / "graphify-out"
+                with self.state.existing_private_directory(relative) as descriptor:
+                    _directory_names(descriptor, deadline_ns=None, max_entries=0)
+            proof = self._staged_abandonment_proof_if_stale_locked(
+                operation, state, self._abandonment_source_document(trusted),
+                extraction_failure_manifest=failed_manifest,
+            )
+            if proof is None or proof[0] != "EXTRACTION_INCOMPLETE":
+                raise GenerationConflict("failed extraction produced no terminal evidence")
+            reason, evidence, _pointer = proof
+            lease_value = preparation.grant.lease.to_dict()
+            occurred_at = datetime.fromisoformat(
+                str(lease_value["acquired_at"]).replace("Z", "+00:00")
+            )
+            return self._commit_new_staged_abandonment_locked(
+                operation, state, reason=reason, evidence=evidence, occurred_at=occurred_at,
+            )
 
     def complete_staged_promotion(
         self,

@@ -319,7 +319,73 @@ the 63-case focused regression batch then passed. The worker audit is a guard
 for the trusted installed implementation, not a hostile code sandbox or a
 peak-memory limit. S4 does not adopt a new RAM policy.
 
-## Validation receipt
+## Follow-up review at `ca7777f5`
+
+The September 28 feedback adds four supported findings. They concern failure
+recovery and observation transport, plus redundant discovery work. Priority:
+
+1. [Incomplete extraction](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4122051830)
+   now terminally closes its fenced staging attempt instead of retaining a
+   `PUBLISHING` request that blocks subsequent work. The provider-neutral failure
+   carries validated failed inputs; durable abandonment records bounded digests
+   and status through the existing recovery path. R, capital-F Fortran and mixed
+   failures are covered. Read and drift errors retain their retry behavior.
+2. [Observation size](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4122051844):
+   use compact JSON for observation transport so two admitted canonical
+   manifests fit the existing bounded response envelope. A near-limit fixture
+   reproduces the previous overflow without increasing the transport ceiling.
+3. [Repeated Git scans](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4121983830):
+   avoid repeated full object-tree walks for metadata-only commands, retaining
+   checks before the first Git process and before object-reading commands. The
+   one-remote regression makes three full tree walks, down from nine; it still
+   rechecks routing/configuration for each metadata command and performs a full
+   final checkout verification.
+4. [Malformed observation responses](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4121983823):
+   normalize JSON, UTF-8, manifest, lifecycle and field-type failures to the
+   adapter's `SourceError` contract. `ObservationError` is a `RuntimeError`, so
+   the suggested `ValueError` catch alone would not cover it.
+
+The [serialization claim](https://github.com/Villeneuve-Ventures/graphify/pull/167#issuecomment-5856708304)
+is not reproduced by the actual `json.dump(..., indent=2)` path. Existing tests
+compare full serialized bytes for empty/nonempty directed, undirected and
+multigraphs and exercise early streaming interruption; all nine passed. The
+private streaming wrapper remains unchanged. The docstring percentage warning
+still reflects the bot's default threshold rather than an adopted repository
+gate. No new issue tickets were found in the feedback snapshot.
+
+### Follow-up validation
+
+The combined patch passed the full serial suite through the repository entry
+point: **6,844 passed, 41 skipped, 3 known warnings, and 235 subtests passed** in
+2,072.41 seconds (34m32s). Bytecode and pytest-cache writes were disabled. The
+slowest cases were S4 admission/watermark checks at 24–26 seconds each; the
+near-limit transport and mixed-failure recovery regressions took about 21 seconds.
+
+- Frozen all-extra setup checked 171 packages; CPython 3.14.3 and Git 2.55.0.
+- Focused recovery checks: 9 passed; Git preflight checks: 90 passed; the final
+  adapter module: 14 passed. The full gate also covers all eight new transport cases.
+- Optimized verifier: 80 passed, with the expected optimized-mode pytest warning.
+- All five skill-generation checks, disposable default/Codex help/install smoke,
+  native Leiden smoke, Ruff F on changed Python files, and diff checks passed.
+- Bounded independent review found no remaining supported defect in this repair
+  batch, including the final unsupported-input and mixed-outcome handling.
+- Bandit completed with the same 14 advisory finding records. The prior 12-finding
+  pip-audit receipt remains scoped to the unchanged default-plus-dev lock.
+- Task-owned `graphify update .` completed: 15,518 nodes, 38,639 edges and 895
+  communities. The same five zero-node JSON-input warnings remain; HTML output
+  is skipped by the existing large-graph guard. No provider tokens were used.
+- All 356 Python files matched the final validation snapshot after the full gate.
+
+Two interrupted runs are not counted as passes. The first exposed an old test
+expecting the engine-specific exception for an external resolver refusal; the
+updated test asserts the neutral exception, unsupported-input evidence and empty
+payload. The second stopped because the installed-wheel proof builds offline and
+`setuptools` was absent from the uv cache. A normal `uv build --wheel --out-dir`
+with a disposable output directory populated that declared prerequisite. The
+installed no-write proof then passed separately, followed by the complete serial
+run above. No application-code change was made for either validation correction.
+
+## Prior validation receipt (`05f13bdc`)
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
 and Git 2.55.0. The native fixture runs on macOS 27.0 build 26A428 and native

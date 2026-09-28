@@ -187,6 +187,59 @@ def test_build_drift_cannot_complete_or_promote(tmp_path, monkeypatch):
     assert runtime.stores.pointers.load(REPO_UUID, allow_missing=True) is None
 
 
+@pytest.mark.parametrize("inputs", [
+    {"script.r": "x <- 1\n"},
+    {"script.F90": "program a\nend program\n"},
+    {"a.r": "x <- 1\n", "z.F90": "program a\nend program\n"},
+])
+def test_incomplete_extraction_closes_staging_and_allows_new_request(tmp_path, monkeypatch, inputs):
+    from graphify.workspace.adapters.base import StructuralBuildIncomplete
+    from graphify.workspace.generations import GenerationConflict
+    runtime, repo = runtime_fixture(tmp_path, monkeypatch)
+    for name, content in inputs.items():
+        (repo / name).write_text(content)
+    request = request_for(runtime)
+    with pytest.raises(StructuralBuildIncomplete):
+        synchronize_structural(runtime, request, attempt_sha256="a" * 64)
+    state = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert state.lifecycle_state == "ABANDONED"
+    assert state.abandon_reason == "EXTRACTION_INCOMPLETE"
+    assert len(state.canonical) < 64 * 1024
+    assert runtime.stores.pointers.load(REPO_UUID, allow_missing=True) is None
+    with pytest.raises(GenerationConflict, match="abandoned"):
+        synchronize_structural(runtime, request, attempt_sha256="b" * 64)
+    for name in inputs:
+        (repo / name).unlink()
+    successor = request_for(runtime, "gen-repaired")
+    result = synchronize_structural(runtime, successor, attempt_sha256="c" * 64)
+    assert result.pointer_revision == 1
+    assert "leaf" in query_structural(
+        runtime, REPO_UUID, QueryRequest("caller"),
+        deadline_ns=time.monotonic_ns() + 60_000_000_000,
+    )
+
+
+def test_incomplete_extraction_abandon_intent_recovers_exactly(tmp_path, monkeypatch):
+    from graphify.workspace.generations import GenerationConflict
+    from graphify.workspace.persistence import InjectedFault
+    runtime, repo = runtime_fixture(tmp_path, monkeypatch)
+    (repo / "script.r").write_text("x <- 1\n")
+    request = request_for(runtime)
+    def fault(label):
+        if label.endswith(":abandon_intent_durable"):
+            raise InjectedFault(label)
+    runtime.stores.generations.fault_hook = fault
+    with pytest.raises(InjectedFault):
+        synchronize_structural(runtime, request, attempt_sha256="a" * 64)
+    runtime.stores.generations.fault_hook = lambda label: None
+    runtime = compose_workspace_runtime(runtime.inputs).require_runtime()
+    with pytest.raises(GenerationConflict, match="abandoned"):
+        synchronize_structural(runtime, request, attempt_sha256="b" * 64)
+    state = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert state.lifecycle_state == "ABANDONED"
+    assert state.abandon_reason == "EXTRACTION_INCOMPLETE"
+
+
 def test_query_keeps_generation_lock_and_refuses_ordinary_writes(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     import time
@@ -314,6 +367,45 @@ def test_expired_successor_fence_refuses_adapter_writes(tmp_path, monkeypatch):
         synchronize_structural(runtime, request, attempt_sha256="a" * 64)
     payload = stores.generations.state.path(stores.generations._staging(REPO_UUID, request.generation_id)) / "graphify-out"
     assert list(payload.iterdir()) == []
+    assert stores.pointers.load(REPO_UUID, allow_missing=True) is None
+    stores.leases.release(successor[0].grant)
+
+
+def test_incomplete_extraction_cannot_close_after_successor_fence(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+    from graphify.workspace.leases import StaleLease
+    from graphify.workspace.lifecycle_contracts import FencedLease
+    runtime, repo = runtime_fixture(tmp_path, monkeypatch)
+    (repo / "script.r").write_text("x <- 1\n")
+    request = request_for(runtime)
+    stores = runtime.stores
+    original = runtime.adapter.build_structural
+    successor = []
+    def replace_fence(*args, **kwargs):
+        with stores.registry.read_only_snapshot() as document:
+            with stores.leases.workspace_lock(REPO_UUID):
+                state = stores.leases.read_only_snapshot_locked(document, REPO_UUID)
+                lease = state.leases["workspace"].to_dict()
+                lease["liveness_deadline_monotonic_ns"] = (
+                    lease["liveness_deadline_monotonic_ns"] - 3_600_000_000_000 + 1
+                )
+                expired = FencedLease.from_mapping(lease)
+                stores.leases._commit_state_locked(
+                    replace(state, revision=state.revision + 1, leases={"workspace": expired})
+                )
+        successor.append(stores.generations.acquire_staged_recovery(
+            REPO_UUID, request.generation_id, request.build,
+            attempt_sha256="b" * 64, acquired_at=datetime.now(timezone.utc),
+            monotonic_ns=time.monotonic_ns(), ttl_ns=10**12,
+        ))
+        return original(*args, **kwargs)
+    monkeypatch.setattr(runtime.adapter, "build_structural", replace_fence)
+    with pytest.raises(StaleLease):
+        synchronize_structural(runtime, request, attempt_sha256="a" * 64)
+    staged = stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert staged.lifecycle_state == "PUBLISHING"
+    assert staged.abandonment_intent is None
     assert stores.pointers.load(REPO_UUID, allow_missing=True) is None
     stores.leases.release(successor[0].grant)
 
