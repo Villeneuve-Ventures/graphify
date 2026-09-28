@@ -468,9 +468,30 @@ def _preflight_git_inputs(root: Path, *, deadline_ns: int | None) -> None:
         # Probe through no-follow descriptors. Presence alone is unsupported;
         # never open an alternate-store file (which could itself be a FIFO).
         with SourceIO(common) as inputs:
+            # A missing leaf is meaningful only beneath admitted directories.
+            # SourceIO probes can report ENOTDIR as absence, including a refused
+            # symlink ancestor; Git itself would follow that object-store route.
+            for relative in ("objects", "objects/info", "objects/pack"):
+                info = inputs.probe(common / relative)
+                if info is None and relative != "objects":
+                    continue
+                if info is None or not stat.S_ISDIR(info.st_mode):
+                    raise SourceDiscoveryError("unsafe Git object directory")
             for name in ("alternates", "http-alternates"):
                 if inputs.probe(common / "objects" / "info" / name) is not None:
                     raise SourceDiscoveryError("Git alternate object stores are unsupported")
+            # Git also follows pack/loose-object paths. Validate their whole
+            # bounded directory tree, without reading object contents, so a
+            # lower symlink cannot recreate the same external-reader escape.
+            pending = [common / "objects"]
+            while pending:
+                _check_deadline(deadline_ns)
+                for path, mode in inputs.listdir(pending.pop()):
+                    _check_deadline(deadline_ns)
+                    if stat.S_ISDIR(mode):
+                        pending.append(path)
+                    elif not stat.S_ISREG(mode):
+                        raise SourceDiscoveryError("unsafe Git object tree entry")
         for directory, name in ((common, "config"), (git_dir, "config.worktree")):
             try:
                 (directory / name).lstat()

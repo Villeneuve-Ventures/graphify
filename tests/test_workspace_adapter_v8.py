@@ -181,8 +181,12 @@ def test_external_resolver_metadata_and_partial_enumeration_refuse(tmp_path, mon
     (repo / ".graphifyignore").write_text("tsconfig.json\n")
     with pytest.raises((ExtractionIncomplete, SourceError)):
         _build(adapter(), repo, tmp_path / "payload")
+    original_listdir = SourceIO.listdir
     def unavailable(self, path):
-        self.refuse("injected partial enumeration", SourceEnumerationFailed)
+        # Exercise source detection, after the independent Git object preflight.
+        if self.root == repo:
+            self.refuse("injected partial enumeration", SourceEnumerationFailed)
+        return original_listdir(self, path)
     monkeypatch.setattr(SourceIO, "listdir", unavailable)
     with pytest.raises(SourceEnumerationFailed):
         adapter().observe(repo)

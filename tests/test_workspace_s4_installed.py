@@ -119,12 +119,18 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     args = [str(python), "-B", "-c", _LAUNCH]
     tail = [str(state), str(bundle), str(source), REPO_UUID]
     assert run([*args, "build", *tail]).strip() == "INSTALLED-S4-BUILT"
-    before = tree_snapshot(state), tree_snapshot(source), tree_snapshot(venv)
+    def snapshots():
+        return tuple(tree_snapshot(p) for p in (state, source, venv,
+            *(Path(env[name]) for name in ('HOME', 'CODEX_HOME', 'XDG_STATE_HOME',
+                                         'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'TMPDIR'))))
+    before = snapshots()
     first = json.loads(run([*args, "query", *tail]))
     assert "leaf" in first[0] and "南京市长江大桥" in first[1]
+    assert snapshots() == before
     import marshal
     cache = Path(env["TMPDIR"]) / "jieba.cache"
     cache.write_bytes(marshal.dumps(({"南京市长江大桥": 999}, 999)))
+    before = snapshots()
     second = json.loads(run([*args, "query", *tail]))
     assert first == second
-    assert (tree_snapshot(state), tree_snapshot(source), tree_snapshot(venv)) == before
+    assert snapshots() == before

@@ -74,8 +74,11 @@ request over a nonterminal request or retained semantic lifecycle.
   returning text. It creates no lock, lease, cache, log, receipt, or repair record.
   A caller-supplied positive absolute monotonic deadline covers both freshness
   scans and traversal; there is no implicit deadline. The same v8 graph loader,
-  tokenizer and traversal run in a one-shot `-I -B` child inheriting only the
-  pinned payload descriptor. The parent kills and reaps it on expiry before
+  tokenizer and traversal run in a one-shot `-I -S -B` child inheriting only the
+  pinned payload descriptor. Authority validation and each freshness observation
+  use the same bounded worker transport. Its audit hook starts before candidate
+  imports; runtime-owned workers verify the pinned installed candidate. The
+  parent terminates the owned process group and reaps the worker on expiry before
   releasing workspace/generation locks. Expired computation returns no output
   and skips the second freshness scan. Successful output still passes both
   freshness observations.
@@ -99,7 +102,8 @@ installs only into a disposable venv, and exercises actual installed-package
 admission. Cold subprocesses install an audit hook before candidate imports and
 query with absent and misleading tokenizer caches. They deny filesystem writes,
 ambient jieba-cache access, network effects, and unexpected subprocesses, and
-compare state/source/installed-tree bytes, modes, identities, and mtimes.
+compare state/source/installed-tree bytes, modes, identities, and mtimes, together
+with disposable HOME, CODEX_HOME, XDG and temporary directories.
 The existing S1 cold tests independently qualify Chinese token/ranking parity
 and the missing-extra fallback. No public workspace CLI is added by this proof.
 
@@ -282,6 +286,39 @@ streaming budget. No equality methods were added. The existing docstring coverag
 warning remains advisory. All fixes remain within this PR; no separate issue or
 review-thread mutation is needed.
 
+## Integrated acceptance repairs
+
+The independent design and functional review of `212e0331fa468736ec9b673f8e4a371643b7388d`
+reproduced three boundary defects. They were repaired together in this order:
+
+1. Runtime authority could change during observation before the old runtime
+   persisted a staged request. Preparation and execution now revalidate after
+   observation. The store also invokes the runtime admission guard after its own
+   trusted observations, immediately before the durable request write. Both
+   interruption points refuse without lifecycle mutation, and a newly composed
+   runtime can subsequently complete a valid request.
+2. An unsafe Git object-directory ancestor could make alternate-file probes look
+   absent while Git followed an external object store. Discovery now requires
+   real object directories and walks the bounded object tree through no-follow
+   descriptors before launching Git. Root, info, pack and loose-object escapes
+   refuse for ordinary and linked repositories. Optional absent directories
+   remain supported. This enumerates metadata, not object contents, and retains
+   the existing source-entry ceiling and deadline checks.
+3. Freshness detection/replay and installed authority verification could outlive
+   a query deadline. Those operations now use the disposable worker as well as
+   graph traversal. One absolute deadline covers all workers, input and output
+   are bounded, and expiry discards partial output and terminates the owned
+   helper group before releasing locks. Regressions stall both before/after
+   freshness and authority checks, verify unchanged protected trees, and acquire
+   both workspace and exclusive generation locks after cancellation. An import
+   side-effect fixture confirms the audit hook precedes candidate imports.
+
+The same two reviewers independently rechecked these corrections and their
+affected paths. Both found no remaining supported defect in this bounded scope;
+the 63-case focused regression batch then passed. The worker audit is a guard
+for the trusted installed implementation, not a hostile code sandbox or a
+peak-memory limit. S4 does not adopt a new RAM policy.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -291,32 +328,36 @@ capability support and are not native durability evidence.
 
 | Check | Result |
 | --- | --- |
-| `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,795 passed, 41 skipped, 3 warnings, and 235 subtests passed in 1,791.93 seconds (29m51s). |
+| `uv sync --all-extras --frozen` | Passed; 171 packages checked. |
+| Full serial suite through `uv run --frozen --all-extras pytest tests/ -q --tb=short` | 6,826 passed, 41 skipped, 3 warnings, and 235 subtests passed in 2,245.16 seconds (37m25s). |
 | Optimized Python protected-verifier suite | 80 passed in 10.09 seconds (one optimized-mode pytest warning). |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
-| Current focused suites | 82 workspace cases passed in 85.14 seconds, including 21 new HEAD/cancellation/parity cases and installed no-write queries; 159 engine, adapter and earlier streaming/deadline cases passed in 31.06 seconds. |
-| Prior admission and recovery checks | 24 follow-up/admission cases passed in 194.10 seconds; 5 uncertain-commit recovery cases passed in 63.34 seconds; covered again by the current full suite. |
-| Focused resource and capacity regressions | Prior candidate: 15 passed in 87.53 seconds, including bounded serialization, manifest accounting, recoverable abandonment, slow observations, and existing receipt-capacity checks. |
-| Focused extraction-budget regressions | Build/promotion/no-write query passed for code and non-code inputs; inter-pass drift and oversized combined evidence refused before payload writes. |
-| Focused admission tests | Prior candidate: 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
-| Adapter/review/installed-wheel tests | Prior candidate: 47 passed, including actual installed-candidate admission and absent/misleading-cache no-write checks; also included in the current full suite. |
+| Focused acceptance, deadline, installed and admission suites | 63 passed in 419.04 seconds. |
+| Adapter regression module | 14 passed in 17.48 seconds. |
+| Bootstrap/skill-generation test module | 259 passed, 38 platform-specific skips in 61.64 seconds through the repository pytest entry point. |
+| Independent correction review | Original design and functional reviewers found no remaining supported defect in the three repaired boundaries; functional reviewer also rechecked the test-fixture correction. |
 | Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |
-| Focused S3 regressions | 112 passed, 24 subtests passed. |
-| Diff review and Ruff F checks | Passed on current changed Python paths; the previously disclosed `export.py` baseline warnings remain unchanged. |
-| Task-owned `graphify update .` | Canonical graph/report refreshed; no provider tokens. |
+| Diff review and Ruff F checks | Passed on changed Python paths; no production changes after the correction review. |
+| Advisory security receipts | Bandit completed with 14 unchanged finding records. Prior pip-audit receipt retained for the unchanged default-plus-dev lock: 12 findings. |
+| Task-owned `graphify update .` | Canonical graph/report refreshed locally with AST extraction; no provider tokens. |
 
-The final serial and optimized pytest runs disabled bytecode and pytest-cache
-writes. The serial gate took 29m51s; its slowest ten cases were S4 admission,
-capacity/recovery and query-expiry tests, each taking 19–25 seconds. The graph refresh is local
-orientation output, not a release or immutable-candidate certification receipt.
-Advisory Bandit completed with 14 unchanged finding records (only line numbers
-shifted in `serve.py`). Pip-audit
-completed with 12 finding records against the unchanged default-plus-dev lock
-environment. Its first all-extras attempt was explicitly incomplete because the
-receipt helper requires the CI default-plus-dev scope; a separate disposable
-environment supplied that scope without altering the test environment. Findings
-remain advisory; no dependency or enforcement change is included.
+The pytest runs disable bytecode and pytest-cache writes. Use the repository's
+`uv run ... pytest` entry point: initial direct-interpreter attempts differed in
+active-environment discovery or the exact interpreter path asserted by bootstrap
+tests. Those interrupted runs are not counted as passes. The complete bootstrap
+module passed with the correct entry point before the final serial run.
+
+The aggregate gate also exposed an older test that injected failure into every
+`SourceIO.listdir` call. Git preflight now enumerates objects first; the injection
+is scoped to the source root so the original partial-source-enumeration assertion
+still executes, with Git preflight enabled. The adapter module and the independent
+fixture recheck both passed after that correction.
+
+The final serial gate took 37m25s. Its slowest ten cases took 22–30 seconds each,
+primarily S4 admission/watermark, capacity recovery and installed-query cases.
+The graph refresh is local orientation output, not a release or immutable-candidate
+certification receipt. The dependency lock and security enforcement are unchanged;
+security findings remain advisory.
 
 ## Limits
 

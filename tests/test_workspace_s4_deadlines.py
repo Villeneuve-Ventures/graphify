@@ -6,6 +6,7 @@ import time
 import pytest
 
 from graphify.workspace.adapters import v8
+from graphify.workspace import _readonly
 from graphify.workspace.adapters.base import QueryRequest
 from graphify.workspace.identity import SourceDiscoveryError, discover_source
 from graphify.workspace.persistence import LockTimeout
@@ -91,7 +92,7 @@ v8._query_child()
     original_popen, original_read = subprocess.Popen, os.read
     def popen(*args, **kwargs):
         process = original_popen(*args, **kwargs)
-        if args[0][:5] == [v8.sys.executable, "-I", "-B", "-c", script]:
+        if script in args[0]:
             processes.append(process)
         return process
     def read(fd, size):
@@ -99,7 +100,7 @@ v8._query_child()
         if processes and not processes[0].stderr.closed and fd == processes[0].stderr.fileno():
             diagnostics.extend(chunk)
         return chunk
-    monkeypatch.setattr(v8.subprocess, 'Popen', popen)
+    monkeypatch.setattr(_readonly.subprocess, 'Popen', popen)
     monkeypatch.setattr(v8.os, 'read', read)
     return processes, diagnostics
 
@@ -184,7 +185,7 @@ def test_child_output_limit_kills_computation(graph_payload, monkeypatch):
         child = original(*args, **kwargs)
         processes.append(child)
         return child
-    monkeypatch.setattr(v8.subprocess, 'Popen', popen)
+    monkeypatch.setattr(_readonly.subprocess, 'Popen', popen)
     monkeypatch.setattr(v8, 'MAX_TOTAL_BYTES', 128)
     monkeypatch.setattr(v8, '_QUERY_CHILD_CODE', 'import os,time; os.write(1, b"x" * 129); time.sleep(60)')
     with pytest.raises(QueryRejected, match='output exceeds'):

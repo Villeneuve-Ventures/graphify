@@ -151,6 +151,7 @@ def prepare_structural_sync(runtime, *, repo_uuid, generation_id, source_epoch,
     _payload_budget(expected_payload_bytes)
     stores = runtime.stores
     source, observations = _observe(runtime, repo_uuid)
+    runtime.validate_authority()
     observation = observations[0]
     document = stores.generations.structural_observation_document(observation)
     with stores.registry.read_only_snapshot() as registry:
@@ -418,8 +419,10 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
     recovering = staged is not None
     if staged is None:
         _source, observations = _observe(runtime, request.repo_uuid)
+        runtime.validate_authority()
         staged = stores.generations.request_staged_build(request.repo_uuid, request.generation_id,
-                                                        request.build, source_observations=observations)
+            request.build, source_observations=observations,
+            admission_guard=runtime.validate_authority)
         _fault(runtime, request, "request_staged")
     if staged.lifecycle_state != "CERTIFIED":
         attempt = _acquire(runtime, request, attempt_sha256, recovering=recovering)
@@ -432,6 +435,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
                 staged = stores.generations.recover_staged_certification(attempt, monotonic_ns=time.monotonic_ns())
             else:
                 source, observations = _observe(runtime, request.repo_uuid)
+                runtime.validate_authority()
                 if recovering:
                     try:
                         stores.generations.abandon_staged_build(attempt, source_observations=observations,
@@ -457,6 +461,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
                         if required_bytes <= preparation.allocation.expected_payload_bytes:
                             raise  # The adapter's independent ceiling, not reservation exhaustion.
                         _source, final = _observe(runtime, request.repo_uuid, exc.input_manifest)
+                        runtime.validate_authority()
                         stores.generations.complete_staged_build(preparation,
                             source_observations=final, monotonic_ns=time.monotonic_ns(),
                             required_payload_bytes=required_bytes)
@@ -504,6 +509,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
             if current != {"generation_id": request.generation_id, "receipt_sha256": receipt.sha256}:
                 manifest = _manifest(stores, request, certified=True)
                 _source, observations = _observe(runtime, request.repo_uuid, manifest)
+                runtime.validate_authority()
                 try:
                     stores.generations.abandon_staged_build(attempt, source_observations=observations,
                                                            monotonic_ns=time.monotonic_ns())

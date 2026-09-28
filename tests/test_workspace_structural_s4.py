@@ -20,6 +20,12 @@ def runtime_fixture(tmp_path, monkeypatch, *, native=False):
     # Unit/integration fixtures use an explicit synthetic package identity. The
     # separate installed-wheel proof exercises the real package admission path.
     monkeypatch.setattr(composition, "verify_installed_candidate", lambda expected: None)
+    # Preserve synthetic identity only in these unit fixtures. Installed-wheel
+    # tests use the unchanged worker bootstrap and real child admission.
+    from graphify.workspace import _readonly
+    monkeypatch.setattr(_readonly, '_CHILD_BOOTSTRAP', _readonly._CHILD_BOOTSTRAP.replace(
+        "exec(operation,", "import graphify.workspace.composition as _fixture_composition\n"
+        "_fixture_composition.verify_installed_candidate = lambda expected: None\nexec(operation,"))
     from graphify.workspace.persistence import RuntimeCapabilities
     for key in tuple(os.environ):
         if key.endswith("API_KEY") or key in {"GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_AUTH_TOKEN"}:

@@ -24,7 +24,7 @@ def query_structural(runtime, repo_uuid, request, *, deadline_ns=None):
     if type(deadline_ns) is not int or deadline_ns <= 0:
         raise QueryRejected("explicit positive monotonic deadline_ns required")
     require_before_deadline(deadline_ns, "query deadline expired")
-    runtime.validate_authority()
+    runtime.validate_authority(deadline_ns=deadline_ns)
     stores = runtime.stores
     with stores.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
         entry = _entry(registry, repo_uuid)
@@ -77,6 +77,6 @@ def query_structural(runtime, repo_uuid, request, *, deadline_ns=None):
                 ) != source:
                     raise QueryRejected("source changed during traversal")
                 stores.pointers.revalidate_read(repo_uuid, reading, deadline_ns=deadline_ns)
-                runtime.validate_authority()
+                runtime.validate_authority(deadline_ns=deadline_ns)
                 require_before_deadline(deadline_ns, "query deadline expired")
                 return text

@@ -13,21 +13,20 @@ import json
 import os
 from pathlib import Path
 import re
-import selectors
 import stat
-import subprocess
 import sys
 import time
 
 from graphify.source_io import SourceIO, SourceError, SourceChanged, SourceUnsupported
 from graphify.workspace.contracts import (
-    DETECTOR_ID, MAX_TOTAL_BYTES, InputManifest, ContractError, input_label, integer,
+    DETECTOR_ID, MAX_DOCUMENT_BYTES, MAX_TOTAL_BYTES, InputManifest, ContractError, input_label, integer, exact,
 )
 from graphify.workspace.identity import (
     discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation as LifecycleObservation
-from graphify.workspace.persistence import LockTimeout, require_before_deadline
+from graphify.workspace.persistence import require_before_deadline
+from graphify.workspace._readonly import ReadOnlyFailure, run_readonly
 from .base import PayloadBudgetExceeded, QueryRejected, QueryRequest, SourceObservation, StructuralBuild
 
 
@@ -196,99 +195,91 @@ class _BoundedGraphBuffer(io.BytesIO):
         return len(text)
 
 
-# Only the pinned payload descriptor is inherited, never workspace/GC lock FDs.
+# Only explicit input descriptors are inherited, never workspace/GC lock FDs.
 _QUERY_CHILD_CODE = "from graphify.workspace.adapters.v8 import _query_child; _query_child()"
+_OBSERVATION_CHILD_CODE = "from graphify.workspace.adapters.v8 import _observation_child; _observation_child()"
+_CHILD_INPUT_LIMIT = 2 * MAX_DOCUMENT_BYTES + 65_536
+
+
+def _child_request():
+    raw = sys.stdin.buffer.read(_CHILD_INPUT_LIMIT + 1)
+    if len(raw) > _CHILD_INPUT_LIMIT:
+        raise QueryRejected("read-only request exceeds byte limit")
+    value = json.loads(raw)
+    expected = value.pop("expected")
+    if expected is not None:
+        from graphify.workspace.composition import verify_installed_candidate
+        from graphify.workspace.contracts import CompatibilityManifest
+        verify_installed_candidate(CompatibilityManifest.from_mapping(expected))
+    return value
 
 
 def _query_child():
-    """Run the existing engine with bytecode, durable writes and network disabled."""
-    def audit(event, args):
-        mutation = event in {"os.mkdir", "os.remove", "os.rename", "os.rmdir", "os.chmod",
-                            "os.link", "os.symlink", "os.truncate", "os.utime"}
-        if event == "open":
-            path, _, flags = args
-            mutation = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
-            if isinstance(path, (str, bytes)) and "jieba.cache" in os.fsdecode(path):
-                raise QueryRejected("ambient tokenizer cache access")
-        if mutation or event in {"socket.connect", "socket.bind", "subprocess.Popen", "os.system"}:
-            raise QueryRejected("query computation attempted a durable or external side effect")
-    sys.addaudithook(audit)
-    raw = sys.stdin.buffer.read(65_537)
-    if len(raw) > 65_536:
-        raise QueryRejected("query computation request exceeds byte limit")
-    request = QueryRequest(**json.loads(raw))
-    text = V8Adapter().query_structural(int(sys.argv[1]), request)
+    value = _child_request()
+    text = V8Adapter().query_structural(int(sys.argv[1]), QueryRequest(**value["request"]))
     sys.stdout.buffer.write(text.encode("utf-8"))
 
 
-def _query_with_deadline(payload_fd, request, deadline_ns):
-    """Kill and reap computation at expiry, including native JSON/tokenizer work.
+def _observation_child():
+    value = _child_request()
+    manifest = value["input_manifest"]
+    observed, source = V8Adapter()._observe(
+        Path(value["source_root"]),
+        input_manifest=None if manifest is None else InputManifest.from_mapping(manifest),
+        max_inventory_passes=value["max_inventory_passes"], deadline_ns=value["deadline_ns"],
+    )
+    result = {"source_commit": source.head_commit, "policy_sha256": source.config_sha256,
+              "initial_detection": observed.initial_detection.to_dict(),
+              "consumed_inputs": None if observed.consumed_inputs is None else observed.consumed_inputs.to_dict(),
+              "stable_inventory_passes": observed.stable_inventory_passes}
+    sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
 
-    Loop callbacks alone cannot interrupt JSON decoding or dependency code. The
-    parent retains all locks until this disposable child exits, and never exposes
-    its buffered output before the caller's final freshness checks.
-    """
-    def remaining():
-        require_before_deadline(deadline_ns, "query deadline expired")
-        return max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
 
-    remaining()
-    request_bytes = json.dumps(asdict(request), ensure_ascii=False).encode("utf-8")
-    command = [sys.executable, "-I", "-B", "-c", _QUERY_CHILD_CODE, str(payload_fd)]
-    with subprocess.Popen(command, pass_fds=(payload_fd,), close_fds=True,
-                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE) as process:
-        output = bytearray()
-        total = sent = 0
-        try:
-            with selectors.DefaultSelector() as selector:
-                for stream, event in ((process.stdin, selectors.EVENT_WRITE),
-                                      (process.stdout, selectors.EVENT_READ),
-                                      (process.stderr, selectors.EVENT_READ)):
-                    os.set_blocking(stream.fileno(), False)
-                    selector.register(stream, event)
-                while selector.get_map():
-                    events = selector.select(remaining())
-                    remaining()
-                    for key, _ in events:
-                        if key.fileobj is process.stdin:
-                            try:
-                                sent += os.write(key.fd, request_bytes[sent:])
-                            except BrokenPipeError:
-                                sent = len(request_bytes)
-                            if sent == len(request_bytes):
-                                selector.unregister(key.fileobj)
-                                process.stdin.close()
-                            continue
-                        chunk = os.read(key.fd, min(65536, MAX_TOTAL_BYTES - total + 1))
-                        if not chunk:
-                            selector.unregister(key.fileobj)
-                            continue
-                        total += len(chunk)
-                        if total > MAX_TOTAL_BYTES:
-                            raise QueryRejected("query computation output exceeds byte limit")
-                        if key.fileobj is process.stdout:
-                            output.extend(chunk)
-            process.wait(timeout=remaining())
-            remaining()
-        except subprocess.TimeoutExpired:
-            raise LockTimeout("query deadline expired") from None
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-        if process.returncode != 0:
-            # Tracebacks may contain source content; they are never query output.
-            raise QueryRejected("invalid structural graph or query computation failed")
-        try:
-            return output.decode("utf-8")
-        except UnicodeDecodeError:
-            raise QueryRejected("query computation returned invalid UTF-8") from None
+def _query_with_deadline(payload_fd, request, deadline_ns, expected=None):
+    require_before_deadline(deadline_ns, "query deadline expired")
+    raw = json.dumps({"request": asdict(request),
+                      "expected": None if expected is None else expected.to_dict()}, ensure_ascii=False).encode("utf-8")
+    try:
+        output = run_readonly(_QUERY_CHILD_CODE, raw, arguments=(payload_fd,), pass_fds=(payload_fd,),
+                              deadline_ns=deadline_ns, max_input_bytes=_CHILD_INPUT_LIMIT,
+                              max_output_bytes=MAX_TOTAL_BYTES)
+        return output.decode("utf-8")
+    except (ReadOnlyFailure, UnicodeDecodeError) as exc:
+        raise QueryRejected(str(exc)) from None
 
 
 class V8Adapter:
     adapter_id = "graphify-v8/structural-v2"
     detector_id = DETECTOR_ID
+
+    def __init__(self, expected=None):
+        # Low-level descriptor owners can use the engine without installed
+        # authority. Composed runtimes always pin the exact candidate here.
+        self.expected = expected
+
+    def _timed_observation(self, source_root, *, input_manifest=None,
+                           max_inventory_passes=6, deadline_ns):
+        require_before_deadline(deadline_ns, "query deadline expired")
+        raw = json.dumps({"source_root": str(_absolute(source_root)),
+                          "input_manifest": None if input_manifest is None else input_manifest.to_dict(),
+                          "max_inventory_passes": max_inventory_passes, "deadline_ns": deadline_ns,
+                          "expected": None if self.expected is None else self.expected.to_dict()},
+                         ensure_ascii=False).encode("utf-8")
+        try:
+            raw = run_readonly(_OBSERVATION_CHILD_CODE, raw, deadline_ns=deadline_ns,
+                               max_input_bytes=_CHILD_INPUT_LIMIT,
+                               max_output_bytes=2 * MAX_DOCUMENT_BYTES + 65_536)
+            value = json.loads(raw)
+            exact(value, {"source_commit", "policy_sha256", "initial_detection",
+                          "consumed_inputs", "stable_inventory_passes"})
+            structural = SourceObservation(InputManifest.from_mapping(value["initial_detection"]),
+                None if value["consumed_inputs"] is None else InputManifest.from_mapping(value["consumed_inputs"]),
+                value["stable_inventory_passes"])
+            result = LifecycleObservation(value["source_commit"], value["policy_sha256"], structural)
+        except ReadOnlyFailure as exc:
+            raise SourceError(str(exc)) from None
+        require_before_deadline(deadline_ns, "query deadline expired")
+        return result
 
     @contextmanager
     def _inputs(self, source_root, deadline_ns=None):
@@ -339,9 +330,13 @@ class V8Adapter:
         raise SourceChanged("source lacks two agreeing complete observations")
 
     def observe(self, source_root, **kwargs):
+        if kwargs.get("deadline_ns") is not None:
+            return self._timed_observation(source_root, **kwargs).structural
         return self._observe(source_root, **kwargs)[0]
 
     def observe_lifecycle(self, source_root, **kwargs):
+        if kwargs.get("deadline_ns") is not None:
+            return self._timed_observation(source_root, **kwargs)
         structural, source = self._observe(source_root, **kwargs)
         return LifecycleObservation(source.head_commit, source.config_sha256, structural)
 
@@ -413,7 +408,7 @@ class V8Adapter:
         if deadline_ns is not None:
             if type(deadline_ns) is not int or deadline_ns <= 0:
                 raise QueryRejected("positive monotonic deadline_ns required")
-            return _query_with_deadline(payload_fd, request, deadline_ns)
+            return _query_with_deadline(payload_fd, request, deadline_ns, self.expected)
 
         from networkx.readwrite import json_graph
         from graphify.serve import _query_graph_text, memory_query_segmenter

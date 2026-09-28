@@ -847,6 +847,7 @@ class GenerationStore:
         request: StructuralBuildRequest,
         *,
         source_observations: Sequence[SourceObservation],
+        admission_guard: Callable[[], None] | None = None,
     ) -> StagedBuildState:
         """Durably install exact request authority before BUILD acquisition."""
 
@@ -917,6 +918,10 @@ class GenerationStore:
                     request=request,
                     lifecycle_state="REQUESTED",
                 )
+                # Runtime-owned callers recheck their authority after trusted
+                # source observation, at the first durable request boundary.
+                if admission_guard is not None:
+                    admission_guard()
                 committed = self._commit_staged_build_locked(requested)
                 self.fault_hook(f"generation:{generation_id}:request_durable")
                 return committed
