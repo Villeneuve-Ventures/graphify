@@ -789,7 +789,7 @@ def _bfs(G: nx.Graph, start_nodes: list[str], depth: int) -> tuple[set[str], lis
     edges_seen: list[tuple] = []
     for _ in range(depth):
         next_frontier: set[str] = set()
-        for n in frontier:
+        for n in sorted(frontier, key=str):
             # Don't expand through high-degree hubs (except seeds - a hub that
             # is the starting node should still be explored).
             if n not in seed_set and G.degree(n) >= hub_threshold:
@@ -841,8 +841,9 @@ def _subgraph_to_text(G: nx.Graph, nodes: set[str], edges: list[tuple], token_bu
     # Empty when no sidecar exists, so un-annotated output stays byte-identical.
     overlay = getattr(G, "graph", {}).get("_learning_overlay", {}) or {}
     seed_set = set(seeds or [])
+    # Stable ties keep one-shot processes and in-process queries byte-identical.
     ordered = [n for n in (seeds or []) if n in nodes] + \
-              sorted(nodes - seed_set, key=lambda n: G.degree(n), reverse=True)
+              sorted(nodes - seed_set, key=lambda n: (-G.degree(n), str(n)))
     for nid in ordered:
         d = G.nodes[nid]
         # Every LLM-derived field passes through sanitize_label before being

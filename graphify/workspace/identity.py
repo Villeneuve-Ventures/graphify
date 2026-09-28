@@ -458,6 +458,9 @@ def _preflight_git_inputs(root: Path, *, deadline_ns: int | None) -> None:
             if not routing.startswith("gitdir: "):
                 raise SourceDiscoveryError("unsupported Git routing")
             git_dir = Path(os.path.abspath(root / routing[8:]))
+        # Even rev-parse opens HEAD. Reject FIFOs, symlinks and oversized inputs
+        # before a subprocess can block on them, including linked-worktree HEADs.
+        read(git_dir, "HEAD")
         common = git_dir
         if (git_dir / "commondir").exists():
             routing = read(git_dir, "commondir").decode("utf-8").strip()

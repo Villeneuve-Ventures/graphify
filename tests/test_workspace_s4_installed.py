@@ -18,16 +18,20 @@ from tools.workspace_artifacts.candidate import build_fixture
 
 
 _LAUNCH = r'''
-import sys, os, json, time
+import sys, os, json, time, stat
 from pathlib import Path
 mode, state, bundle, source, repo_uuid = sys.argv[1:]
 if mode == 'query':
+    query_child_code = 'from graphify.workspace.adapters.v8 import _query_child; _query_child()'
     def audit(event, args):
         mutation = event in {'os.mkdir', 'os.remove', 'os.rename', 'os.rmdir', 'os.chmod',
                             'os.link', 'os.symlink', 'os.truncate', 'os.utime'}
         if event == 'open':
             path, _, flags = args
             mutation = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+            # Popen wraps anonymous IPC pipe descriptors; these are not durable writes.
+            if type(path) is int and stat.S_ISFIFO(os.fstat(path).st_mode):
+                mutation = False
             if isinstance(path, (str, bytes)) and 'jieba.cache' in os.fsdecode(path):
                 raise AssertionError('ambient tokenizer cache access')
         if mutation or event in {'socket.connect', 'socket.bind'}:
@@ -35,7 +39,8 @@ if mode == 'query':
         if event == 'subprocess.Popen':
             command = args[1]
             allowed = (command[0] in {'git', 'df', 'diskutil'}
-                       or command[:4] == [sys.executable, '-I', '-S', '-B'])
+                       or command[:4] == [sys.executable, '-I', '-S', '-B']
+                       or (len(command) == 6 and command[:5] == [sys.executable, '-I', '-B', '-c', query_child_code]))
             if not allowed:
                 raise AssertionError('unexpected subprocess: ' + str(command))
     sys.addaudithook(audit)

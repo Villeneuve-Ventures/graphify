@@ -149,9 +149,9 @@ def test_query_suppresses_source_drift_without_state_writes(tmp_path, monkeypatc
     before = tree_snapshot(runtime.inputs.state_root)
     called = []
     original = runtime.adapter.query_structural
-    def traverse(fd, request):
+    def traverse(fd, request, **kwargs):
         called.append(True)
-        result = original(fd, request)
+        result = original(fd, request, **kwargs)
         (repo / "README.md").write_text("changed original non-code input")
         return result
     monkeypatch.setattr(runtime.adapter, "query_structural", traverse)
@@ -190,7 +190,7 @@ def test_query_keeps_generation_lock_and_refuses_ordinary_writes(tmp_path, monke
     runtime, _repo = runtime_fixture(tmp_path, monkeypatch)
     result = synchronize_structural(runtime, request_for(runtime), attempt_sha256="a" * 64)
     original = runtime.adapter.query_structural
-    def traverse(fd, request):
+    def traverse(fd, request, **kwargs):
         def try_gc_lock():
             with runtime.stores.generations.state.existing_generation_lock(
                 runtime.stores.generations._lock(REPO_UUID, result.generation_id),
@@ -200,7 +200,7 @@ def test_query_keeps_generation_lock_and_refuses_ordinary_writes(tmp_path, monke
         with ThreadPoolExecutor(max_workers=1) as pool:
             with pytest.raises(LockTimeout):
                 pool.submit(try_gc_lock).result(timeout=5)
-        return original(fd, request)
+        return original(fd, request, **kwargs)
     monkeypatch.setattr(runtime.adapter, "query_structural", traverse)
     before = tree_snapshot(runtime.inputs.state_root)
     assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)

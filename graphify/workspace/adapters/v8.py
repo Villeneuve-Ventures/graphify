@@ -6,14 +6,17 @@ selects an explicit common-directory root; corpus metadata cannot widen it.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import stat
+import subprocess
+import sys
 import time
 
 from graphify.source_io import SourceIO, SourceError, SourceChanged, SourceUnsupported
@@ -24,6 +27,7 @@ from graphify.workspace.identity import (
     discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation as LifecycleObservation
+from graphify.workspace.persistence import LockTimeout, require_before_deadline
 from .base import PayloadBudgetExceeded, QueryRejected, QueryRequest, SourceObservation, StructuralBuild
 
 
@@ -192,6 +196,96 @@ class _BoundedGraphBuffer(io.BytesIO):
         return len(text)
 
 
+# Only the pinned payload descriptor is inherited, never workspace/GC lock FDs.
+_QUERY_CHILD_CODE = "from graphify.workspace.adapters.v8 import _query_child; _query_child()"
+
+
+def _query_child():
+    """Run the existing engine with bytecode, durable writes and network disabled."""
+    def audit(event, args):
+        mutation = event in {"os.mkdir", "os.remove", "os.rename", "os.rmdir", "os.chmod",
+                            "os.link", "os.symlink", "os.truncate", "os.utime"}
+        if event == "open":
+            path, _, flags = args
+            mutation = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+            if isinstance(path, (str, bytes)) and "jieba.cache" in os.fsdecode(path):
+                raise QueryRejected("ambient tokenizer cache access")
+        if mutation or event in {"socket.connect", "socket.bind", "subprocess.Popen", "os.system"}:
+            raise QueryRejected("query computation attempted a durable or external side effect")
+    sys.addaudithook(audit)
+    raw = sys.stdin.buffer.read(65_537)
+    if len(raw) > 65_536:
+        raise QueryRejected("query computation request exceeds byte limit")
+    request = QueryRequest(**json.loads(raw))
+    text = V8Adapter().query_structural(int(sys.argv[1]), request)
+    sys.stdout.buffer.write(text.encode("utf-8"))
+
+
+def _query_with_deadline(payload_fd, request, deadline_ns):
+    """Kill and reap computation at expiry, including native JSON/tokenizer work.
+
+    Loop callbacks alone cannot interrupt JSON decoding or dependency code. The
+    parent retains all locks until this disposable child exits, and never exposes
+    its buffered output before the caller's final freshness checks.
+    """
+    def remaining():
+        require_before_deadline(deadline_ns, "query deadline expired")
+        return max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+
+    remaining()
+    request_bytes = json.dumps(asdict(request), ensure_ascii=False).encode("utf-8")
+    command = [sys.executable, "-I", "-B", "-c", _QUERY_CHILD_CODE, str(payload_fd)]
+    with subprocess.Popen(command, pass_fds=(payload_fd,), close_fds=True,
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE) as process:
+        output = bytearray()
+        total = sent = 0
+        try:
+            with selectors.DefaultSelector() as selector:
+                for stream, event in ((process.stdin, selectors.EVENT_WRITE),
+                                      (process.stdout, selectors.EVENT_READ),
+                                      (process.stderr, selectors.EVENT_READ)):
+                    os.set_blocking(stream.fileno(), False)
+                    selector.register(stream, event)
+                while selector.get_map():
+                    events = selector.select(remaining())
+                    remaining()
+                    for key, _ in events:
+                        if key.fileobj is process.stdin:
+                            try:
+                                sent += os.write(key.fd, request_bytes[sent:])
+                            except BrokenPipeError:
+                                sent = len(request_bytes)
+                            if sent == len(request_bytes):
+                                selector.unregister(key.fileobj)
+                                process.stdin.close()
+                            continue
+                        chunk = os.read(key.fd, min(65536, MAX_TOTAL_BYTES - total + 1))
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        total += len(chunk)
+                        if total > MAX_TOTAL_BYTES:
+                            raise QueryRejected("query computation output exceeds byte limit")
+                        if key.fileobj is process.stdout:
+                            output.extend(chunk)
+            process.wait(timeout=remaining())
+            remaining()
+        except subprocess.TimeoutExpired:
+            raise LockTimeout("query deadline expired") from None
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        if process.returncode != 0:
+            # Tracebacks may contain source content; they are never query output.
+            raise QueryRejected("invalid structural graph or query computation failed")
+        try:
+            return output.decode("utf-8")
+        except UnicodeDecodeError:
+            raise QueryRejected("query computation returned invalid UTF-8") from None
+
+
 class V8Adapter:
     adapter_id = "graphify-v8/structural-v2"
     detector_id = DETECTOR_ID
@@ -312,10 +406,14 @@ class V8Adapter:
         return StructuralBuild(consumed, hashlib.sha256(raw).hexdigest(),
                                graph.number_of_nodes(), graph.number_of_edges())
 
-    def query_structural(self, payload_fd, request):
+    def query_structural(self, payload_fd, request, *, deadline_ns=None):
         if type(request) is not QueryRequest:
             raise QueryRejected("validated query request required")
         request = replace(request)
+        if deadline_ns is not None:
+            if type(deadline_ns) is not int or deadline_ns <= 0:
+                raise QueryRejected("positive monotonic deadline_ns required")
+            return _query_with_deadline(payload_fd, request, deadline_ns)
 
         from networkx.readwrite import json_graph
         from graphify.serve import _query_graph_text, memory_query_segmenter

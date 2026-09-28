@@ -14,7 +14,8 @@ def query_structural(runtime, repo_uuid, request, *, deadline_ns=None):
     """Return text only after before/after source and pointer validation.
 
     The embedding process must start with -B/PYTHONDONTWRITEBYTECODE=1 before
-    importing candidate modules. This library never creates a query launcher.
+    importing candidate modules. Deadline-bound computation runs in a disposable
+    child using the same engine; no public query launcher is created.
     Supply an absolute monotonic deadline covering both freshness scans and traversal.
     """
     if type(request) is not QueryRequest:
@@ -70,7 +71,7 @@ def query_structural(runtime, repo_uuid, request, *, deadline_ns=None):
                     return result
                 before = observe()
                 with stores.generations.state.existing_private_directory(relative / "graphify-out") as payload:
-                    text = runtime.adapter.query_structural(payload, request)
+                    text = runtime.adapter.query_structural(payload, request, deadline_ns=deadline_ns)
                 if observe() != before or stores.registry.resolve_active_source_locked(
                     registry, repo_uuid, deadline_ns=deadline_ns,
                 ) != source:
