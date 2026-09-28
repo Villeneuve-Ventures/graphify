@@ -221,6 +221,10 @@ class EngineAdapter(Protocol):
     def observe(self, source_root: Path, *, input_manifest: InputManifest | None = None,
                 max_inventory_passes: int = 6, deadline_ns: int | None = None) -> SourceObservation: ...
 
+    def observe_consumed_inputs(self, source_root: Path, *, input_manifest: InputManifest) -> str:
+        """Digest repeated current evidence for the sealed operation set, for recovery."""
+        ...
+
 
 @dataclass(frozen=True)
 class AdapterSelection:

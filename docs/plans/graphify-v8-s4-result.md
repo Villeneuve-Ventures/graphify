@@ -2,9 +2,79 @@
 
 This candidate is based on v8 `8798f3981847f98c7ce5c647f0a9338398c3489f`.
 It implements the S4 library boundary from the
-[structural design](graphify-v8-structural-workspace-design.md). Publication is
-one draft PR. S5 commands, S6 maintenance transports, S7 release qualification,
+[structural design](graphify-v8-structural-workspace-design.md). The implementation
+and stabilization are tracked in PR #167.
+S5 commands, S6 maintenance transports, S7 release qualification,
 semantic execution, migration, and consumer adoption remain separate work.
+
+## Current stabilization batch
+
+This stabilization batch starts at `f31eeab9296ac689ba01062be0c30f6578a6c5af` and repairs
+four related boundary gaps, in priority order:
+
+1. Read-only workers select the loaded package, interpreter and installed
+   dependency roots without copying caller `sys.path`. Empty, relative and
+   explicit source paths cannot substitute candidate or dependency imports.
+   Static installation `.pth` records are read without executing their code,
+   with regular-file, byte, count and deadline bounds.
+2. Composed pointer stores revalidate runtime authority before durable intent
+   and visible replacement, including pending-pointer recovery. A refusal
+   preserves the old visible pointer and any already-durable pending intent;
+   restoring the exact admitted authority permits the existing recovery path.
+3. Certified retries can abandon positively observed source drift even when
+   strict consumed-input replay would fail. Recovery independently reobserves
+   the sealed operations, including explicit absence and directory membership,
+   and persists a change proof bound to the completion manifest. Failed reads,
+   unsafe replacements and disagreeing observations cannot authorize abandonment.
+   Sealed routes are checked even when detection also changes. Existing records
+   without the optional proof remain readable; intent interruption and restart
+   retain the proof and the existing request/fence checks.
+4. Git discovery admits only ordinary or standard linked-worktree routing before
+   consuming HEAD, config, refs or objects or invoking Git. Relative and absolute
+   supported routes retain adapter observation coverage. Adapter evidence collection
+   also matches Git/discovery whitespace semantics at selected symbolic-ref hops
+   and reads per-worktree ref namespaces from the linked Git directory. These
+   positive controls were added after fresh independent review found the parser
+   disagreement.
+
+The accepted matrix and original local validation boundary are recorded in the
+ignored `.omx/plans/s4-stabilization.md` planning artifact. Focused regressions
+failed before repair. Fresh independent review covered all 36 candidate files
+against the pinned v8 base, then rechecked the bounded Git correction: the code
+reviewer returned **APPROVE** with zero open findings and the architect returned
+**CLEAR**. Earlier receipts below describe earlier candidates, not this batch.
+
+Final local validation on 2026-09-28:
+
+| Check | Result |
+| --- | --- |
+| Full frozen all-extra serial pytest | **6,898 passed, 41 skipped, 3 known warnings, 235 subtests passed**, in 2,795.15 seconds (46m35s). |
+| Input stability | All 362 Python files plus `pyproject.toml` and `uv.lock` matched their pre-run SHA-256 hashes afterward. |
+| Formal OMX CLI UltraQA | Initial bounded cycle passed 97 test invocations. After the independent Git finding, a scoped supplemental cycle passed 27: new Git controls, existing refusals and real installed-wheel build/cold query. Both cycles preserved all 842 inventoried inputs and cleared only their own runtime state. |
+| Optimized verifier | 80 passed in 10.02 seconds, with the expected optimized-mode pytest warning. |
+| Skill generation | All five checks passed: generated artifacts, coverage, schema singleton, monolith round trip and always-on round trip. |
+| Install and native library smoke | Disposable default/Codex install and help, plus native Leiden partition, passed. |
+| Static/diff checks | Configured Ruff passed across the full PR; expanded F checks passed across this local batch; `git diff --check` passed. Four pre-existing expanded-F diagnostics in unchanged `export.py` lines remain outside this repair. |
+| Advisory security | Bandit completed without scan errors and retained the same 14 finding signatures. The prior default-plus-dev pip-audit receipt has 12 findings; lock, project configuration and scanner-helper hashes were verified unchanged. This reuses lock-scoped evidence, not a fresh advisory-database scan. |
+| AST graph refresh | 15,571 nodes, 38,903 edges and 921 communities. Six zero-node warnings comprise the five existing fixtures plus the CLI-created state-lock identity JSON; HTML was skipped by the existing large-graph guard. |
+
+The full gate command was
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen --all-extras pytest tests/ -q --tb=short -p no:cacheprovider --durations=10 --maxfail=1`.
+Its slowest cases were pointer-authority rotation and watermark admission/retry
+checks (31.63–37.15 seconds each). These are observed timings, not an attribution
+of aggregate runtime or a claim of performance improvement. The three full-suite
+warnings remain the existing semantic-cache scope and managed-state cleanup
+warnings.
+
+The supplemental QA reused unchanged I/P/R/W implementation evidence and
+refreshed the affected Git and installed-package scenarios. A temporary probe
+import-path error and a report-writing setup error in the initial cycle were
+corrected separately; neither was counted as a product failure or passing test.
+Validation receipts, the accepted matrix and independent review reports remain
+local under `.omx/plans/` and `/tmp/graphify-s4-round13-*`. The shared CLI
+state-lock namespace is retained outside the product patch. These results record
+local validation before delivery to PR #167 and do not establish S7 release
+qualification. CI was not awaited.
 
 ## Library boundary
 

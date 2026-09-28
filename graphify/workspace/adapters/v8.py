@@ -19,7 +19,8 @@ import time
 
 from graphify.source_io import SourceIO, SourceError, SourceChanged, SourceUnsupported
 from graphify.workspace.contracts import (
-    DETECTOR_ID, MAX_DOCUMENT_BYTES, MAX_TOTAL_BYTES, InputManifest, ContractError, input_label, integer, exact,
+    DETECTOR_ID, MAX_DOCUMENT_BYTES, MAX_TOTAL_BYTES, InputManifest, ContractError,
+    canonical_json_bytes, input_label, integer, exact,
 )
 from graphify.workspace.identity import (
     discover_source, _git, SourceDiscoveryError, SourceDiscoveryTimeout,
@@ -85,10 +86,12 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
         if inputs.probe(common / name) is not None:
             raise SourceUnsupported("unsupported Git object/history routing")
     packed = _optional(inputs, common / "packed-refs")
-    head = inputs.read_bytes(git_dir / "HEAD").removesuffix(b"\n")
+    head = inputs.read_bytes(git_dir / "HEAD").strip()
     seen = set()
-    while head.startswith(b"ref: "):
-        ref_bytes = head[5:]
+    while head.startswith(b"ref:"):
+        # Match discovery's Git-accepted separators at every selected hop.
+        # SourceIO still records the original bytes, including whitespace.
+        ref_bytes = head[4:].strip()
         ref = os.fsdecode(ref_bytes)
         if (not ref.startswith("refs/")
                 or ref in seen or len(seen) >= 8):
@@ -106,7 +109,8 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
         except ContractError as exc:
             raise SourceUnsupported("Git reference requires a canonical UTF-8 input label") from exc
         seen.add(ref)
-        raw = _optional(inputs, common / ref)
+        local_ref = ref.startswith(("refs/worktree/", "refs/bisect/", "refs/rewritten/"))
+        raw = _optional(inputs, (git_dir if local_ref else common) / ref)
         if raw is None:
             rows = [] if packed is None else packed.split(b"\n")
             matches = [line.split(b" ")[0] for line in rows if line.endswith(b" " + ref_bytes)]
@@ -114,7 +118,7 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
                 raise SourceUnsupported("Git reference is unavailable")
             head = matches[0]
         else:
-            head = raw.removesuffix(b"\n")
+            head = raw.strip()
     if head != source.head_commit.encode("ascii"):
         raise SourceChanged("Git HEAD changed during observation")
     policy = inputs.read_bytes(root / ".graphify" / "workspace.toml")
@@ -145,6 +149,56 @@ def _replay(inputs, manifest):
     if replayed != manifest:
         raise SourceChanged("consumed input evidence changed")
     return replayed
+
+
+def _consumed_evidence(inputs, manifest):
+    """Observe the sealed operation set, retaining proven absence for recovery.
+
+    This does not produce a successful extraction manifest. Failed reads, unsafe
+    routes, and budget refusals still raise; only positive evidence can differ.
+    """
+    value = manifest.to_dict()
+    if value["roots"] != sorted(inputs.roots):
+        raise SourceUnsupported("input roots differ from selected source authority")
+    for record in value["evidence"]:
+        label = record["path"]
+        root, relative = label.split(":", 1) if ":" in label else ("source", label)
+        path = inputs.roots[root]
+        missing = False
+        # Probe each ancestor explicitly: ENOTDIR must not turn a symlink or
+        # non-directory ancestor into apparent absence in SourceIO.probe.
+        for part in Path(relative).parts[:-1]:
+            path /= part
+            info = inputs.probe(path)
+            if info is None:
+                missing = True
+                break
+            if not stat.S_ISDIR(info.st_mode):
+                raise SourceUnsupported("unsafe consumed input ancestor")
+        if missing:
+            continue
+        path = inputs.roots[root] / relative
+        info = inputs.probe(path)
+        if info is None:
+            continue
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise SourceUnsupported("unsafe consumed input replacement")
+        operation = record["operation"]
+        if operation == "read":
+            inputs.read_bytes(path)
+        elif operation == "list":
+            inputs.listdir(path)
+        elif operation == "directory" and not stat.S_ISDIR(info.st_mode):
+            raise SourceUnsupported("unsafe consumed directory replacement")
+    current = {(e["operation"], e["path"]): e["value"] for e in inputs.evidence}
+    # Extra probes used for route admission are not part of the sealed operation
+    # set. An absent former read/list/directory is represented explicitly by null.
+    records = [{**e, "value": current.get((e["operation"], e["path"]))}
+               for e in value["evidence"]]
+    raw = canonical_json_bytes(records)
+    if len(raw) > MAX_DOCUMENT_BYTES:
+        raise SourceUnsupported("consumed observation exceeds document bound")
+    return hashlib.sha256(raw).hexdigest()
 
 
 def read_payload_file(payload_fd, name, *, max_bytes=MAX_TOTAL_BYTES):
@@ -339,6 +393,25 @@ class V8Adapter:
             return self._timed_observation(source_root, **kwargs)
         structural, source = self._observe(source_root, **kwargs)
         return LifecycleObservation(source.head_commit, source.config_sha256, structural)
+
+    def observe_consumed_inputs(self, source_root, *, input_manifest):
+        """Return two-agreeing-pass evidence for the exact sealed operations."""
+        if type(input_manifest) is not InputManifest or not input_manifest.complete:
+            raise ContractError("complete validated consumed manifest required")
+        previous = None
+        for _ in range(6):
+            with self._inputs(source_root) as (inputs, initial, source, _code):
+                with SourceIO(inputs.root,
+                              extra_roots={k: v for k, v in inputs.roots.items() if k != "source"},
+                              max_file_bytes=inputs.max_file_bytes,
+                              max_total_bytes=inputs.max_total_bytes,
+                              max_entries=inputs.max_entries) as replay:
+                    evidence = _consumed_evidence(replay, input_manifest)
+                current = (initial.sha256, evidence, source)
+            if current == previous:
+                return evidence
+            previous = current
+        raise SourceChanged("consumed inputs lack two agreeing complete observations")
 
     def build_structural(self, source_root, *, payload_fd, scratch_fd, initial_detection,
                          write_guard=None, max_payload_bytes=MAX_TOTAL_BYTES):

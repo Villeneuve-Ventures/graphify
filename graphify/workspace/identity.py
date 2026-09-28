@@ -530,18 +530,39 @@ def _preflight_git_inputs(
         marker = root / ".git"
         if stat.S_ISDIR(marker.lstat().st_mode):
             git_dir = marker
+            # An ordinary checkout owns its common directory. Git must not
+            # follow an injected commondir into a separate metadata store.
+            try:
+                (git_dir / "commondir").lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise SourceDiscoveryError("unsupported Git routing")
+            common = git_dir
         else:
             routing = read(root, ".git").decode("utf-8").strip()
             if not routing.startswith("gitdir: "):
                 raise SourceDiscoveryError("unsupported Git routing")
             git_dir = Path(os.path.abspath(root / routing[8:]))
+            if git_dir.parent.name != "worktrees" or not git_dir.name:
+                raise SourceDiscoveryError("unsupported linked Git routing")
+            common = git_dir.parent.parent
+            # Route components and the selected source must be real directories;
+            # a symlink here could make the lexical worktree shape misleading.
+            for directory in (root, common, git_dir.parent, git_dir):
+                if not stat.S_ISDIR(directory.lstat().st_mode):
+                    raise SourceDiscoveryError("unsupported linked Git routing")
+            if git_dir.resolve(strict=True) != git_dir:
+                raise SourceDiscoveryError("unsupported linked Git routing")
+            cd = read(git_dir, "commondir").decode("utf-8").strip()
+            if Path(os.path.abspath(git_dir / cd)) != common:
+                raise SourceDiscoveryError("unsupported linked Git common directory")
+            back = read(git_dir, "gitdir").decode("utf-8").strip()
+            if Path(os.path.abspath(git_dir / back)) != marker:
+                raise SourceDiscoveryError("unsupported linked Git backlink")
         # Even rev-parse opens HEAD. Reject FIFOs, symlinks and oversized inputs
         # before a subprocess can block on them, including linked-worktree HEADs.
         head = read(git_dir, "HEAD")
-        common = git_dir
-        if (git_dir / "commondir").exists():
-            routing = read(git_dir, "commondir").decode("utf-8").strip()
-            common = Path(os.path.abspath(git_dir / routing))
         _preflight_git_refs(git_dir, common, head, deadline_ns=deadline_ns)
         # Probe through no-follow descriptors. Presence alone is unsupported;
         # never open an alternate-store file (which could itself be a FIFO).

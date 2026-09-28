@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
-from typing import Any, Iterator, cast
+from typing import Any, Callable, Iterator, cast
 
 from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.contracts import CompatibilityManifest
@@ -150,6 +150,7 @@ class PointerStore:
         journal: JournalStore,
         *,
         compatibility_manifest: CompatibilityManifest,
+        admission_guard: Callable[[], None] | None = None,
         capabilities: RuntimeCapabilities | None = None,
         fault_hook: FaultHook | None = None,
         syscalls: Syscalls | None = None,
@@ -157,6 +158,7 @@ class PointerStore:
         if type(compatibility_manifest) is not CompatibilityManifest:
             raise UnsupportedCompatibility("validated S2 compatibility manifest required")
         self.compatibility_sha256 = compatibility_manifest.sha256
+        self.admission_guard = admission_guard
         if generations.compatibility_sha256 != self.compatibility_sha256:
             raise UnsupportedCompatibility(
                 "pointer and generation stores require the same compatibility manifest"
@@ -174,6 +176,12 @@ class PointerStore:
         if len(roots) != 1:
             raise PointerError("pointer dependencies must share one external state root")
         self.fault_hook = fault_hook or (lambda _event: None)
+
+    def _admit_write(self) -> None:
+        # Composed runtimes bind live package/policy authority. Standalone S3
+        # stores retain their existing caller-owned authority contract.
+        if self.admission_guard is not None:
+            self.admission_guard()
 
     @staticmethod
     def _workspace(repo_uuid: str) -> Path:
@@ -1021,6 +1029,7 @@ class PointerStore:
         deadline_ns: int | None = None,
     ) -> PointerSet:
         label = transition.lower()
+        self._admit_write()
         if current is not None:
             self._retain_prior(
                 operation.repo_uuid,
@@ -1031,6 +1040,7 @@ class PointerStore:
                 deadline_ns=deadline_ns,
             )
             self.fault_hook(f"pointer:{label}:prior_durable")
+            self._admit_write()
         self.state.atomic_replace_bytes(
             self._pending(operation.repo_uuid),
             pointer.canonical,
@@ -1038,6 +1048,10 @@ class PointerStore:
             deadline_ns=deadline_ns,
         )
         self.fault_hook(f"pointer:{label}:pending_durable")
+        # Keep a durable intent recoverable if authority changes before visible
+        # replacement. This is observed-current admission, not a filesystem lock
+        # against arbitrary external changes to the installed runtime.
+        self._admit_write()
         self.state.atomic_replace_bytes(
             self._current(operation.repo_uuid),
             pointer.canonical,
@@ -1083,6 +1097,7 @@ class PointerStore:
         deadline_ns: int | None = None,
     ) -> PointerSet:
         # Normalize before any mutation, including first publication and replay.
+        self._admit_write()
         _timestamp(occurred_at)
         with self.leases.current_operation(
             grant,
@@ -2157,6 +2172,7 @@ class PointerStore:
         deadline_ns: int | None = None,
     ) -> PointerSet:
         # Pending resumption can publish without passing through _persist_move.
+        self._admit_write()
         _timestamp(occurred_at)
         operation_name = str(grant.lease.to_dict()["operation"])
         operation_context = (
@@ -2199,6 +2215,7 @@ class PointerStore:
                 allow_atomic_temps=operation.operation == "POINTER_RECOVERY",
                 deadline_ns=deadline_ns,
             ) as analysis:
+                self._admit_write()
                 if expected_plan is not None and analysis.plan != expected_plan:
                     replay = (
                         self._completed_repair_replay(
@@ -2261,6 +2278,7 @@ class PointerStore:
                     if pending is None:  # pragma: no cover - analysis invariant
                         raise PointerCorrupt("pending repair resumption is incomplete")
                     if current is None or current.canonical != pending.canonical:
+                        self._admit_write()
                         self.state.atomic_replace_bytes(
                             self._current(operation.repo_uuid),
                             pending.canonical,

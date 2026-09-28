@@ -5,9 +5,13 @@ import json
 import os
 import selectors
 import signal
+import site
+import stat
 import subprocess
 import sys
+import sysconfig
 import time
+from pathlib import Path
 
 from .persistence import LockTimeout, require_before_deadline
 
@@ -16,9 +20,9 @@ class ReadOnlyFailure(RuntimeError):
     pass
 
 
-# -S prevents site/.pth execution before the audit hook. Reuse the parent's
-# explicit import search path and cache prefix, not ambient PYTHONPATH or cwd.
-# The operation revalidates installed candidate identity where runtime-owned.
+# -S prevents site/.pth execution before the audit hook. The worker receives
+# paths from the loaded package and interpreter installation, not caller cwd or
+# arbitrary sys.path entries. Runtime-owned operations revalidate the package.
 _CHILD_BOOTSTRAP = r'''
 import sys, os, stat
 def audit(event, args):
@@ -53,6 +57,56 @@ exec(operation, {'__name__': '__main__'})
 '''
 
 
+def _worker_import_paths(deadline_ns):
+    """Select package, standard library and installed dependency roots."""
+    package = sys.modules["graphify"]
+    package_root = Path(package.__file__).resolve().parent.parent
+    stdlib = Path(sysconfig.get_path("stdlib")).resolve()
+    ziplib = Path(sys.base_prefix) / "lib" / (
+        f"python{sys.version_info.major}{sys.version_info.minor}.zip")
+    paths = [str(package_root), str(ziplib), str(stdlib), str(stdlib / "lib-dynload")]
+
+    # Only installation-owned .pth path records supply shared dependencies.
+    # Import statements in .pth files are never executed in the worker.
+    for site_root in map(Path, site.getsitepackages()):
+        require_before_deadline(deadline_ns, 'query deadline expired')
+        paths.append(str(site_root.resolve()))
+        with os.scandir(site_root) as entries:
+            pth_paths = []
+            for entry in entries:
+                require_before_deadline(deadline_ns, 'query deadline expired')
+                if entry.name.endswith(".pth"):
+                    pth_paths.append(site_root / entry.name)
+                    if len(pth_paths) > 128:
+                        raise ReadOnlyFailure('too many installation path files')
+        for pth in sorted(pth_paths):
+            require_before_deadline(deadline_ns, 'query deadline expired')
+            try:
+                fd = os.open(pth, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                try:
+                    info = os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+                        raise ReadOnlyFailure('unsafe installation path file')
+                    content = os.read(fd, 65537)
+                    if len(content) > 65536:
+                        raise ReadOnlyFailure('unsafe installation path file')
+                finally:
+                    os.close(fd)
+                lines = content.decode('utf-8').splitlines()
+            except (OSError, UnicodeDecodeError) as exc:
+                raise ReadOnlyFailure('unsafe installation path file') from exc
+            require_before_deadline(deadline_ns, 'query deadline expired')
+            for line in lines:
+                entry = line.strip()
+                if not entry or entry.startswith("#") or entry.startswith("import "):
+                    continue
+                dependency = Path(entry)
+                if (dependency.is_absolute() and dependency.name in
+                        {"site-packages", "dist-packages"} and dependency.is_dir()):
+                    paths.append(str(dependency.resolve()))
+    return list(dict.fromkeys(paths))
+
+
 def run_readonly(code, request, *, deadline_ns, max_output_bytes,
                  max_input_bytes, arguments=(), pass_fds=()):
     """Retain caller locks until a private process group is killed and reaped.
@@ -68,7 +122,7 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
     remaining()
     if len(request) > max_input_bytes:
         raise ReadOnlyFailure('read-only request exceeds byte limit')
-    paths = [os.path.abspath(path) for path in sys.path]
+    paths = _worker_import_paths(deadline_ns)
     startup = json.dumps([paths, sys.pycache_prefix])
     command = [sys.executable, '-I', '-S', '-B', '-c', _CHILD_BOOTSTRAP,
                startup, code, *map(str, arguments)]

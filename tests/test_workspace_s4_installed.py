@@ -20,8 +20,8 @@ from tools.workspace_artifacts.candidate import build_fixture
 _LAUNCH = r'''
 import sys, os, json, time, stat
 from pathlib import Path
-mode, state, bundle, source, repo_uuid = sys.argv[1:]
-if mode == 'query':
+mode, state, bundle, source, repo_uuid, *extra = sys.argv[1:]
+if mode.startswith('query'):
     query_child_code = 'from graphify.workspace.adapters.v8 import _query_child; _query_child()'
     def audit(event, args):
         mutation = event in {'os.mkdir', 'os.remove', 'os.rename', 'os.rmdir', 'os.chmod',
@@ -55,7 +55,13 @@ if sys.platform != 'darwin':
 expected = CompatibilityManifest.from_json((Path(bundle) / 'compatibility.json').read_bytes())
 inputs = load_workspace_runtime_inputs(state_root=Path(state), expected=expected)
 runtime = compose_workspace_runtime(inputs).require_runtime()
-if mode == 'build':
+if mode.endswith('_hostile'):
+    # The genuine installed package is already imported; an embedding caller
+    # can now move into a source tree and add it to the import search path.
+    import networkx, statistics
+    os.chdir(extra[0])
+    sys.path[:0] = ['', '.', str(Path(extra[0]).resolve())]
+if mode.startswith('build'):
     from graphify.workspace.identity import discover_source, OperatorAuthorization, IdentityAction
     from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
     runtime.stores.registry.enroll(discover_source(Path(source)), OperatorAuthorization(
@@ -116,21 +122,30 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     authority = state / "runtime-manifest.json"
     authority.write_bytes((bundle / "runtime-manifest.json").read_bytes())
     authority.chmod(0o600)
+    hostile = root / "hostile-source"
+    hostile.mkdir()
+    for module in ("graphify", "networkx"):
+        package = hostile / module
+        package.mkdir()
+        (package / "__init__.py").write_text(
+            f"import sys; sys.stdout.write('FORGED-{module}'); raise SystemExit(0)\n")
+    (hostile / "statistics.py").write_text(
+        "import sys; sys.stdout.write('FORGED-statistics'); raise SystemExit(0)\n")
     args = [str(python), "-B", "-c", _LAUNCH]
     tail = [str(state), str(bundle), str(source), REPO_UUID]
-    assert run([*args, "build", *tail]).strip() == "INSTALLED-S4-BUILT"
+    assert run([*args, "build_hostile", *tail, str(hostile)]).strip() == "INSTALLED-S4-BUILT"
     def snapshots():
-        return tuple(tree_snapshot(p) for p in (state, source, venv,
+        return tuple(tree_snapshot(p) for p in (state, source, venv, hostile,
             *(Path(env[name]) for name in ('HOME', 'CODEX_HOME', 'XDG_STATE_HOME',
                                          'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'TMPDIR'))))
     before = snapshots()
-    first = json.loads(run([*args, "query", *tail]))
+    first = json.loads(run([*args, "query_hostile", *tail, str(hostile)]))
     assert "leaf" in first[0] and "南京市长江大桥" in first[1]
     assert snapshots() == before
     import marshal
     cache = Path(env["TMPDIR"]) / "jieba.cache"
     cache.write_bytes(marshal.dumps(({"南京市长江大桥": 999}, 999)))
     before = snapshots()
-    second = json.loads(run([*args, "query", *tail]))
+    second = json.loads(run([*args, "query_hostile", *tail, str(hostile)]))
     assert first == second
     assert snapshots() == before

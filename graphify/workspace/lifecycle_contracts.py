@@ -1348,6 +1348,7 @@ class StagedBuildAbandonmentEvidence:
     extraction_failure_detection_sha256: str | None = None
     extraction_failure_status: str | None = None
     extraction_failure_failure_status: str | None = None
+    consumed_input_change: tuple[str, str, str] | None = None
 
     def _observation_document(self) -> dict[str, object]:
         return {
@@ -1383,7 +1384,10 @@ class StagedBuildAbandonmentEvidence:
                 "observation_evidence_sha256": self.source_observation_evidence_sha256,
             },
         }
-        if self.capacity_failure_payload_bytes is not None and self.extraction_failure_manifest_sha256 is not None:
+        if sum(value is not None for value in (
+            self.capacity_failure_payload_bytes, self.extraction_failure_manifest_sha256,
+            self.consumed_input_change,
+        )) > 1:
             raise ContractError("$.abandon_evidence: multiple terminal failures")
         if self.capacity_failure_payload_bytes is not None:
             document["capacity_failure"] = {
@@ -1396,6 +1400,11 @@ class StagedBuildAbandonmentEvidence:
                 "status": self.extraction_failure_status,
                 "failure_status": self.extraction_failure_failure_status,
             }
+        if self.consumed_input_change is not None:
+            document["consumed_input_change"] = dict(zip(
+                ("sealed_manifest_sha256", "previous_evidence_sha256", "observed_evidence_sha256"),
+                self.consumed_input_change, strict=True,
+            ))
         return document
 
     @property
@@ -1406,13 +1415,20 @@ class StagedBuildAbandonmentEvidence:
     def sha256(self) -> str:
         return hashlib.sha256(self.canonical).hexdigest()
 
-    def reason_for(self, request: StructuralBuildRequest) -> str:
+    def reason_for(self, request: StructuralBuildRequest,
+                   completion_binding: CompletionBinding | None = None) -> str:
         """Return the canonical first stale-authority reason bound by this snapshot."""
 
         if self.request_sha256 != request.sha256:
             raise ContractError(
                 "$.abandon_evidence.request_sha256: must bind the staged request"
             )
+        if self.consumed_input_change is not None:
+            sealed, previous, observed = self.consumed_input_change
+            if (completion_binding is None
+                    or sealed != completion_binding.to_dict()["consumed_inputs_sha256"]
+                    or previous == observed):
+                raise ContractError("$.abandon_evidence.consumed_input_change: invalid sealed change proof")
         if self.registry_revision < request.expected_registry_revision:
             raise ContractError(
                 "$.abandon_evidence.registry_revision: predates the staged request"
@@ -1451,6 +1467,8 @@ class StagedBuildAbandonmentEvidence:
             request.observation_manifest_sha256,
             request.observation_evidence_sha256,
         ):
+            return "SOURCE_CHANGED"
+        if self.consumed_input_change is not None:
             return "SOURCE_CHANGED"
         if self.capacity_failure_payload_bytes is not None:
             if self.capacity_failure_payload_bytes <= request.expected_payload_bytes:
@@ -1496,7 +1514,7 @@ class StagedBuildAbandonmentEvidence:
                 "semantic_queue",
                 "source",
             },
-            {"capacity_failure", "extraction_failure"},
+            {"capacity_failure", "extraction_failure", "consumed_input_change"},
         )
         pointer_revision = _integer(
             data["pointer_revision"],
@@ -1591,6 +1609,16 @@ class StagedBuildAbandonmentEvidence:
                     "$.abandon_evidence.extraction_failure.failure_status",
                     {"unsupported_input"},
                 )
+        consumed_input_change = None
+        if "consumed_input_change" in data:
+            change = _mapping(data["consumed_input_change"], "$.abandon_evidence.consumed_input_change")
+            keys = ("sealed_manifest_sha256", "previous_evidence_sha256", "observed_evidence_sha256")
+            _exact_keys(change, "$.abandon_evidence.consumed_input_change", set(keys))
+            consumed_input_change = tuple(
+                _digest(change[key], f"$.abandon_evidence.consumed_input_change.{key}") for key in keys
+            )
+            if consumed_input_change[1] == consumed_input_change[2]:
+                raise ContractError("$.abandon_evidence.consumed_input_change: unchanged evidence")
         source = _mapping(data["source"], "$.abandon_evidence.source")
         _exact_keys(
             source,
@@ -1690,6 +1718,7 @@ class StagedBuildAbandonmentEvidence:
             extraction_failure_detection_sha256=extraction_failure_detection_sha256,
             extraction_failure_status=extraction_failure_status,
             extraction_failure_failure_status=extraction_failure_failure_status,
+            consumed_input_change=consumed_input_change,
         )
         expected_observation_evidence = hashlib.sha256(
             canonical_json_bytes(
@@ -2007,7 +2036,7 @@ class StagedBuildState:
                         "$.abandonment_intent.operation_epoch/fence_token: "
                         "must retain the prior attempt pair or advance both"
                     )
-            if abandonment_intent.evidence.reason_for(request) != abandonment_intent.reason:
+            if abandonment_intent.evidence.reason_for(request, completion_binding) != abandonment_intent.reason:
                 raise ContractError(
                     "$.abandonment_intent.reason: must match canonical abandonment evidence"
                 )
@@ -2047,7 +2076,7 @@ class StagedBuildState:
                 raise ContractError(
                     "$.abandon_evidence_sha256: must match canonical abandonment evidence"
                 )
-            if abandon_evidence.reason_for(request) != abandon_reason:
+            if abandon_evidence.reason_for(request, completion_binding) != abandon_reason:
                 raise ContractError(
                     "$.abandon_reason: must match canonical abandonment evidence"
                 )

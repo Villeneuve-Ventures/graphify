@@ -439,7 +439,7 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
                 if recovering:
                     try:
                         stores.generations.abandon_staged_build(attempt, source_observations=observations,
-                                                               monotonic_ns=time.monotonic_ns())
+                            monotonic_ns=time.monotonic_ns(), admission_guard=runtime.validate_authority)
                     except StagedBuildStillCurrent:
                         pass
                     else:
@@ -516,15 +516,19 @@ def synchronize_structural(runtime, request, *, attempt_sha256):
             current = None if pointer is None else pointer.to_dict()["current"]
             if current != {"generation_id": request.generation_id, "receipt_sha256": receipt.sha256}:
                 manifest = _manifest(stores, request, certified=True)
-                _source, observations = _observe(runtime, request.repo_uuid, manifest)
+                # Recovery first proves detection or sealed-consumed drift. A
+                # failed strict replay by itself cannot authorize abandonment.
+                _source, observations = _observe(runtime, request.repo_uuid)
                 runtime.validate_authority()
                 try:
                     stores.generations.abandon_staged_build(attempt, source_observations=observations,
-                                                           monotonic_ns=time.monotonic_ns())
+                        monotonic_ns=time.monotonic_ns(), admission_guard=runtime.validate_authority)
                 except StagedBuildStillCurrent:
                     pass
                 else:
                     raise GenerationConflict("stale certified request was abandoned")
+                _observe(runtime, request.repo_uuid, manifest)
+                runtime.validate_authority()
                 pointer = stores.pointers.promote(attempt.grant, PointerCAS(
                     expected_pointer_revision=request.build.expected_pointer_revision,
                     expected_active_source_revision=attempt.grant.active_source_revision,

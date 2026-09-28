@@ -590,7 +590,10 @@ class StructuralComposition:
         adapter.expected = inputs.expected
         stores = self.require_lifecycle_stores()
         stores.generations.observer = adapter.observe_lifecycle
-        return StructuralRuntime(inputs, stores, adapter)
+        stores.generations.consumed_observer = adapter.observe_consumed_inputs
+        runtime = StructuralRuntime(inputs, stores, adapter)
+        stores.pointers.admission_guard = runtime.validate_authority
+        return runtime
 
     def require_lifecycle_stores(self):
         """Construct S3 stores without creating state or enabling an adapter."""
