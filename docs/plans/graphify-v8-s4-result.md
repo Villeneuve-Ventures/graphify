@@ -21,6 +21,7 @@ caller uses:
 
 ```python
 from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
+from time import monotonic_ns
 from graphify.workspace.query import query_structural
 from graphify.workspace.adapters.base import QueryRequest
 
@@ -29,7 +30,9 @@ request = prepare_structural_sync(
     source_epoch=1, desired_watermark=1, expected_payload_bytes=1024 * 1024,
 )
 result = synchronize_structural(runtime, request, attempt_sha256=attempt_sha256)
-text = query_structural(runtime, repo_uuid, QueryRequest("caller"))
+# The embedding caller chooses a budget for freshness scans plus traversal.
+text = query_structural(runtime, repo_uuid, QueryRequest("caller"),
+                        deadline_ns=monotonic_ns() + 3_600_000_000_000)
 ```
 
 The example limits and epochs are fixture inputs, not operational defaults.
@@ -69,7 +72,9 @@ request over a nonterminal request or retained semantic lifecycle.
   verifies the sealed generation, buffers v8 output, observes source freshness
   before and after traversal, and revalidates pointer and runtime authority before
   returning text. It creates no lock, lease, cache, log, receipt, or repair record.
-  Deadline expiry withholds output. Callers launch Python with `-B` or
+  A caller-supplied positive absolute monotonic deadline covers both freshness
+  scans and traversal; there is no implicit deadline. Expiry withholds output.
+  Callers launch Python with `-B` or
   `PYTHONDONTWRITEBYTECODE=1` **before imports** to suppress startup bytecode writes.
 
 The focused suites cover source/supporting-input drift, missing parsers and
@@ -220,6 +225,30 @@ coverage warning does not identify a behavioral defect or an adopted repository
 gate; broad docstring generation is outside these repairs. No review threads or
 issue state were changed.
 
+The feedback snapshot at `0a3d811d5232cf6a22814898f662fa2862e41d13`
+contained eleven conversation comments, ten reviews and twenty-one inline
+comments, with no linked issues. The three new findings share resource admission
+that occurs too late or chooses a budget without caller input. Patch order:
+
+1. [Alternate object stores](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117791472):
+   discovery probes common-directory `objects/info/alternates` and
+   `http-alternates` through no-follow descriptors before launching Git.
+   Regular files, FIFOs and symlinks refuse for ordinary and linked worktrees;
+   a real shared clone also refuses without starting discovery subprocesses.
+2. [Streaming graph JSON](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117791465):
+   the existing serializer copies one node or edge at a time, allowing the
+   adapter's byte limit to interrupt serialization before a full node-link copy
+   is allocated. Byte parity covers directed, undirected and multigraph output,
+   empty graphs, labels, communities, confidence and stored edge direction.
+   This bounds the additional entity copies, not graph construction memory or
+   the size of one individual attribute value.
+3. [Explicit query deadline](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117791458):
+   callers must supply a positive absolute monotonic deadline. Invalid or absent
+   deadlines refuse before reading runtime authority. The example and installed
+   query launcher now choose their own budgets. A simulated 31-second query
+   passes with a 60-second budget and withholds output with a 30-second budget,
+   preserving both source and state.
+
 ## Validation receipt
 
 Validation uses frozen all-extra dependencies, CPython 3.14.3,
@@ -230,22 +259,23 @@ capability support and are not native durability evidence.
 | Check | Result |
 | --- | --- |
 | `uv sync --all-extras --frozen` | Passed. |
-| Full serial `pytest tests/ -q --tb=short` | 6,745 passed, 41 skipped, 6 warnings, and 235 subtests passed in 1,805.92 seconds (30m05s). |
-| Optimized Python protected-verifier suite | 80 passed in 12.50 seconds (one optimized-mode pytest warning). |
+| Full serial `pytest tests/ -q --tb=short` | 6,774 passed, 41 skipped, 3 warnings, and 235 subtests passed in 1,817.56 seconds (30m17s). |
+| Optimized Python protected-verifier suite | 80 passed in 10.28 seconds (one optimized-mode pytest warning). |
 | Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
-| Current feedback regressions | 14 passed in 31.67 seconds; near-limit certification, maximal receipt bounds, early admission, capacity cleanup, retained renewal, and ordinary/linked/BOM Git includes. |
-| Current admission and recovery checks | 24 follow-up/admission cases passed in 194.10 seconds; 5 uncertain-commit recovery cases passed in 63.34 seconds. |
+| Current focused suites | 243 passed in 693.26 seconds (11m33s), with three dependency warnings; includes 29 new preflight, streaming-parity, and explicit-deadline cases plus source discovery, export, lifecycle, installed-wheel, resource and prior feedback regressions. |
+| Prior admission and recovery checks | 24 follow-up/admission cases passed in 194.10 seconds; 5 uncertain-commit recovery cases passed in 63.34 seconds; covered again by the current full suite. |
 | Focused resource and capacity regressions | Prior candidate: 15 passed in 87.53 seconds, including bounded serialization, manifest accounting, recoverable abandonment, slow observations, and existing receipt-capacity checks. |
 | Focused extraction-budget regressions | Build/promotion/no-write query passed for code and non-code inputs; inter-pass drift and oversized combined evidence refused before payload writes. |
 | Focused admission tests | Prior candidate: 10 passed in 137.86 seconds, including state preservation, the existing-lease queue race, valid follow-up requests, and exact retries. |
 | Adapter/review/installed-wheel tests | Prior candidate: 47 passed, including actual installed-candidate admission and absent/misleading-cache no-write checks; also included in the current full suite. |
 | Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |
 | Focused S3 regressions | 112 passed, 24 subtests passed. |
-| Diff review and Ruff F checks | Passed on task paths. |
+| Diff review and Ruff F checks | Diff checks and other changed Python paths passed; `export.py` retains four unchanged baseline F401/F841 warnings. |
 | Task-owned `graphify update .` | Canonical graph/report refreshed; no provider tokens. |
 
 The final serial and optimized pytest runs disabled bytecode and pytest-cache
-writes. The graph refresh is local
+writes. The serial gate took 30m17s; its slowest ten cases were S4 admission
+and capacity/recovery tests, each taking 19–25 seconds. The graph refresh is local
 orientation output, not a release or immutable-candidate certification receipt.
 Advisory Bandit completed with 14 finding records in unchanged files. Pip-audit
 completed with 12 finding records against the unchanged default-plus-dev lock

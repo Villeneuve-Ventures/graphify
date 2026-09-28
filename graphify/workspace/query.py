@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
-import time
 
 from .adapters.base import QueryRequest, QueryRejected
 from .contracts import InputManifest, MAX_DOCUMENT_BYTES
@@ -16,12 +15,13 @@ def query_structural(runtime, repo_uuid, request, *, deadline_ns=None):
 
     The embedding process must start with -B/PYTHONDONTWRITEBYTECODE=1 before
     importing candidate modules. This library never creates a query launcher.
+    Supply an absolute monotonic deadline covering both freshness scans and traversal.
     """
     if type(request) is not QueryRequest:
         raise QueryRejected("validated query request required")
     request = replace(request)
-    if deadline_ns is None:
-        deadline_ns = time.monotonic_ns() + 30_000_000_000
+    if type(deadline_ns) is not int or deadline_ns <= 0:
+        raise QueryRejected("explicit positive monotonic deadline_ns required")
     require_before_deadline(deadline_ns, "query deadline expired")
     runtime.validate_authority()
     stores = runtime.stores

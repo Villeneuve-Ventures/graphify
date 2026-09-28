@@ -1,6 +1,7 @@
 """Real v8 engine + S3 lifecycle in disposable external roots."""
 import os
 import sys
+import time
 import pytest
 
 from graphify.workspace.adapters.base import QueryRequest
@@ -60,7 +61,7 @@ def test_native_structural_round_trip(tmp_path, monkeypatch):
     result = synchronize_structural(runtime, request, attempt_sha256="a" * 64)
     assert result.pointer_revision == 1
     before_state = tree_snapshot(runtime.inputs.state_root)
-    text = query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    text = query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
     assert "caller" in text and "leaf" in text
     assert tree_snapshot(runtime.inputs.state_root) == before_state
     assert tree_snapshot(repo) == before_source
@@ -103,7 +104,7 @@ def test_linked_source_is_explicitly_adopted_and_activated(tmp_path, monkeypatch
     assert receipt["active_source_revision"] == 2
     assert receipt["semantic_completeness"] == "not_required"
     assert receipt["completion_binding"]["initial_detection_sha256"] == request.build.observation_manifest_sha256
-    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
     assert (tree_snapshot(repo), tree_snapshot(linked)) == before
 
 
@@ -137,7 +138,7 @@ def test_exact_retry_at_durable_boundaries(tmp_path, monkeypatch, boundary):
     before = tree_snapshot(runtime.inputs.state_root)
     assert synchronize_structural(runtime, request, attempt_sha256="c" * 64) == result
     assert tree_snapshot(runtime.inputs.state_root) == before
-    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
 
 
 @pytest.mark.parametrize("moment", ["before", "after"])
@@ -157,7 +158,7 @@ def test_query_suppresses_source_drift_without_state_writes(tmp_path, monkeypatc
     if moment == "before":
         (repo / "README.md").write_text("changed original non-code input")
     with pytest.raises((SourceError, ValueError)):
-        query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+        query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
     assert bool(called) == (moment == "after")
     assert tree_snapshot(runtime.inputs.state_root) == before
 
@@ -202,7 +203,7 @@ def test_query_keeps_generation_lock_and_refuses_ordinary_writes(tmp_path, monke
         return original(fd, request)
     monkeypatch.setattr(runtime.adapter, "query_structural", traverse)
     before = tree_snapshot(runtime.inputs.state_root)
-    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
     generation = runtime.inputs.state_root / "workspaces" / REPO_UUID / "generations" / result.generation_id
     with pytest.raises(Exception, match="workspace|managed"):
         to_json(nx.DiGraph(), {}, str(generation / "graphify-out/graph.json"), force=True)
@@ -264,7 +265,7 @@ def test_pending_record_commit_retries_exactly(tmp_path, monkeypatch, record):
     target.fault_hook = lambda label: None
     result = synchronize_structural(runtime, request, attempt_sha256="a" * 64)
     assert result.pointer_revision == 1
-    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
 
 
 def test_retained_semantic_state_blocks_before_writes(tmp_path, monkeypatch):

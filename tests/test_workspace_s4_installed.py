@@ -18,7 +18,7 @@ from tools.workspace_artifacts.candidate import build_fixture
 
 
 _LAUNCH = r'''
-import sys, os, json
+import sys, os, json, time
 from pathlib import Path
 mode, state, bundle, source, repo_uuid = sys.argv[1:]
 if mode == 'query':
@@ -64,7 +64,7 @@ if mode == 'build':
 else:
     from graphify.workspace.adapters.base import QueryRequest
     from graphify.workspace.query import query_structural
-    print(json.dumps([query_structural(runtime, repo_uuid, QueryRequest(q))
+    print(json.dumps([query_structural(runtime, repo_uuid, QueryRequest(q), deadline_ns=time.monotonic_ns() + 60_000_000_000)
                       for q in ('caller', '南京市长江大桥')], ensure_ascii=False))
 '''
 

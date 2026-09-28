@@ -3,6 +3,7 @@ import os
 import stat
 from types import SimpleNamespace
 
+import time
 import pytest
 
 from graphify.workspace.adapters.base import QueryRejected, QueryRequest
@@ -114,7 +115,7 @@ def test_reviewed_source_conditions_complete_and_promote(tmp_path, monkeypatch, 
             os.umask(previous)
     assert result.pointer_revision == 1
     state_before = tree_snapshot(runtime.inputs.state_root)
-    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
     assert tree_snapshot(runtime.inputs.state_root) == state_before
     assert tree_snapshot(repo) == source_before
 
@@ -141,7 +142,7 @@ def test_build_and_replay_have_separate_bounded_read_budgets(tmp_path, monkeypat
     result = synchronize_structural(runtime, request, attempt_sha256="c" * 64)
     assert result.pointer_revision == 1
     state = tree_snapshot(runtime.inputs.state_root)
-    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"))
+    assert "leaf" in query_structural(runtime, REPO_UUID, QueryRequest("caller"), deadline_ns=time.monotonic_ns() + 60_000_000_000)
     assert tree_snapshot(runtime.inputs.state_root) == state
     assert tree_snapshot(repo) == before
     # Separate replay budgets must not relax the per-observation input ceiling.

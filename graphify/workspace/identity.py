@@ -16,6 +16,7 @@ import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from graphify.source_io import SourceError, SourceIO
 from graphify.workspace.lifecycle_contracts import (
     ContractError,
     WorkspaceConfig,
@@ -166,7 +167,7 @@ def _git(
     deadline_ns: int | None = None,
     strip_output: bool = True,
 ) -> str:
-    _reject_git_includes(root, deadline_ns=deadline_ns)
+    _preflight_git_inputs(root, deadline_ns=deadline_ns)
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
     }
@@ -442,8 +443,8 @@ def _read_source_regular(
             os.close(directory_descriptor)
 
 
-def _reject_git_includes(root: Path, *, deadline_ns: int | None) -> None:
-    """Refuse external config readers before any Git command loads local config."""
+def _preflight_git_inputs(root: Path, *, deadline_ns: int | None) -> None:
+    """Refuse external config and object readers before any Git command starts."""
     def read(directory: Path, name: str) -> bytes:
         return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
                                     max_bytes=WORKSPACE_CONFIG_MAX_BYTES)
@@ -461,6 +462,12 @@ def _reject_git_includes(root: Path, *, deadline_ns: int | None) -> None:
         if (git_dir / "commondir").exists():
             routing = read(git_dir, "commondir").decode("utf-8").strip()
             common = Path(os.path.abspath(git_dir / routing))
+        # Probe through no-follow descriptors. Presence alone is unsupported;
+        # never open an alternate-store file (which could itself be a FIFO).
+        with SourceIO(common) as inputs:
+            for name in ("alternates", "http-alternates"):
+                if inputs.probe(common / "objects" / "info" / name) is not None:
+                    raise SourceDiscoveryError("Git alternate object stores are unsupported")
         for directory, name in ((common, "config"), (git_dir, "config.worktree")):
             try:
                 (directory / name).lstat()
@@ -469,8 +476,8 @@ def _reject_git_includes(root: Path, *, deadline_ns: int | None) -> None:
             raw = read(directory, name).removeprefix(b"\xef\xbb\xbf")
             if re.search(rb'(?im)^\s*\[\s*include(?:if)?(?:\s|\]|\.)', raw):
                 raise SourceDiscoveryError("Git includes require unsupported external input authority")
-    except (OSError, UnicodeError) as exc:
-        raise SourceDiscoveryError("cannot preflight local Git configuration") from exc
+    except (OSError, UnicodeError, SourceError) as exc:
+        raise SourceDiscoveryError("cannot preflight local Git inputs") from exc
 
 
 def _read_workspace_config(
