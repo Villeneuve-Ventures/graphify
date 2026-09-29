@@ -283,9 +283,13 @@ def _released(runtime, grant):
             runtime.stores.leases.release(grant)
         except CommitUnknown:
             raise
-        except Exception:
+        except Exception as release_error:
             if primary is None:
                 raise
+            primary.add_note(
+                f"Lease release also failed ({type(release_error).__name__}: {release_error}); "
+                "retry the same request and attempt to recover any retained lease."
+            )
 
 
 def _acquire(runtime, request, attempt_sha256, *, recovering):
