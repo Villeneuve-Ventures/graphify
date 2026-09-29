@@ -420,9 +420,10 @@ def test_discovery_bounds_git_output(source_repository, monkeypatch, command, de
     _git(source_repository, "remote", "add", "origin", "https://example.test/repo.git")
     original = subprocess.Popen
     children = []
+    git_executable = identity._git_executable(source_repository)
 
     def popen(arguments, **kwargs):
-        if arguments[0] == "git" and arguments[1] == command:
+        if arguments[0] == git_executable and arguments[1] == command:
             arguments = [sys.executable, "-c", (
                 f"import os; os.write({descriptor}, b'TEST_SECRET' * 110000)"
             )]
@@ -446,9 +447,10 @@ def test_git_failure_reaps_child_and_redacts_diagnostics(source_repository, monk
     _git(source_repository, "remote", "add", "origin", "https://example.test/repo.git")
     original = subprocess.Popen
     children = []
+    git_executable = identity._git_executable(source_repository)
 
     def popen(arguments, **kwargs):
-        if arguments[0] == "git" and arguments[1] == "remote":
+        if arguments[0] == git_executable and arguments[1] == "remote":
             program = "import time; time.sleep(10)" if failure == "deadline" else (
                 "import sys; sys.stderr.write('TEST_SECRET'); sys.exit(2)"
             )

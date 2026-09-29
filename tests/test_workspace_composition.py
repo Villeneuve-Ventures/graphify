@@ -25,14 +25,19 @@ def authority():
 
 
 @pytest.mark.parametrize("intent", list(AdapterIntent))
-def test_exact_selection_never_executes_or_promotes(intent):
+def test_exact_selection_grants_only_requested_intent(intent):
     candidate = CompatibilityTuple(compatibility())
     if intent is AdapterIntent.PROBE:
         selection = select_adapter(candidate, expected=candidate, intent=intent)
         assert not selection.executable and not selection.promotable
         with pytest.raises(ContractError): selection.require_adapter()
     else:
-        with pytest.raises(ContractError): select_adapter(candidate, expected=candidate, intent=intent)
+        selection = select_adapter(candidate, expected=candidate, intent=intent)
+        assert selection.promotable == (intent is AdapterIntent.PROMOTE)
+        if selection.executable:
+            assert selection.require_adapter().detector_id == candidate.manifest.to_dict()["detector_id"]
+        else:
+            with pytest.raises(ContractError): selection.require_adapter()
 
 
 def test_different_wheel_same_version_is_not_same_tuple():
@@ -47,12 +52,12 @@ def test_composition_does_not_create_missing_state(tmp_path):
     root = tmp_path / "absent"
     auth = authority()
     result = compose_workspace_runtime(WorkspaceRuntimeInputs(root, auth, auth.compatibility))
-    with pytest.raises(WorkspaceAuthorityInvalid, match="S4"):
+    with pytest.raises(WorkspaceAuthorityInvalid, match="authority missing or unsafe"):
         result.require_runtime()
     assert not root.exists()
 
 
-def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_path, monkeypatch):
+def test_store_composition_is_read_only_and_execution_requires_installed_authority(tmp_path, monkeypatch):
     from graphify.workspace.persistence import RuntimeCapabilities
 
     detections = []
@@ -75,7 +80,7 @@ def test_s3_store_composition_is_read_only_and_adapter_remains_unavailable(tmp_p
     assert stores.capacity_policy.workspace_max_generations == 4
     assert stores.queue_policy.max_claimed_tasks == 1
     assert not root.exists()
-    with pytest.raises(WorkspaceAuthorityInvalid, match="S4"):
+    with pytest.raises(WorkspaceAuthorityInvalid, match="authority missing or unsafe"):
         composition.require_runtime()
     with pytest.raises(WorkspaceAuthorityInvalid):
         load_workspace_runtime_inputs(state_root=root, expected=auth.compatibility)

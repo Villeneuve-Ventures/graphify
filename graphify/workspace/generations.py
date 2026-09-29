@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.contracts import (
-    CompatibilityManifest, CompletionBinding, InputManifest, MAX_DOCUMENT_BYTES, integer,
+    CompatibilityManifest, CompletionBinding, InputManifest, MAX_DOCUMENT_BYTES, digest, integer,
 )
 from graphify.workspace.lifecycle_observation import ObservationError, SourceObservation
 from graphify.workspace.lifecycle_contracts import (
@@ -467,7 +467,8 @@ class GenerationStore:
         journal: JournalStore,
         *,
         compatibility_manifest: CompatibilityManifest,
-        observer: Callable[[Path], SourceObservation] | None = None,
+        observer: Callable[..., SourceObservation] | None = None,
+        consumed_observer: Callable[..., str] | None = None,
         semantic_queue: SemanticQueueStore | None = None,
         max_payload_bytes: int | None = None,
         capabilities: RuntimeCapabilities | None = None,
@@ -480,6 +481,7 @@ class GenerationStore:
             integer(max_payload_bytes, minimum=1)
         self.max_payload_bytes = max_payload_bytes
         self.observer = observer
+        self.consumed_observer = consumed_observer
         self.compatibility_manifest = compatibility_manifest
         self.compatibility_sha256 = compatibility_manifest.sha256
         self.leases = leases
@@ -507,10 +509,10 @@ class GenerationStore:
         if self.max_payload_bytes is not None and expected_payload_bytes > self.max_payload_bytes:
             raise CapacityExceeded("reservation exceeds the per-generation payload limit")
 
-    def _observe(self, source_root: Path) -> SourceObservation:
+    def _observe(self, source_root: Path, *, input_manifest: InputManifest | None = None) -> SourceObservation:
         if self.observer is None:
             raise ObservationError("S4 source observer is not installed")
-        observation = self.observer(source_root)
+        observation = self.observer(source_root, input_manifest=input_manifest)
         if type(observation) is not SourceObservation:
             raise ObservationError("source observer returned unvalidated evidence")
         return observation
@@ -697,8 +699,8 @@ class GenerationStore:
         try:
             source = self.leases.registry.resolve_active_source(repo_uuid)
             trusted = (
-                self._observe(source.root),
-                self._observe(source.root),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
             )
             confirmed_source = self.leases.registry.resolve_active_source(repo_uuid)
         except (ObservationError, IdentityError, OSError, StateCorrupt, StatePathError) as exc:
@@ -847,6 +849,7 @@ class GenerationStore:
         request: StructuralBuildRequest,
         *,
         source_observations: Sequence[SourceObservation],
+        admission_guard: Callable[[], None] | None = None,
     ) -> StagedBuildState:
         """Durably install exact request authority before BUILD acquisition."""
 
@@ -917,6 +920,10 @@ class GenerationStore:
                     request=request,
                     lifecycle_state="REQUESTED",
                 )
+                # Runtime-owned callers recheck their authority after trusted
+                # source observation, at the first durable request boundary.
+                if admission_guard is not None:
+                    admission_guard()
                 committed = self._commit_staged_build_locked(requested)
                 self.fault_hook(f"generation:{generation_id}:request_durable")
                 return committed
@@ -1551,6 +1558,8 @@ class GenerationStore:
         source_document: Mapping[str, object],
         *,
         capacity_failure_payload_bytes: int | None = None,
+        extraction_failure_manifest: InputManifest | None = None,
+        consumed_input_change: Mapping[str, str] | None = None,
     ) -> tuple[str, StagedBuildAbandonmentEvidence, PointerSet | None] | None:
         registry_revision, entry = self._registry_workspace_entry(operation)
         active_source_revision = int(entry["active_source_revision"])
@@ -1597,9 +1606,27 @@ class GenerationStore:
             evidence_value["capacity_failure"] = {
                 "payload_bytes": capacity_failure_payload_bytes,
             }
+        if consumed_input_change is not None:
+            evidence_value["consumed_input_change"] = dict(consumed_input_change)
+        if extraction_failure_manifest is not None:
+            failed_value = extraction_failure_manifest.to_dict()
+            statuses = [item["status"] for item in failed_value["outcomes"]]
+            terminal = (
+                "unsupported_input"
+                if failed_value["failure"] == "unsupported_input"
+                else next(status for status in statuses if status in {
+                    "unsupported_extractor", "missing_parser", "failed_extraction",
+                })
+            )
+            evidence_value["extraction_failure"] = {
+                "initial_detection_sha256": state.request.observation_manifest_sha256,
+                "input_manifest_sha256": extraction_failure_manifest.sha256,
+                "status": terminal,
+                "failure_status": failed_value["failure"],
+            }
         evidence = StagedBuildAbandonmentEvidence.from_mapping(evidence_value)
         try:
-            reason = evidence.reason_for(request)
+            reason = evidence.reason_for(request, state.completion_binding)
         except StagedBuildAuthorityCurrent:
             return None
         except ContractError as exc:
@@ -2109,16 +2136,51 @@ class GenerationStore:
             occurred_at=occurred_at,
         )
 
+    def _certified_consumed_change(self, state: StagedBuildState) -> dict[str, str] | None:
+        """Independently reobserve operations from the sealed manifest, not caller paths."""
+        if state.lifecycle_state != "CERTIFIED" or self.consumed_observer is None:
+            return None
+        if state.completion_binding is None:
+            raise GenerationConflict("certified stage lacks sealed input authority")
+        with self.state.existing_generation_lock(
+            self._lock(state.repo_uuid, state.generation_id),
+            generation_id=state.generation_id, exclusive=False,
+        ):
+            raw = self.state.read_contained_regular_file(
+                self._generation(state.repo_uuid, state.generation_id),
+                "graphify-out/input-manifest.json", max_bytes=MAX_DOCUMENT_BYTES,
+                allowed_directory_modes=_ALLOWED_DIRECTORY_MODES,
+                allowed_file_modes=_ALLOWED_FILE_MODES,
+            )
+            manifest = InputManifest.from_json(raw)
+            if manifest.sha256 != state.completion_binding.to_dict()["consumed_inputs_sha256"]:
+                raise PayloadChanged("consumed change proof differs from sealed input authority")
+        source = self.leases.registry.resolve_active_source(state.repo_uuid)
+        observed = tuple(self.consumed_observer(source.root, input_manifest=manifest) for _ in range(2))
+        for value in observed:
+            digest(value)
+        if (observed[0] != observed[1]
+                or self.leases.registry.resolve_active_source(state.repo_uuid) != source):
+            raise GenerationConflict("consumed change proof is not stable")
+        previous = hashlib.sha256(canonical_json_bytes(manifest.to_dict()["evidence"])).hexdigest()
+        if observed[0] == previous:
+            return None
+        return {"sealed_manifest_sha256": manifest.sha256,
+                "previous_evidence_sha256": previous, "observed_evidence_sha256": observed[0]}
+
     def abandon_staged_build(
         self,
         attempt: StagedBuildOperation,
         *,
         source_observations: Sequence[SourceObservation],
         monotonic_ns: int,
+        admission_guard: Callable[[], None] | None = None,
     ) -> StagedBuildState:
         """Close one provably stale staged request without publishing its bytes."""
 
         request = self._validated_structural_request(attempt.state.request)
+        if admission_guard is not None:
+            admission_guard()
         with self.leases.current_staged_recovery(
             attempt.grant,
             attempt.state.generation_id,
@@ -2143,6 +2205,8 @@ class GenerationStore:
                 str(lease_value["acquired_at"]).replace("Z", "+00:00")
             )
             if state.abandonment_intent is not None:
+                if admission_guard is not None:
+                    admission_guard()
                 return self._finish_staged_abandonment_locked(
                     operation,
                     state,
@@ -2156,6 +2220,8 @@ class GenerationStore:
             )
             if proof is not None:
                 reason, evidence, _pointer = proof
+                if admission_guard is not None:
+                    admission_guard()
                 return self._commit_new_staged_abandonment_locked(
                     operation,
                     state,
@@ -2165,12 +2231,17 @@ class GenerationStore:
                 )
 
         observation_error: GenerationError | None = None
+        consumed_input_change = None
         try:
             trusted = self._trusted_structural_observations(
                 repo_uuid,
                 source_observations,
             )
             source_document = self._abandonment_source_document(trusted)
+            # A detection change can itself be an unsafe replacement of a
+            # consumed ancestor. Admit the sealed routes before using either
+            # detection or consumed evidence to close a certified request.
+            consumed_input_change = self._certified_consumed_change(state)
         except GenerationError as exc:
             observation_error = exc
             source_document = self._frozen_abandonment_source_document(request)
@@ -2195,11 +2266,14 @@ class GenerationStore:
                 str(lease_value["acquired_at"]).replace("Z", "+00:00")
             )
             intent = state.abandonment_intent
+            if admission_guard is not None:
+                admission_guard()
             if intent is None:
                 proof = self._staged_abandonment_proof_if_stale_locked(
                     operation,
                     state,
                     source_document,
+                    consumed_input_change=consumed_input_change,
                 )
                 if proof is None:
                     if observation_error is not None:
@@ -3491,6 +3565,7 @@ class GenerationStore:
         )
         if inventory.total_bytes > allocation.expected_payload_bytes:
             raise CapacityExceeded("staged payload exceeds its durable reservation")
+
         manifest = payload_manifest_sha256("graphify-out", inventory.entries)
         if manifest != state.payload_manifest_sha256:
             raise PayloadChanged("completed staged payload differs from durable manifest")
@@ -3618,10 +3693,18 @@ class GenerationStore:
         *,
         source_observations: Sequence[SourceObservation],
         monotonic_ns: int,
+        required_payload_bytes: int | None = None,
     ) -> StagedBuildCompletion:
-        """Seal complete staged bytes only after trusted source re-observation."""
+        """Seal complete bytes, or close a bounded producer's proved capacity failure.
+
+        A producer may report the minimum serialized payload size before writing
+        files. That path requires empty staging and the same trusted observations,
+        allocation and fence checks as ordinary completion.
+        """
 
         request = self._validated_structural_request(preparation.state.request)
+        if required_payload_bytes is not None:
+            integer(required_payload_bytes, minimum=preparation.allocation.expected_payload_bytes + 1)
         with self.leases.current_operation(
             preparation.grant,
             monotonic_ns=monotonic_ns,
@@ -3641,6 +3724,8 @@ class GenerationStore:
             )
             self._require_allocation(recovery_operation, preparation.allocation)
             self._require_structural_allocation(recovery_state, preparation.allocation)
+            if required_payload_bytes is not None and recovery_state.lifecycle_state != "PUBLISHING":
+                raise GenerationConflict("producer capacity failure requires publishing state")
             if recovery_state.lifecycle_state == "COMPLETE":
                 lock = self._lock(
                     recovery_operation.repo_uuid,
@@ -3704,15 +3789,23 @@ class GenerationStore:
                     operation.fence_token,
                 ):
                     raise GenerationConflict("staged build publication belongs to another fence")
-                try:
-                    inventory = self._inventory(
-                        preparation.allocation.staging_path,
-                        allowed_root_entries=frozenset({"graphify-out"}),
-                        max_bytes=preparation.allocation.expected_payload_bytes,
-                    )
-                    payload_bytes = inventory.total_bytes
-                except _PayloadCapacityExceeded as exc:
-                    payload_bytes = exc.observed_bytes
+                if required_payload_bytes is not None:
+                    if self._staging_names(state.repo_uuid, state.generation_id) != ["graphify-out"]:
+                        raise GenerationConflict("producer capacity failure requires empty staging")
+                    relative = self._staging(state.repo_uuid, state.generation_id) / "graphify-out"
+                    with self.state.existing_private_directory(relative) as descriptor:
+                        _directory_names(descriptor, deadline_ns=None, max_entries=0)
+                    payload_bytes = required_payload_bytes
+                else:
+                    try:
+                        inventory = self._inventory(
+                            preparation.allocation.staging_path,
+                            allowed_root_entries=frozenset({"graphify-out"}),
+                            max_bytes=preparation.allocation.expected_payload_bytes,
+                        )
+                        payload_bytes = inventory.total_bytes
+                    except _PayloadCapacityExceeded as exc:
+                        payload_bytes = exc.observed_bytes
                 if payload_bytes <= preparation.allocation.expected_payload_bytes:
                     self._sync_inventory(
                         operation.repo_uuid,
@@ -3781,6 +3874,87 @@ class GenerationStore:
                 occurred_at=occurred_at,
             )
             raise CapacityExceeded("staged payload exceeds its durable reservation")
+
+    def fail_staged_extraction(
+        self,
+        preparation: StagedBuildPreparation,
+        *,
+        failed_manifest: InputManifest,
+        source_observations: Sequence[SourceObservation],
+        monotonic_ns: int,
+    ) -> StagedBuildState:
+        """Close a fenced, empty publication after a validated extraction failure."""
+
+        if type(failed_manifest) is not InputManifest:
+            raise GenerationConflict("validated failed input manifest required")
+        request = self._validated_structural_request(preparation.state.request)
+        trusted = self._require_structural_evidence(
+            preparation.state.repo_uuid, request, source_observations,
+        )
+        initial = trusted[0].initial_detection.to_dict()
+        failed = failed_manifest.to_dict()
+        failed_evidence = {
+            (item["operation"], item["path"]): item for item in failed["evidence"]
+        }
+        if (failed["phase"] != "consumed" or failed["roots"] != initial["roots"]
+                or failed["code_inputs"] != initial["code_inputs"]
+                or any(failed_evidence.get((item["operation"], item["path"])) != item
+                       for item in initial["evidence"])
+                or failed["failure"] not in {None, "unsupported_input"}
+                or not any(item["status"] in {
+                    "unsupported_extractor", "missing_parser", "failed_extraction", "unsupported_input",
+                } for item in failed["outcomes"])
+                or any(item["status"] not in {
+                    "success", "empty", "not_processed",
+                    "unsupported_extractor", "missing_parser", "failed_extraction",
+                    "unsupported_input",
+                } for item in failed["outcomes"])
+                or (failed["failure"] == "unsupported_input"
+                    and not any(item["status"] == "unsupported_input" for item in failed["outcomes"]))
+                or (failed["failure"] is None
+                    and any(item["status"] == "unsupported_input" for item in failed["outcomes"]))):
+            raise GenerationConflict("failed extraction does not extend frozen detection")
+        with self.leases.current_operation(
+            preparation.grant,
+            monotonic_ns=monotonic_ns,
+            allowed_operations=frozenset({"BUILD"}),
+        ) as operation:
+            state = self._load_staged_build_locked(operation.repo_uuid)
+            if state is None:
+                raise GenerationConflict("staged build request is missing")
+            self._require_staged_binding(
+                state, repo_uuid=operation.repo_uuid,
+                generation_id=preparation.state.generation_id, request=request,
+            )
+            self._require_allocation(operation, preparation.allocation)
+            self._require_structural_allocation(state, preparation.allocation)
+            if (state.lifecycle_state != "PUBLISHING"
+                    or (state.operation_epoch, state.fence_token) != (
+                        operation.grant.operation_epoch, operation.fence_token)):
+                raise GenerationConflict("failed extraction belongs to another publication fence")
+            lock = self._lock(operation.repo_uuid, state.generation_id)
+            with self.state.existing_generation_lock(
+                lock, generation_id=state.generation_id, exclusive=True,
+            ):
+                if self._staging_names(state.repo_uuid, state.generation_id) != ["graphify-out"]:
+                    raise GenerationConflict("failed extraction requires empty staging")
+                relative = self._staging(state.repo_uuid, state.generation_id) / "graphify-out"
+                with self.state.existing_private_directory(relative) as descriptor:
+                    _directory_names(descriptor, deadline_ns=None, max_entries=0)
+            proof = self._staged_abandonment_proof_if_stale_locked(
+                operation, state, self._abandonment_source_document(trusted),
+                extraction_failure_manifest=failed_manifest,
+            )
+            if proof is None or proof[0] != "EXTRACTION_INCOMPLETE":
+                raise GenerationConflict("failed extraction produced no terminal evidence")
+            reason, evidence, _pointer = proof
+            lease_value = preparation.grant.lease.to_dict()
+            occurred_at = datetime.fromisoformat(
+                str(lease_value["acquired_at"]).replace("Z", "+00:00")
+            )
+            return self._commit_new_staged_abandonment_locked(
+                operation, state, reason=reason, evidence=evidence, occurred_at=occurred_at,
+            )
 
     def complete_staged_promotion(
         self,
@@ -4649,8 +4823,8 @@ class GenerationStore:
         try:
             source = self.leases.registry.resolve_active_source(repo_uuid)
             trusted = (
-                self._observe(source.root),
-                self._observe(source.root),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
+                self._observe(source.root, input_manifest=expected[0].consumed_inputs),
             )
             confirmed_source = self.leases.registry.resolve_active_source(repo_uuid)
         except (ObservationError, IdentityError, OSError, StateCorrupt, StatePathError) as exc:

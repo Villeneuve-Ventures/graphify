@@ -1,0 +1,623 @@
+# S4 v8 structural library round trip
+
+This candidate is based on v8 `8798f3981847f98c7ce5c647f0a9338398c3489f`.
+It implements the S4 library boundary from the
+[structural design](graphify-v8-structural-workspace-design.md). The implementation
+and stabilization are tracked in PR #167.
+S5 commands, S6 maintenance transports, S7 release qualification,
+semantic execution, migration, and consumer adoption remain separate work.
+
+## Current follow-up repairs
+
+This local batch starts at `ed60eea86cf04bbbe5de51e4b1c255a10af528d7`.
+It repairs the following observed failures, in priority order:
+
+1. Git subprocesses select an absolute executable from operator installation
+   paths, excluding empty/relative PATH entries and paths or symlink targets
+   inside the checkout or its Git common directory. Observation workers receive that exact executable from the
+   parent; their audit hook checks both argv and the executable. Other read-only
+   workers have no Git allowance. Absolute installation paths outside those roots
+   remain operator-trusted; this is not an OS sandbox for hostile installed code.
+2. Repeated no-follow observations of safe file/directory type changes can
+   establish consumed-input drift and terminally abandon a stale certified
+   request. Symlinks, special files, failed reads, budget exhaustion and unstable
+   evidence remain refusals. This includes regular-file replacements of former
+   directory ancestors without traversing the replacement.
+3. Git-accepted uppercase object IDs compare against canonical source identity
+   without changing the raw bytes retained in input evidence. Different IDs
+   still refuse.
+4. Missing interpreter site-directory candidates are skipped. Other site scan
+   errors become typed read-only failures; unsafe `.pth` files still refuse.
+5. Discovery rejects non-SHA-1 source commits before enrollment can write a
+   registry entry, matching the existing lifecycle commit contract.
+
+Validation for this local batch is separate from the prior receipts below:
+
+| Check | Result |
+| --- | --- |
+| Full frozen all-extra serial pytest | **6,926 passed, 41 skipped, 3 existing warnings, 235 subtests passed**, in 3,804.17 seconds (1h03m24s). |
+| Input stability | All 366 inventoried Python and dependency files matched their pre-run SHA-256 hashes afterward. All 12 candidate paths also matched the independent-review snapshot before this factual receipt update. |
+| Focused Git and installed-package checks | 93 passed in 82.87 seconds, including ordinary and linked-worktree helper isolation and the installed-wheel build/cold-query path. |
+| Independent review | All 12 candidate paths reviewed, followed by a bounded recheck of the linked-worktree correction; zero open findings. This reviews the repair batch, not S7 release qualification. |
+| Ancillary checks | Optimized verifier: 80 passed with its expected pytest warning. All five skill-generation checks, disposable default/Codex install and help, and native Leiden smoke passed. |
+| Static/diff checks | Configured Ruff passed across the PR; expanded F checks passed across this batch; the final Git correction passed fresh Ruff and diff checks. |
+| Advisory security | Final Bandit scan completed without scan errors and retained the same 14 finding signatures. The prior default-plus-dev pip-audit receipt has 12 findings; lock, project configuration and scanner-helper hashes remain unchanged. This reuses lock-scoped evidence, not a fresh advisory-database scan. |
+| AST graph refresh | 15,600 nodes, 39,055 edges and 902 communities. The same six zero-node warnings remain; HTML was skipped by the existing large-graph guard. |
+
+The full gate command was
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen --all-extras pytest tests/ -q --tb=short -p no:cacheprovider --durations=10 --maxfail=1`.
+The slowest individual cases were pointer-authority rotation (63.20 seconds),
+certified ancestor-type drift recovery (49.39 seconds), and another
+pointer-authority rotation case (48.51 seconds). These are observed case timings,
+not an attribution of total runtime. The three warnings remain the existing
+semantic-cache scope and managed-state cleanup warnings.
+
+The independent-review report, frozen input inventory, full-suite log and final
+verification receipt are local `/tmp/graphify-s4-followup-*` artifacts. The
+preexisting `.omx-state-locks*` runtime files remain outside the product patch.
+These results record local validation before delivery to PR #167. CI was not
+awaited.
+
+## Prior stabilization batch (`ed60eea8`)
+
+This stabilization batch starts at `f31eeab9296ac689ba01062be0c30f6578a6c5af` and repairs
+four related boundary gaps, in priority order:
+
+1. Read-only workers select the loaded package, interpreter and installed
+   dependency roots without copying caller `sys.path`. Empty, relative and
+   explicit source paths cannot substitute candidate or dependency imports.
+   Static installation `.pth` records are read without executing their code,
+   with regular-file, byte, count and deadline bounds.
+2. Composed pointer stores revalidate runtime authority before durable intent
+   and visible replacement, including pending-pointer recovery. A refusal
+   preserves the old visible pointer and any already-durable pending intent;
+   restoring the exact admitted authority permits the existing recovery path.
+3. Certified retries can abandon positively observed source drift even when
+   strict consumed-input replay would fail. Recovery independently reobserves
+   the sealed operations, including explicit absence and directory membership,
+   and persists a change proof bound to the completion manifest. Failed reads,
+   unsafe replacements and disagreeing observations cannot authorize abandonment.
+   Sealed routes are checked even when detection also changes. Existing records
+   without the optional proof remain readable; intent interruption and restart
+   retain the proof and the existing request/fence checks.
+4. Git discovery admits only ordinary or standard linked-worktree routing before
+   consuming HEAD, config, refs or objects or invoking Git. Relative and absolute
+   supported routes retain adapter observation coverage. Adapter evidence collection
+   also matches Git/discovery whitespace semantics at selected symbolic-ref hops
+   and reads per-worktree ref namespaces from the linked Git directory. These
+   positive controls were added after fresh independent review found the parser
+   disagreement.
+
+The accepted matrix and original local validation boundary are recorded in the
+ignored `.omx/plans/s4-stabilization.md` planning artifact. Focused regressions
+failed before repair. Fresh independent review covered all 36 candidate files
+against the pinned v8 base, then rechecked the bounded Git correction: the code
+reviewer returned **APPROVE** with zero open findings and the architect returned
+**CLEAR**. Earlier receipts below describe earlier candidates, not this batch.
+
+Final local validation on 2026-09-28:
+
+| Check | Result |
+| --- | --- |
+| Full frozen all-extra serial pytest | **6,898 passed, 41 skipped, 3 known warnings, 235 subtests passed**, in 2,795.15 seconds (46m35s). |
+| Input stability | All 362 Python files plus `pyproject.toml` and `uv.lock` matched their pre-run SHA-256 hashes afterward. |
+| Formal OMX CLI UltraQA | Initial bounded cycle passed 97 test invocations. After the independent Git finding, a scoped supplemental cycle passed 27: new Git controls, existing refusals and real installed-wheel build/cold query. Both cycles preserved all 842 inventoried inputs and cleared only their own runtime state. |
+| Optimized verifier | 80 passed in 10.02 seconds, with the expected optimized-mode pytest warning. |
+| Skill generation | All five checks passed: generated artifacts, coverage, schema singleton, monolith round trip and always-on round trip. |
+| Install and native library smoke | Disposable default/Codex install and help, plus native Leiden partition, passed. |
+| Static/diff checks | Configured Ruff passed across the full PR; expanded F checks passed across this local batch; `git diff --check` passed. Four pre-existing expanded-F diagnostics in unchanged `export.py` lines remain outside this repair. |
+| Advisory security | Bandit completed without scan errors and retained the same 14 finding signatures. The prior default-plus-dev pip-audit receipt has 12 findings; lock, project configuration and scanner-helper hashes were verified unchanged. This reuses lock-scoped evidence, not a fresh advisory-database scan. |
+| AST graph refresh | 15,571 nodes, 38,903 edges and 921 communities. Six zero-node warnings comprise the five existing fixtures plus the CLI-created state-lock identity JSON; HTML was skipped by the existing large-graph guard. |
+
+The full gate command was
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen --all-extras pytest tests/ -q --tb=short -p no:cacheprovider --durations=10 --maxfail=1`.
+Its slowest cases were pointer-authority rotation and watermark admission/retry
+checks (31.63–37.15 seconds each). These are observed timings, not an attribution
+of aggregate runtime or a claim of performance improvement. The three full-suite
+warnings remain the existing semantic-cache scope and managed-state cleanup
+warnings.
+
+The supplemental QA reused unchanged I/P/R/W implementation evidence and
+refreshed the affected Git and installed-package scenarios. A temporary probe
+import-path error and a report-writing setup error in the initial cycle were
+corrected separately; neither was counted as a product failure or passing test.
+Validation receipts, the accepted matrix and independent review reports remain
+local under `.omx/plans/` and `/tmp/graphify-s4-round13-*`. The shared CLI
+state-lock namespace is retained outside the product patch. These results record
+local validation before delivery to PR #167 and do not establish S7 release
+qualification. CI was not awaited.
+
+## Library boundary
+
+`StructuralComposition.require_runtime()` now rereads the explicit runtime
+manifest and verifies the actual installed distribution before constructing
+an operational adapter and S3 stores. Construction is read-only. Probe selection
+still grants no execution; operational selection requires the S4 package members
+and exact whole-candidate equality. Package-version fallback remains forbidden.
+The compatibility manifest still identifies an uncertified **local fixture**;
+certifying a disposable generation does not certify a release candidate.
+
+After explicit registry enrollment, adoption, and source activation, an embedding
+caller uses:
+
+```python
+from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
+from time import monotonic_ns
+from graphify.workspace.query import query_structural
+from graphify.workspace.adapters.base import QueryRequest
+
+request = prepare_structural_sync(
+    runtime, repo_uuid=repo_uuid, generation_id="gen-example",
+    source_epoch=1, desired_watermark=1, expected_payload_bytes=1024 * 1024,
+)
+result = synchronize_structural(runtime, request, attempt_sha256=attempt_sha256)
+# The embedding caller chooses a budget for freshness scans plus traversal.
+text = query_structural(runtime, repo_uuid, QueryRequest("caller"),
+                        deadline_ns=monotonic_ns() + 3_600_000_000_000)
+```
+
+The example limits and epochs are fixture inputs, not operational defaults.
+`runtime` comes from `compose_workspace_runtime(load_workspace_runtime_inputs(
+state_root=..., expected=...)).require_runtime()` with an explicitly installed
+candidate and authority. Registration remains the existing explicit registry API.
+The tests demonstrate adoption and activation of a second linked worktree;
+enrollment's initial source selection is not counted as activation.
+
+Persist `request.canonical` in caller-owned storage if needed; recover it with
+`StructuralSyncRequest.from_json`. Retry the same frozen request. A fresh attempt
+uses a new explicit digest after release; an uncertain acquisition or retained
+lease requires its original attempt identity. The caller must inspect a refusal
+rather than silently create a replacement request. The library admits no other
+request over a nonterminal request or retained semantic lifecycle.
+
+## Implementation and evidence
+
+- `workspace/adapters/v8.py` is the only bridge to engine-private computation.
+  It reuses scoped detection, strict synchronous extraction, graph construction,
+  stream serialization, traversal, and the memory-only tokenizer. No ordinary
+  output transaction, parser, provider, or alternate graph engine is introduced.
+- Initial detection remains separate from consumed-input completion. Original
+  non-code bytes, policy, Git routing/refs, supporting reads, absent probes, and
+  directory membership are reobserved through fresh bounded `SourceIO` contexts.
+  Complete agreeing passes must reproduce the entire manifest. Every admitted
+  code input has an explicit successful or empty disposition; missing parsers,
+  incomplete extraction, unaccounted inputs, and external resolver escapes refuse.
+  Non-code inputs are hashed for freshness, not semantically extracted.
+- Structural sync uses exact S3 request/attempt bindings, explicit capacity,
+  heartbeat and fence checks, descriptor-bound staging, durable completion,
+  structural empty-queue reconciliation, sealed-input binding, certification,
+  and pointer promotion. The writer joins its heartbeat before completion.
+  Pending record recovery projects and checks exact authority before mutation.
+  A durable certification binding is recovered without rerunning the engine.
+- Query holds existing registry/workspace locks and the shared generation lock,
+  verifies the sealed generation, buffers v8 output, observes source freshness
+  before and after traversal, and revalidates pointer and runtime authority before
+  returning text. It creates no lock, lease, cache, log, receipt, or repair record.
+  A caller-supplied positive absolute monotonic deadline covers both freshness
+  scans and traversal; there is no implicit deadline. The same v8 graph loader,
+  tokenizer and traversal run in a one-shot `-I -S -B` child inheriting only the
+  pinned payload descriptor. Authority validation and each freshness observation
+  use the same bounded worker transport. Its audit hook starts before candidate
+  imports; runtime-owned workers verify the pinned installed candidate. The
+  parent terminates the owned process group and reaps the worker on expiry before
+  releasing workspace/generation locks. Expired computation returns no output
+  and skips the second freshness scan. Successful output still passes both
+  freshness observations.
+  Callers launch Python with `-B` or
+  `PYTHONDONTWRITEBYTECODE=1` **before imports** to suppress startup bytecode writes.
+
+The focused suites cover source/supporting-input drift, missing parsers and
+unsupported extraction, original Office inputs and Google-shortcut refusal,
+relative IDs and v8 facts/ranking, exact candidate/authority rejection,
+request serialization, stale fences, queue watermark changes, preserved sources,
+ordinary-write refusal, query GC protection, and suppressed stale query output.
+Injected interruptions cover request, acquisition, reservation, staging, build,
+completion, queue/sealed-input binding, receipt durability/install, certification,
+pointer intent/visibility/journal, promotion, and release. Retries reconstruct
+runtime/request objects and verify the same result without rebuilding sealed data.
+Pointer recovery may advance the pointer revision to record repair, as required
+by S3; it does not create a second generation.
+
+`test_workspace_s4_installed.py` builds a wheel and content-bound fixture bundle,
+installs only into a disposable venv, and exercises actual installed-package
+admission. Cold subprocesses install an audit hook before candidate imports and
+query with absent and misleading tokenizer caches. They deny filesystem writes,
+ambient jieba-cache access, network effects, and unexpected subprocesses, and
+compare state/source/installed-tree bytes, modes, identities, and mtimes, together
+with disposable HOME, CODEX_HOME, XDG and temporary directories.
+The existing S1 cold tests independently qualify Chinese token/ranking parity
+and the missing-extra fallback. No public workspace CLI is added by this proof.
+
+## PR #167 review repairs
+
+The feedback snapshot at `1a17c3f01d72c73a849487958f184bfc9a988073` included
+three conversation comments, two reviews, and six inline threads, with no linked
+issues. Three independent execution-boundary defects were reproduced and repaired
+in this priority order:
+
+1. [Query bounds](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4114054405):
+   both library and adapter entry points reconstruct a validated request before
+   authority, locks, payload access, or traversal. Exact type alone is insufficient
+   for a deserialized or altered dataclass.
+2. [Payload modes](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4114054412):
+   the adapter sets mode `0600` on each newly opened payload descriptor before
+   writing, independent of umask. A `0277` fixture now completes and promotes.
+3. [Git refs](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4114054409):
+   reference names use Git's own validator through the existing bounded Git
+   helper, with the query deadline preserved. UTF-8 loose and packed refs accept
+   valid `+`, `@`, and Unicode names, including Unicode whitespace. Only Git's LF
+   delimiter is removed or split; invalid ref paths still refuse before probing.
+
+Regression tests reproduced all three defects and the Unicode whitespace
+edge cases. The focused run passed 44 tests, including the adapter and actual
+installed-wheel no-write proof. The remaining inline warnings require no repair: module and member imports serve
+distinct monkeypatch/call sites, the ellipsis is a standard protocol method stub,
+and heartbeat `BaseException` handling transfers thread failure to the caller
+after joining, preventing silent heartbeat loss. Review-thread state is unchanged.
+
+The subsequent feedback snapshot at `9f94657013d39acc8d14c40ae0ece1936f9a4875`
+contained four conversation comments, three reviews, and eight inline threads,
+with no linked issues. The two new findings concern adapter observation:
+
+1. [Replay budget](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115528274):
+   detection and consumed-manifest replay now use separate bounded `SourceIO`
+   contexts. Replay retains the selected roots and all reader limits, compares
+   the complete retained evidence, and must still extend the initial detection.
+   A tightened-budget fixture reproduces the former post-build failure and now
+   completes, promotes, and queries without writes; over-budget input still refuses.
+2. [Ref bytes](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115528275):
+   packed-ref matching preserves bytes, so an unrelated non-UTF-8 ref no longer
+   breaks a supported checkout. Selected refs still require the canonical UTF-8
+   filesystem labels mandated by S2, including absent loose-ref probes. Such
+   unsupported selected names now fail explicitly before probing, rather than
+   leaking a decoder exception. Arbitrary byte-path support would require a
+   separate input-manifest contract change and is not claimed here.
+
+The review of `319ced6361b513a5e9f14d33235bf056acc466f6` added two admission
+findings (eight conversation comments, four reviews, ten inline threads, no linked
+issues). The [watermark finding](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115711920)
+reproduced: invalid reconciliation coordinates could reach durable staging.
+Preparation now checks the locked queue snapshot, and execution repeats that
+check before staging. Backward watermarks and same-watermark requests bound to
+different source evidence refuse without state writes; matching evidence and
+exact retries remain valid. New requests also refuse an already-held lease:
+otherwise its holder could advance the queue and release without changing the
+request's operation epoch between admission and staging. After a lease-free
+snapshot, a new writer must advance that epoch, which S3 checks atomically before
+persisting the staged request. Existing exact staged recovery remains permitted.
+A later valid request can still promote.
+
+The [oversized-reservation finding](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4115711915)
+did not reproduce: the existing `GenerationStore.request_staged_build` payload
+ceiling already runs before persistence. An S4 integration regression confirms
+unchanged source/state snapshots and a successful valid call after rejection.
+
+The review of `89414e4189de35687b351d0da122eefd86a7d178` added one
+[extraction-budget finding](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4116508830)
+(eight conversation comments, five reviews, eleven inline threads, no linked
+issues). Detection and extraction shared one cumulative read budget, so input
+that fit either pass could fail when their reads were added together. Extraction
+now uses a separate context with the same roots and limits. Its consumed evidence
+is combined with detection evidence, rejecting disagreements and revalidating the
+combined manifest bounds before payload writes. Repeated reads within extraction
+still count against that pass's limit; this does not change the S1 I/O contract.
+Focused regressions cover promotion and a no-write query, inter-pass source drift,
+and the combined unique-input ceiling with detection-only and extraction-only inputs.
+
+The review of `ed68b9df6056b62aa36571c220f395bcf9021b73` added two
+resource-lifetime findings (nine conversation comments, six reviews, thirteen
+inline threads, no linked issues), repaired in this order:
+
+1. [Payload reservation](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4116735049):
+   the adapter receives the durable allocation ceiling. Its UTF-8 serialization
+   buffer stops at the remaining budget after charging the input manifest, before
+   either payload file is created. A proved overflow follows the existing fenced
+   capacity-abandonment path after trusted source re-observation and an empty
+   staging check, freeing the reservation for a later valid request. Interruption
+   after durable abandonment intent remains recoverable. S3 still checks the
+   payload plus canonical receipt before any certification write.
+2. [Lease lifetime](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4116735056):
+   heartbeat now covers the acquired build/certification and promotion sections,
+   including source observations. It joins before lease release. Five-second
+   lease fixtures with six-second observations reproduce the former expiry at
+   allocation, completion, and promotion, and now complete without retained
+   leases or heartbeat threads.
+
+The feedback snapshot at `a904c250e9088b919576751c621e6f22733648e2`
+contained ten conversation comments, nine reviews and eighteen inline threads,
+with no linked issues. Four current findings share late admission or incomplete
+resource accounting. Repairs are prioritized as follows:
+
+1. [Git includes](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117494292):
+   every discovery Git command first checks bounded, descriptor-read local config,
+   including common-directory and worktree config. Includes refuse before a Git
+   subprocess can read an external target, including FIFO targets and BOM-prefixed
+   config. Existing remote rewriting remains supported. This is observed preflight,
+   not a claim of safety against hostile concurrent configuration replacement.
+2. [Receipt headroom](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117009633):
+   reserve 4 KiB for the fixed structural receipt fields plus the decimal lengths
+   of its five lifecycle counters. The schema fixes hashes, proof names, two
+   payload paths and bounded generation/lock identifiers; maximal-field regression
+   coverage checks the bound, including large lifecycle counters. Charge the same
+   allowance to early serialization failures, preserving fenced abandonment and
+   subsequent valid requests. Tiny reservations refuse before staging.
+3. [Adapter ceiling](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117494287):
+   preparation and execution reject reservations above the adapter's 512 MiB
+   ceiling before staging, even if runtime capacity policy would admit them.
+4. [Retained lease](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117494290):
+   renew synchronously on heartbeat entry before waiting for periodic renewal.
+   An existing grant with less than one renewal interval remaining now survives
+   observation; release still follows heartbeat join.
+
+The repeated Protocol ellipsis warning remains intentional, as do the previously
+reviewed mixed imports and exception transfer. CodeRabbit's default docstring
+coverage warning does not identify a behavioral defect or an adopted repository
+gate; broad docstring generation is outside these repairs. No review threads or
+issue state were changed.
+
+The feedback snapshot at `0a3d811d5232cf6a22814898f662fa2862e41d13`
+contained eleven conversation comments, ten reviews and twenty-one inline
+comments, with no linked issues. The three new findings share resource admission
+that occurs too late or chooses a budget without caller input. Patch order:
+
+1. [Alternate object stores](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117791472):
+   discovery probes common-directory `objects/info/alternates` and
+   `http-alternates` through no-follow descriptors before launching Git.
+   Regular files, FIFOs and symlinks refuse for ordinary and linked worktrees;
+   a real shared clone also refuses without starting discovery subprocesses.
+2. [Streaming graph JSON](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117791465):
+   the existing serializer copies one node or edge at a time, allowing the
+   adapter's byte limit to interrupt serialization before a full node-link copy
+   is allocated. Byte parity covers directed, undirected and multigraph output,
+   empty graphs, labels, communities, confidence and stored edge direction.
+   This bounds the additional entity copies, not graph construction memory or
+   the size of one individual attribute value.
+3. [Explicit query deadline](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117791458):
+   callers must supply a positive absolute monotonic deadline. Invalid or absent
+   deadlines refuse before reading runtime authority. The example and installed
+   query launcher now choose their own budgets. A simulated 31-second query
+   passes with a 60-second budget and withholds output with a 30-second budget,
+   preserving both source and state.
+
+The feedback snapshot at `42c2658b9e1507481977b5a4031302541acd5c94`
+contained fourteen conversation comments, thirteen reviews and twenty-four
+inline comments, with no linked issues. Two new findings share blocking work
+that begins before the relevant input or deadline check. Patch order:
+
+1. [Unsafe Git HEAD](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4118015000):
+   preflight reads the correct ordinary or linked-worktree HEAD through the
+   existing bounded, no-follow, nonblocking descriptor helper. FIFOs, symlinks,
+   directories and oversized HEAD files refuse before any Git subprocess starts.
+2. [Query deadline enforcement](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117995131):
+   propagate the caller's deadline through the adapter and enforce it around
+   disposable computation, including payload reads, native JSON decoding,
+   graph construction, tokenizer setup, ranking and traversal. Output is bounded
+   and buffered; cancellation kills/reaps the child and releases both locks.
+   This uses the same v8 engine, without duplicating its parser or traversal.
+   Its BFS frontier and equal-degree rendering ties now use stable ID order so
+   hash-randomized child processes agree with in-process results, including
+   truncation. A child audit hook rejects durable writes, external calls and
+   ambient tokenizer cache access; it is not an OS sandbox for hostile code.
+
+The [new equality warning](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4117989008)
+is not a reachable defect: `_JsonItems` is private to `write_json`, and the JSON
+encoder uses its length and iteration without comparing it. Materializing its
+one-shot iterator for equality would consume serialization input and defeat the
+streaming budget. No equality methods were added. The existing docstring coverage
+warning remains advisory. All fixes remain within this PR; no separate issue or
+review-thread mutation is needed.
+
+## Integrated acceptance repairs
+
+The independent design and functional review of `212e0331fa468736ec9b673f8e4a371643b7388d`
+reproduced three boundary defects. They were repaired together in this order:
+
+1. Runtime authority could change during observation before the old runtime
+   persisted a staged request. Preparation and execution now revalidate after
+   observation. The store also invokes the runtime admission guard after its own
+   trusted observations, immediately before the durable request write. Both
+   interruption points refuse without lifecycle mutation, and a newly composed
+   runtime can subsequently complete a valid request.
+2. An unsafe Git object-directory ancestor could make alternate-file probes look
+   absent while Git followed an external object store. Discovery now requires
+   real object directories and walks the bounded object tree through no-follow
+   descriptors before launching Git. Root, info, pack and loose-object escapes
+   refuse for ordinary and linked repositories. Optional absent directories
+   remain supported. This enumerates metadata, not object contents, and retains
+   the existing source-entry ceiling and deadline checks.
+3. Freshness detection/replay and installed authority verification could outlive
+   a query deadline. Those operations now use the disposable worker as well as
+   graph traversal. One absolute deadline covers all workers, input and output
+   are bounded, and expiry discards partial output and terminates the owned
+   helper group before releasing locks. Regressions stall both before/after
+   freshness and authority checks, verify unchanged protected trees, and acquire
+   both workspace and exclusive generation locks after cancellation. An import
+   side-effect fixture confirms the audit hook precedes candidate imports.
+
+The same two reviewers independently rechecked these corrections and their
+affected paths. Both found no remaining supported defect in this bounded scope;
+the 63-case focused regression batch then passed. The worker audit is a guard
+for the trusted installed implementation, not a hostile code sandbox or a
+peak-memory limit. S4 does not adopt a new RAM policy.
+
+## Follow-up review at `ca7777f5`
+
+The September 28 feedback adds four supported findings. They concern failure
+recovery and observation transport, plus redundant discovery work. Priority:
+
+1. [Incomplete extraction](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4122051830)
+   now terminally closes its fenced staging attempt instead of retaining a
+   `PUBLISHING` request that blocks subsequent work. The provider-neutral failure
+   carries validated failed inputs; durable abandonment records bounded digests
+   and status through the existing recovery path. R, capital-F Fortran and mixed
+   failures are covered. Read and drift errors retain their retry behavior.
+2. [Observation size](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4122051844):
+   use compact JSON for observation transport so two admitted canonical
+   manifests fit the existing bounded response envelope. A near-limit fixture
+   reproduces the previous overflow without increasing the transport ceiling.
+3. [Repeated Git scans](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4121983830):
+   avoid repeated full object-tree walks for metadata-only commands, retaining
+   checks before the first Git process and before object-reading commands. The
+   one-remote regression makes three full tree walks, down from nine; it still
+   rechecks routing/configuration for each metadata command and performs a full
+   final checkout verification.
+4. [Malformed observation responses](https://github.com/Villeneuve-Ventures/graphify/pull/167#discussion_r4121983823):
+   normalize JSON, UTF-8, manifest, lifecycle and field-type failures to the
+   adapter's `SourceError` contract. `ObservationError` is a `RuntimeError`, so
+   the suggested `ValueError` catch alone would not cover it.
+
+The [serialization claim](https://github.com/Villeneuve-Ventures/graphify/pull/167#issuecomment-5856708304)
+is not reproduced by the actual `json.dump(..., indent=2)` path. Existing tests
+compare full serialized bytes for empty/nonempty directed, undirected and
+multigraphs and exercise early streaming interruption; all nine passed. The
+private streaming wrapper remains unchanged. The docstring percentage warning
+still reflects the bot's default threshold rather than an adopted repository
+gate. No new issue tickets were found in the feedback snapshot.
+
+### Follow-up validation
+
+The combined patch passed the full serial suite through the repository entry
+point: **6,844 passed, 41 skipped, 3 known warnings, and 235 subtests passed** in
+2,072.41 seconds (34m32s). Bytecode and pytest-cache writes were disabled. The
+slowest cases were S4 admission/watermark checks at 24–26 seconds each; the
+near-limit transport and mixed-failure recovery regressions took about 21 seconds.
+
+- Frozen all-extra setup checked 171 packages; CPython 3.14.3 and Git 2.55.0.
+- Focused recovery checks: 9 passed; Git preflight checks: 90 passed; the final
+  adapter module: 14 passed. The full gate also covers all eight new transport cases.
+- Optimized verifier: 80 passed, with the expected optimized-mode pytest warning.
+- All five skill-generation checks, disposable default/Codex help/install smoke,
+  native Leiden smoke, Ruff F on changed Python files, and diff checks passed.
+- Bounded independent review found no remaining supported defect in this repair
+  batch, including the final unsupported-input and mixed-outcome handling.
+- Bandit completed with the same 14 advisory finding records. The prior 12-finding
+  pip-audit receipt remains scoped to the unchanged default-plus-dev lock.
+- Task-owned `graphify update .` completed: 15,518 nodes, 38,639 edges and 895
+  communities. The same five zero-node JSON-input warnings remain; HTML output
+  is skipped by the existing large-graph guard. No provider tokens were used.
+- All 356 Python files matched the final validation snapshot after the full gate.
+
+Two interrupted runs are not counted as passes. The first exposed an old test
+expecting the engine-specific exception for an external resolver refusal; the
+updated test asserts the neutral exception, unsupported-input evidence and empty
+payload. The second stopped because the installed-wheel proof builds offline and
+`setuptools` was absent from the uv cache. A normal `uv build --wheel --out-dir`
+with a disposable output directory populated that declared prerequisite. The
+installed no-write proof then passed separately, followed by the complete serial
+run above. No application-code change was made for either validation correction.
+
+## Independent-review corrections after `aa2df303`
+
+Two fresh reviewers inspected the full S4 diff before consulting prior feedback.
+They found two remaining boundary defects, repaired in this order:
+
+1. An interruption after durable `ABANDONED` state but before BUILD lease
+   release left exact retry refusing before terminal cleanup. Both terminal
+   states now use S3's existing request/attempt/fence-validated cleanup path.
+   Abandoned work still refuses after cleanup; a corrected source can start a
+   new request and query its result. A wrong attempt cannot clear the lease.
+   A different process still respects the existing lease TTL before takeover;
+   expiry alone does not remove a persisted lease.
+2. Git discovery could consume symlinked loose refs, ref ancestors, or
+   `packed-refs` before the adapter refused the source. Preflight now checks
+   these routes without following links before any Git subprocess. Selected
+   symbolic-ref chains are bounded, including Git's accepted whitespace after
+   `ref:`. Valid shared refs in linked worktrees remain supported. This is
+   observed preflight, not atomic protection against hostile concurrent rename.
+
+The new lease regression failed before the fix because the lease remained after
+exact retry. Five unsafe Git-route regressions and two alternate-whitespace
+cases also failed before their corresponding corrections because Git started.
+Both original reviewers rechecked only their affected contracts and found no
+remaining supported defect there; these are bounded correction verdicts, not
+new release qualification.
+
+Local validation for this edit batch:
+
+- 71 source-discovery, query-deadline and S4 integration cases passed in 84.73s,
+  including native round trip, promoted retry, pending lease release and
+  abandonment-intent recovery.
+- Both new terminal-cleanup cases passed against the final combined code in
+  39.67s. They cover interruption before release and at the durable pending
+  release record, exact cleanup, idempotent refusal, and a subsequent sync/query.
+  The earlier terminal-plus-S3-recovery batch passed 15 tests in 55.95s before
+  the Git correction was finalized.
+- 13 Git preflight cases and 16 adjacent valid-branch/ref/UTF-8 cases passed.
+- Repository Ruff checks extended to all F rules and `git diff --check` passed
+  on the changed Python files.
+- Task-owned AST graph refresh completed: 15,527 nodes, 38,687 edges and 913
+  communities. The same five zero-node fixture warnings remain; HTML generation
+  was skipped by the existing large-graph guard. No provider tokens were used.
+
+The final integrated patch passed the full serial gate through
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen --all-extras pytest tests/ -q --tb=short -p no:cacheprovider --durations=10 --maxfail=1`:
+**6,855 passed, 41 skipped, 3 known warnings, and 235 subtests passed** in
+2,470.55 seconds (41m10s). All 357 Python files in Git's tracked/untracked input
+inventory matched the pre-run hashes afterward. The slowest cases were CLI
+cluster-only export (47.50s), incomplete-extraction recovery (30.67–35.04s),
+and staged retry/admission cases (27.65–31.16s). This records observed timings,
+not a measured attribution of the runtime change to this patch.
+
+The optimized verifier passed 80 tests (9.48s, with its expected optimized-mode
+warning). All five skill-generation checks and disposable default/Codex
+help/install plus native Leiden smoke passed. Bandit completed with the same
+14 advisory finding records. The prior pip-audit receipt remains scoped to the
+unchanged default-plus-dev dependency lock. The three full-suite warnings are
+the existing semantic-cache scope and managed-state cleanup warnings. CI was
+not awaited.
+
+## Prior validation receipt (`05f13bdc`)
+
+Validation uses frozen all-extra dependencies, CPython 3.14.3,
+and Git 2.55.0. The native fixture runs on macOS 27.0 build 26A428 and native
+non-elevated local APFS admission. Portable failure fixtures explicitly inject
+capability support and are not native durability evidence.
+
+| Check | Result |
+| --- | --- |
+| `uv sync --all-extras --frozen` | Passed; 171 packages checked. |
+| Full serial suite through `uv run --frozen --all-extras pytest tests/ -q --tb=short` | 6,826 passed, 41 skipped, 3 warnings, and 235 subtests passed in 2,245.16 seconds (37m25s). |
+| Optimized Python protected-verifier suite | 80 passed in 10.09 seconds (one optimized-mode pytest warning). |
+| Five `tools.skillgen` checks | Check (134 artifacts), coverage audit, schema singleton, monolith round trip, and always-on round trip passed. |
+| Focused acceptance, deadline, installed and admission suites | 63 passed in 419.04 seconds. |
+| Adapter regression module | 14 passed in 17.48 seconds. |
+| Bootstrap/skill-generation test module | 259 passed, 38 platform-specific skips in 61.64 seconds through the repository pytest entry point. |
+| Independent correction review | Original design and functional reviewers found no remaining supported defect in the three repaired boundaries; functional reviewer also rechecked the test-fixture correction. |
+| Disposable help/install and native Leiden smoke | Passed; real user installation/configuration remained unchanged. |
+| Diff review and Ruff F checks | Passed on changed Python paths; no production changes after the correction review. |
+| Advisory security receipts | Bandit completed with 14 unchanged finding records. Prior pip-audit receipt retained for the unchanged default-plus-dev lock: 12 findings. |
+| Task-owned `graphify update .` | Canonical graph/report refreshed locally with AST extraction; no provider tokens. |
+
+The pytest runs disable bytecode and pytest-cache writes. Use the repository's
+`uv run ... pytest` entry point: initial direct-interpreter attempts differed in
+active-environment discovery or the exact interpreter path asserted by bootstrap
+tests. Those interrupted runs are not counted as passes. The complete bootstrap
+module passed with the correct entry point before the final serial run.
+
+The aggregate gate also exposed an older test that injected failure into every
+`SourceIO.listdir` call. Git preflight now enumerates objects first; the injection
+is scoped to the source root so the original partial-source-enumeration assertion
+still executes, with Git preflight enabled. The adapter module and the independent
+fixture recheck both passed after that correction.
+
+The final serial gate took 37m25s. Its slowest ten cases took 22–30 seconds each,
+primarily S4 admission/watermark, capacity recovery and installed-query cases.
+The graph refresh is local orientation output, not a release or immutable-candidate
+certification receipt. The dependency lock and security enforcement are unchanged;
+security findings remain advisory.
+
+## Limits
+
+Freshness is observed-current, not an atomic snapshot or proof against changes
+made and reverted between observations. Power-loss and hostile concurrent-rename
+proof are not established. Git observation supports ordinary files-based Git
+repositories and standard linked worktrees; includes/extensions, alternate object
+stores, shallow history, and unsupported reference routing refuse explicitly.
+Selected Git ref paths must satisfy S2's canonical NFC UTF-8 input-label contract;
+unrelated ref names inside the byte-bound `packed-refs` file need not be UTF-8.
+Queries without retained migration lineage refuse nonzero migration epochs;
+S4 introduces no migration or historical-query compatibility promise.
+
+Security enforcement and D1/D2/D3 remain unchanged. Real installed tools, managed
+state, unrelated worktrees, and the ignored coordination tracker are untouched.
+No consumer repository is enrolled. CI, review bots, and approvals are not awaited.

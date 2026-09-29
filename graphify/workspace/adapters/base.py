@@ -1,4 +1,4 @@
-"""Engine-neutral S2 adapter protocol. No operational adapter is shipped yet."""
+"""Engine-neutral structural adapter protocol."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from graphify.workspace.contracts import (
-    CompatibilityManifest, InputManifest, ContractError, _validate_input_extension,
+    CompatibilityManifest, InputManifest, ContractError, MAX_TOTAL_BYTES, _validate_input_extension,
 )
 
 _MAX_QUERY_DEPTH = 8
@@ -26,6 +26,25 @@ class UnsupportedCompatibility(ContractError):
 
 class QueryRejected(ContractError):
     """Query request exceeds the bounded adapter contract."""
+
+
+class PayloadBudgetExceeded(ContractError):
+    """A bounded serializer proved a minimum payload size before writing files."""
+
+    def __init__(self, required_bytes, input_manifest):
+        super().__init__("structural payload exceeds byte budget")
+        self.required_bytes = required_bytes
+        self.input_manifest = input_manifest
+
+
+class StructuralBuildIncomplete(ContractError):
+    """Adapter proved a bounded, non-retryable extraction disposition."""
+
+    def __init__(self, input_manifest):
+        if type(input_manifest) is not InputManifest:
+            raise ContractError("validated failed input manifest required")
+        super().__init__("structural extraction incomplete")
+        self.input_manifest = input_manifest
 
 
 class AdapterIntent(str, Enum):
@@ -183,7 +202,7 @@ class QueryRequest:
 
 
 class EngineAdapter(Protocol):
-    """S4 supplies implementation; paths are explicit, never cwd-derived authority.
+    """Paths are explicit, never cwd-derived authority.
 
     The lifecycle owns pinned staging descriptors and fences. Implementations must
     validate those capabilities before writing, and never publish ordinary output.
@@ -193,12 +212,18 @@ class EngineAdapter(Protocol):
     detector_id: str
 
     def build_structural(self, source_root: Path, *, payload_fd: int,
-                         scratch_fd: int, initial_detection: InputManifest) -> StructuralBuild: ...
+                         scratch_fd: int, initial_detection: InputManifest, write_guard=None,
+                         max_payload_bytes: int = MAX_TOTAL_BYTES) -> StructuralBuild: ...
 
-    def query_structural(self, payload_fd: int, request: QueryRequest) -> str: ...
+    def query_structural(self, payload_fd: int, request: QueryRequest, *,
+                         deadline_ns: int | None = None) -> str: ...
 
     def observe(self, source_root: Path, *, input_manifest: InputManifest | None = None,
                 max_inventory_passes: int = 6, deadline_ns: int | None = None) -> SourceObservation: ...
+
+    def observe_consumed_inputs(self, source_root: Path, *, input_manifest: InputManifest) -> str:
+        """Digest repeated current evidence for the sealed operation set, for recovery."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -209,4 +234,7 @@ class AdapterSelection:
     promotable: bool = False
 
     def require_adapter(self) -> EngineAdapter:
-        raise UnsupportedCompatibility("S2 has no operational adapter; S4 is required")
+        if not self.executable or self.intent is AdapterIntent.PROBE:
+            raise UnsupportedCompatibility("selection does not grant engine execution")
+        from .v8 import V8Adapter
+        return V8Adapter()

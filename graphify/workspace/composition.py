@@ -575,7 +575,25 @@ class StructuralComposition:
     inputs: WorkspaceRuntimeInputs
 
     def require_runtime(self):
-        raise WorkspaceAuthorityInvalid("S4 operational adapter is not implemented")
+        # Re-admit both the on-disk authority and installed package here. A
+        # caller-constructed WorkspaceRuntimeInputs is not installed authority.
+        inputs = load_workspace_runtime_inputs(
+            state_root=self.inputs.state_root, expected=self.inputs.expected,
+        )
+        if inputs != self.inputs:
+            raise WorkspaceAuthorityInvalid("runtime authority changed")
+        selection = select_adapter(
+            CompatibilityTuple(inputs.expected), expected=CompatibilityTuple(inputs.expected),
+            intent=AdapterIntent.EXECUTE,
+        )
+        adapter = selection.require_adapter()
+        adapter.expected = inputs.expected
+        stores = self.require_lifecycle_stores()
+        stores.generations.observer = adapter.observe_lifecycle
+        stores.generations.consumed_observer = adapter.observe_consumed_inputs
+        runtime = StructuralRuntime(inputs, stores, adapter)
+        stores.pointers.admission_guard = runtime.validate_authority
+        return runtime
 
     def require_lifecycle_stores(self):
         """Construct S3 stores without creating state or enabling an adapter."""
@@ -653,3 +671,49 @@ def compose_workspace_runtime(inputs):
     select_adapter(CompatibilityTuple(inputs.authority.compatibility),
                    expected=CompatibilityTuple(inputs.expected), intent=AdapterIntent.PROBE)
     return StructuralComposition(inputs)
+
+
+@dataclass(frozen=True)
+class StructuralRuntime:
+    """Qualified structural library runtime; no public CLI or semantic service."""
+    inputs: WorkspaceRuntimeInputs
+    stores: LifecycleStores
+    adapter: object
+
+    def validate_authority(self, *, deadline_ns=None):
+        if deadline_ns is not None:
+            from ._readonly import ReadOnlyFailure, run_readonly
+            request = canonical_json_bytes({"state_root": str(self.inputs.state_root),
+                "expected": self.inputs.expected.to_dict(), "authority": self.inputs.authority.to_dict()})
+            try:
+                result = run_readonly(_AUTHORITY_CHILD_CODE, request, deadline_ns=deadline_ns,
+                    max_input_bytes=2 * RUNTIME_AUTHORITY_MAX_BYTES + 65_536,
+                    max_output_bytes=65_536)
+            except ReadOnlyFailure:
+                raise WorkspaceAuthorityInvalid("runtime authority validation failed") from None
+            if result != b"verified":
+                raise WorkspaceAuthorityInvalid("runtime authority validation failed")
+            return
+        current = load_workspace_runtime_inputs(
+            state_root=self.inputs.state_root, expected=self.inputs.expected,
+        )
+        if current != self.inputs:
+            raise WorkspaceAuthorityInvalid("runtime authority changed")
+
+
+_AUTHORITY_CHILD_CODE = "from graphify.workspace.composition import _authority_child; _authority_child()"
+
+
+def _authority_child():
+    import json
+    import sys
+    limit = 2 * RUNTIME_AUTHORITY_MAX_BYTES + 65_536
+    raw = sys.stdin.buffer.read(limit + 1)
+    if len(raw) > limit:
+        raise WorkspaceAuthorityInvalid("runtime validation input exceeds byte limit")
+    value = json.loads(raw)
+    current = load_workspace_runtime_inputs(state_root=Path(value["state_root"]),
+        expected=CompatibilityManifest.from_mapping(value["expected"]))
+    if current.authority != WorkspaceRuntimeAuthority.from_mapping(value["authority"]):
+        raise WorkspaceAuthorityInvalid("runtime authority changed")
+    sys.stdout.buffer.write(b"verified")

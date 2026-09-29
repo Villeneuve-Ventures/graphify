@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from graphify.workspace.contracts import CompletionBinding
+from graphify.workspace.contracts import CompletionBinding, InputManifest
 from graphify.workspace.lifecycle_contracts import (
     ContractError,
     StagedBuildAbandonmentEvidence,
@@ -116,6 +116,36 @@ def test_intent_cannot_claim_an_epoch_newer_than_its_evidence():
     value["operation_epoch"] = 10
     with pytest.raises(ContractError, match="operation_epoch"):
         StagedBuildAbandonmentIntent.from_mapping(value)
+
+
+def test_extraction_failure_evidence_is_bounded_and_replays_exactly():
+    document = _staged_with_intent("PUBLISHING")
+    request = StructuralBuildRequest.from_mapping(document["request"])
+    failed = InputManifest.from_mapping({
+        "contract": "graphify.workspace.source-inputs", "format_version": 1,
+        "phase": "consumed", "roots": ["source"],
+        "evidence": [{"operation": "directory", "path": ".", "value": [1, 2, 16832]}],
+        "code_inputs": ["script.r"],
+        "outcomes": [{"path": "script.r", "status": "unsupported_extractor"}],
+        "failure": None,
+    })
+    evidence = document["abandonment_intent"]["evidence"]
+    evidence["selected_compatibility_sha256"] = request.compatibility_sha256
+    evidence["extraction_failure"] = {
+        "initial_detection_sha256": request.observation_manifest_sha256,
+        "input_manifest_sha256": failed.sha256,
+        "status": "unsupported_extractor",
+        "failure_status": None,
+    }
+    document["abandonment_intent"]["reason"] = "EXTRACTION_INCOMPLETE"
+    document["abandonment_intent"]["evidence_sha256"] = canonical_sha256(evidence)
+    state = StagedBuildState.from_mapping(document)
+    assert state.abandonment_intent.evidence.reason_for(request) == "EXTRACTION_INCOMPLETE"
+    assert StagedBuildState.from_json(state.canonical) == state
+    assert len(state.canonical) < 64 * 1024
+    evidence["extraction_failure"]["initial_detection_sha256"] = "0" * 64
+    with pytest.raises(ContractError, match="initial_detection_sha256|extraction_failure"):
+        StagedBuildAbandonmentEvidence.from_mapping(evidence).reason_for(request)
 
 
 @pytest.mark.parametrize("lifecycle_state,field,value", [

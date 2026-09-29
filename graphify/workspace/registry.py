@@ -1064,18 +1064,31 @@ class RegistryStore:
             leases._release_under_registry_lock(grant, committed, validate_active=False)
             return ActivationResult(registry=committed, grant=grant)
 
-    def resolve_active_source(self, repo_uuid: str) -> SourceIdentity:
+    def resolve_active_source(self, repo_uuid: str, *, read_only: bool = False,
+                              deadline_ns: int | None = None) -> SourceIdentity:
+        if read_only:
+            with self.read_only_snapshot(deadline_ns=deadline_ns) as document:
+                return self.resolve_active_source_locked(document, repo_uuid, deadline_ns=deadline_ns)
         document = self.load()
+        source = self.resolve_active_source_locked(document, repo_uuid, deadline_ns=deadline_ns)
+        with self.read_only_snapshot(deadline_ns=deadline_ns) as current:
+            if current.canonical != document.canonical:
+                raise SourceAmbiguousError("registry changed during active source discovery")
+            return source
+
+    def resolve_active_source_locked(self, document: Registry, repo_uuid: str, *,
+                                     deadline_ns: int | None = None) -> SourceIdentity:
+        """Resolve while the caller retains the existing registry snapshot lock."""
         entry = _entry_for(document, repo_uuid)
         recorded = entry["active_source"]
         try:
-            source = discover_source(Path(recorded["path"]))
+            source = discover_source(Path(recorded["path"]), deadline_ns=deadline_ns)
         except (OSError, IdentityError) as exc:
             raise SourceAmbiguousError(f"selected active source is unavailable: {exc}") from exc
         if source.repo_uuid != repo_uuid or source.registry_source != recorded:
             raise SourceAmbiguousError("selected active source no longer matches registry evidence")
         evidence = self.read_evidence(
-            entry["active_source_evidence"]["rebind_evidence_sha256"]
+            entry["active_source_evidence"]["rebind_evidence_sha256"], deadline_ns=deadline_ns,
         )
         if (
             evidence["git_common_device"] != source.git_common_device
@@ -1084,10 +1097,7 @@ class RegistryStore:
             raise SourceAmbiguousError(
                 "selected active source does not match active Git directory identity"
             )
-        with self.read_only_snapshot() as current:
-            if current.canonical != document.canonical:
-                raise SourceAmbiguousError("registry changed during active source discovery")
-            return source
+        return source
 
 
 __all__ = [

@@ -13,7 +13,6 @@ from collections import Counter
 from datetime import date
 from pathlib import Path
 import networkx as nx
-from networkx.readwrite import json_graph
 from graphify.security import sanitize_label
 from graphify.analyze import _node_community_map
 from graphify.build import edge_data
@@ -193,41 +192,70 @@ def _git_head() -> str | None:
         return None
 
 
+class _JsonItems(list):
+    """Let json.dump stream a known-size collection without copying its items."""
+
+    def __init__(self, items, count):
+        self.items = items
+        self.count = count
+
+    def __len__(self):
+        return self.count
+
+    def __iter__(self):
+        return iter(self.items)
+
+
 def write_json(G, communities, stream, *, built_at_commit=None, community_labels=None):
     """Serialize through a caller-owned text stream without path or Git I/O.
 
     The caller owns output admission, lifetime, flushing and publication. Pass an
     explicit commit if wanted; unlike to_json, this function never discovers one.
+    Nodes and edges are copied one at a time so stream limits can interrupt work
+    without first materializing a second copy of the entire node-link graph.
     """
     node_community = _node_community_map(communities)
     _labels: dict[int, str] = {int(k): v for k, v in (community_labels or {}).items()}
-    try:
-        data = json_graph.node_link_data(G, edges="links")
-    except TypeError:
-        data = json_graph.node_link_data(G)
-    for node in data["nodes"]:
-        cid = node_community.get(node["id"])
-        node["community"] = cid
-        if cid is not None and _labels:
-            node["community_name"] = _labels.get(cid, f"Community {cid}")
-        node["norm_label"] = _strip_diacritics(node.get("label", "")).lower()
-    for link in data["links"]:
-        if "confidence_score" not in link:
-            conf = link.get("confidence", "EXTRACTED")
-            link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)
-        # Restore original edge direction. Undirected NetworkX storage may
-        # canonicalize endpoint order, flipping `calls` and other directional
-        # edges in graph.json. The build path stashes the true endpoints in
-        # _src/_tgt for exactly this purpose (#563).
-        true_src = link.pop("_src", None)
-        true_tgt = link.pop("_tgt", None)
-        if true_src is not None and true_tgt is not None:
-            link["source"] = true_src
-            link["target"] = true_tgt
-    data["hyperedges"] = getattr(G, "graph", {}).get("hyperedges", [])
-    commit = built_at_commit if built_at_commit is not None else None
-    if commit:
-        data["built_at_commit"] = commit
+
+    def nodes():
+        for node_id in G:
+            node = dict(G.nodes[node_id], id=node_id)
+            cid = node_community.get(node_id)
+            node["community"] = cid
+            if cid is not None and _labels:
+                node["community_name"] = _labels.get(cid, f"Community {cid}")
+            node["norm_label"] = _strip_diacritics(node.get("label", "")).lower()
+            yield node
+
+    def links():
+        edges = G.edges(keys=True, data=True) if G.is_multigraph() else (
+            (source, target, None, attrs) for source, target, attrs in G.edges(data=True)
+        )
+        for source, target, key, attrs in edges:
+            link = dict(attrs, source=source, target=target)
+            if G.is_multigraph():
+                link["key"] = key
+            if "confidence_score" not in link:
+                conf = link.get("confidence", "EXTRACTED")
+                link["confidence_score"] = _CONFIDENCE_SCORE_DEFAULTS.get(conf, 1.0)
+            # Restore direction stashed by the builder before undirected storage.
+            true_src = link.pop("_src", None)
+            true_tgt = link.pop("_tgt", None)
+            if true_src is not None and true_tgt is not None:
+                link["source"] = true_src
+                link["target"] = true_tgt
+            yield link
+
+    data = {
+        "directed": G.is_directed(),
+        "multigraph": G.is_multigraph(),
+        "graph": G.graph,
+        "nodes": _JsonItems(nodes(), len(G)),
+        "links": _JsonItems(links(), G.number_of_edges()),
+        "hyperedges": G.graph.get("hyperedges", []),
+    }
+    if built_at_commit:
+        data["built_at_commit"] = built_at_commit
     json.dump(data, stream, indent=2)
 
 

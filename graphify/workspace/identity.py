@@ -16,6 +16,7 @@ import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from graphify.source_io import SourceError, SourceIO
 from graphify.workspace.lifecycle_contracts import (
     ContractError,
     WorkspaceConfig,
@@ -26,6 +27,8 @@ from graphify.workspace.lifecycle_contracts import (
 
 WORKSPACE_CONFIG_MAX_BYTES = 1024 * 1024
 GIT_OUTPUT_MAX_BYTES = 1024 * 1024
+# Set only by the read-only worker bootstrap from its parent's selected helper.
+_PINNED_GIT_EXECUTABLE: str | None = None
 
 
 _RFC3339_UTC = re.compile(
@@ -160,12 +163,62 @@ def _check_deadline(deadline_ns: int | None) -> None:
     _remaining_timeout_seconds(deadline_ns)
 
 
+def _git_search_path(root: Path, git_common_dir: Path) -> str:
+    """Keep operator installation paths; never search relative to the source."""
+    root = root.resolve(strict=True)
+    directories = []
+    for entry in os.get_exec_path():
+        if not os.path.isabs(entry):
+            continue
+        directory = Path(os.path.abspath(entry))
+        try:
+            resolved = directory.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if any(directory.is_relative_to(denied) or resolved.is_relative_to(denied)
+               for denied in (root, git_common_dir)):
+            continue
+        if resolved.is_dir():
+            directories.append(str(resolved))
+    return os.pathsep.join(dict.fromkeys(directories))
+
+
+def _git_executable(root: Path, *, deadline_ns: int | None = None,
+                    git_common_dir: Path | None = None) -> str:
+    """Select an absolute Git outside source authority, or reuse the worker pin."""
+    root = root.resolve(strict=True)
+    if git_common_dir is None:
+        _git_dir, git_common_dir = _git_routing(root, deadline_ns=deadline_ns)
+    candidates = (
+        [_PINNED_GIT_EXECUTABLE] if _PINNED_GIT_EXECUTABLE is not None else
+        [str(Path(entry) / "git")
+         for entry in _git_search_path(root, git_common_dir).split(os.pathsep) if entry]
+    )
+    for candidate in candidates:
+        _check_deadline(deadline_ns)
+        path = Path(candidate)
+        try:
+            resolved = path.resolve(strict=True)
+            if (path.is_absolute() and not any(
+                    path.is_relative_to(denied) or resolved.is_relative_to(denied)
+                    for denied in (root, git_common_dir))
+                    and resolved.is_file() and os.access(resolved, os.X_OK)):
+                return str(resolved)
+        except (OSError, RuntimeError):
+            continue
+    raise SourceDiscoveryError("no eligible Git executable outside source root")
+
+
 def _git(
     root: Path,
     *arguments: str,
     deadline_ns: int | None = None,
     strip_output: bool = True,
+    inspect_object_tree: bool = True,
 ) -> str:
+    git_common_dir = _preflight_git_inputs(
+        root, deadline_ns=deadline_ns, inspect_object_tree=inspect_object_tree,
+    )
     environment = {
         key: value for key, value in os.environ.items() if not key.startswith("GIT_")
     }
@@ -180,7 +233,9 @@ def _git(
             "GIT_TERMINAL_PROMPT": "0",
         }
     )
-    command = ["git", *arguments]
+    command = [_git_executable(root, deadline_ns=deadline_ns,
+                               git_common_dir=git_common_dir), *arguments]
+    environment["PATH"] = _git_search_path(root, git_common_dir)
     _check_deadline(deadline_ns)
     with subprocess.Popen(
         command, cwd=root, env=environment,
@@ -441,6 +496,179 @@ def _read_source_regular(
             os.close(directory_descriptor)
 
 
+def _preflight_git_refs(
+    git_dir: Path, common: Path, head: bytes, *, deadline_ns: int | None,
+) -> None:
+    """Check Git's selected loose-ref chain and packed-ref route without following links."""
+    extra_roots = {"worktree": git_dir} if git_dir != common else None
+    with SourceIO(
+        common, extra_roots=extra_roots,
+        max_file_bytes=WORKSPACE_CONFIG_MAX_BYTES,
+        max_total_bytes=9 * WORKSPACE_CONFIG_MAX_BYTES,
+    ) as inputs:
+        packed = inputs.probe(common / "packed-refs")
+        if packed is not None and not stat.S_ISREG(packed.st_mode):
+            raise SourceDiscoveryError("unsafe Git packed references")
+        seen: set[bytes] = set()
+        while True:
+            _check_deadline(deadline_ns)
+            head = head.strip()
+            if not head.startswith(b"ref:"):
+                if re.fullmatch(rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head) is None:
+                    raise SourceDiscoveryError("unsupported Git reference")
+                return
+            # Git accepts tabs, repeated spaces and newlines after ``ref:``.
+            # Normalize only its surrounding ASCII whitespace; reject control
+            # bytes inside the selected path before any Git process starts.
+            ref = head[4:].strip()
+            parts = ref.split(b"/")
+            if (
+                len(seen) >= 8 or ref in seen or len(parts) < 2
+                or parts[0] != b"refs" or any(
+                    not part or part in {b".", b".."}
+                    or b"\\" in part or any(byte < 32 or byte == 127 for byte in part)
+                    for part in parts
+                )
+            ):
+                raise SourceDiscoveryError("unsupported Git reference")
+            seen.add(ref)
+            relative = Path(os.fsdecode(ref))
+            # Standard refs are shared by linked worktrees. Per-worktree
+            # namespaces live in the linked Git directory.
+            local_ref = ref.startswith((b"refs/worktree/", b"refs/bisect/", b"refs/rewritten/"))
+            selected = git_dir if local_ref else common
+            loose: dict[Path, bytes] = {}
+            for directory in (common, git_dir) if git_dir != common else (common,):
+                path = directory
+                missing = False
+                for part in parts[:-1]:
+                    _check_deadline(deadline_ns)
+                    path /= os.fsdecode(part)
+                    info = inputs.probe(path)
+                    if info is None:
+                        missing = True
+                        break
+                    if not stat.S_ISDIR(info.st_mode):
+                        raise SourceDiscoveryError("unsafe Git reference directory")
+                if missing:
+                    continue
+                path = directory / relative
+                info = inputs.probe(path)
+                if info is None:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise SourceDiscoveryError("unsafe Git loose reference")
+                if directory == selected:
+                    loose[directory] = inputs.read_bytes(
+                        path, max_bytes=WORKSPACE_CONFIG_MAX_BYTES,
+                    )
+            if selected not in loose:
+                # An absent loose ref may be packed (or an unborn branch).
+                return
+            head = loose[selected]
+
+
+def _git_routing(root: Path, *, deadline_ns: int | None) -> tuple[Path, Path]:
+    """Admit ordinary or linked routing without reading Git refs or objects."""
+    def read(directory: Path, name: str) -> bytes:
+        return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
+                                    max_bytes=WORKSPACE_CONFIG_MAX_BYTES)
+
+    _check_deadline(deadline_ns)
+    try:
+        marker = root / ".git"
+        if stat.S_ISDIR(marker.lstat().st_mode):
+            git_dir = marker
+            # An ordinary checkout owns its common directory. Git must not
+            # follow an injected commondir into a separate metadata store.
+            try:
+                (git_dir / "commondir").lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise SourceDiscoveryError("unsupported Git routing")
+            common = git_dir
+        else:
+            routing = read(root, ".git").decode("utf-8").strip()
+            if not routing.startswith("gitdir: "):
+                raise SourceDiscoveryError("unsupported Git routing")
+            git_dir = Path(os.path.abspath(root / routing[8:]))
+            if git_dir.parent.name != "worktrees" or not git_dir.name:
+                raise SourceDiscoveryError("unsupported linked Git routing")
+            common = git_dir.parent.parent
+            # Route components and the selected source must be real directories;
+            # a symlink here could make the lexical worktree shape misleading.
+            for directory in (root, common, git_dir.parent, git_dir):
+                if not stat.S_ISDIR(directory.lstat().st_mode):
+                    raise SourceDiscoveryError("unsupported linked Git routing")
+            if git_dir.resolve(strict=True) != git_dir:
+                raise SourceDiscoveryError("unsupported linked Git routing")
+            cd = read(git_dir, "commondir").decode("utf-8").strip()
+            if Path(os.path.abspath(git_dir / cd)) != common:
+                raise SourceDiscoveryError("unsupported linked Git common directory")
+            back = read(git_dir, "gitdir").decode("utf-8").strip()
+            if Path(os.path.abspath(git_dir / back)) != marker:
+                raise SourceDiscoveryError("unsupported linked Git backlink")
+        return git_dir, common
+    except (OSError, UnicodeError, SourceError) as exc:
+        raise SourceDiscoveryError("cannot preflight local Git routing") from exc
+
+
+def _preflight_git_inputs(
+    root: Path, *, deadline_ns: int | None, inspect_object_tree: bool = True,
+) -> Path:
+    """Refuse external config and object readers before any Git command starts."""
+    def read(directory: Path, name: str) -> bytes:
+        return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
+                                    max_bytes=WORKSPACE_CONFIG_MAX_BYTES)
+
+    try:
+        git_dir, common = _git_routing(root, deadline_ns=deadline_ns)
+        # Even rev-parse opens HEAD. Reject FIFOs, symlinks and oversized inputs
+        # before a subprocess can block on them, including linked-worktree HEADs.
+        head = read(git_dir, "HEAD")
+        _preflight_git_refs(git_dir, common, head, deadline_ns=deadline_ns)
+        # Probe through no-follow descriptors. Presence alone is unsupported;
+        # never open an alternate-store file (which could itself be a FIFO).
+        with SourceIO(common) as inputs:
+            # A missing leaf is meaningful only beneath admitted directories.
+            # SourceIO probes can report ENOTDIR as absence, including a refused
+            # symlink ancestor; Git itself would follow that object-store route.
+            for relative in ("objects", "objects/info", "objects/pack"):
+                info = inputs.probe(common / relative)
+                if info is None and relative != "objects":
+                    continue
+                if info is None or not stat.S_ISDIR(info.st_mode):
+                    raise SourceDiscoveryError("unsafe Git object directory")
+            for name in ("alternates", "http-alternates"):
+                if inputs.probe(common / "objects" / "info" / name) is not None:
+                    raise SourceDiscoveryError("Git alternate object stores are unsupported")
+            # Git also follows pack/loose-object paths. Validate their whole
+            # bounded directory tree, without reading object contents, so a
+            # lower symlink cannot recreate the same external-reader escape.
+            if inspect_object_tree:
+                pending = [common / "objects"]
+                while pending:
+                    _check_deadline(deadline_ns)
+                    for path, mode in inputs.listdir(pending.pop()):
+                        _check_deadline(deadline_ns)
+                        if stat.S_ISDIR(mode):
+                            pending.append(path)
+                        elif not stat.S_ISREG(mode):
+                            raise SourceDiscoveryError("unsafe Git object tree entry")
+        for directory, name in ((common, "config"), (git_dir, "config.worktree")):
+            try:
+                (directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            raw = read(directory, name).removeprefix(b"\xef\xbb\xbf")
+            if re.search(rb'(?im)^\s*\[\s*include(?:if)?(?:\s|\]|\.)', raw):
+                raise SourceDiscoveryError("Git includes require unsupported external input authority")
+    except (OSError, UnicodeError, SourceError) as exc:
+        raise SourceDiscoveryError("cannot preflight local Git inputs") from exc
+    return common
+
+
 def _read_workspace_config(
     root: Path,
     *,
@@ -596,8 +824,15 @@ def discover_source(
     if not root.is_dir():
         raise SourceDiscoveryError(f"source root is not a directory: {root}")
     root_identity = source_root_identity(root, deadline_ns=deadline_ns)
+    # Establish complete object-tree containment before the first Git subprocess.
+    # Metadata-only commands then repeat the routing/config/ancestor checks;
+    # object traversal and final verification each get a fresh full check.
+    _preflight_git_inputs(root, deadline_ns=deadline_ns)
     top_level = Path(
-        _git(root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns)
+        _git(
+            root, "rev-parse", "--show-toplevel", deadline_ns=deadline_ns,
+            inspect_object_tree=False,
+        )
     ).resolve(strict=True)
     _check_deadline(deadline_ns)
     if top_level != root:
@@ -612,12 +847,18 @@ def discover_source(
 
     git_common_dir = _resolve_git_path(
         root,
-        _git(root, "rev-parse", "--git-common-dir", deadline_ns=deadline_ns),
+        _git(
+            root, "rev-parse", "--git-common-dir", deadline_ns=deadline_ns,
+            inspect_object_tree=False,
+        ),
         deadline_ns=deadline_ns,
     )
     git_dir = _resolve_git_path(
         root,
-        _git(root, "rev-parse", "--git-dir", deadline_ns=deadline_ns),
+        _git(
+            root, "rev-parse", "--git-dir", deadline_ns=deadline_ns,
+            inspect_object_tree=False,
+        ),
         deadline_ns=deadline_ns,
     )
     _check_deadline(deadline_ns)
@@ -630,7 +871,7 @@ def discover_source(
     # insteadOf rules) without discarding whitespace from the URL itself.
     config_keys = _git(
         root, "config", "--null", "--name-only", "--list",
-        deadline_ns=deadline_ns, strip_output=False,
+        deadline_ns=deadline_ns, strip_output=False, inspect_object_tree=False,
     )
     remote_names = {
         key[len("remote."):-len(".url")]
@@ -643,7 +884,7 @@ def discover_source(
             raise SourceDiscoveryError("malformed Git remote name")
         raw_url = _git(
             root, "remote", "get-url", "--", name,
-            deadline_ns=deadline_ns, strip_output=False,
+            deadline_ns=deadline_ns, strip_output=False, inspect_object_tree=False,
         ).removesuffix("\n")
         if any(character.isspace() for character in raw_url):
             raise SourceDiscoveryError("fetch remote URL contains whitespace")
@@ -675,9 +916,17 @@ def discover_source(
         registry_source = canonical_registry_source(registry_source)
     except ContractError:
         raise SourceDiscoveryError("source identity is not canonical") from None
-    if _git(root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns) == "true":
+    if _git(
+        root, "rev-parse", "--is-shallow-repository", deadline_ns=deadline_ns,
+        inspect_object_tree=False,
+    ) == "true":
         raise SourceDiscoveryError("shallow repositories require complete history before enrollment")
-    head = _git(root, "rev-parse", "HEAD", deadline_ns=deadline_ns)
+    head = _git(
+        root, "rev-parse", "HEAD", deadline_ns=deadline_ns,
+        inspect_object_tree=False,
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise SourceDiscoveryError("unsupported Git object format: SHA-1 source commit required")
     roots = tuple(
         sorted(
             filter(
