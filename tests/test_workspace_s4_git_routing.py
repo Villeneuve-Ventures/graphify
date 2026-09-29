@@ -93,7 +93,8 @@ def _rewrite_symbolic_ref(repo, location, separator):
     else:
         selected = head
     selected.write_bytes(b'ref:' + separator + target + b' \n')
-    assert subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).strip() == expected
+    actual_head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).strip()
+    assert actual_head == expected
     return expected.decode('ascii')
 
 
@@ -124,7 +125,8 @@ def test_adapter_accepts_uppercase_git_oid_with_raw_evidence(tmp_path, location)
     else:
         selected = head
         selected.write_bytes(upper + b'\n')
-    assert subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).strip() == expected
+    actual_head = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD']).strip()
+    assert actual_head == expected
     observed = V8Adapter().observe_lifecycle(repo)
     assert observed.source_commit == expected.decode('ascii')
     label = 'git:' + selected.relative_to(repo / '.git').as_posix()
@@ -159,7 +161,8 @@ def test_linked_worktree_local_reference_is_observed(tmp_path):
     local_ref.parent.mkdir(parents=True)
     local_ref.write_bytes(commit + b'\n')
     (git_dir / 'HEAD').write_bytes(b'ref: refs/worktree/active\n')
-    assert subprocess.check_output(['git', '-C', str(linked), 'rev-parse', 'HEAD']).strip() == commit
+    actual_head = subprocess.check_output(['git', '-C', str(linked), 'rev-parse', 'HEAD']).strip()
+    assert actual_head == commit
     assert identity.discover_source(linked).head_commit == commit.decode('ascii')
     assert V8Adapter().observe_lifecycle(linked).source_commit == commit.decode('ascii')
 
