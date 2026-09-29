@@ -33,17 +33,29 @@ def certified(tmp_path, monkeypatch):
     return runtime, repo, support, request, manifest
 
 
-@pytest.mark.parametrize('change', ['detected', 'support_bytes', 'support_missing'])
+@pytest.mark.parametrize('change', ['detected', 'support_bytes', 'support_missing',
+                                    'support_directory', 'support_ancestor_file'])
 def test_certified_drift_abandons_and_allows_successor(tmp_path, monkeypatch, change):
     runtime, repo, support, request, _manifest_value = certified(tmp_path, monkeypatch)
     if change == 'detected':
         (repo / 'README.md').write_text('changed after certification\n')
     elif change == 'support_missing':
         support.unlink()
+    elif change == 'support_directory':
+        support.unlink()
+        support.mkdir()
+    elif change == 'support_ancestor_file':
+        support.unlink()
+        support.parent.rmdir()
+        support.parent.write_text('replacement')
     else:
         support.write_text('{"compilerOptions":{}}')
     if change != 'detected':
-        assert runtime.adapter.observe(repo).initial_detection.sha256 == request.build.observation_manifest_sha256
+        changed_detection = runtime.adapter.observe(repo).initial_detection.sha256
+        if change == 'support_ancestor_file':
+            assert changed_detection != request.build.observation_manifest_sha256
+        else:
+            assert changed_detection == request.build.observation_manifest_sha256
     with pytest.raises(GenerationConflict, match='abandoned'):
         synchronize_structural(runtime, request, attempt_sha256='b' * 64)
     stage = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
@@ -55,6 +67,11 @@ def test_certified_drift_abandons_and_allows_successor(tmp_path, monkeypatch, ch
     runtime = compose_workspace_runtime(runtime.inputs).require_runtime()
     with pytest.raises(GenerationConflict, match='abandoned'):
         synchronize_structural(runtime, request, attempt_sha256='c' * 64)
+    if support.parent.is_file():
+        support.parent.unlink()
+        support.parent.mkdir()
+    if support.is_dir():
+        support.rmdir()
     support.write_text('{"compilerOptions":{}}')
     successor = prepare_structural_sync(runtime, repo_uuid=REPO_UUID, generation_id='gen-successor',
         source_epoch=2, desired_watermark=2, expected_payload_bytes=1024 * 1024)

@@ -62,6 +62,40 @@ def test_sealed_directory_membership_changes_and_budget_refuses(tmp_path):
             _consumed_evidence(inputs, read_manifest)
 
 
+def test_sealed_list_replaced_by_regular_file_has_changed_evidence(tmp_path):
+    root = tmp_path.resolve()
+    listed = root / "listed"
+    listed.mkdir()
+    with SourceIO(root) as inputs:
+        inputs.listdir(listed)
+        manifest = InputManifest.from_engine(inputs, phase="consumed", code_inputs=())
+    with SourceIO(root) as inputs:
+        previous = _consumed_evidence(inputs, manifest)
+    listed.rmdir()
+    listed.write_text("replacement")
+    with SourceIO(root) as inputs:
+        changed = _consumed_evidence(inputs, manifest)
+    assert changed != previous
+
+
+def test_sealed_directory_ancestor_replaced_by_file_has_changed_evidence(tmp_path):
+    root = tmp_path.resolve()
+    parent = root / "parent"
+    parent.mkdir()
+    (parent / "child.txt").write_text("child")
+    with SourceIO(root) as inputs:
+        inputs.read_bytes(parent / "child.txt")
+        manifest = InputManifest.from_engine(inputs, phase="consumed", code_inputs=())
+    with SourceIO(root) as inputs:
+        previous = _consumed_evidence(inputs, manifest)
+    (parent / "child.txt").unlink()
+    parent.rmdir()
+    parent.write_text("replacement")
+    with SourceIO(root) as inputs:
+        changed = _consumed_evidence(inputs, manifest)
+    assert changed != previous
+
+
 @pytest.mark.parametrize("failure", ["read_eio", "permission", "symlink_ancestor", "symlink_leaf", "fifo_leaf", "pass_disagreement"])
 def test_unproven_consumed_change_keeps_certified_state(tmp_path, monkeypatch, failure):
     runtime, repo, support, request, _manifest = certified(tmp_path, monkeypatch)

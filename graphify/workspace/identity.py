@@ -27,6 +27,8 @@ from graphify.workspace.lifecycle_contracts import (
 
 WORKSPACE_CONFIG_MAX_BYTES = 1024 * 1024
 GIT_OUTPUT_MAX_BYTES = 1024 * 1024
+# Set only by the read-only worker bootstrap from its parent's selected helper.
+_PINNED_GIT_EXECUTABLE: str | None = None
 
 
 _RFC3339_UTC = re.compile(
@@ -161,6 +163,52 @@ def _check_deadline(deadline_ns: int | None) -> None:
     _remaining_timeout_seconds(deadline_ns)
 
 
+def _git_search_path(root: Path, git_common_dir: Path) -> str:
+    """Keep operator installation paths; never search relative to the source."""
+    root = root.resolve(strict=True)
+    directories = []
+    for entry in os.get_exec_path():
+        if not os.path.isabs(entry):
+            continue
+        directory = Path(os.path.abspath(entry))
+        try:
+            resolved = directory.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if any(directory.is_relative_to(denied) or resolved.is_relative_to(denied)
+               for denied in (root, git_common_dir)):
+            continue
+        if resolved.is_dir():
+            directories.append(str(resolved))
+    return os.pathsep.join(dict.fromkeys(directories))
+
+
+def _git_executable(root: Path, *, deadline_ns: int | None = None,
+                    git_common_dir: Path | None = None) -> str:
+    """Select an absolute Git outside source authority, or reuse the worker pin."""
+    root = root.resolve(strict=True)
+    if git_common_dir is None:
+        _git_dir, git_common_dir = _git_routing(root, deadline_ns=deadline_ns)
+    candidates = (
+        [_PINNED_GIT_EXECUTABLE] if _PINNED_GIT_EXECUTABLE is not None else
+        [str(Path(entry) / "git")
+         for entry in _git_search_path(root, git_common_dir).split(os.pathsep) if entry]
+    )
+    for candidate in candidates:
+        _check_deadline(deadline_ns)
+        path = Path(candidate)
+        try:
+            resolved = path.resolve(strict=True)
+            if (path.is_absolute() and not any(
+                    path.is_relative_to(denied) or resolved.is_relative_to(denied)
+                    for denied in (root, git_common_dir))
+                    and resolved.is_file() and os.access(resolved, os.X_OK)):
+                return str(resolved)
+        except (OSError, RuntimeError):
+            continue
+    raise SourceDiscoveryError("no eligible Git executable outside source root")
+
+
 def _git(
     root: Path,
     *arguments: str,
@@ -168,7 +216,7 @@ def _git(
     strip_output: bool = True,
     inspect_object_tree: bool = True,
 ) -> str:
-    _preflight_git_inputs(
+    git_common_dir = _preflight_git_inputs(
         root, deadline_ns=deadline_ns, inspect_object_tree=inspect_object_tree,
     )
     environment = {
@@ -185,7 +233,9 @@ def _git(
             "GIT_TERMINAL_PROMPT": "0",
         }
     )
-    command = ["git", *arguments]
+    command = [_git_executable(root, deadline_ns=deadline_ns,
+                               git_common_dir=git_common_dir), *arguments]
+    environment["PATH"] = _git_search_path(root, git_common_dir)
     _check_deadline(deadline_ns)
     with subprocess.Popen(
         command, cwd=root, env=environment,
@@ -518,14 +568,13 @@ def _preflight_git_refs(
             head = loose[selected]
 
 
-def _preflight_git_inputs(
-    root: Path, *, deadline_ns: int | None, inspect_object_tree: bool = True,
-) -> None:
-    """Refuse external config and object readers before any Git command starts."""
+def _git_routing(root: Path, *, deadline_ns: int | None) -> tuple[Path, Path]:
+    """Admit ordinary or linked routing without reading Git refs or objects."""
     def read(directory: Path, name: str) -> bytes:
         return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
                                     max_bytes=WORKSPACE_CONFIG_MAX_BYTES)
 
+    _check_deadline(deadline_ns)
     try:
         marker = root / ".git"
         if stat.S_ISDIR(marker.lstat().st_mode):
@@ -560,6 +609,21 @@ def _preflight_git_inputs(
             back = read(git_dir, "gitdir").decode("utf-8").strip()
             if Path(os.path.abspath(git_dir / back)) != marker:
                 raise SourceDiscoveryError("unsupported linked Git backlink")
+        return git_dir, common
+    except (OSError, UnicodeError, SourceError) as exc:
+        raise SourceDiscoveryError("cannot preflight local Git routing") from exc
+
+
+def _preflight_git_inputs(
+    root: Path, *, deadline_ns: int | None, inspect_object_tree: bool = True,
+) -> Path:
+    """Refuse external config and object readers before any Git command starts."""
+    def read(directory: Path, name: str) -> bytes:
+        return _read_source_regular(directory, Path(name), deadline_ns=deadline_ns,
+                                    max_bytes=WORKSPACE_CONFIG_MAX_BYTES)
+
+    try:
+        git_dir, common = _git_routing(root, deadline_ns=deadline_ns)
         # Even rev-parse opens HEAD. Reject FIFOs, symlinks and oversized inputs
         # before a subprocess can block on them, including linked-worktree HEADs.
         head = read(git_dir, "HEAD")
@@ -602,6 +666,7 @@ def _preflight_git_inputs(
                 raise SourceDiscoveryError("Git includes require unsupported external input authority")
     except (OSError, UnicodeError, SourceError) as exc:
         raise SourceDiscoveryError("cannot preflight local Git inputs") from exc
+    return common
 
 
 def _read_workspace_config(
@@ -860,6 +925,8 @@ def discover_source(
         root, "rev-parse", "HEAD", deadline_ns=deadline_ns,
         inspect_object_tree=False,
     )
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        raise SourceDiscoveryError("unsupported Git object format: SHA-1 source commit required")
     roots = tuple(
         sorted(
             filter(

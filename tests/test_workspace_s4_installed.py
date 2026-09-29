@@ -18,10 +18,11 @@ from tools.workspace_artifacts.candidate import build_fixture
 
 
 _LAUNCH = r'''
-import sys, os, json, time, stat
+import sys, os, json, time, stat, shutil
 from pathlib import Path
 mode, state, bundle, source, repo_uuid, *extra = sys.argv[1:]
 if mode.startswith('query'):
+    git_executable = str(Path(shutil.which('git')).resolve())
     query_child_code = 'from graphify.workspace.adapters.v8 import _query_child; _query_child()'
     def audit(event, args):
         mutation = event in {'os.mkdir', 'os.remove', 'os.rename', 'os.rmdir', 'os.chmod',
@@ -38,7 +39,8 @@ if mode.startswith('query'):
             raise AssertionError('unexpected durable side effect: ' + event)
         if event == 'subprocess.Popen':
             command = args[1]
-            allowed = (command[0] in {'git', 'df', 'diskutil'}
+            allowed = ((args[0] == git_executable and command[0] == git_executable)
+                       or command[0] in {'df', 'diskutil'}
                        or command[:4] == [sys.executable, '-I', '-S', '-B']
                        or (len(command) == 6 and command[:5] == [sys.executable, '-I', '-B', '-c', query_child_code]))
             if not allowed:
@@ -87,6 +89,16 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     root = tmp_path.resolve()
     repo_root = Path(__file__).resolve().parents[1]
     source = create_repo(root / "source")
+    git_marker = root / "source-git-invoked"
+    real_git = shutil.which("git")
+    assert real_git is not None
+    source_git = source / "git"
+    source_git.write_text(
+        "#!/bin/sh\n"
+        f"printf 'invoked\\n' >> '{git_marker}'\n"
+        f"exec '{real_git}' \"$@\"\n"
+    )
+    source_git.chmod(0o755)
     (source / "main.py").write_text(
         "def leaf(): return 42\ndef caller(): return leaf()\n"
         "def 南京市长江大桥(): return caller()\n", encoding="utf-8")
@@ -99,6 +111,7 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
         env[name] = str(path)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONHASHSEED"] = "0"
+    env["PATH"] = os.pathsep.join((".", env.get("PATH", os.defpath)))
     # Reuse the dependency cache, but put every environment/install beneath root.
     env["UV_CACHE_DIR"] = os.environ.get("UV_CACHE_DIR", str(Path.home() / ".cache/uv"))
     def run(args, **kwargs):
@@ -134,6 +147,7 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     args = [str(python), "-B", "-c", _LAUNCH]
     tail = [str(state), str(bundle), str(source), REPO_UUID]
     assert run([*args, "build_hostile", *tail, str(hostile)]).strip() == "INSTALLED-S4-BUILT"
+    assert not git_marker.exists()
     def snapshots():
         return tuple(tree_snapshot(p) for p in (state, source, venv, hostile,
             *(Path(env[name]) for name in ('HOME', 'CODEX_HOME', 'XDG_STATE_HOME',
@@ -142,6 +156,7 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     first = json.loads(run([*args, "query_hostile", *tail, str(hostile)]))
     assert "leaf" in first[0] and "南京市长江大桥" in first[1]
     assert snapshots() == before
+    assert not git_marker.exists()
     import marshal
     cache = Path(env["TMPDIR"]) / "jieba.cache"
     cache.write_bytes(marshal.dumps(({"南京市长江大桥": 999}, 999)))
@@ -149,3 +164,4 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     second = json.loads(run([*args, "query_hostile", *tail, str(hostile)]))
     assert first == second
     assert snapshots() == before
+    assert not git_marker.exists()

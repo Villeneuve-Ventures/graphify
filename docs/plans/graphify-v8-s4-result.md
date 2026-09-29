@@ -7,7 +7,58 @@ and stabilization are tracked in PR #167.
 S5 commands, S6 maintenance transports, S7 release qualification,
 semantic execution, migration, and consumer adoption remain separate work.
 
-## Current stabilization batch
+## Current follow-up repairs
+
+This local batch starts at `ed60eea86cf04bbbe5de51e4b1c255a10af528d7`.
+It repairs the following observed failures, in priority order:
+
+1. Git subprocesses select an absolute executable from operator installation
+   paths, excluding empty/relative PATH entries and paths or symlink targets
+   inside the checkout or its Git common directory. Observation workers receive that exact executable from the
+   parent; their audit hook checks both argv and the executable. Other read-only
+   workers have no Git allowance. Absolute installation paths outside those roots
+   remain operator-trusted; this is not an OS sandbox for hostile installed code.
+2. Repeated no-follow observations of safe file/directory type changes can
+   establish consumed-input drift and terminally abandon a stale certified
+   request. Symlinks, special files, failed reads, budget exhaustion and unstable
+   evidence remain refusals. This includes regular-file replacements of former
+   directory ancestors without traversing the replacement.
+3. Git-accepted uppercase object IDs compare against canonical source identity
+   without changing the raw bytes retained in input evidence. Different IDs
+   still refuse.
+4. Missing interpreter site-directory candidates are skipped. Other site scan
+   errors become typed read-only failures; unsafe `.pth` files still refuse.
+5. Discovery rejects non-SHA-1 source commits before enrollment can write a
+   registry entry, matching the existing lifecycle commit contract.
+
+Validation for this local batch is separate from the prior receipts below:
+
+| Check | Result |
+| --- | --- |
+| Full frozen all-extra serial pytest | **6,926 passed, 41 skipped, 3 existing warnings, 235 subtests passed**, in 3,804.17 seconds (1h03m24s). |
+| Input stability | All 366 inventoried Python and dependency files matched their pre-run SHA-256 hashes afterward. All 12 candidate paths also matched the independent-review snapshot before this factual receipt update. |
+| Focused Git and installed-package checks | 93 passed in 82.87 seconds, including ordinary and linked-worktree helper isolation and the installed-wheel build/cold-query path. |
+| Independent review | All 12 candidate paths reviewed, followed by a bounded recheck of the linked-worktree correction; zero open findings. This reviews the repair batch, not S7 release qualification. |
+| Ancillary checks | Optimized verifier: 80 passed with its expected pytest warning. All five skill-generation checks, disposable default/Codex install and help, and native Leiden smoke passed. |
+| Static/diff checks | Configured Ruff passed across the PR; expanded F checks passed across this batch; the final Git correction passed fresh Ruff and diff checks. |
+| Advisory security | Final Bandit scan completed without scan errors and retained the same 14 finding signatures. The prior default-plus-dev pip-audit receipt has 12 findings; lock, project configuration and scanner-helper hashes remain unchanged. This reuses lock-scoped evidence, not a fresh advisory-database scan. |
+| AST graph refresh | 15,600 nodes, 39,055 edges and 902 communities. The same six zero-node warnings remain; HTML was skipped by the existing large-graph guard. |
+
+The full gate command was
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen --all-extras pytest tests/ -q --tb=short -p no:cacheprovider --durations=10 --maxfail=1`.
+The slowest individual cases were pointer-authority rotation (63.20 seconds),
+certified ancestor-type drift recovery (49.39 seconds), and another
+pointer-authority rotation case (48.51 seconds). These are observed case timings,
+not an attribution of total runtime. The three warnings remain the existing
+semantic-cache scope and managed-state cleanup warnings.
+
+The independent-review report, frozen input inventory, full-suite log and final
+verification receipt are local `/tmp/graphify-s4-followup-*` artifacts. The
+preexisting `.omx-state-locks*` runtime files remain outside the product patch.
+These results record local validation before delivery to PR #167. CI was not
+awaited.
+
+## Prior stabilization batch (`ed60eea8`)
 
 This stabilization batch starts at `f31eeab9296ac689ba01062be0c30f6578a6c5af` and repairs
 four related boundary gaps, in priority order:

@@ -119,7 +119,8 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
             head = matches[0]
         else:
             head = raw.strip()
-    if head != source.head_commit.encode("ascii"):
+    valid_oid = re.fullmatch(rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head)
+    if valid_oid is None or head.lower() != source.head_commit.encode("ascii"):
         raise SourceChanged("Git HEAD changed during observation")
     policy = inputs.read_bytes(root / ".graphify" / "workspace.toml")
     if hashlib.sha256(policy).hexdigest() != source.config_sha256:
@@ -174,7 +175,14 @@ def _consumed_evidence(inputs, manifest):
                 missing = True
                 break
             if not stat.S_ISDIR(info.st_mode):
-                raise SourceUnsupported("unsafe consumed input ancestor")
+                if not stat.S_ISREG(info.st_mode):
+                    raise SourceUnsupported("unsafe consumed input ancestor")
+                # A regular file now occupies the sealed directory route.
+                # Its descendants cannot be replayed, but the ancestor's
+                # no-follow binding is positive evidence of the change.
+                inputs.probe(path)
+                missing = True
+                break
         if missing:
             continue
         path = inputs.roots[root] / relative
@@ -185,11 +193,20 @@ def _consumed_evidence(inputs, manifest):
             raise SourceUnsupported("unsafe consumed input replacement")
         operation = record["operation"]
         if operation == "read":
-            inputs.read_bytes(path)
+            if stat.S_ISREG(info.st_mode):
+                inputs.read_bytes(path)
+            else:
+                # The sealed file is now a directory. A second no-follow probe
+                # confirms the replacement binding without reading a directory.
+                inputs.probe(path)
         elif operation == "list":
-            inputs.listdir(path)
+            if stat.S_ISDIR(info.st_mode):
+                inputs.listdir(path)
+            else:
+                # Likewise, a regular file cannot be listed as the sealed dir.
+                inputs.probe(path)
         elif operation == "directory" and not stat.S_ISDIR(info.st_mode):
-            raise SourceUnsupported("unsafe consumed directory replacement")
+            inputs.probe(path)
     current = {(e["operation"], e["path"]): e["value"] for e in inputs.evidence}
     # Extra probes used for route admission are not part of the sealed operation
     # set. An absent former read/list/directory is represented explicitly by null.
@@ -321,6 +338,7 @@ class V8Adapter:
                          ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         try:
             raw = run_readonly(_OBSERVATION_CHILD_CODE, raw, deadline_ns=deadline_ns,
+                               git_source_root=source_root,
                                max_input_bytes=_CHILD_INPUT_LIMIT,
                                max_output_bytes=2 * MAX_DOCUMENT_BYTES + 65_536)
             value = json.loads(raw)

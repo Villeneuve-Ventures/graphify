@@ -58,3 +58,33 @@ def test_worker_refuses_unsafe_installation_path_file(tmp_path, monkeypatch, uns
     with pytest.raises(ReadOnlyFailure, match="unsafe installation path file"):
         run_readonly("pass", b"", deadline_ns=time.monotonic_ns() + 5_000_000_000,
                      max_input_bytes=1024, max_output_bytes=1024)
+
+
+def test_worker_skips_missing_installation_site_root(tmp_path, monkeypatch):
+    missing = tmp_path / "missing" / "site-packages"
+    roots = _readonly.site.getsitepackages()
+    monkeypatch.setattr(_readonly.site, "getsitepackages", lambda: [str(missing), *roots])
+    output = run_readonly(
+        "import networkx; print('ready')", b"",
+        deadline_ns=time.monotonic_ns() + 10_000_000_000,
+        max_input_bytes=1024, max_output_bytes=1024,
+    )
+    assert output == b"ready\n"
+    assert not missing.exists()
+
+
+def test_worker_reports_site_scan_failure(tmp_path, monkeypatch):
+    site_root = tmp_path / "site-packages"
+    site_root.mkdir()
+    original = os.scandir
+
+    def denied(path):
+        if os.fspath(path) == os.fspath(site_root):
+            raise PermissionError("site directory unreadable")
+        return original(path)
+
+    monkeypatch.setattr(_readonly.site, "getsitepackages", lambda: [str(site_root)])
+    monkeypatch.setattr(_readonly.os, "scandir", denied)
+    with pytest.raises(ReadOnlyFailure, match="installation site directory"):
+        run_readonly("pass", b"", deadline_ns=time.monotonic_ns() + 5_000_000_000,
+                     max_input_bytes=1024, max_output_bytes=1024)
