@@ -91,7 +91,21 @@ jobs:
           test "$("$git_build/install/bin/git" --version)" = "git version 2.55.0"
 
       - name: Run tests
-        run: uv run --frozen pytest tests/ -q --tb=short
+        # Module invocation makes the checkout-local observer importable.
+        run: >-
+          uv run --frozen python -m pytest -p tools.pytest_timings
+          --ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json"
+          tests/ -q --tb=short
+
+      - name: Upload pytest timing diagnostics
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-timings-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pytest-timings/
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Run protected verifier conformance with optimized Python
         run: uv run --frozen python -O -m pytest tests/test_protected_change_verifier.py -q --tb=short
