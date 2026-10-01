@@ -22,7 +22,7 @@ def suite(tmp_path):
     return tmp_path
 
 
-def run(root, *args, instrument=True, output=None, opt_in=True, env_extra=None):
+def run(root, *args, instrument=True, output=None, opt_in=True, env_extra=None, shard=False):
     env = os.environ.copy()
     for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         env.pop(name, None)
@@ -36,6 +36,11 @@ def run(root, *args, instrument=True, output=None, opt_in=True, env_extra=None):
         command += ["-p", PLUGIN]
         if opt_in:
             command += ["--ci-timing-json", str(output or root / "timings.json")]
+    if shard:
+        from tools.pytest_partition import allocation, owner
+        paths = sorted((root / "tests").rglob("test_*.py"))
+        shard_id = owner(paths[0].relative_to(root).as_posix(), allocation()[0])
+        command += ["-p", "tools.pytest_partition", f"--ci-shard={shard_id}"]
     return subprocess.run(
         [*command, "tests/", "-q", "--tb=short", "--color=no", *args],
         cwd=root, env=env, text=True, capture_output=True, timeout=30, check=False,
@@ -130,10 +135,11 @@ def test_discovery_and_new_modules_match_original_entry_point(suite):
     ("def test_case(): pytest.exit('early', returncode=0)\n", 0, False),
     ("def test_case(): raise KeyboardInterrupt\n", 2, False),
 ])
-def test_outcomes_match_without_observer(suite, source, code, complete):
+@pytest.mark.parametrize("shard", [False, True])
+def test_outcomes_match_without_observer(suite, source, code, complete, shard):
     (suite / "tests/test_case.py").write_text("import pytest\n" + source)
     baseline = run(suite, instrument=False)
-    observed = run(suite)
+    observed = run(suite, shard=shard)
     assert baseline.returncode == observed.returncode == code, observed.stdout + observed.stderr
     payload = timing(observed, suite)
     assert payload["status"] == ("complete" if complete else "incomplete")
@@ -176,7 +182,8 @@ def test_module_phase_attribution_and_execution_once(suite):
 
 @pytest.mark.parametrize("fail", [False, True])
 @pytest.mark.parametrize("kind", ["fixture", "unittest", "setup-fixture"])
-def test_subtests_preserve_outcomes_and_do_not_double_count(suite, fail, kind):
+@pytest.mark.parametrize("shard", [False, True])
+def test_subtests_preserve_outcomes_and_do_not_double_count(suite, fail, kind, shard):
     (suite / "conftest.py").write_text(
         "import pytest\n@pytest.hookimpl(wrapper=True)\n"
         "def pytest_runtest_makereport(item, call):\n"
@@ -205,7 +212,7 @@ def test_subtests_preserve_outcomes_and_do_not_double_count(suite, fail, kind):
         )
     (suite / "tests/test_sub.py").write_text(body)
     baseline = run(suite, instrument=False)
-    observed = run(suite)
+    observed = run(suite, shard=shard)
     assert baseline.returncode == observed.returncode == int(fail), observed.stdout
     payload = timing(observed, suite)
     assert payload["subtests"] == {"passed": 1 if fail else 2, "failed": int(fail), "skipped": 0}
@@ -255,11 +262,12 @@ def test_setup_only_and_empty_inventory(suite):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_unwritable_artifact_preserves_test_result(suite, fail):
+@pytest.mark.parametrize("shard", [False, True])
+def test_unwritable_artifact_preserves_test_result(suite, fail, shard):
     (suite / "tests/test_case.py").write_text(f"def test_case(): assert {not fail}\n")
     blocker = suite / "blocked"
     blocker.write_text("preserve")
-    result = run(suite, output=blocker / "timings.json")
+    result = run(suite, output=blocker / "timings.json", shard=shard)
     assert result.returncode == int(fail)
     payload = timing(result, suite, file=False)
     assert payload["status"] == "incomplete"
@@ -269,7 +277,8 @@ def test_unwritable_artifact_preserves_test_result(suite, fail):
 
 @pytest.mark.parametrize("error", ["OSError", "RuntimeError"])
 @pytest.mark.parametrize("fail", [False, True])
-def test_terminal_output_failure_preserves_result_and_artifact(suite, error, fail):
+@pytest.mark.parametrize("shard", [False, True])
+def test_terminal_output_failure_preserves_result_and_artifact(suite, error, fail, shard):
     (suite / "conftest.py").write_text(
         "def pytest_sessionstart(session):\n"
         "    reporter = session.config.pluginmanager.getplugin('terminalreporter')\n"
@@ -280,19 +289,20 @@ def test_terminal_output_failure_preserves_result_and_artifact(suite, error, fai
         "    reporter.write_line = write\n"
     )
     (suite / "tests/test_case.py").write_text(f"def test_case(): assert {not fail}\n")
-    result = run(suite)
+    result = run(suite, shard=shard)
     assert result.returncode == int(fail), result.stderr
     payload = json.loads((suite / "timings.json").read_text())
     assert payload["exit_code"] == result.returncode
     assert payload["status"] == ("incomplete" if fail else "complete")
 
 
-def test_inner_finalizer_failure_is_preserved_and_diagnostic_is_incomplete(suite):
+@pytest.mark.parametrize("shard", [False, True])
+def test_inner_finalizer_failure_is_preserved_and_diagnostic_is_incomplete(suite, shard):
     (suite / "conftest.py").write_text(
         "def pytest_sessionfinish(session): raise RuntimeError('inner finalizer')\n"
     )
     (suite / "tests/test_case.py").write_text("def test_case(): pass\n")
-    result = run(suite)
+    result = run(suite, shard=shard)
     assert result.returncode != 0
     assert "RuntimeError: inner finalizer" in result.stderr
     payload = json.loads((suite / "timings.json").read_text())
@@ -341,7 +351,8 @@ def test_collection_hook_exception_keeps_diagnostics(suite):
 @pytest.mark.parametrize("mutation", [
     "missing-teardown", "duplicate-call", "nan", "overflow", "none-duration",
 ])
-def test_incomplete_or_invalid_parent_reports_are_ineligible(suite, mutation):
+@pytest.mark.parametrize("shard", [False, True])
+def test_incomplete_or_invalid_parent_reports_are_ineligible(suite, mutation, shard):
     (suite / "tests/test_case.py").write_text("def test_case(): pass\n")
     (suite / "conftest.py").write_text(
         "import tools.pytest_timings as timing\n"
@@ -356,7 +367,7 @@ def test_incomplete_or_invalid_parent_reports_are_ineligible(suite, mutation):
         "    if mutation == 'duplicate-call' and report.when == 'call': original(self, report)\n"
         "timing._Timing.pytest_runtest_logreport = report\n"
     )
-    result = run(suite)
+    result = run(suite, shard=shard)
     assert result.returncode == 0
     payload = timing(result, suite)
     assert payload["status"] == "incomplete"
@@ -366,9 +377,10 @@ def test_incomplete_or_invalid_parent_reports_are_ineligible(suite, mutation):
     assert reason in payload["incomplete_reasons"]
 
 
-def test_killed_process_leaves_explicit_running_checkpoint(suite):
+@pytest.mark.parametrize("shard", [False, True])
+def test_killed_process_leaves_explicit_running_checkpoint(suite, shard):
     (suite / "tests/test_case.py").write_text("import os\ndef test_case(): os._exit(17)\n")
-    result = run(suite)
+    result = run(suite, shard=shard)
     assert result.returncode == 17
     payload = json.loads((suite / "timings.json").read_text())
     assert payload["status"] == "running"
@@ -377,7 +389,8 @@ def test_killed_process_leaves_explicit_running_checkpoint(suite):
 
 
 @pytest.mark.parametrize("fail", [False, True])
-def test_serialization_failure_does_not_change_result(suite, fail):
+@pytest.mark.parametrize("shard", [False, True])
+def test_serialization_failure_does_not_change_result(suite, fail, shard):
     (suite / "tests/test_case.py").write_text(
         "import tools.pytest_timings as timing\n"
         "from types import SimpleNamespace\n"
@@ -386,7 +399,7 @@ def test_serialization_failure_does_not_change_result(suite, fail):
         "    timing.json = SimpleNamespace(dumps=broken)\n"
         f"    assert {not fail}\n"
     )
-    result = run(suite)
+    result = run(suite, shard=shard)
     assert result.returncode == int(fail)
     # The final write never succeeded, so the earlier record cannot claim success.
     assert json.loads((suite / "timings.json").read_text())["status"] == "running"
@@ -408,12 +421,13 @@ def test_finalizer_exit_status_is_observed(suite):
 def test_workflow_keeps_full_suite_and_uploads_failed_run_diagnostics():
     workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["test"]
-    assert job["strategy"]["matrix"] == {"python-version": ["3.14"]}
+    assert job["strategy"]["matrix"] == {"python-version": ["3.14"], "shard": ["1", "2", "3", "4"]}
     steps = {step.get("name"): step for step in job["steps"]}
     assert steps["Install dependencies"]["run"] == "uv sync --all-extras --frozen"
     assert "git version 2.55.0" in steps["Install acceptance-pinned Git 2.55.0"]["run"]
     assert steps["Run tests"]["run"] == (
-        "uv run --frozen python -m pytest -p tools.pytest_timings "
+        "uv run --frozen python -m pytest -p tools.pytest_partition -p tools.pytest_timings "
+        "--ci-shard=${{ matrix.shard }} "
         '--ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json" tests/ -q --tb=short'
     )
     assert "continue-on-error" not in steps["Run tests"]
@@ -422,9 +436,10 @@ def test_workflow_keeps_full_suite_and_uploads_failed_run_diagnostics():
     assert upload["continue-on-error"] == "true"
     assert upload["uses"] == "actions/upload-artifact@v4"
     assert upload["with"]["path"] == "${{ runner.temp }}/pytest-timings/"
+    steps = {step.get("name"): step for step in workflow["jobs"]["quality"]["steps"]}
     assert steps["Run protected verifier conformance with optimized Python"]["run"] == (
         "uv run --frozen python -O -m pytest tests/test_protected_change_verifier.py -q --tb=short"
     )
     assert steps["Verify install works end-to-end"]["run"] == (
-        "uv run --frozen graphify --help\nuv run --frozen graphify install\n"
+        "uv run --frozen python -m tools.ci_pytest_gate smoke"
     )

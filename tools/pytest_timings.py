@@ -20,6 +20,8 @@ import time
 
 import pytest
 
+from tools.pytest_partition import PARTITION
+
 PHASES = ("setup", "call", "teardown")
 
 
@@ -97,6 +99,7 @@ class _Timing:
         self.collection_completed = False
         self.collection_errors = 0
         self.deselected = 0
+        self.full_inventory = {}
         self.items = {}
         self.modules = {}
         self.phases = {}
@@ -156,6 +159,17 @@ class _Timing:
                     **{f"{phase}_seconds": 0.0 for phase in PHASES},
                 })
                 module["selected_items"] += 1
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_collection_modifyitems(self, items):
+        self.full_inventory = {}
+        for item in items:
+            if item.nodeid in self.full_inventory:
+                self.valid = False
+            self.full_inventory[item.nodeid] = os.path.relpath(
+                item.path, self.config.rootpath
+            ).replace(os.sep, "/")
+        return (yield)
 
     def pytest_collectreport(self, report: pytest.CollectReport) -> None:
         self.collection_errors += int(report.failed)
@@ -220,7 +234,17 @@ class _Timing:
         )
         if completed != len(self.items):
             reasons.append("execution-incomplete")
-        if self.deselected:
+        partition = self.config.stash.get(PARTITION, None)
+        validated_partition = bool(
+            partition is not None
+            and partition["full_inventory"] == self.full_inventory
+            and partition["selected_inventory"] == self.items
+            and partition["deselected_items"] == self.deselected
+            and len(self.full_inventory) == len(self.items) + self.deselected
+        )
+        if partition is not None and not validated_partition:
+            reasons.append("invalid-shard-selection")
+        if self.deselected and not validated_partition:
             reasons.append("deselected-tests")
         if exit_code != 0:
             reasons.append("pytest-unsuccessful")
@@ -244,6 +268,12 @@ class _Timing:
             "collection_seconds": round(self.collection_seconds, 6),
             "collection_completed": self.collection_completed,
             "collection_errors": self.collection_errors,
+            "full_items": len(self.full_inventory),
+            "full_inventory": dict(sorted(self.full_inventory.items())),
+            "selected_inventory": dict(sorted(self.items.items())),
+            "partition": ({key: partition[key] for key in (
+                "shard", "shard_count", "allocation_sha256"
+            )} | {"selection_validated": validated_partition}) if partition else None,
             "selected_items": len(self.items), "executed_items": len(self.phases),
             "completed_items": completed,
             "deselected_items": self.deselected, "modules": modules,

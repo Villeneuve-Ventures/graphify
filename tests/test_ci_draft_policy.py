@@ -19,8 +19,15 @@ def test_draft_transition_cancels_only_the_same_pull_requests_ci():
         ),
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
-    for job in workflow["jobs"].values():
-        assert job["if"] == (
+    for name, job in workflow["jobs"].items():
+        draft_condition = (
             "${{ github.event_name != 'pull_request' || "
             "github.event.pull_request.draft == false }}"
         )
+        if name == "quality":
+            assert job["if"] == (
+                "${{ always() && (github.event_name != 'pull_request' || "
+                "github.event.pull_request.draft == false) }}"
+            )
+        else:
+            assert job["if"] == draft_condition
