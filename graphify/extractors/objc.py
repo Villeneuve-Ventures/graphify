@@ -310,7 +310,13 @@ def extract_objc(path: Path, *, strict: bool = False) -> dict:
     walk(root)
 
     # Second pass: resolve calls inside method bodies
-    all_method_nids = {n["id"] for n in nodes if n["id"] != file_nid}
+    # Limit candidate callees to declared method IDs only (not classes/protocols/stubs).
+    all_method_nids = {m_nid for m_nid, _, _ in method_bodies}
+    for n in nodes:
+        name = n.get("name")
+        nid = n.get("id")
+        if isinstance(name, str) and isinstance(nid, str) and name[:1] in ("+", "-"):
+            all_method_nids.add(nid)
     class_method_nids: dict[str, set[str]] = {}
     for m_nid, _, container_nid in method_bodies:
         class_method_nids.setdefault(container_nid, set()).add(m_nid)
