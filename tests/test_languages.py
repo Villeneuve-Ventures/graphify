@@ -1185,6 +1185,63 @@ def test_objc_class_method_labeled_with_plus(tmp_path):
     assert "+shared" in labels and "-go" in labels
 
 
+@pytest.mark.parametrize(("declarations", "body", "expected"), [
+    (
+        "@interface Caller\n- (void)render;\n@end\n",
+        "[self render];",
+        {("-go", "-render")},
+    ),
+    (
+        "@interface Factory\n+ (void)render;\n@end\n",
+        "[Factory render];",
+        {("-go", "+render")},
+    ),
+    (
+        "@protocol Renderer\n- (void)render;\n@end\n",
+        "id<Renderer> obj; [obj render];",
+        {("-go", "-render")},
+    ),
+    (
+        "@interface Factory\n+ (Factory *)shared;\n- (void)render;\n@end\n",
+        "[[Factory shared] render];",
+        {("-go", "+shared"), ("-go", "-render")},
+    ),
+], ids=["instance", "class", "protocol", "nested-receiver"])
+def test_objc_calls_preserve_declaration_only_methods(tmp_path, declarations, body, expected):
+    """Method declarations remain callable even when no definition was extracted."""
+    p = tmp_path / "Caller.m"
+    p.write_text(
+        declarations
+        + "@implementation Caller\n"
+        + f"- (void)go {{ {body} }}\n"
+        + "@end\n"
+    )
+    r = extract_objc(p)
+    assert "error" not in r
+    assert _calls(r) == expected
+
+
+@pytest.mark.parametrize(("declarations", "excluded_label"), [
+    ("@interface Render\n@end\n", "Render"),
+    ("@protocol Render\n@end\n", "<Render>"),
+    ("@interface Holder\n@property (strong) Render *item;\n@end\n", "Render"),
+], ids=["class", "protocol", "type-stub"])
+def test_objc_calls_exclude_non_method_nodes(tmp_path, declarations, excluded_label):
+    """A matching class, protocol, or type stub cannot become a method call target."""
+    p = tmp_path / "Caller.m"
+    p.write_text(
+        declarations
+        + "@implementation Caller\n"
+        + "- (void)Render { }\n"
+        + "- (void)go { [self Render]; }\n"
+        + "@end\n"
+    )
+    r = extract_objc(p)
+    assert "error" not in r
+    assert excluded_label in _labels(r)
+    assert _calls(r) == {("-go", "-Render")}
+
+
 def test_objc_compound_selector_call_resolves(tmp_path):
     """A compound message `[self a:x b:y]` resolves to the compound method def (#1475)."""
     p = tmp_path / "V.m"

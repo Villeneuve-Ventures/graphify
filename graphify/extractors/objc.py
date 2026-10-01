@@ -313,7 +313,7 @@ def extract_objc(path: Path, *, strict: bool = False) -> dict:
     # Limit candidate callees to declared method IDs only (not classes/protocols/stubs).
     all_method_nids = {m_nid for m_nid, _, _ in method_bodies}
     for n in nodes:
-        name = n.get("name")
+        name = n.get("label")
         nid = n.get("id")
         if isinstance(name, str) and isinstance(nid, str) and name[:1] in ("+", "-"):
             all_method_nids.add(nid)
