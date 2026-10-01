@@ -172,3 +172,82 @@ def test_unrelated_job_policies_match_baseline():
         assert current["jobs"][name] == old["jobs"][name]
     for field in ("name", "on", "concurrency"):
         assert current[field] == old[field]
+
+
+def test_quality_installs_the_acceptance_git_before_conformance():
+    ci = workflow()
+    name = "Install acceptance-pinned Git 2.55.0"
+    matrix_step = next(step for step in ci["jobs"]["test"]["steps"]
+                       if step.get("name") == name)
+    gate_steps = ci["jobs"]["quality"]["steps"]
+    git_index = next(index for index, step in enumerate(gate_steps)
+                     if step.get("name") == name)
+    verifier_index = next(index for index, step in enumerate(gate_steps)
+                          if step.get("name") ==
+                          "Run protected verifier conformance with optimized Python")
+    assert git_index < verifier_index
+    assert gate_steps[git_index] == matrix_step
+    assert "if" not in matrix_step and "continue-on-error" not in matrix_step
+    assert "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357" in matrix_step["run"]
+    assert '"$git_build/install/bin" >> "$GITHUB_PATH"' in matrix_step["run"]
+
+
+def test_smoke_propagates_a_broken_installed_launcher(tmp_path, monkeypatch):
+    import sysconfig
+    from tools.ci_pytest_gate import smoke
+
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    launcher = scripts / ("graphify.exe" if sys.platform == "win32" else "graphify")
+    monkeypatch.setattr(sysconfig, "get_path", lambda name: str(scripts))
+    original_run = subprocess.run
+
+    def broken_launcher(command, **kwargs):
+        if command[0] == str(launcher):
+            raise subprocess.CalledProcessError(17, command)
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", broken_launcher)
+    with pytest.raises(subprocess.CalledProcessError) as failure:
+        smoke()
+    assert failure.value.returncode == 17
+
+
+def test_smoke_checks_console_commands_in_a_disposable_home(tmp_path, monkeypatch):
+    import sysconfig
+    from tools.ci_pytest_gate import smoke
+
+    operator_home = tmp_path / "operator-home"
+    operator_home.mkdir()
+    protected = operator_home / "existing-skill"
+    protected.write_text("preserve")
+    monkeypatch.setenv("HOME", str(operator_home))
+    monkeypatch.setenv("USERPROFILE", str(operator_home))
+    scripts = tmp_path / "scripts"
+    monkeypatch.setattr(sysconfig, "get_path", lambda name: str(scripts))
+    launcher = scripts / ("graphify.exe" if sys.platform == "win32" else "graphify")
+    calls = []
+
+    def installed_launcher(command, **kwargs):
+        assert command[0] == str(launcher)
+        assert kwargs["check"] is True
+        env = kwargs["env"]
+        home = Path(env["HOME"])
+        assert home != operator_home and home.is_dir()
+        assert env["USERPROFILE"] == str(home)
+        assert Path(env["CODEX_HOME"]).is_relative_to(home)
+        assert Path(env["XDG_CONFIG_HOME"]).is_relative_to(home)
+        calls.append((command, home))
+        if command[1:] == ["install"]:
+            skill = home / ".claude/skills/graphify/SKILL.md"
+            skill.parent.mkdir(parents=True)
+            skill.write_text("installed skill")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", installed_launcher)
+    smoke()
+    assert [command for command, home in calls] == [
+        [str(launcher), "--help"], [str(launcher), "install"]]
+    assert calls[0][1] == calls[1][1] and not calls[0][1].exists()
+    assert protected.read_text() == "preserve"
+    assert set(operator_home.iterdir()) == {protected}

@@ -64,8 +64,10 @@ the exact four expected paths and payloads. A failed receipt upload fails the
 matrix child and cannot produce a successful gate. Whole-run cancellation also
 has an explicit failing gate step.
 
-After accepting the receipts, the gate runs optimized-Python protected-verifier
-conformance and one installation smoke check in a disposable process-scoped home.
+After accepting the receipts, the gate installs its own acceptance-pinned Git
+2.55.0 before optimized-Python protected-verifier conformance. Its installation
+smoke check invokes the installed `graphify` console launcher for both `--help`
+and `install` in a disposable process-scoped home.
 It never reruns the full suite. Skill generation, advisory security scans and the
 macOS Leiden job retain their policies.
 

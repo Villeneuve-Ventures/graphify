@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 import tempfile
 
 SHARDS = (1, 2, 3, 4)
@@ -54,13 +55,16 @@ def check(root: Path, env: dict[str, str]) -> None:
 
 
 def smoke() -> None:
+    launcher = Path(sysconfig.get_path("scripts")) / (
+        "graphify.exe" if sys.platform == "win32" else "graphify"
+    )
     # Process-scoped disposable home: never update the operator's installed skills.
     with tempfile.TemporaryDirectory(prefix="graphify-install-smoke-") as directory:
         env = {**os.environ, "HOME": directory, "USERPROFILE": directory,
                "CODEX_HOME": str(Path(directory) / ".codex"),
                "XDG_CONFIG_HOME": str(Path(directory) / ".config")}
         for args in (("--help",), ("install",)):
-            subprocess.run([sys.executable, "-m", "graphify", *args], env=env, check=True)
+            subprocess.run([str(launcher), *args], env=env, check=True)
         skill = Path(directory) / ".claude/skills/graphify/SKILL.md"
         if not skill.is_file() or not skill.read_text():
             raise ValueError("Installation did not produce the default Claude skill")
