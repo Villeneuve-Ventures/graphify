@@ -30,7 +30,7 @@ def run(root, *args, instrument=True, output=None, opt_in=True, env_extra=None):
     env.update(env_extra or {})
     # Compare the original console entry point with the instrumented module entry.
     command = [sys.executable, "-m", "pytest"] if instrument else [
-        str(Path(sys.executable).with_name("pytest"))
+        str(Path(sys.executable).with_name("pytest.exe" if sys.platform == "win32" else "pytest"))
     ]
     if instrument:
         command += ["-p", PLUGIN]
@@ -53,6 +53,32 @@ def timing(result, root, *, file=True):
     if file:
         assert json.loads((root / "timings.json").read_text()) == payload
     return payload
+
+
+@pytest.mark.parametrize("platform,python_name,launcher", [
+    ("linux", "python3.14", "pytest"),
+    ("darwin", "python", "pytest"),
+    ("win32", "python.exe", "pytest.exe"),
+])
+def test_original_entry_point_uses_current_interpreters_console_launcher(
+    suite, monkeypatch, platform, python_name, launcher,
+):
+    executable = suite / "environment" / python_name
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(sys, "executable", str(executable))
+    calls = []
+
+    def capture(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", capture)
+    result = run(suite, instrument=False)
+    assert result.returncode == 0
+    assert calls[0][0] == [
+        str(executable.with_name(launcher)), "tests/", "-q", "--tb=short", "--color=no",
+    ]
+    assert calls[0][1]["cwd"] == suite
 
 
 def test_inert_without_explicit_option(suite):
