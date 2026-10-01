@@ -53,11 +53,14 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
+    name: Pytest shard ${{ matrix.shard }}/4
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.14"]
+        shard: [1, 2, 3, 4]
 
     steps:
       - uses: actions/checkout@v6
@@ -91,9 +94,11 @@ jobs:
           test "$("$git_build/install/bin/git" --version)" = "git version 2.55.0"
 
       - name: Run tests
+        id: pytest
         # Module invocation makes the checkout-local observer importable.
         run: >-
-          uv run --frozen python -m pytest -p tools.pytest_timings
+          uv run --frozen python -m pytest -p tools.pytest_partition -p tools.pytest_timings
+          --ci-shard=${{ matrix.shard }}
           --ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json"
           tests/ -q --tb=short
 
@@ -102,18 +107,69 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: pytest-timings-${{ github.run_id }}-${{ github.run_attempt }}
+          name: pytest-timings-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/pytest-timings/
           if-no-files-found: warn
           retention-days: 30
+
+      # Unlike timings, these receipts are required proof for each matrix child.
+      - name: Record shard execution outcome
+        if: always()
+        env:
+          PYTEST_OUTCOME: ${{ steps.pytest.outcome }}
+          JOB_STATUS: ${{ job.status }}
+        run: >-
+          python -m tools.ci_pytest_gate record --shard=${{ matrix.shard }}
+          --output "$RUNNER_TEMP/pytest-result/result.json"
+
+      - name: Upload shard execution outcome
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-result-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/pytest-result/result.json
+          if-no-files-found: error
+          retention-days: 30
+
+  quality:
+    name: Python quality gate
+    needs: [test]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download individual shard execution outcomes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pytest-result-${{ github.run_id }}-${{ github.run_attempt }}-shard-*
+          path: ${{ runner.temp }}/pytest-results
+          merge-multiple: false
+
+      - name: Require all four successful shard executions
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+        run: python -m tools.ci_pytest_gate check --receipts "$RUNNER_TEMP/pytest-results"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: "3.14"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --frozen
 
       - name: Run protected verifier conformance with optimized Python
         run: uv run --frozen python -O -m pytest tests/test_protected_change_verifier.py -q --tb=short
 
       - name: Verify install works end-to-end
-        run: |
-          uv run --frozen graphify --help
-          uv run --frozen graphify install
+        run: uv run --frozen python -m tools.ci_pytest_gate smoke
+
+      - name: Reject whole-run cancellation
+        if: cancelled()
+        run: exit 1
 
   security-scan:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}

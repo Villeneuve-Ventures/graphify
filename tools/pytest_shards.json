@@ -1,0 +1,1005 @@
+{
+  "fallback": "SHA-256 of relative POSIX module path, first 4 bytes big-endian modulo 4, plus 1",
+  "modules": {
+    "tests/test_affected_cli.py": {
+      "microseconds": 17460,
+      "shard": 3
+    },
+    "tests/test_affected_member_seed.py": {
+      "microseconds": 1744,
+      "shard": 2
+    },
+    "tests/test_agents_platform.py": {
+      "microseconds": 52729,
+      "shard": 4
+    },
+    "tests/test_analyze.py": {
+      "microseconds": 30393,
+      "shard": 2
+    },
+    "tests/test_anthropic_custom_endpoint.py": {
+      "microseconds": 5667,
+      "shard": 4
+    },
+    "tests/test_antigravity_install.py": {
+      "microseconds": 6984,
+      "shard": 3
+    },
+    "tests/test_astro_extraction.py": {
+      "microseconds": 11947,
+      "shard": 1
+    },
+    "tests/test_backend_extras.py": {
+      "microseconds": 2773,
+      "shard": 2
+    },
+    "tests/test_benchmark.py": {
+      "microseconds": 479856,
+      "shard": 2
+    },
+    "tests/test_build.py": {
+      "microseconds": 57783,
+      "shard": 3
+    },
+    "tests/test_build_merge_hyperedges_and_prune.py": {
+      "microseconds": 130545,
+      "shard": 2
+    },
+    "tests/test_build_merge_semantic_preservation.py": {
+      "microseconds": 763911,
+      "shard": 3
+    },
+    "tests/test_builtin_global_type_refs.py": {
+      "microseconds": 15459,
+      "shard": 1
+    },
+    "tests/test_cache.py": {
+      "microseconds": 247547,
+      "shard": 3
+    },
+    "tests/test_cache_cleanup_boundaries.py": {
+      "microseconds": 239615,
+      "shard": 1
+    },
+    "tests/test_callflow_html.py": {
+      "microseconds": 1924205,
+      "shard": 2
+    },
+    "tests/test_cargo_introspect.py": {
+      "microseconds": 50121,
+      "shard": 1
+    },
+    "tests/test_case_sensitive_resolution.py": {
+      "microseconds": 49228,
+      "shard": 4
+    },
+    "tests/test_charmap_encoding.py": {
+      "microseconds": 19264,
+      "shard": 2
+    },
+    "tests/test_chunking.py": {
+      "microseconds": 632367,
+      "shard": 1
+    },
+    "tests/test_ci_draft_policy.py": {
+      "microseconds": 10219,
+      "shard": 4
+    },
+    "tests/test_cjs_module_extension.py": {
+      "microseconds": 5113,
+      "shard": 1
+    },
+    "tests/test_claude_cli_backend.py": {
+      "microseconds": 16976,
+      "shard": 2
+    },
+    "tests/test_claude_md.py": {
+      "microseconds": 33896,
+      "shard": 1
+    },
+    "tests/test_cli_broken_pipe.py": {
+      "microseconds": 191673,
+      "shard": 4
+    },
+    "tests/test_cli_export.py": {
+      "microseconds": 36129853,
+      "shard": 4
+    },
+    "tests/test_cluster.py": {
+      "microseconds": 30936,
+      "shard": 3
+    },
+    "tests/test_codebuddy.py": {
+      "microseconds": 82437,
+      "shard": 1
+    },
+    "tests/test_community_hub_labels.py": {
+      "microseconds": 3077,
+      "shard": 2
+    },
+    "tests/test_confidence.py": {
+      "microseconds": 12792,
+      "shard": 4
+    },
+    "tests/test_corrupt_graph_json.py": {
+      "microseconds": 8888,
+      "shard": 2
+    },
+    "tests/test_cpp_objc_cross_file_calls.py": {
+      "microseconds": 235938,
+      "shard": 4
+    },
+    "tests/test_cpp_preprocess.py": {
+      "microseconds": 1612,
+      "shard": 3
+    },
+    "tests/test_cross_language_call_resolution.py": {
+      "microseconds": 40801,
+      "shard": 3
+    },
+    "tests/test_csharp_member_calls.py": {
+      "microseconds": 79195,
+      "shard": 2
+    },
+    "tests/test_csharp_type_resolution.py": {
+      "microseconds": 416151,
+      "shard": 1
+    },
+    "tests/test_dart.py": {
+      "microseconds": 9963,
+      "shard": 1
+    },
+    "tests/test_dedup.py": {
+      "microseconds": 29235,
+      "shard": 4
+    },
+    "tests/test_detect.py": {
+      "microseconds": 4962533,
+      "shard": 4
+    },
+    "tests/test_devin.py": {
+      "microseconds": 55766,
+      "shard": 4
+    },
+    "tests/test_dotnet.py": {
+      "microseconds": 360476,
+      "shard": 3
+    },
+    "tests/test_engine_seams.py": {
+      "microseconds": 2842372,
+      "shard": 3
+    },
+    "tests/test_explain_cli.py": {
+      "microseconds": 20779,
+      "shard": 1
+    },
+    "tests/test_export.py": {
+      "microseconds": 344594,
+      "shard": 1
+    },
+    "tests/test_extract.py": {
+      "microseconds": 1767007,
+      "shard": 1
+    },
+    "tests/test_extract_cache_location.py": {
+      "microseconds": 60051,
+      "shard": 3
+    },
+    "tests/test_extract_cli.py": {
+      "microseconds": 1727215,
+      "shard": 3
+    },
+    "tests/test_extract_code_only_cli.py": {
+      "microseconds": 18438962,
+      "shard": 4
+    },
+    "tests/test_extraction_spec_ids.py": {
+      "microseconds": 30576,
+      "shard": 1
+    },
+    "tests/test_extractors_registry.py": {
+      "microseconds": 743,
+      "shard": 1
+    },
+    "tests/test_falkordb_integration.py": {
+      "microseconds": 2011,
+      "shard": 4
+    },
+    "tests/test_file_node_id_spec.py": {
+      "microseconds": 54584,
+      "shard": 2
+    },
+    "tests/test_file_slice.py": {
+      "microseconds": 30761,
+      "shard": 4
+    },
+    "tests/test_gemini_hook.py": {
+      "microseconds": 394762,
+      "shard": 4
+    },
+    "tests/test_global_graph.py": {
+      "microseconds": 39244,
+      "shard": 4
+    },
+    "tests/test_google_workspace.py": {
+      "microseconds": 15194,
+      "shard": 3
+    },
+    "tests/test_hook_guard.py": {
+      "microseconds": 771134,
+      "shard": 1
+    },
+    "tests/test_hooks.py": {
+      "microseconds": 40007894,
+      "shard": 2
+    },
+    "tests/test_hypergraph.py": {
+      "microseconds": 27194,
+      "shard": 1
+    },
+    "tests/test_id_normalization_contract.py": {
+      "microseconds": 1281428,
+      "shard": 4
+    },
+    "tests/test_image_vision.py": {
+      "microseconds": 60996,
+      "shard": 4
+    },
+    "tests/test_import_extension_resolution.py": {
+      "microseconds": 103232,
+      "shard": 1
+    },
+    "tests/test_incremental.py": {
+      "microseconds": 2956917,
+      "shard": 4
+    },
+    "tests/test_indirect_dispatch.py": {
+      "microseconds": 143340,
+      "shard": 2
+    },
+    "tests/test_indirect_dispatch_assign_return.py": {
+      "microseconds": 20565,
+      "shard": 1
+    },
+    "tests/test_indirect_dispatch_getattr.py": {
+      "microseconds": 24156,
+      "shard": 4
+    },
+    "tests/test_ingest.py": {
+      "microseconds": 31529,
+      "shard": 3
+    },
+    "tests/test_install.py": {
+      "microseconds": 470501,
+      "shard": 1
+    },
+    "tests/test_install_references.py": {
+      "microseconds": 1699798,
+      "shard": 4
+    },
+    "tests/test_install_roundtrip.py": {
+      "microseconds": 264149,
+      "shard": 3
+    },
+    "tests/test_install_strings.py": {
+      "microseconds": 3226,
+      "shard": 4
+    },
+    "tests/test_install_upgrade.py": {
+      "microseconds": 31482,
+      "shard": 2
+    },
+    "tests/test_interpreter_pointer.py": {
+      "microseconds": 188807,
+      "shard": 3
+    },
+    "tests/test_java_member_calls.py": {
+      "microseconds": 170141,
+      "shard": 2
+    },
+    "tests/test_java_type_resolution.py": {
+      "microseconds": 141228,
+      "shard": 1
+    },
+    "tests/test_js_import_resolution.py": {
+      "microseconds": 360283,
+      "shard": 4
+    },
+    "tests/test_label_retry.py": {
+      "microseconds": 779,
+      "shard": 4
+    },
+    "tests/test_labeling.py": {
+      "microseconds": 405436,
+      "shard": 2
+    },
+    "tests/test_language_resolvers.py": {
+      "microseconds": 1983,
+      "shard": 1
+    },
+    "tests/test_languages.py": {
+      "microseconds": 876041,
+      "shard": 3
+    },
+    "tests/test_legacy_graph_update.py": {
+      "microseconds": 67430,
+      "shard": 4
+    },
+    "tests/test_llm_backends.py": {
+      "microseconds": 1403856,
+      "shard": 3
+    },
+    "tests/test_llm_parser.py": {
+      "microseconds": 5408,
+      "shard": 4
+    },
+    "tests/test_long_path_hashing.py": {
+      "microseconds": 4418,
+      "shard": 3
+    },
+    "tests/test_manifest_ingest.py": {
+      "microseconds": 46398,
+      "shard": 2
+    },
+    "tests/test_mcp_ingest.py": {
+      "microseconds": 51576,
+      "shard": 1
+    },
+    "tests/test_merge_graphs_cli.py": {
+      "microseconds": 494129,
+      "shard": 4
+    },
+    "tests/test_minhash.py": {
+      "microseconds": 43264,
+      "shard": 1
+    },
+    "tests/test_multigraph_compat.py": {
+      "microseconds": 1776,
+      "shard": 1
+    },
+    "tests/test_multigraph_diagnostics.py": {
+      "microseconds": 101808,
+      "shard": 1
+    },
+    "tests/test_multilang.py": {
+      "microseconds": 113695,
+      "shard": 2
+    },
+    "tests/test_obsidian_dangling_member.py": {
+      "microseconds": 23903,
+      "shard": 2
+    },
+    "tests/test_obsidian_filename_cap.py": {
+      "microseconds": 43572,
+      "shard": 4
+    },
+    "tests/test_office_incremental.py": {
+      "microseconds": 99110,
+      "shard": 3
+    },
+    "tests/test_office_limits.py": {
+      "microseconds": 454871,
+      "shard": 3
+    },
+    "tests/test_ollama.py": {
+      "microseconds": 6988,
+      "shard": 1
+    },
+    "tests/test_ollama_retry_cap.py": {
+      "microseconds": 526835,
+      "shard": 2
+    },
+    "tests/test_openai_custom_endpoint.py": {
+      "microseconds": 7676,
+      "shard": 3
+    },
+    "tests/test_pascal.py": {
+      "microseconds": 87929,
+      "shard": 3
+    },
+    "tests/test_pascal_call_scoping.py": {
+      "microseconds": 30664,
+      "shard": 2
+    },
+    "tests/test_pascal_resolution.py": {
+      "microseconds": 46081,
+      "shard": 2
+    },
+    "tests/test_path_cli.py": {
+      "microseconds": 22908,
+      "shard": 3
+    },
+    "tests/test_paths.py": {
+      "microseconds": 14351,
+      "shard": 2
+    },
+    "tests/test_pg_introspect.py": {
+      "microseconds": 7721,
+      "shard": 1
+    },
+    "tests/test_phantom_cross_package_call.py": {
+      "microseconds": 42311,
+      "shard": 1
+    },
+    "tests/test_phantom_external_import.py": {
+      "microseconds": 229484,
+      "shard": 3
+    },
+    "tests/test_php_type_resolution.py": {
+      "microseconds": 74286,
+      "shard": 2
+    },
+    "tests/test_pipeline.py": {
+      "microseconds": 17228550,
+      "shard": 3
+    },
+    "tests/test_prepared_semantic_reader.py": {
+      "microseconds": 3268628,
+      "shard": 3
+    },
+    "tests/test_protected_change_equivalence.py": {
+      "microseconds": 2294664,
+      "shard": 2
+    },
+    "tests/test_protected_change_verifier.py": {
+      "microseconds": 3877730,
+      "shard": 1
+    },
+    "tests/test_provider_registry.py": {
+      "microseconds": 21900,
+      "shard": 2
+    },
+    "tests/test_prs.py": {
+      "microseconds": 24110,
+      "shard": 3
+    },
+    "tests/test_pytest_timings.py": {
+      "microseconds": 17028574,
+      "shard": 1
+    },
+    "tests/test_python314_policy.py": {
+      "microseconds": 709964,
+      "shard": 4
+    },
+    "tests/test_python_import_resolution.py": {
+      "microseconds": 35717,
+      "shard": 1
+    },
+    "tests/test_query_cli.py": {
+      "microseconds": 2150043,
+      "shard": 3
+    },
+    "tests/test_querylog.py": {
+      "microseconds": 60704,
+      "shard": 1
+    },
+    "tests/test_rationale.py": {
+      "microseconds": 67811,
+      "shard": 3
+    },
+    "tests/test_read_hook.py": {
+      "microseconds": 2263177,
+      "shard": 4
+    },
+    "tests/test_readme_policy.py": {
+      "microseconds": 868069,
+      "shard": 2
+    },
+    "tests/test_reflect.py": {
+      "microseconds": 4734502,
+      "shard": 3
+    },
+    "tests/test_replace_or_append_section.py": {
+      "microseconds": 1870,
+      "shard": 4
+    },
+    "tests/test_report.py": {
+      "microseconds": 18334,
+      "shard": 3
+    },
+    "tests/test_root_pointer.py": {
+      "microseconds": 117341,
+      "shard": 3
+    },
+    "tests/test_ruby_resolution.py": {
+      "microseconds": 240243,
+      "shard": 2
+    },
+    "tests/test_scip_ingest.py": {
+      "microseconds": 36697,
+      "shard": 1
+    },
+    "tests/test_search_hook.py": {
+      "microseconds": 1644213,
+      "shard": 1
+    },
+    "tests/test_security.py": {
+      "microseconds": 91666,
+      "shard": 4
+    },
+    "tests/test_security_receipts.py": {
+      "microseconds": 505463,
+      "shard": 1
+    },
+    "tests/test_semantic_cleanup.py": {
+      "microseconds": 20621,
+      "shard": 4
+    },
+    "tests/test_semantic_fragment_sanitize.py": {
+      "microseconds": 1908,
+      "shard": 3
+    },
+    "tests/test_semantic_id_remap_root.py": {
+      "microseconds": 3063,
+      "shard": 1
+    },
+    "tests/test_semantic_similarity.py": {
+      "microseconds": 4610,
+      "shard": 3
+    },
+    "tests/test_serve.py": {
+      "microseconds": 369044,
+      "shard": 4
+    },
+    "tests/test_serve_http.py": {
+      "microseconds": 220115,
+      "shard": 1
+    },
+    "tests/test_skill_version_warning.py": {
+      "microseconds": 12619,
+      "shard": 4
+    },
+    "tests/test_skillgen.py": {
+      "microseconds": 91259531,
+      "shard": 3
+    },
+    "tests/test_strict_extraction_completeness.py": {
+      "microseconds": 33174167,
+      "shard": 2
+    },
+    "tests/test_swift_cross_file_calls.py": {
+      "microseconds": 127532,
+      "shard": 1
+    },
+    "tests/test_swift_import_resolution.py": {
+      "microseconds": 54739,
+      "shard": 2
+    },
+    "tests/test_symbol_resolution.py": {
+      "microseconds": 102743,
+      "shard": 4
+    },
+    "tests/test_terraform.py": {
+      "microseconds": 35268,
+      "shard": 2
+    },
+    "tests/test_test_environment.py": {
+      "microseconds": 500671,
+      "shard": 3
+    },
+    "tests/test_transaction.py": {
+      "microseconds": 70986482,
+      "shard": 4
+    },
+    "tests/test_transcribe.py": {
+      "microseconds": 29115,
+      "shard": 3
+    },
+    "tests/test_ts_decorators.py": {
+      "microseconds": 62772,
+      "shard": 3
+    },
+    "tests/test_ts_generators.py": {
+      "microseconds": 31601,
+      "shard": 4
+    },
+    "tests/test_ts_import_require.py": {
+      "microseconds": 39314,
+      "shard": 3
+    },
+    "tests/test_ts_inheritance.py": {
+      "microseconds": 50517,
+      "shard": 3
+    },
+    "tests/test_ts_namespace.py": {
+      "microseconds": 38727,
+      "shard": 2
+    },
+    "tests/test_ts_receiver_member_calls.py": {
+      "microseconds": 42025,
+      "shard": 4
+    },
+    "tests/test_typescript_module_extensions.py": {
+      "microseconds": 22400,
+      "shard": 4
+    },
+    "tests/test_validate.py": {
+      "microseconds": 5149,
+      "shard": 2
+    },
+    "tests/test_vue_extraction.py": {
+      "microseconds": 59336,
+      "shard": 4
+    },
+    "tests/test_watch.py": {
+      "microseconds": 13966341,
+      "shard": 3
+    },
+    "tests/test_wheel_packaging.py": {
+      "microseconds": 20069596,
+      "shard": 1
+    },
+    "tests/test_wiki.py": {
+      "microseconds": 159207,
+      "shard": 3
+    },
+    "tests/test_windows_atomic_cleanup.py": {
+      "microseconds": 11351,
+      "shard": 2
+    },
+    "tests/test_windows_unlink.py": {
+      "microseconds": 49393,
+      "shard": 3
+    },
+    "tests/test_word_count_cache.py": {
+      "microseconds": 10533,
+      "shard": 3
+    },
+    "tests/test_workspace_abandonment_contracts.py": {
+      "microseconds": 65270,
+      "shard": 2
+    },
+    "tests/test_workspace_adapter_v8.py": {
+      "microseconds": 11136321,
+      "shard": 2
+    },
+    "tests/test_workspace_build_inputs.py": {
+      "microseconds": 96474,
+      "shard": 2
+    },
+    "tests/test_workspace_canonical_budget.py": {
+      "microseconds": 10728,
+      "shard": 3
+    },
+    "tests/test_workspace_capacity_acceptance.py": {
+      "microseconds": 32089025,
+      "shard": 4
+    },
+    "tests/test_workspace_capacity_contracts.py": {
+      "microseconds": 5662,
+      "shard": 2
+    },
+    "tests/test_workspace_capacity_migration.py": {
+      "microseconds": 379322,
+      "shard": 1
+    },
+    "tests/test_workspace_capacity_read_limits.py": {
+      "microseconds": 3021079,
+      "shard": 2
+    },
+    "tests/test_workspace_composition.py": {
+      "microseconds": 3086492,
+      "shard": 1
+    },
+    "tests/test_workspace_contracts.py": {
+      "microseconds": 1270334,
+      "shard": 1
+    },
+    "tests/test_workspace_coordination_review.py": {
+      "microseconds": 1560661,
+      "shard": 2
+    },
+    "tests/test_workspace_durable_contract_validation.py": {
+      "microseconds": 513317,
+      "shard": 4
+    },
+    "tests/test_workspace_fixture_batch.py": {
+      "microseconds": 221762,
+      "shard": 2
+    },
+    "tests/test_workspace_fixture_capture_identity.py": {
+      "microseconds": 67957,
+      "shard": 1
+    },
+    "tests/test_workspace_fixture_inputs.py": {
+      "microseconds": 137802,
+      "shard": 3
+    },
+    "tests/test_workspace_fixture_member_binding.py": {
+      "microseconds": 41495,
+      "shard": 2
+    },
+    "tests/test_workspace_fixture_output_bounds.py": {
+      "microseconds": 58291,
+      "shard": 2
+    },
+    "tests/test_workspace_fixture_review.py": {
+      "microseconds": 10130,
+      "shard": 2
+    },
+    "tests/test_workspace_foundation_boundaries.py": {
+      "microseconds": 458086,
+      "shard": 3
+    },
+    "tests/test_workspace_gc_recovery_review.py": {
+      "microseconds": 18261030,
+      "shard": 1
+    },
+    "tests/test_workspace_generation_capacity_review.py": {
+      "microseconds": 10022808,
+      "shard": 4
+    },
+    "tests/test_workspace_generation_inventory_review.py": {
+      "microseconds": 19158408,
+      "shard": 3
+    },
+    "tests/test_workspace_generation_io_limits.py": {
+      "microseconds": 5878758,
+      "shard": 1
+    },
+    "tests/test_workspace_generation_recovery_review.py": {
+      "microseconds": 26505886,
+      "shard": 4
+    },
+    "tests/test_workspace_git_preflight.py": {
+      "microseconds": 589667,
+      "shard": 2
+    },
+    "tests/test_workspace_immutable_durability.py": {
+      "microseconds": 157833,
+      "shard": 4
+    },
+    "tests/test_workspace_installed_identity.py": {
+      "microseconds": 2636003,
+      "shard": 1
+    },
+    "tests/test_workspace_lifecycle_contracts.py": {
+      "microseconds": 14353,
+      "shard": 1
+    },
+    "tests/test_workspace_lifecycle_json_bounds.py": {
+      "microseconds": 8535,
+      "shard": 4
+    },
+    "tests/test_workspace_lifecycle_s3.py": {
+      "microseconds": 169622095,
+      "shard": 3
+    },
+    "tests/test_workspace_lock_binding.py": {
+      "microseconds": 180160,
+      "shard": 4
+    },
+    "tests/test_workspace_lock_recovery.py": {
+      "microseconds": 99493,
+      "shard": 4
+    },
+    "tests/test_workspace_mount_boundaries.py": {
+      "microseconds": 65979,
+      "shard": 1
+    },
+    "tests/test_workspace_negative_probes.py": {
+      "microseconds": 16198,
+      "shard": 4
+    },
+    "tests/test_workspace_observation_binding.py": {
+      "microseconds": 44953,
+      "shard": 3
+    },
+    "tests/test_workspace_package_selectors.py": {
+      "microseconds": 34867,
+      "shard": 3
+    },
+    "tests/test_workspace_pointer_acceptance.py": {
+      "microseconds": 136674706,
+      "shard": 4
+    },
+    "tests/test_workspace_pointer_deadline_review.py": {
+      "microseconds": 3708567,
+      "shard": 2
+    },
+    "tests/test_workspace_pointer_repair_selection.py": {
+      "microseconds": 5293429,
+      "shard": 1
+    },
+    "tests/test_workspace_publication.py": {
+      "microseconds": 179309,
+      "shard": 1
+    },
+    "tests/test_workspace_record_recovery.py": {
+      "microseconds": 387409,
+      "shard": 2
+    },
+    "tests/test_workspace_registry_deadlines.py": {
+      "microseconds": 3546031,
+      "shard": 4
+    },
+    "tests/test_workspace_registry_review.py": {
+      "microseconds": 19837026,
+      "shard": 2
+    },
+    "tests/test_workspace_result_cleanup.py": {
+      "microseconds": 27371,
+      "shard": 1
+    },
+    "tests/test_workspace_review_regressions.py": {
+      "microseconds": 34790,
+      "shard": 4
+    },
+    "tests/test_workspace_root_marker.py": {
+      "microseconds": 1024218,
+      "shard": 4
+    },
+    "tests/test_workspace_s4_acceptance.py": {
+      "microseconds": 142590384,
+      "shard": 4
+    },
+    "tests/test_workspace_s4_admission.py": {
+      "microseconds": 218251160,
+      "shard": 2
+    },
+    "tests/test_workspace_s4_admission_formats.py": {
+      "microseconds": 137694,
+      "shard": 4
+    },
+    "tests/test_workspace_s4_certified_drift.py": {
+      "microseconds": 118813800,
+      "shard": 3
+    },
+    "tests/test_workspace_s4_consumed_recovery.py": {
+      "microseconds": 88016916,
+      "shard": 2
+    },
+    "tests/test_workspace_s4_deadlines.py": {
+      "microseconds": 35163703,
+      "shard": 3
+    },
+    "tests/test_workspace_s4_followup.py": {
+      "microseconds": 40138307,
+      "shard": 3
+    },
+    "tests/test_workspace_s4_git_executable.py": {
+      "microseconds": 17696445,
+      "shard": 2
+    },
+    "tests/test_workspace_s4_git_routing.py": {
+      "microseconds": 20403267,
+      "shard": 3
+    },
+    "tests/test_workspace_s4_installed.py": {
+      "microseconds": 31365456,
+      "shard": 3
+    },
+    "tests/test_workspace_s4_observation_transport.py": {
+      "microseconds": 53817939,
+      "shard": 2
+    },
+    "tests/test_workspace_s4_promotion_authority.py": {
+      "microseconds": 96723273,
+      "shard": 4
+    },
+    "tests/test_workspace_s4_resources.py": {
+      "microseconds": 114125717,
+      "shard": 2
+    },
+    "tests/test_workspace_s4_review.py": {
+      "microseconds": 70897036,
+      "shard": 3
+    },
+    "tests/test_workspace_s4_streaming.py": {
+      "microseconds": 29376818,
+      "shard": 2
+    },
+    "tests/test_workspace_s4_terminal_cleanup.py": {
+      "microseconds": 41824282,
+      "shard": 4
+    },
+    "tests/test_workspace_s4_worker_imports.py": {
+      "microseconds": 1171081,
+      "shard": 2
+    },
+    "tests/test_workspace_semantic_queue_review.py": {
+      "microseconds": 15333208,
+      "shard": 4
+    },
+    "tests/test_workspace_source_discovery.py": {
+      "microseconds": 5172031,
+      "shard": 2
+    },
+    "tests/test_workspace_storage_separation.py": {
+      "microseconds": 336428,
+      "shard": 2
+    },
+    "tests/test_workspace_structural_s4.py": {
+      "microseconds": 563555231,
+      "shard": 1
+    },
+    "tests/test_zero_node_no_cache.py": {
+      "microseconds": 57863,
+      "shard": 1
+    }
+  },
+  "predicted_microseconds": {
+    "1": 649834884,
+    "2": 649834632,
+    "3": 649834859,
+    "4": 649834884
+  },
+  "provenance": {
+    "archive_sha256": "ca30c8b93af204818b8cf4d08b073ff2582f3c59d7f30c6ab99e023ef9991967",
+    "artifact_id": 11169867555,
+    "artifact_name": "pytest-timings-36871547583-1",
+    "collection_seconds": 13.003818,
+    "environment": {
+      "argv": [
+        "-p",
+        "tools.pytest_timings",
+        "--ci-timing-json",
+        "/home/runner/work/_temp/pytest-timings/timings.json",
+        "tests/",
+        "-q",
+        "--tb=short"
+      ],
+      "ci": {
+        "GITHUB_EVENT_NAME": "push",
+        "GITHUB_JOB": "test",
+        "GITHUB_REF": "refs/heads/v8",
+        "GITHUB_REPOSITORY": "Villeneuve-Ventures/graphify",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_RUN_ID": "36871547583",
+        "GITHUB_SHA": "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984",
+        "ImageOS": "ubuntu24",
+        "ImageVersion": "20260927.320.1",
+        "PYTEST_ADDOPTS": null,
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": null,
+        "PYTEST_PLUGINS": null,
+        "RUNNER_ARCH": "X64",
+        "RUNNER_OS": "Linux"
+      },
+      "ci_source_matches_checkout": true,
+      "collection_paths": [
+        "tests/"
+      ],
+      "errors": [],
+      "git": "git version 2.55.0",
+      "implementation": "CPython",
+      "machine": "x86_64",
+      "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+      "plugins": [
+        "anyio==4.13.0",
+        "hypothesis==6.153.0",
+        "pytest-cov==7.1.0",
+        "pytest-xdist==3.8.0"
+      ],
+      "pytest": "9.0.3",
+      "python": "3.14.7 (main, Sep 29 2026, 15:01:40) [Clang 22.1.3 ]",
+      "sha256": {
+        ".github/workflows/ci.yml": "5245d6414c0be9d4305a440fa191426c89e0c76b7f5ce3dc4fafc9813993e5c9",
+        "observer": "a8562ba44b93833941e114eb29a0dc6ca4612758f0ccbce19d983652728a1b2b",
+        "pyproject.toml": "defd5c8f69ad06899c0aa46d6df57a39c9e08a4c7fbdedeafccf67d19bb9572b",
+        "uv.lock": "f4343bfd9a8f6fc1b82f8e058bf3266d1c254e5f627a34702f88f8cac0550536"
+      },
+      "source_revision": "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984",
+      "tracked_changes": "",
+      "uv": "uv 0.12.21 (x86_64-unknown-linux-gnu)"
+    },
+    "module_count": 229,
+    "run_url": "https://github.com/Villeneuve-Ventures/graphify/actions/runs/36871547583",
+    "selected_items": 7021,
+    "session_seconds": 2615.021516,
+    "source_revision": "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984",
+    "subtests": {
+      "failed": 0,
+      "passed": 235,
+      "skipped": 0
+    },
+    "timings_sha256": "6bbcb47b2c7a1e2a03c01e769130b17b54903e799f7d095fb023cc2a03ffa9d1"
+  },
+  "recipe": "Longest processing time first: sort modules by descending measured total microseconds, then ascending POSIX path; assign to the least-loaded shard, breaking load ties by ascending shard number. Whole modules remain intact.",
+  "schema_version": 1,
+  "shards": [
+    1,
+    2,
+    3,
+    4
+  ]
+}
