@@ -341,7 +341,7 @@ def test_public_update_warns_before_skipping_missing_node_id(tmp_path, monkeypat
     assert all(result == original for result, original in supplied)
 
 
-@pytest.mark.parametrize("record", ["malformed", [], ["other"]])
+@pytest.mark.parametrize("record", ["malformed", [], ["other"], None, False, 3, 1.5, "idx", ["id"]])
 @pytest.mark.parametrize("entry", ["watch", "semantic", "ast"])
 def test_indexing_admission_keeps_non_object_skip_behavior(tmp_path, capsys, record, entry):
     path = seed(tmp_path, {"nodes": [node("anchor"), record], "links": []})
@@ -364,6 +364,52 @@ def test_indexing_admission_keeps_non_object_skip_behavior(tmp_path, capsys, rec
         assert set(graph) == {"anchor", "fresh"}
     assert capsys.readouterr().err == ""
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("record", [None, 3, "idx", ["id"]])
+def test_direct_build_keeps_non_object_validation_and_shape_errors(record, capsys):
+    with pytest.raises(TypeError):
+        build_from_json({"nodes": [node("anchor"), record], "edges": []})
+    assert "Node 1 must be an object" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("record", [None, 3, "idx", ["id"]])
+@pytest.mark.parametrize("retained", [False, True])
+@pytest.mark.parametrize("no_cluster", [False, True])
+def test_public_update_skips_non_object_nodes_before_indexing(
+        tmp_path, monkeypatch, record, retained, no_cluster):
+    import graphify.__main__ as mainmod
+    import graphify.extract as extractmod
+    source = tmp_path / "app.py"
+    source.write_text("def fresh(): return 1\n")
+    (tmp_path / "stable.md").write_text("accepted semantic evidence")
+    out = tmp_path / "graphify-out"
+    out.mkdir()
+    path = out / "graph.json"
+    stable = node("anchor", quotation="accepted evidence")
+    path.write_text(json.dumps({"nodes": [stable] + ([record] if retained else []), "links": []}))
+    before = source.read_bytes()
+    original_extract = extractmod.extract
+    supplied = []
+
+    def extract_with_non_object(*args, **kwargs):
+        result = original_extract(*args, **kwargs)
+        if not retained:
+            result["nodes"].append(deepcopy(record))
+        supplied.append((result, deepcopy(result)))
+        return result
+
+    monkeypatch.setattr(extractmod, "extract", extract_with_non_object)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "update", str(tmp_path)]
+                        + (["--no-cluster"] if no_cluster else []))
+    mainmod.main()
+    graph = json.loads(path.read_text())
+    assert graph["nodes"] and all(isinstance(n.get("id"), str) for n in graph["nodes"])
+    anchor = next(n for n in graph["nodes"] if n["id"] == "anchor")
+    assert anchor["quotation"] == stable["quotation"]
+    assert any(n.get("source_file") == "app.py" for n in graph["nodes"])
+    assert source.read_bytes() == before
+    assert all(result == original for result, original in supplied)
 
 
 @pytest.mark.parametrize("data, field", [

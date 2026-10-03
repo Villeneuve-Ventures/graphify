@@ -84,12 +84,13 @@ def _admit_string_identities(nodes, edges, *, keep_incomplete_nodes=True, keep_i
 
     Empty strings remain string identities. Missing node IDs stay visible to
     validation unless the caller must index nodes, in which case warn and skip.
-    Non-object records retain their existing filtering and shape errors.
+    Indexing callers skip non-object records; ordinary validation retains its
+    existing shape errors.
     This contract deliberately does not apply to hyperedge group IDs.
     """
     valid_nodes = []
     for i, node in enumerate(nodes):
-        if not keep_incomplete_nodes and "id" not in node:
+        if not keep_incomplete_nodes and (not isinstance(node, dict) or "id" not in node):
             if isinstance(node, dict):
                 print(f"[graphify] Extraction warning: Node {i} (id='?') "
                       "missing required field 'id'; skipping node.", file=sys.stderr)
