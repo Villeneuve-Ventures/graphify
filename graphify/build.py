@@ -79,6 +79,69 @@ _FILE_TYPE_SYNONYMS = {
 _HE_MEMBER_ALIASES = ("members", "node_ids")
 
 
+def _admit_string_identities(nodes, edges, *, keep_incomplete_nodes=True, keep_incomplete_edges=False):
+    """Skip malformed identities before dedup, remapping or dictionary access.
+
+    Empty strings remain string identities. Missing node IDs stay visible to
+    validation unless the caller must index nodes, in which case warn and skip.
+    Indexing callers skip non-object records; ordinary validation retains its
+    existing shape errors.
+    This contract deliberately does not apply to hyperedge group IDs.
+    """
+    valid_nodes = []
+    for i, node in enumerate(nodes):
+        if not keep_incomplete_nodes and (not isinstance(node, dict) or "id" not in node):
+            if isinstance(node, dict):
+                print(f"[graphify] Extraction warning: Node {i} (id='?') "
+                      "missing required field 'id'; skipping node.", file=sys.stderr)
+            continue
+        if isinstance(node, dict):
+            identity = node.get("id")
+            if "id" in node and not isinstance(identity, str):
+                kind = "non-string" if _hashable(identity) else "non-hashable"
+                print(f"[graphify] WARNING: skipping node with {kind} id "
+                      f"{identity!r} (must be a string).", file=sys.stderr)
+                continue
+        valid_nodes.append(node)
+    valid_edges = []
+    for edge in edges:
+        if isinstance(edge, dict):
+            has_source = "source" in edge or "from" in edge
+            has_target = "target" in edge or "to" in edge
+            source = edge.get("source", edge.get("from"))
+            target = edge.get("target", edge.get("to"))
+            if ((has_source and not isinstance(source, str))
+                    or (has_target and not isinstance(target, str))):
+                kind = "non-string" if _hashable(source) and _hashable(target) else "non-hashable"
+                print(f"[graphify] WARNING: skipping edge with {kind} endpoint "
+                      f"(source={source!r}, target={target!r}).", file=sys.stderr)
+                continue
+            if not (has_source and has_target) and not keep_incomplete_edges:
+                continue
+        valid_edges.append(edge)
+    return valid_nodes, valid_edges
+
+
+def _admit_hyperedges(hyperedges, *, retained=False):
+    """Skip unindexable group IDs; None/missing/empty IDs remain anonymous.
+
+    JSON numeric and boolean IDs are accepted independently of string node IDs.
+    Apply the same tolerant admission to fresh, retained and attached groups.
+    """
+    admitted = []
+    for group in hyperedges:
+        if not isinstance(group, dict):
+            if not retained:
+                print("[graphify] WARNING: skipping non-object fresh hyperedge.", file=sys.stderr)
+        elif not _hashable(group.get("id")):
+            kind = "retained" if retained else "fresh"
+            print(f"[graphify] WARNING: skipping {kind} hyperedge with non-hashable id.",
+                  file=sys.stderr)
+        else:
+            admitted.append(group)
+    return admitted
+
+
 def _normalize_hyperedge_members(he: object) -> None:
     """Canonicalize a hyperedge's member list onto the `nodes` key, in place.
 
@@ -204,6 +267,7 @@ def dedupe_nodes(nodes: list[dict]) -> list[dict]:
     first appearance; the retained dict is the last one seen.
     """
     by_id: dict = {}
+    nodes, _ = _admit_string_identities(nodes, [])
     for n in nodes:
         nid = n.get("id")
         if nid is None:
@@ -226,6 +290,7 @@ def dedupe_edges(edges: list[dict]) -> list[dict]:
     """
     seen: set[tuple] = set()
     out: list[dict] = []
+    _, edges = _admit_string_identities([], edges, keep_incomplete_edges=True)
     for e in edges:
         key = (e.get("source"), e.get("target"), e.get("relation"))
         if key in seen:
@@ -451,6 +516,17 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     # NetworkX <= 3.1 serialised edges as "links"; remap to "edges" for compatibility.
     if "edges" not in extraction and "links" in extraction:
         extraction = dict(extraction, edges=extraction["links"])
+    nodes, edges = _admit_string_identities(extraction.get("nodes", []),
+                                           extraction.get("edges", []), keep_incomplete_edges=True)
+    # Keep absent fields absent and incomplete records visible to the validator;
+    # only rejected identities are removed before any schema normalization.
+    extraction = dict(extraction)
+    if isinstance(extraction.get("nodes"), list):
+        extraction["nodes"] = nodes
+    if isinstance(extraction.get("edges"), list):
+        extraction["edges"] = edges
+    if "hyperedges" in extraction:
+        extraction["hyperedges"] = _admit_hyperedges(extraction["hyperedges"] or [])
 
     # Canonicalize legacy node/edge schema before validation.
     for node in extraction.get("nodes", []):
@@ -517,7 +593,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
                 edge["target"] = _rekey[edge["target"]]
         for he in extraction.get("hyperedges", []) or []:
             if isinstance(he, dict) and isinstance(he.get("nodes"), list):
-                he["nodes"] = [_rekey.get(n, n) for n in he["nodes"]]
+                he["nodes"] = [_rekey.get(n, n) if isinstance(n, str) else n for n in he["nodes"]]
 
     # Merge markdown quick-scan bare doc nodes into their semantic `_doc` twin
     # for the same file, so a document is one node regardless of which pipeline
@@ -544,26 +620,14 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         extraction["edges"] = _new_edges
         for he in extraction.get("hyperedges", []) or []:
             if isinstance(he, dict) and isinstance(he.get("nodes"), list):
-                he["nodes"] = [_doc_remap.get(n, n) for n in he["nodes"]]
+                he["nodes"] = [_doc_remap.get(n, n) if isinstance(n, str) else n for n in he["nodes"]]
 
     G: nx.Graph = nx.DiGraph() if directed else nx.Graph()
     for node in extraction.get("nodes", []):
-        # Skip dict nodes with a missing or non-hashable id (e.g. a list emitted
-        # by a buggy LLM extraction) so NetworkX add_node never raises
-        # TypeError: unhashable type. Non-dict nodes are deliberately left to
-        # raise as before, so callers that probe build for shape errors (e.g.
-        # the multigraph diagnostic) still observe the malformed shape.
+        # Identity admission ran before all remaps. Non-object records still
+        # raise the existing shape error at construction.
         if isinstance(node, dict):
             if "id" not in node:
-                continue
-            try:
-                hash(node["id"])
-            except TypeError:
-                print(
-                    f"[graphify] WARNING: skipping node with non-hashable id "
-                    f"{node['id']!r} (must be a string).",
-                    file=sys.stderr,
-                )
                 continue
             if "source_file" in node:
                 node["source_file"] = _norm_source_file(node["source_file"], _root)
@@ -706,19 +770,6 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         if "source" not in edge or "target" not in edge:
             continue
         src, tgt = edge["source"], edge["target"]
-        # Skip edges with non-hashable endpoints (e.g. a list emitted by a buggy
-        # LLM extraction) so the `not in node_set` membership test below never
-        # raises TypeError: unhashable type. The validator already reported these.
-        try:
-            hash(src)
-            hash(tgt)
-        except TypeError:
-            print(
-                f"[graphify] WARNING: skipping edge with non-hashable endpoint "
-                f"(source={src!r}, target={tgt!r}).",
-                file=sys.stderr,
-            )
-            continue
         # Remap mismatched IDs via normalization before dropping the edge.
         if src not in node_set:
             src = norm_to_id.get(_normalize_id(src), src)
@@ -869,6 +920,8 @@ def build(
         combined["input_tokens"] += ext.get("input_tokens", 0)
         combined["output_tokens"] += ext.get("output_tokens", 0)
     if dedup and combined["nodes"]:
+        combined["nodes"], combined["edges"] = _admit_string_identities(
+            combined["nodes"], combined["edges"], keep_incomplete_edges=True)
         combined["nodes"], combined["edges"] = deduplicate_entities(
             combined["nodes"], combined["edges"], communities={},
             dedup_llm_backend=dedup_llm_backend,
@@ -1046,41 +1099,13 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     for chunk in chunks:
         for key in fresh:
             fresh[key].extend(deepcopy(chunk.get(key, [])))
-    valid_groups = []
-    for group in fresh["hyperedges"]:
-        if not isinstance(group, dict):
-            print("[graphify] WARNING: skipping non-object fresh hyperedge.", file=sys.stderr)
-        elif not _hashable(group.get("id")):
-            print("[graphify] WARNING: skipping fresh hyperedge with non-hashable id.", file=sys.stderr)
-        else:
-            valid_groups.append(group)
-    fresh["hyperedges"] = valid_groups
+    fresh["hyperedges"] = _admit_hyperedges(fresh["hyperedges"])
     normalize = lambda source: _norm_source_file(source, root)
     node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
     replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
-    # Match the old dedup prepass size after replacement, but before explicit pruning.
-    dedup_prepass = dedup and (len(fresh["nodes"]) + sum(
-        normalize(n.get("source_file")) not in replaced for n in nodes)) > 1
-    valid_nodes = []
-    for node in nodes:
-        if "id" not in node:
-            continue
-        if not _hashable(node["id"]):
-            print(f"[graphify] WARNING: skipping node with non-hashable id "
-                  f"{node['id']!r} (must be a string).", file=sys.stderr)
-            continue
-        if dedup_prepass and not isinstance(node["id"], str) and not node["id"]:
-            continue
-        valid_nodes.append(node)
-    nodes = valid_nodes
-    # Admission follows replacement-source selection, preserving its existing scope.
-    admitted = []
-    for record in fresh["nodes"]:
-        if isinstance(record, dict) and not _hashable(record.get("id")):
-            print("[graphify] WARNING: skipping fresh node with non-hashable id.", file=sys.stderr)
-        else:
-            admitted.append(record)
-    fresh["nodes"] = admitted
+    # Keep replacement-source selection above admission: ownership is unchanged.
+    fresh["nodes"], fresh["edges"] = _admit_string_identities(
+        fresh["nodes"], fresh["edges"], keep_incomplete_edges=True)
     prune_request_count = len(pruned)
     pruned = {normalize(source) for source in pruned if source} - replaced
     removed = replaced | pruned
@@ -1108,12 +1133,6 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     retained_edges = []
     for edge in edges:
         source, target = edge.get("source", edge.get("from")), edge.get("target", edge.get("to"))
-        if source is None or target is None:
-            continue
-        if not _hashable(source) or not _hashable(target):
-            print(f"[graphify] WARNING: skipping edge with non-hashable endpoint "
-                  f"(source={source!r}, target={target!r}).", file=sys.stderr)
-            continue
         source, target = prior_reference(source), prior_reference(target)
         if (normalize(edge.get("source_file")) in pruned
                 and source in prior_nodes and target in prior_nodes):
@@ -1137,8 +1156,7 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
                        and normalize(h.get("source_file")) not in removed]
     def has_group_identity(group):
         identity = group.get("id")
-        # Preserve malformed retained-ID handling while recognizing valid zero/False IDs.
-        return bool(identity) or (_hashable(identity) and identity is not None and identity != "")
+        return identity is not None and identity != ""
 
     def group_key(group):
         identity = group["id"]
@@ -1397,6 +1415,10 @@ def build_merge(
         existing_nodes = []
         existing_edges = []
         existing_hyperedges = []
+
+    existing_nodes, existing_edges = _admit_string_identities(
+        existing_nodes, existing_edges, keep_incomplete_nodes=False)
+    existing_hyperedges = _admit_hyperedges(existing_hyperedges, retained=True)
 
     # Effective root for relativizing absolute source_file / prune paths back to the
     # stored relative source_file keys. When the caller passes root we use it;

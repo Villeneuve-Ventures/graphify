@@ -18,9 +18,7 @@ def validate_extraction(data: dict) -> list[str]:
     errors: list[str] = []
 
     # Collected during the node pass so the edge pass can reuse it. Only
-    # hashable ids land here; a non-hashable id (e.g. a list emitted by a
-    # malformed LLM extraction) is reported as an error rather than crashing
-    # the validator on set construction.
+    # string ids land here; malformed identities never reach set membership.
     node_ids: set = set()
 
     # Nodes
@@ -37,11 +35,14 @@ def validate_extraction(data: dict) -> list[str]:
                 if field not in node:
                     errors.append(f"Node {i} (id={node.get('id', '?')!r}) missing required field '{field}'")
             if "id" in node:
-                try:
-                    hash(node["id"])
-                except TypeError:
+                if not isinstance(node["id"], str):
+                    try:
+                        hash(node["id"])
+                        kind = "non-string"
+                    except TypeError:
+                        kind = "non-hashable"
                     errors.append(
-                        f"Node {i} has non-hashable id {node['id']!r} - id must be a string"
+                        f"Node {i} has {kind} id {node['id']!r} - id must be a string"
                     )
                 else:
                     node_ids.add(node["id"])
@@ -74,13 +75,17 @@ def validate_extraction(data: dict) -> list[str]:
                 if endpoint not in edge:
                     continue
                 val = edge[endpoint]
-                try:
-                    unmatched = bool(node_ids) and val not in node_ids
-                except TypeError:
+                if not isinstance(val, str):
+                    try:
+                        hash(val)
+                        kind = "non-string"
+                    except TypeError:
+                        kind = "non-hashable"
                     errors.append(
-                        f"Edge {i} {endpoint} {val!r} is non-hashable - must be a string"
+                        f"Edge {i} {endpoint} {val!r} is {kind} - must be a string"
                     )
                     continue
+                unmatched = bool(node_ids) and val not in node_ids
                 if unmatched:
                     errors.append(f"Edge {i} {endpoint} '{val}' does not match any node id")
 
