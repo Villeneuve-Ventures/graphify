@@ -172,7 +172,7 @@ _CONFIDENCE_SCORE_DEFAULTS = {"EXTRACTED": 1.0, "INFERRED": 0.5, "AMBIGUOUS": 0.
 
 
 def attach_hyperedges(G: nx.Graph, hyperedges: list) -> None:
-    """Attach admitted groups, preserving anonymous and typed JSON identities."""
+    """Attach identified groups; preserve existing anonymous graph metadata."""
     existing = _admit_hyperedges(G.graph.get("hyperedges", []), retained=True)
     def key(group):
         identity = group.get("id")
@@ -180,10 +180,9 @@ def attach_hyperedges(G: nx.Graph, hyperedges: list) -> None:
     seen_ids = {key(h) for h in existing if key(h) is not None}
     for h in _admit_hyperedges(hyperedges):
         identity = key(h)
-        if identity is None or identity not in seen_ids:
+        if identity is not None and identity not in seen_ids:
             existing.append(h)
-            if identity is not None:
-                seen_ids.add(identity)
+            seen_ids.add(identity)
     G.graph["hyperedges"] = existing
 
 

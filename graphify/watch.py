@@ -388,7 +388,7 @@ def _reconcile_existing_graph(
 
     result = dict(result)
     result["nodes"], result["edges"] = _admit_string_identities(
-        result.get("nodes", []), result.get("edges", []))
+        result.get("nodes", []), result.get("edges", []), keep_incomplete_edges=True)
     result["nodes"] = [node for node in result["nodes"] if "id" in node]
     result["hyperedges"] = _admit_hyperedges(result.get("hyperedges", []))
     existing_graph_data: dict = {}

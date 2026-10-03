@@ -141,7 +141,8 @@ def test_full_and_export_group_admission(identity, entry, capsys):
     else:
         data = {"nodes": [node("anchor")], "edges": [], "hyperedges": deepcopy(groups)}
         graph = build_from_json(data) if entry == "direct" else build([data])
-    assert graph.graph["hyperedges"] == groups[1:]
+    # Attachment historically requires an ID; construction accepts anonymous groups.
+    assert graph.graph["hyperedges"] == (groups[2:] if entry == "attachment" else groups[1:])
     assert "hyperedge with non-hashable id" in capsys.readouterr().err
 
 
@@ -295,3 +296,83 @@ def test_raw_reconciliation_missing_ids_do_not_hide_retained_siblings(tmp_path):
 def test_admission_preserves_non_list_collection_diagnostics(data, field, capsys):
     build_from_json(data)
     assert f"'{field}' must be a list" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("anonymous", [{"nodes": ["anchor"]},
+                                       {"id": None, "nodes": ["anchor"]},
+                                       {"id": "", "nodes": ["anchor"]}])
+def test_attachment_skips_new_anonymous_groups_but_preserves_existing(anonymous):
+    graph = nx.Graph()
+    existing = deepcopy(anonymous)
+    graph.graph["hyperedges"] = [existing]
+    groups = [anonymous, {"id": 0, "nodes": ["anchor"]},
+              {"id": False, "nodes": ["anchor"]}]
+    before = deepcopy(groups)
+    attach_hyperedges(graph, groups)
+    attach_hyperedges(graph, groups)
+    assert graph.graph["hyperedges"] == [existing, *groups[1:]]
+    assert groups == before
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+@pytest.mark.parametrize("dedup", [False, True])
+def test_incremental_incomplete_edge_preserves_warning_and_valid_siblings(tmp_path, capsys, endpoint, dedup):
+    path = seed(tmp_path, {"nodes": [node("anchor"), node("beacon")],
+                          "links": [edge("anchor", "beacon")]})
+    before = path.read_bytes()
+    incomplete = edge("anchor", "beacon")
+    incomplete.pop(endpoint)
+    fresh = {"nodes": [node("fresh", "changed.md")], "edges": [incomplete]}
+    original = deepcopy(fresh)
+    graph = build_merge([fresh], path, root=tmp_path, dedup=dedup)
+    assert set(graph) == {"anchor", "beacon", "fresh"}
+    assert list(graph.edges) == [("anchor", "beacon")]
+    assert f"missing required field '{endpoint}'" in capsys.readouterr().err
+    assert path.read_bytes() == before and fresh == original
+
+
+@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_raw_reconciliation_preserves_fresh_incomplete_edges(tmp_path, existing, endpoint):
+    from graphify.build import dedupe_edges
+    from graphify.watch import _reconcile_existing_graph
+    path = tmp_path / "graph.json"
+    (tmp_path / "stable.md").write_text("accepted evidence")
+    if existing:
+        seed(tmp_path, {"nodes": [node("anchor")], "links": []})
+    before = path.read_bytes() if existing else None
+    incomplete = edge("fresh", "fresh")
+    incomplete.pop(endpoint)
+    fresh = {"nodes": [node("fresh", "changed.md")], "edges": [incomplete]}
+    original = deepcopy(fresh)
+    result, _ = _reconcile_existing_graph(
+        path, fresh, out=tmp_path, project_root=tmp_path, watch_root=tmp_path,
+        code_files=[], extract_targets=[], full_rebuild=False,
+        deleted_paths=set(), deleted_source_identities=set())
+    assert result["edges"] == [incomplete]
+    assert dedupe_edges(result["edges"]) == [incomplete]
+    assert {n["id"] for n in result["nodes"]} == ({"anchor", "fresh"} if existing else {"fresh"})
+    assert fresh == original
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_public_no_cluster_update_preserves_incomplete_extraction_edges(tmp_path, monkeypatch, endpoint):
+    import graphify.__main__ as mainmod
+    import graphify.extract as extractmod
+    (tmp_path / "app.py").write_text("def anchor(): return 1\n")
+    original_extract = extractmod.extract
+    incomplete = dict(relation="supports", confidence="EXTRACTED", source_file="app.py",
+                      **{endpoint: "app_anchor"})
+
+    def extract_with_incomplete_edge(*args, **kwargs):
+        result = original_extract(*args, **kwargs)
+        result["edges"].append(deepcopy(incomplete))
+        return result
+
+    monkeypatch.setattr(extractmod, "extract", extract_with_incomplete_edge)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "update", str(tmp_path), "--no-cluster"])
+    mainmod.main()
+    graph = json.loads((tmp_path / "graphify-out" / "graph.json").read_text())
+    assert incomplete in graph["links"]
+    assert graph["nodes"]

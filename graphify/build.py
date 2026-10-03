@@ -1097,7 +1097,8 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
     node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
     replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
     # Keep replacement-source selection above admission: ownership is unchanged.
-    fresh["nodes"], fresh["edges"] = _admit_string_identities(fresh["nodes"], fresh["edges"])
+    fresh["nodes"], fresh["edges"] = _admit_string_identities(
+        fresh["nodes"], fresh["edges"], keep_incomplete_edges=True)
     prune_request_count = len(pruned)
     pruned = {normalize(source) for source in pruned if source} - replaced
     removed = replaced | pruned
