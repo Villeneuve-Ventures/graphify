@@ -376,3 +376,68 @@ def test_public_no_cluster_update_preserves_incomplete_extraction_edges(tmp_path
     graph = json.loads((tmp_path / "graphify-out" / "graph.json").read_text())
     assert incomplete in graph["links"]
     assert graph["nodes"]
+
+    # Replay against stored raw output after an unrelated file changes. Only
+    # the first extraction supplies the diagnostic record.
+    monkeypatch.setattr(extractmod, "extract", original_extract)
+    (tmp_path / "other.py").write_text("def beacon(): return 2\n")
+    mainmod.main()
+    replay = json.loads((tmp_path / "graphify-out" / "graph.json").read_text())
+    assert replay["links"].count(incomplete) == 1
+    assert any(n.get("source_file") == "other.py" for n in replay["nodes"])
+
+
+@pytest.mark.parametrize("links_key", ["links", "edges"])
+@pytest.mark.parametrize("missing", [("source",), ("target",), ("source", "target")])
+def test_raw_reconciliation_preserves_retained_incomplete_edges(tmp_path, links_key, missing):
+    from graphify.watch import _reconcile_existing_graph
+    (tmp_path / "stable.md").write_text("accepted evidence")
+    incomplete = edge("anchor", "beacon")
+    for endpoint in missing:
+        incomplete.pop(endpoint)
+    good = edge("anchor", "beacon")
+    path = seed(tmp_path, {"nodes": [node("anchor"), node("beacon")],
+                          links_key: [good, incomplete]})
+    before = path.read_bytes()
+    fresh = {"nodes": [node("fresh", "changed.md")], "edges": []}
+    original = deepcopy(fresh)
+    result, admitted = _reconcile_existing_graph(
+        path, fresh, out=tmp_path, project_root=tmp_path, watch_root=tmp_path,
+        code_files=[], extract_targets=[], full_rebuild=False,
+        deleted_paths=set(), deleted_source_identities=set())
+    assert admitted[links_key] == [good, incomplete]
+    assert result["edges"] == [good, incomplete]
+    assert {n["id"] for n in result["nodes"]} == {"anchor", "beacon", "fresh"}
+    assert path.read_bytes() == before and fresh == original
+
+
+@pytest.mark.parametrize("case", ["deleted", "replaced-ast", "dangling", "non-string", "from", "to"])
+def test_retained_incomplete_edges_still_obey_eviction_and_identity_rules(tmp_path, case):
+    from graphify.watch import _reconcile_existing_graph
+    (tmp_path / "unrelated.md").write_text("accepted evidence")
+    incomplete = edge("anchor", "beacon")
+    incomplete.pop("target")
+    if case == "replaced-ast":
+        incomplete["_origin"] = "ast"
+    elif case == "dangling":
+        incomplete["source"] = "missing"
+    elif case == "non-string":
+        incomplete["source"] = []
+    elif case == "from":
+        incomplete["from"] = incomplete.pop("source")
+    elif case == "to":
+        incomplete["to"] = "beacon"
+    good = dict(edge("anchor", "beacon"), source_file="unrelated.md")
+    path = seed(tmp_path, {"nodes": [node("anchor", "unrelated.md"),
+                                    node("beacon", "unrelated.md")],
+                          "links": [good, incomplete]})
+    before = path.read_bytes()
+    result, _ = _reconcile_existing_graph(
+        path, {"nodes": [], "edges": []}, out=tmp_path,
+        project_root=tmp_path, watch_root=tmp_path, code_files=[],
+        extract_targets=[tmp_path / "stable.md"] if case == "replaced-ast" else [],
+        full_rebuild=False, deleted_paths=set(),
+        deleted_source_identities={str(tmp_path / "stable.md")} if case == "deleted" else set())
+    assert result["edges"] == [good]
+    assert {n["id"] for n in result["nodes"]} == {"anchor", "beacon"}
+    assert path.read_bytes() == before

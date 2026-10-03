@@ -403,7 +403,8 @@ def _reconcile_existing_graph(
         check_graph_file_size_cap(existing_graph)
         existing = json.loads(existing_graph.read_text(encoding="utf-8"))
         existing["nodes"], admitted_edges = _admit_string_identities(
-            existing.get("nodes", []), existing.get("links", existing.get("edges", [])))
+            existing.get("nodes", []), existing.get("links", existing.get("edges", [])),
+            keep_incomplete_edges=True)
         existing["nodes"] = [node for node in existing["nodes"] if "id" in node]
         existing["links" if "links" in existing else "edges"] = admitted_edges
         existing["hyperedges"] = _admit_hyperedges(existing.get("hyperedges", []), retained=True)
@@ -507,11 +508,14 @@ def _reconcile_existing_graph(
         # until a semantic re-extraction supersedes them. Same provenance rule
         # the node reconciliation above applies via _origin (#1865). Deletion
         # eviction stays provenance-blind.
+        # Raw output keeps incomplete records for diagnostics across updates.
+        # Supplied endpoints must still survive; aliases keep their existing
+        # retention behavior rather than counting as genuinely absent fields.
         preserved_edges = [
             edge
             for edge in existing.get("links", existing.get("edges", []))
-            if edge.get("source") in all_ids
-            and edge.get("target") in all_ids
+            if (edge.get("source") in all_ids or ("source" not in edge and "from" not in edge))
+            and (edge.get("target") in all_ids or ("target" not in edge and "to" not in edge))
             and not source_paths.is_evicted(edge, edge_evicted_source_identities)
             and not (
                 edge.get("_origin") == "ast"
