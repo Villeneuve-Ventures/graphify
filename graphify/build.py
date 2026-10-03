@@ -79,15 +79,21 @@ _FILE_TYPE_SYNONYMS = {
 _HE_MEMBER_ALIASES = ("members", "node_ids")
 
 
-def _admit_string_identities(nodes, edges, *, keep_incomplete_edges=False):
+def _admit_string_identities(nodes, edges, *, keep_incomplete_nodes=True, keep_incomplete_edges=False):
     """Skip malformed identities before dedup, remapping or dictionary access.
 
-    Empty strings remain string identities. Missing fields retain their existing
-    skip behavior, and non-object records retain their existing shape errors.
+    Empty strings remain string identities. Missing node IDs stay visible to
+    validation unless the caller must index nodes, in which case warn and skip.
+    Non-object records retain their existing filtering and shape errors.
     This contract deliberately does not apply to hyperedge group IDs.
     """
     valid_nodes = []
-    for node in nodes:
+    for i, node in enumerate(nodes):
+        if not keep_incomplete_nodes and "id" not in node:
+            if isinstance(node, dict):
+                print(f"[graphify] Extraction warning: Node {i} (id='?') "
+                      "missing required field 'id'; skipping node.", file=sys.stderr)
+            continue
         if isinstance(node, dict):
             identity = node.get("id")
             if "id" in node and not isinstance(identity, str):
@@ -1409,8 +1415,8 @@ def build_merge(
         existing_edges = []
         existing_hyperedges = []
 
-    existing_nodes, existing_edges = _admit_string_identities(existing_nodes, existing_edges)
-    existing_nodes = [node for node in existing_nodes if "id" in node]
+    existing_nodes, existing_edges = _admit_string_identities(
+        existing_nodes, existing_edges, keep_incomplete_nodes=False)
     existing_hyperedges = _admit_hyperedges(existing_hyperedges, retained=True)
 
     # Effective root for relativizing absolute source_file / prune paths back to the

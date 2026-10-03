@@ -388,8 +388,8 @@ def _reconcile_existing_graph(
 
     result = dict(result)
     result["nodes"], result["edges"] = _admit_string_identities(
-        result.get("nodes", []), result.get("edges", []), keep_incomplete_edges=True)
-    result["nodes"] = [node for node in result["nodes"] if "id" in node]
+        result.get("nodes", []), result.get("edges", []),
+        keep_incomplete_nodes=False, keep_incomplete_edges=True)
     result["hyperedges"] = _admit_hyperedges(result.get("hyperedges", []))
     existing_graph_data: dict = {}
     if not existing_graph.exists():
@@ -404,8 +404,7 @@ def _reconcile_existing_graph(
         existing = json.loads(existing_graph.read_text(encoding="utf-8"))
         existing["nodes"], admitted_edges = _admit_string_identities(
             existing.get("nodes", []), existing.get("links", existing.get("edges", [])),
-            keep_incomplete_edges=True)
-        existing["nodes"] = [node for node in existing["nodes"] if "id" in node]
+            keep_incomplete_nodes=False, keep_incomplete_edges=True)
         existing["links" if "links" in existing else "edges"] = admitted_edges
         existing["hyperedges"] = _admit_hyperedges(existing.get("hyperedges", []), retained=True)
         existing_graph_data = existing

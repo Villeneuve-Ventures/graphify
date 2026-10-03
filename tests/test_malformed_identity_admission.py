@@ -275,7 +275,7 @@ def test_rejected_identities_do_not_reach_other_field_normalization(capsys):
     assert capsys.readouterr().err.count("skipping") == 3
 
 
-def test_raw_reconciliation_missing_ids_do_not_hide_retained_siblings(tmp_path):
+def test_raw_reconciliation_missing_ids_do_not_hide_retained_siblings(tmp_path, capsys):
     from graphify.watch import _reconcile_existing_graph
     path = seed(tmp_path, {"nodes": [node("anchor"), {"label": "missing id"}], "links": []})
     (tmp_path / "stable.md").write_text("accepted evidence")
@@ -285,6 +285,84 @@ def test_raw_reconciliation_missing_ids_do_not_hide_retained_siblings(tmp_path):
         out=tmp_path, project_root=tmp_path, watch_root=tmp_path, code_files=[],
         extract_targets=[], full_rebuild=False, deleted_paths=set(), deleted_source_identities=set())
     assert [n["id"] for n in result["nodes"]] == ["fresh", "anchor"]
+    assert path.read_bytes() == before
+    warnings = capsys.readouterr().err
+    assert warnings.count("missing required field 'id'") == 2
+    assert warnings.count("Extraction warning") == 2
+
+
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("ast_refresh", [False, True])
+def test_retained_missing_node_id_warns_before_indexing(tmp_path, capsys, dedup, ast_refresh):
+    missing = node("bad", "broken.md")
+    missing.pop("id")
+    path = seed(tmp_path, {"nodes": [node("anchor"), missing], "links": []})
+    before = path.read_bytes()
+    fresh = {"nodes": [node("fresh", "changed.md")], "edges": []}
+    original = deepcopy(fresh)
+    graph = build_merge([fresh], path, root=tmp_path, dedup=dedup,
+                        ast_refresh_sources=["changed.md"] if ast_refresh else None)
+    assert set(graph) == {"anchor", "fresh"}
+    warnings = capsys.readouterr().err
+    assert warnings.count("missing required field 'id'") == 1
+    assert "Extraction warning" in warnings
+    assert path.read_bytes() == before and fresh == original
+
+
+@pytest.mark.parametrize("no_cluster", [False, True])
+def test_public_update_warns_before_skipping_missing_node_id(tmp_path, monkeypatch, capsys, no_cluster):
+    import graphify.__main__ as mainmod
+    import graphify.extract as extractmod
+    source = tmp_path / "app.py"
+    source.write_text("def anchor(): return 1\n")
+    before = source.read_bytes()
+    original_extract = extractmod.extract
+    supplied = []
+
+    def extract_with_missing_id(*args, **kwargs):
+        result = original_extract(*args, **kwargs)
+        missing = dict(result["nodes"][-1], label="missing identity")
+        missing.pop("id")
+        result["nodes"].append(missing)
+        supplied.append((result, deepcopy(result)))
+        return result
+
+    monkeypatch.setattr(extractmod, "extract", extract_with_missing_id)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "update", str(tmp_path)]
+                        + (["--no-cluster"] if no_cluster else []))
+    mainmod.main()
+    warnings = capsys.readouterr().err
+    assert warnings.count("missing required field 'id'") == 1
+    assert "Extraction warning" in warnings
+    graph = json.loads((tmp_path / "graphify-out" / "graph.json").read_text())
+    assert graph["nodes"] and all(isinstance(n.get("id"), str) for n in graph["nodes"])
+    assert all(n.get("label") != "missing identity" for n in graph["nodes"])
+    assert source.read_bytes() == before
+    assert all(result == original for result, original in supplied)
+
+
+@pytest.mark.parametrize("record", ["malformed", [], ["other"]])
+@pytest.mark.parametrize("entry", ["watch", "semantic", "ast"])
+def test_indexing_admission_keeps_non_object_skip_behavior(tmp_path, capsys, record, entry):
+    path = seed(tmp_path, {"nodes": [node("anchor"), record], "links": []})
+    (tmp_path / "stable.md").write_text("accepted evidence")
+    before = path.read_bytes()
+    fresh = {"nodes": [node("fresh", "changed.md")], "edges": []}
+    if entry == "watch":
+        from graphify.watch import _reconcile_existing_graph
+        fresh["nodes"].append(deepcopy(record))
+        original = deepcopy(fresh)
+        result, _ = _reconcile_existing_graph(
+            path, fresh, out=tmp_path, project_root=tmp_path, watch_root=tmp_path,
+            code_files=[], extract_targets=[], full_rebuild=False,
+            deleted_paths=set(), deleted_source_identities=set())
+        assert {n["id"] for n in result["nodes"]} == {"anchor", "fresh"}
+        assert fresh == original
+    else:
+        graph = build_merge([fresh], path, root=tmp_path, dedup=False,
+                            ast_refresh_sources=["changed.md"] if entry == "ast" else None)
+        assert set(graph) == {"anchor", "fresh"}
+    assert capsys.readouterr().err == ""
     assert path.read_bytes() == before
 
 
