@@ -791,14 +791,15 @@ def test_falsey_hashable_group_identity_participates_in_conflicts(tmp_path, iden
 
 
 @pytest.mark.parametrize("identity", [[], {}, [1], {"bad": 1}])
-def test_retained_malformed_group_identity_policy_unchanged(tmp_path, identity):
+def test_retained_malformed_group_identity_warns_and_skips(tmp_path, identity, capsys):
     group = {"id": identity, "nodes": ["a"]}
     path, _ = seed(tmp_path, [node("a")], [], [group])
-    if identity:
-        with pytest.raises(TypeError):
-            build_merge([], path, root=tmp_path)
-    else:
-        assert build_merge([], path, root=tmp_path).graph["hyperedges"] == [group]
+    before = path.read_bytes()
+    graph = build_merge([], path, root=tmp_path)
+    assert set(graph) == {"a"}
+    assert not graph.graph.get("hyperedges")
+    assert "skipping retained hyperedge with non-hashable id" in capsys.readouterr().err
+    assert path.read_bytes() == before
 
 
 def test_fresh_group_members_are_not_resolved_in_prior_namespace_again(tmp_path):
@@ -1071,19 +1072,18 @@ def test_explicit_empty_retained_group_list_policy_unchanged(tmp_path):
 
 @pytest.mark.parametrize("identity", [None, False, 0])
 @pytest.mark.parametrize("mode", ["default_fresh", "default_old_sibling", "singleton", "dedup_false"])
-def test_falsey_retained_node_default_dedup_recovery(tmp_path, identity, mode):
+def test_falsey_retained_node_recovery_across_dedup_variants(tmp_path, identity, mode, capsys):
     records = [node(identity, "Invalid")]
     if mode == "default_old_sibling":
         records.append(node("anchor"))
     path, _ = seed(tmp_path, records, [])
     before = path.read_bytes()
     chunks = [] if mode in {"singleton", "default_old_sibling"} else [{"nodes": [node("beacon", source="changed.md")]}]
-    if mode in {"singleton", "dedup_false"}:
-        with pytest.raises((TypeError, ValueError)):
-            build_merge(chunks, path, root=tmp_path, **({"dedup": False} if mode == "dedup_false" else {}))
-    else:
-        graph = build_merge(chunks, path, root=tmp_path)
-        assert set(graph) == ({"anchor"} if mode == "default_old_sibling" else {"beacon"})
+    graph = build_merge(chunks, path, root=tmp_path,
+                        **({"dedup": False} if mode == "dedup_false" else {}))
+    expected = set() if mode == "singleton" else {"anchor"} if mode == "default_old_sibling" else {"beacon"}
+    assert set(graph) == expected
+    assert "skipping node with non-string id" in capsys.readouterr().err
     assert path.read_bytes() == before
 
 

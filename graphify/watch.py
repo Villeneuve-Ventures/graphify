@@ -384,6 +384,13 @@ def _reconcile_existing_graph(
     deleted_source_identities: set[str],
 ) -> tuple[dict, dict]:
     """Merge fresh extraction with preserved graph entries and evict stale sources."""
+    from graphify.build import _admit_hyperedges, _admit_string_identities
+
+    result = dict(result)
+    result["nodes"], result["edges"] = _admit_string_identities(
+        result.get("nodes", []), result.get("edges", []))
+    result["nodes"] = [node for node in result["nodes"] if "id" in node]
+    result["hyperedges"] = _admit_hyperedges(result.get("hyperedges", []))
     existing_graph_data: dict = {}
     if not existing_graph.exists():
         return result, existing_graph_data
@@ -395,6 +402,11 @@ def _reconcile_existing_graph(
 
         check_graph_file_size_cap(existing_graph)
         existing = json.loads(existing_graph.read_text(encoding="utf-8"))
+        existing["nodes"], admitted_edges = _admit_string_identities(
+            existing.get("nodes", []), existing.get("links", existing.get("edges", [])))
+        existing["nodes"] = [node for node in existing["nodes"] if "id" in node]
+        existing["links" if "links" in existing else "edges"] = admitted_edges
+        existing["hyperedges"] = _admit_hyperedges(existing.get("hyperedges", []), retained=True)
         existing_graph_data = existing
         source_paths = _StoredSourcePaths(
             existing,
@@ -673,8 +685,12 @@ def _check_shrink(
     """
     if force or not existing_data or had_explicit_deletions:
         return True
-    existing_nodes = existing_data.get("nodes", [])
-    new_nodes = new_data.get("nodes", [])
+    # Malformed node identities were never accepted evidence; count only the
+    # string identities that can survive admission, preserving valid-loss refusal.
+    existing_nodes = [node for node in existing_data.get("nodes", [])
+                      if isinstance(node.get("id"), str)]
+    new_nodes = [node for node in new_data.get("nodes", [])
+                 if isinstance(node.get("id"), str)]
     if len(new_nodes) >= len(existing_nodes):
         return True
     if rebuilt_sources is not None:

@@ -15,7 +15,7 @@ from pathlib import Path
 import networkx as nx
 from graphify.security import sanitize_label
 from graphify.analyze import _node_community_map
-from graphify.build import edge_data
+from graphify.build import _admit_hyperedges, edge_data
 from graphify.storage_guard import (
     ManagedWorkspaceOutputError, ordinary_mkdir, ordinary_open, ordinary_temporary_file,
     ordinary_replace, ordinary_unlink,
@@ -172,13 +172,18 @@ _CONFIDENCE_SCORE_DEFAULTS = {"EXTRACTED": 1.0, "INFERRED": 0.5, "AMBIGUOUS": 0.
 
 
 def attach_hyperedges(G: nx.Graph, hyperedges: list) -> None:
-    """Store hyperedges in the graph's metadata dict."""
-    existing = G.graph.get("hyperedges", [])
-    seen_ids = {h["id"] for h in existing}
-    for h in hyperedges:
-        if h.get("id") and h["id"] not in seen_ids:
+    """Attach admitted groups, preserving anonymous and typed JSON identities."""
+    existing = _admit_hyperedges(G.graph.get("hyperedges", []), retained=True)
+    def key(group):
+        identity = group.get("id")
+        return None if identity is None or identity == "" else (isinstance(identity, bool), identity)
+    seen_ids = {key(h) for h in existing if key(h) is not None}
+    for h in _admit_hyperedges(hyperedges):
+        identity = key(h)
+        if identity is None or identity not in seen_ids:
             existing.append(h)
-            seen_ids.add(h["id"])
+            if identity is not None:
+                seen_ids.add(identity)
     G.graph["hyperedges"] = existing
 
 
