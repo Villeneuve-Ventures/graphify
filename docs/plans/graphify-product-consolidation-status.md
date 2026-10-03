@@ -62,9 +62,11 @@ has not been completed.
   head before merge. Skipped draft jobs are not counted as passing tests.
 - [PR #167](https://github.com/Villeneuve-Ventures/graphify/pull/167) merged S4 into
   v8 at `45c7529811006e6fe8dc6d3d3137a59ad8b589de` on 2026-09-29 UTC.
-  The [S4 result](graphify-v8-s4-result.md) records the implementation and its
-  revision-specific local checks, including installed-package and cold-query
-  coverage. This merge does not complete S5–S7 or qualify a release candidate.
+  The [S4 result](graphify-v8-s4-result.md) records the implementation and
+  pre-delivery local checks of the S4 candidate, including installed-package
+  and cold-query coverage, at the scopes identified in that record. These are
+  historical receipts, not a fresh validation run at the merge revision.
+  This merge does not complete S5–S7 or qualify a release candidate.
 - These are historical delivery results. Publishing this status record does
   not constitute a new runtime test or acceptance run. Raw local logs remain
   session-local; the linked result document records their scope and revisions.
