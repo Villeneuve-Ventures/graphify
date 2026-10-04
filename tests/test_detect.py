@@ -95,12 +95,16 @@ def test_classify_md_doc_without_signals(tmp_path):
     assert classify_file(doc) == FileType.DOCUMENT
 
 
-def test_classify_attention_paper():
-    """The real attention paper file should be classified as PAPER."""
-    paper_path = Path("/home/safi/graphify_eval/papers/attention_is_all_you_need.md")
-    if paper_path.exists():
-        result = classify_file(paper_path)
-        assert result == FileType.PAPER
+def test_classify_attention_paper(tmp_path):
+    """A Markdown research summary should be classified as PAPER."""
+    paper_path = tmp_path / "attention_is_all_you_need.md"
+    paper_path.write_text(
+        "# Attention Is All You Need\n\n## Abstract\n\n"
+        "This research summary discusses attention models.\n"
+        "arXiv: 1706.03762\n\n## References\n\n[1] Related research.\n",
+        encoding="utf-8",
+    )
+    assert classify_file(paper_path) == FileType.PAPER
 
 
 def test_graphifyignore_excludes_file(tmp_path):

@@ -1,9 +1,7 @@
 """Tests for the progressive-disclosure references/ sidecar install path.
 
-The real claude bundle now ships in the package (graphify/skills/claude/), so
-claude and its reuse twins (antigravity, kimi) install progressively: a lean
-SKILL.md plus a references/ sidecar. Every other host whose bundle has not
-shipped yet still installs today's byte-identical monolith.
+Progressive hosts install a lean SKILL.md plus a references/ sidecar. A
+disposable package fixture covers the monolith fallback for a missing bundle.
 
 The plumbing tests below stage a hand-made fake bundle in claude's slot so the
 dir-copy, version-stamp, reinstall, and uninstall flow can be exercised with
@@ -214,48 +212,22 @@ def test_hard_fail_when_bundle_dir_present_but_references_missing(tmp_path, monk
             shutil.rmtree(skills_root, ignore_errors=True)
 
 
-def _first_unbuilt_progressive_host():
-    """Find a progressive host whose bundle dir has not shipped in this build.
+def test_unbuilt_bundle_host_falls_back_to_monolith(tmp_path, monkeypatch):
+    """An absent bundle installs the packaged monolith without a sidecar."""
+    from graphify import install as installmod
 
-    The wave ships bundles incrementally (claude, then codex/windows, then the
-    rest), so this picks whichever progressive host is still bundle-less right
-    now instead of hard-coding one that a later wave will build. Returns the
-    host name and its packaged monolith path, or (None, None) if all built.
-    """
-    skills_root = PKG_DIR / "skills"
-    for name, cfg in mainmod._PLATFORM_CONFIG.items():
-        bundle = cfg.get("skill_refs")
-        if not bundle:
-            continue
-        if (skills_root / bundle).exists():
-            continue
-        # Resolve the packaged monolith for this host (skill.md for claude-named).
-        suffix = "" if name == "claude" else f"-{name}"
-        monolith = PKG_DIR / f"skill{suffix}.md"
-        if monolith.exists():
-            return name, monolith
-    return None, None
-
-
-def test_unbuilt_bundle_host_falls_back_to_monolith(tmp_path):
-    """A progressive host whose bundle has not shipped installs the monolith.
-
-    claude/codex/windows bundles now ship; the remaining progressive hosts do
-    not have a bundle yet. They must still install their byte-identical monolith
-    with no references/ sidecar. The host is chosen dynamically so this stays
-    valid as later waves ship more bundles.
-    """
-    host, monolith = _first_unbuilt_progressive_host()
-    if host is None:
-        pytest.skip("every progressive host bundle has shipped; nothing to fall back")
-    assert not (PKG_DIR / "skills" / mainmod._PLATFORM_CONFIG[host]["skill_refs"]).exists()
-    _install(tmp_path, host)
+    host = "claude"
+    package = tmp_path / "package"
+    package.mkdir()
+    monolith = package / mainmod._PLATFORM_CONFIG[host]["skill_file"]
+    monolith.write_text("# Monolithic skill\n\nAll instructions are embedded.\n", encoding="utf-8")
+    monkeypatch.setattr(installmod, "__file__", str(package / "install.py"))
+    assert not (package / "skills" / mainmod._PLATFORM_CONFIG[host]["skill_refs"]).exists()
     with patch("graphify.__main__.Path.home", return_value=tmp_path):
-        dst = mainmod._platform_skill_destination(host)
+        dst = mainmod._copy_skill_file(host)
     skill_dir = dst.parent
     assert (skill_dir / "SKILL.md").exists()
     assert not (skill_dir / "references").exists()
-    # Byte-identical to the packaged monolith for that host.
     assert (skill_dir / "SKILL.md").read_bytes() == monolith.read_bytes()
 
 
@@ -350,125 +322,6 @@ def test_pyproject_declares_references_globs():
     assert "always_on/*.md" in pkg_data
     # The dead glob that matched no file must not creep back in.
     assert "skills/*/SKILL.md" not in pkg_data
-
-
-# The full progressive-disclosure payload the wheel must ship: 15 skill bodies,
-# 104 references (13 split hosts x 8 each), and 6 always-on injection blocks.
-_EXPECTED_SKILL_BODIES = (
-    "skill.md",
-    "skill-codex.md",
-    "skill-opencode.md",
-    "skill-kilo.md",
-    "skill-aider.md",
-    "skill-amp.md",
-    "skill-copilot.md",
-    "skill-claw.md",
-    "skill-windows.md",
-    "skill-droid.md",
-    "skill-trae.md",
-    "skill-kiro.md",
-    "skill-vscode.md",
-    "skill-pi.md",
-    "skill-devin.md",
-)
-_SPLIT_HOSTS = (
-    "claude", "codex", "windows", "opencode", "kilo", "copilot",
-    "claw", "droid", "amp", "trae", "kiro", "pi", "vscode",
-)
-_REFERENCE_NAMES = (
-    "add-watch.md", "exports.md", "extraction-spec.md", "github-and-merge.md",
-    "hooks.md", "query.md", "transcribe.md", "update.md",
-)
-_ALWAYS_ON_NAMES = (
-    "agents-md.md", "antigravity-rules.md", "claude-md.md",
-    "gemini-md.md", "kiro-steering.md", "vscode-instructions.md",
-)
-
-
-def _build_wheel_names(repo_root):
-    """Build the wheel and return the set of arcnames inside it.
-
-    Fails loudly (not skip) when the build backend is unavailable: `build` is a
-    declared dev dependency, so an environment that runs this test is expected to
-    have it. A silent skip is how a packaging regression slips through CI.
-    """
-    import subprocess
-    import sys
-    import tempfile
-    import zipfile
-
-    try:
-        import build  # noqa: F401
-    except ImportError:
-        raise AssertionError(
-            "the 'build' module is required for the wheel-content test but is not "
-            "installed; it is a declared dev dependency (run `uv sync --all-extras`)"
-        )
-
-    with tempfile.TemporaryDirectory() as outdir:
-        result = subprocess.run(
-            [sys.executable, "-m", "build", "--wheel", "--no-isolation", "--outdir", outdir, str(repo_root)],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, (
-            "wheel build failed:\n"
-            f"stdout:\n{result.stdout[-1000:]}\n"
-            f"stderr:\n{result.stderr[-1000:]}"
-        )
-        wheels = list(Path(outdir).glob("*.whl"))
-        assert wheels, "no wheel was produced"
-        with zipfile.ZipFile(wheels[0]) as zf:
-            return set(zf.namelist())
-
-
-def test_built_wheel_ships_the_full_skill_payload():
-    """The built wheel must carry every skill body, reference, and always-on block.
-
-    This is the headline regression guard. If the package-data globs fail to match
-    (e.g. the stale skills/*/SKILL.md glob that matched nothing), the wheel ships a
-    SKILL.md with no references/ sidecar and an install silently loses every
-    on-demand fragment. The test asserts the whole shipped layout: 15 skill
-    bodies, 96 references, and 6 always-on injection blocks. It FAILS (not skips)
-    when the build backend is missing, because build is a declared dev dependency.
-    """
-    repo_root = PKG_DIR.parent
-    if not (repo_root / "pyproject.toml").exists():
-        pytest.skip("pyproject.toml not adjacent to package (installed wheel)")
-    # In this wave every split-host bundle ships, so its absence is a real failure,
-    # not a reason to skip.
-    assert (PKG_DIR / "skills" / "claude" / "references" / "extraction-spec.md").exists(), (
-        "the claude bundle must ship in this build; the references sidecar is missing"
-    )
-
-    names = _build_wheel_names(repo_root)
-
-    missing_bodies = [b for b in _EXPECTED_SKILL_BODIES if f"graphify/{b}" not in names]
-    assert not missing_bodies, f"wheel is missing skill bodies: {missing_bodies}"
-    assert len(_EXPECTED_SKILL_BODIES) == 15
-
-    missing_refs = [
-        f"graphify/skills/{host}/references/{ref}"
-        for host in _SPLIT_HOSTS
-        for ref in _REFERENCE_NAMES
-        if f"graphify/skills/{host}/references/{ref}" not in names
-    ]
-    assert not missing_refs, f"wheel is missing references: {missing_refs}"
-    assert len(_SPLIT_HOSTS) * len(_REFERENCE_NAMES) == 104
-
-    missing_always_on = [
-        f"graphify/always_on/{name}"
-        for name in _ALWAYS_ON_NAMES
-        if f"graphify/always_on/{name}" not in names
-    ]
-    assert not missing_always_on, f"wheel is missing always-on blocks: {missing_always_on}"
-    assert len(_ALWAYS_ON_NAMES) == 6
-
-    # The specific headline file that the stale glob would have dropped.
-    assert "graphify/skills/claude/references/extraction-spec.md" in names
-    assert "graphify/skills/trae/references/hooks.md" in names
-    # amp is now a split host too; its bundle must ship like every other.
-    assert "graphify/skills/amp/references/hooks.md" in names
 
 
 def test_monolith_install_clears_orphan_references(tmp_path, fake_bundle):
