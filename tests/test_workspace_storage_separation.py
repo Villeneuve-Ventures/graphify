@@ -697,13 +697,13 @@ def test_darwin_capability_probe_uses_containing_mount(tmp_path, monkeypatch, fi
     mount = "/Volumes/State Disk"
 
     def probe(argv, **_kwargs):
-        if argv[0] == "df":
-            assert argv == ["df", "-P", str(tmp_path.resolve())]
+        if argv[0] == "/bin/df":
+            assert argv == ["/bin/df", "-P", str(tmp_path.resolve())]
             return CompletedProcess(argv, 0, stdout=(
                 "Filesystem 512-blocks Used Available Capacity Mounted on\n"
                 f"/dev/disk4s1 100 10 90 10% {mount}\n"
             ))
-        assert argv == ["diskutil", "info", "-plist", mount]
+        assert argv == ["/usr/sbin/diskutil", "info", "-plist", mount]
         return CompletedProcess(argv, 0, stdout=plistlib.dumps({
             "MountPoint": mount, "FilesystemType": filesystem,
         }))
@@ -725,7 +725,7 @@ def test_darwin_capability_probe_fails_closed(tmp_path, monkeypatch, response):
     monkeypatch.setattr(persistence.platform, "system", lambda: "Darwin")
 
     def probe(argv, **_kwargs):
-        if argv[0] == "df":
+        if argv[0] == "/bin/df":
             return CompletedProcess(argv, 0, stdout=(
                 "malformed" if response == "malformed" else
                 "header\n/dev/disk4s1 100 10 90 10% /Volumes/State\n"

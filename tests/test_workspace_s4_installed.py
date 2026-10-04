@@ -41,7 +41,7 @@ if mode.startswith('query'):
         if event == 'subprocess.Popen':
             command = args[1]
             allowed = ((args[0] == git_executable and command[0] == git_executable)
-                       or command[0] in {'df', 'diskutil'}
+                       or command[0] in {'/bin/df', '/usr/sbin/diskutil'}
                        or command[:4] == [sys.executable, '-I', '-S', '-B']
                        or (len(command) == 6 and command[:5] == [sys.executable, '-I', '-B', '-c', query_child_code]))
             if not allowed:

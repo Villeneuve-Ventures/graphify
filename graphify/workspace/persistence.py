@@ -133,9 +133,9 @@ class RuntimeCapabilities:
         if system == "Darwin":
             try:
                 mount = subprocess.run(
-                    ["df", "-P", str(existing)],
+                    ["/bin/df", "-P", str(existing)],
                     capture_output=True, text=True, check=False, timeout=5,
-                    env={**os.environ, "LC_ALL": "C"},
+                    env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
                 )
                 # POSIX df reports the containing mount, including APFS firmlinks.
                 # stat %T does not identify the containing filesystem mount.
@@ -144,8 +144,9 @@ class RuntimeCapabilities:
                 mount_point = fields[5] if len(fields) == 6 else ""
                 if mount.returncode == 0 and mount_point.startswith("/"):
                     info = subprocess.run(
-                        ["diskutil", "info", "-plist", mount_point],
+                        ["/usr/sbin/diskutil", "info", "-plist", mount_point],
                         capture_output=True, check=False, timeout=5,
+                        env={"PATH": os.defpath, "LANG": "C", "LC_ALL": "C"},
                     )
                     if info.returncode == 0:
                         details = plistlib.loads(info.stdout)

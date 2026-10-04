@@ -420,7 +420,9 @@ The separate `graphify update` command retains its own AST update behavior.
 
 `graphify workspace` exposes explicit registration, source activation, structural
 sync, query, status, and doctor commands. Each command accepts a bounded canonical
-JSON request from a file or stdin:
+JSON request from a file or stdin. All workspace operations, including query,
+status, and doctor, require non-elevated macOS on local APFS. Windows and Linux
+support workspace help only. On the qualified macOS runtime:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 graphify workspace status --request status.json
@@ -432,9 +434,9 @@ Use an already installed, exact compatible candidate and explicit external state
 root. Set `PYTHONDONTWRITEBYTECODE=1` before console-script startup, or use a
 trusted Python with `-E -P -B -m graphify workspace ...`. Bare cold console/module
 startup cannot guarantee zero writes: CPython can create the first package bytecode
-cache before Graphify code runs. Workspace mutation requires the qualified macOS/local-filesystem runtime;
-help stays available on other platforms. Status, doctor, and query inspect existing
-state without repair or ordinary `graphify-out` writes. Query text is released only
+cache before Graphify code runs. Help stays available on other platforms.
+Status, doctor, and query inspect existing state without repair or ordinary
+`graphify-out` writes. Query text is released only
 after both freshness checks pass. A stale or unavailable result requires an explicit
 operator decision; it does not trigger sync. Freshness is observed-current, not an
 atomic snapshot, and structural sync does not establish semantic completion.

@@ -26,7 +26,14 @@ from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 
 # Install/uninstall subsystem moved to graphify/install.py; re-exported here so
 # `from graphify.__main__ import <name>` keeps working unchanged.
-if not (len(sys.argv) > 1 and sys.argv[1] == "workspace"):
+_LEGACY_EXPORTS_LOADED = False
+
+
+def _load_legacy_exports():
+    global _LEGACY_EXPORTS_LOADED, _always_on, _platform_skill_destination
+    global _PLATFORM_CONFIG, dispatch_install_cli, dispatch_command
+    if _LEGACY_EXPORTS_LOADED:
+        return
     from graphify.install import (  # noqa: E402,F401
         dispatch_install_cli,
         _agents_install,
@@ -131,8 +138,12 @@ if not (len(sys.argv) > 1 and sys.argv[1] == "workspace"):
         _HOOK_SOURCE_EXTS,
         _GEMINI_NUDGE_TEXT,
     )
+    globals().update(locals())
+    _LEGACY_EXPORTS_LOADED = True
 
 
+if not (len(sys.argv) > 1 and sys.argv[1] == "workspace"):
+    _load_legacy_exports()
 
 
 _ALWAYS_ON_ALIASES = {
@@ -145,11 +156,16 @@ _ALWAYS_ON_ALIASES = {
 }
 
 
-def __getattr__(name: str) -> str:
+def __getattr__(name: str):
     # PEP 562: lazily resolve the legacy always-on section constants for external
     # importers (e.g. the install-string tests). In-module code calls _always_on()
     # directly; nothing is read at import time, so a missing block can no longer
     # brick the CLI on `import graphify.__main__` (#1121 follow-up).
+    if name == "__path__":
+        raise AttributeError(name)
+    _load_legacy_exports()
+    if name in globals():
+        return globals()[name]
     base = _ALWAYS_ON_ALIASES.get(name)
     if base is not None:
         return _always_on(base)
@@ -491,6 +507,8 @@ def _run_cli() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "workspace":
         from graphify.workspace.cli import run_workspace_cli
         raise SystemExit(run_workspace_cli(sys.argv[2:]))
+
+    _load_legacy_exports()
 
     # Check all known skill install locations for a stale version stamp.
     # Skip during install/uninstall (hook writes trigger a fresh check anyway).

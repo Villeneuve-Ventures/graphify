@@ -41,7 +41,7 @@ def audit(event, args):
         raise AssertionError('unexpected durable side effect: ' + event)
     if event == 'subprocess.Popen':
         command = args[1]
-        if not (command[0] in {'df', 'diskutil'} or os.path.basename(command[0]) == 'git'
+        if not (command[0] in {'/bin/df', '/usr/sbin/diskutil'} or os.path.basename(command[0]) == 'git'
                 or command[:4] == [sys.executable, '-I', '-S', '-B']
                 or command[:3] == [sys.executable, '-I', '-B']):
             raise AssertionError('unexpected subprocess: ' + str(command))
@@ -243,6 +243,16 @@ def test_installed_public_native_round_trip_and_cold_reads(installed_candidate):
     assert client.snapshots(source, linked, clone) == before
     first = client.run("query", query)["text"]
     assert "leaf" in first
+    redirected = root / "redirected-request.json"
+    redirected.write_bytes(canonical_json_bytes(client.request("query", query)))
+    for launch in ([str(client.console)], [str(client.python), "-E", "-P", "-B", "-m", "graphify"]):
+        with redirected.open("rb") as stream:
+            result = subprocess.run([*launch, "workspace", "query", "--request", "-"],
+                                    stdin=stream, env=client.env, cwd=root,
+                                    capture_output=True, timeout=180)
+        assert result.returncode == 0 and result.stderr == b"", result.stderr
+        assert json.loads(result.stdout)["result"]["text"] == first
+        assert result.stdout == canonical_json_bytes(json.loads(result.stdout))
     assert client.run("query", query, module=True)["text"] == first
     hostile = root / "hostile-cwd"
     hostile.mkdir()
@@ -258,6 +268,25 @@ def test_installed_public_native_round_trip_and_cold_reads(installed_candidate):
     for command in ("status", "doctor"):
         client.run(command, {"repo_uuid": REPO_UUID}, audit=True)
     assert client.snapshots(source, linked, clone) == before
+    # Caller PATH cannot replace qualification helpers or create side effects.
+    shadow_tools = root / "shadow-probes"
+    shadow_tools.mkdir()
+    marker = root / "probe-side-effect"
+    for name in ("df", "diskutil"):
+        helper = shadow_tools / name
+        helper.write_text("#!/bin/sh\nprintf side-effect > " + str(marker) + "\nexit 1\n")
+        helper.chmod(0o700)
+    ordinary_env = client.env
+    client.env = dict(ordinary_env, PATH=str(shadow_tools) + os.pathsep + ordinary_env["PATH"])
+    before = client.snapshots(source, linked, clone)
+    try:
+        assert client.run("query", query, audit=True)["text"] == first
+        for command in ("status", "doctor"):
+            client.run(command, {"repo_uuid": REPO_UUID}, audit=True)
+        assert not marker.exists()
+        assert client.snapshots(source, linked, clone) == before
+    finally:
+        client.env = ordinary_env
     cache = Path(client.env["TMPDIR"]) / "jieba.cache"
     cache.write_bytes(marshal.dumps(({"南京市长江大桥": 999}, 999)))
     before = client.snapshots(source, linked, clone)

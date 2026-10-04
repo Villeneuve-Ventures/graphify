@@ -198,7 +198,7 @@ time.sleep(60)
     assert out.out == ""
     assert json.loads(out.err)["error_code"] == ("execution_unknown" if mutation else "deadline_exceeded")
     pid = int(marker.read_text())
-    probe = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True)
+    probe = subprocess.run(["ps", "-p", str(pid), "-o", "stat="], capture_output=True, text=True, timeout=180)
     assert not probe.stdout.strip() or probe.stdout.strip().startswith("Z")
 
 
@@ -233,7 +233,7 @@ else:
 print('LAZY-HELP-OK')
 '''
     result = subprocess.run([sys.executable, "-B", "-c", code,
-                             "workspace" if workspace else "ordinary"], capture_output=True, text=True)
+                             "workspace" if workspace else "ordinary"], capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stderr
     assert result.stdout.endswith("LAZY-HELP-OK\n")
 
@@ -267,3 +267,80 @@ def test_command_schema_and_model_agree(command):
         assert list(validator.iter_errors(broken))
         with pytest.raises(ContractError):
             WorkspaceCommandRequest.from_mapping(broken)
+
+
+def test_redirected_regular_stdin_does_not_require_selector(tmp_path, monkeypatch):
+    request = tmp_path / 'request'
+    request.write_bytes(b'prefix{}\n')
+    class RejectRegularFiles:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def register(self, *args): raise PermissionError('epoll rejects regular files')
+    monkeypatch.setattr(cli.selectors, 'DefaultSelector', RejectRegularFiles)
+    with request.open('rb', buffering=0) as stream:
+        stream.read(6)
+        monkeypatch.setattr(sys, 'stdin', stream)
+        assert cli._read_request('-') == b'{}\n'
+        assert not stream.closed
+
+
+@pytest.mark.parametrize("expired", [False, True])
+def test_redirected_regular_stdin_keeps_byte_and_acquisition_limits(tmp_path, monkeypatch, expired):
+    request = tmp_path / "request"
+    request.write_bytes(b"{}\n" if expired else b"x" * (cli.MAX_REQUEST_BYTES + 1))
+    if expired:
+        ticks = iter((0, 11))
+        monkeypatch.setattr(cli.time, "monotonic", lambda: next(ticks))
+    with request.open("rb", buffering=0) as stream:
+        monkeypatch.setattr(sys, "stdin", stream)
+        with pytest.raises(ContractError, match="acquisition expired" if expired else "regular request"):
+            cli._read_request("-")
+        assert not stream.closed
+
+
+@pytest.mark.parametrize("imports", [False, True])
+def test_legacy_exports_survive_workspace_argv_and_later_ordinary_dispatch(imports):
+    code = '''import sys
+mode=sys.argv[-1]
+sys.argv=['graphify','workspace','--help',mode]
+import graphify.__main__ as entry
+if sys.argv[-1]=='imports':
+    from graphify.__main__ import install, _StageTimer, _CLAUDE_MD_SECTION
+    from graphify.install import install as implementation
+    from graphify.cli import _StageTimer as timer
+    assert install is implementation and _StageTimer is timer
+    assert isinstance(_CLAUDE_MD_SECTION,str)
+sys.argv=['graphify','--help']
+entry.main()
+print('LEGACY-OK')
+'''
+    result = subprocess.run([sys.executable, '-B', '-c', code, 'imports' if imports else 'dispatch'], capture_output=True,
+                            text=True, timeout=180)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.endswith('LEGACY-OK\n')
+
+
+@pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin host qualification')
+def test_readonly_worker_ignores_path_host_probe_shadows(command, tmp_path, monkeypatch):
+    marker = tmp_path / 'side-effect'
+    tools = tmp_path / 'shadow-tools'
+    tools.mkdir()
+    for name in ('df', 'diskutil'):
+        helper = tools / name
+        helper.write_text('#!/bin/sh\nprintf side-effect > ' + str(marker) + '\nexit 1\n')
+        helper.chmod(0o700)
+    monkeypatch.setenv('PATH', str(tools) + os.pathsep + os.environ['PATH'])
+    # Retain the public worker's actual import isolation and audit hook, then
+    # exercise the capability detector called before every public operation.
+    tail = '''from graphify.workspace.persistence import RuntimeCapabilities
+from graphify.workspace.cli_contracts import response
+capabilities=RuntimeCapabilities.detect(__import__('pathlib').Path(''' + repr(str(tmp_path)) + '''))
+sys.stdout.buffer.write(response('query','public-boundary',result={'filesystem':capabilities.filesystem}).canonical)
+'''
+    monkeypatch.setattr(cli, '_BOOTSTRAP', cli._BOOTSTRAP.replace(
+        'from graphify.workspace.cli import _command_child\n_command_child(deadline_ns)', tail))
+    reply, code = cli._run_bounded(WorkspaceCommandRequest.from_mapping(command),
+                                   time.monotonic_ns() + 10_000_000_000)
+    assert code == 0
+    assert not marker.exists()
+    assert reply.to_dict()['result']['filesystem'] == 'apfs'

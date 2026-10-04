@@ -18,12 +18,16 @@ version numbers is not enough to establish authority. See the
 [selected-ref contract](graphify-v8-selected-ref-contract.md).
 
 Old manifests, staged requests, or receipts are not converted or re-signed. The
-state root is explicit and external to the checkout. Mutation requires qualified
-runtime/storage capabilities. Do not infer support from successful help or import.
+state root is explicit and external to the checkout. All workspace operations,
+including query, status, and doctor, require non-elevated macOS on local APFS.
+Windows and Linux support workspace help only. Do not infer operational support
+from successful help or import.
 A refusal does not grant permission to install authority, migrate, repair, or
 change the selected source.
 
 ## Command and request contract
+
+The launch examples below use the qualified macOS runtime and its POSIX shell:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 graphify workspace --help

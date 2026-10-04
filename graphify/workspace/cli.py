@@ -38,6 +38,8 @@ def _read_request(name):
     if name == "-":
         fd = sys.stdin.fileno()
         deadline = time.monotonic() + 10
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return _read_regular_request(fd, deadline=deadline)
         chunks, size = [], 0
         with selectors.DefaultSelector() as selector:
             selector.register(fd, selectors.EVENT_READ)
@@ -54,26 +56,33 @@ def _read_request(name):
                     raise ContractError("request byte limit exceeded")
     fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     try:
-        before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_REQUEST_BYTES:
-            raise ContractError("bounded regular request file required")
-        chunks, size = [], 0
-        while True:
-            chunk = os.read(fd, min(65536, MAX_REQUEST_BYTES + 1 - size))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            size += len(chunk)
-            if size > MAX_REQUEST_BYTES:
-                raise ContractError("request byte limit exceeded")
-        after = os.fstat(fd)
-        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                or size != before.st_size):
-            raise ContractError("request changed while reading")
-        return b"".join(chunks)
+        return _read_regular_request(fd)
     finally:
         os.close(fd)
+
+
+def _read_regular_request(fd, *, deadline=None):
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_size > MAX_REQUEST_BYTES:
+        raise ContractError("bounded regular request file required")
+    offset = os.lseek(fd, 0, os.SEEK_CUR)
+    chunks, size = [], 0
+    while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise ContractError("request acquisition expired")
+        chunk = os.read(fd, min(65536, MAX_REQUEST_BYTES + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_REQUEST_BYTES:
+            raise ContractError("request byte limit exceeded")
+    after = os.fstat(fd)
+    if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or size != before.st_size - offset):
+        raise ContractError("request changed while reading")
+    return b"".join(chunks)
 
 
 # Workspace computations use installation paths, never caller cwd/PYTHONPATH.
