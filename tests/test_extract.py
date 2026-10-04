@@ -651,7 +651,7 @@ def test_no_dangling_edges_on_extract():
 
 
 def test_calls_edges_emitted():
-    """Call-graph pass must produce INFERRED calls edges."""
+    """Call-graph pass must produce EXTRACTED calls edges."""
     result = extract_python(FIXTURES / "sample_calls.py")
     calls = [e for e in result["edges"] if e["relation"] == "calls"]
     assert len(calls) > 0, "Expected at least one calls edge"

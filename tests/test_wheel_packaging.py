@@ -22,17 +22,6 @@ REPO = Path(__file__).resolve().parents[1]
 PKG = REPO / "graphify"
 
 
-def _has_build() -> bool:
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "build", "--version"],
-            check=True, capture_output=True,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return False
-
-
 def _skill_bodies() -> list[Path]:
     """Every distinct skill body a platform installs (the SKILL.md is copied from
     one of these). A body missing from the wheel makes `graphify install
@@ -58,8 +47,13 @@ def _expected_artifacts() -> list[Path]:
 
 @pytest.fixture(scope="module")
 def built_wheel(tmp_path_factory) -> Path:
-    if not _has_build():
-        pytest.skip("`python -m build` unavailable (dev extra not installed)")
+    try:
+        import build  # noqa: F401
+    except ImportError:
+        pytest.fail(
+            "the 'build' module is required for the wheel-content tests; "
+            "it is a declared dev dependency (run `uv sync --all-extras`)"
+        )
     out = tmp_path_factory.mktemp("wheel")
     proc = subprocess.run(
         [sys.executable, "-m", "build", "--wheel", "--no-isolation",
@@ -71,6 +65,12 @@ def built_wheel(tmp_path_factory) -> Path:
     wheels = list(out.glob("graphifyy-*.whl"))
     assert wheels, "no wheel produced"
     return max(wheels, key=lambda p: p.stat().st_mtime)
+
+
+def test_missing_build_dependency_fails(monkeypatch, tmp_path_factory):
+    monkeypatch.setitem(sys.modules, "build", None)
+    with pytest.raises(pytest.fail.Exception, match="declared dev dependency"):
+        built_wheel.__wrapped__(tmp_path_factory)
 
 
 @pytest.fixture(scope="module")
