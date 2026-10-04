@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/cli-response.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "format_version",
+    "command",
+    "request_id",
+    "outcome",
+    "result",
+    "error_code"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.cli.response"
+    },
+    "format_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "command": {
+      "enum": [
+        "register",
+        "activate",
+        "sync",
+        "query",
+        "status",
+        "doctor",
+        null
+      ]
+    },
+    "request_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "ok",
+        "refused"
+      ]
+    },
+    "result": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "error_code": {
+      "enum": [
+        null,
+        "bad_request",
+        "unsupported_runtime",
+        "authority_invalid",
+        "workspace_refused",
+        "deadline_exceeded",
+        "execution_unknown",
+        "execution_failed"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "ok"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "type": "object"
+          },
+          "error_code": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "result": {
+            "type": "null"
+          },
+          "error_code": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

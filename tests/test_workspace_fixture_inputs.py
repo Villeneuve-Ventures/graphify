@@ -26,7 +26,8 @@ class FixtureInputReviewTests(unittest.TestCase):
         self.repo.mkdir()
         modules = ("__init__.py", "__main__.py", "source_io.py", "workspace/contracts.py",
                    "workspace/composition.py", "workspace/__init__.py",
-                   "workspace/adapters/base.py", "workspace/adapters/__init__.py")
+                   "workspace/adapters/base.py", "workspace/adapters/__init__.py",
+                   "workspace/cli.py", "workspace/cli_contracts.py", "workspace/status.py")
         for name in modules:
             path = self.repo / "graphify" / name
             path.parent.mkdir(parents=True, exist_ok=True)
