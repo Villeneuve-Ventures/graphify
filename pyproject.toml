@@ -51,7 +51,9 @@ Issues = "https://github.com/safishamsi/graphify/issues"
 # starlette is pulled in transitively by mcp, but graphify/serve.py imports it
 # directly for the HTTP transport, so declare it here and floor it above the
 # CVE-2026-48818 / CVE-2026-54283 fixes (both resolved by 1.3.1) (#1391, #1396).
-mcp = ["mcp", "starlette>=1.3.1"]
+# The SDK's transitive floors still permit the advisory-affected PyJWT and
+# cryptography releases. Keep these published floors inside the MCP extra (#180).
+mcp = ["mcp>=1.28.1", "starlette>=1.3.1", "pyjwt[crypto]>=2.15.0", "cryptography>=50.0.0"]
 neo4j = ["neo4j"]
 falkordb = ["falkordb"]
 pdf = ["pypdf>=6.16.1", "markdownify"]
@@ -80,7 +82,7 @@ pascal = ["tree-sitter-pascal"]
 # avoids breaking the default `uv tool install graphifyy` for everyone (#1104).
 dm = ["tree-sitter-dm"]
 terraform = ["tree-sitter-hcl"]
-all = ["mcp", "starlette>=1.3.1", "neo4j", "falkordb", "pypdf>=6.16.1", "markdownify", "watchdog", "graspologic-native>=1.3.1,<2", "python-docx", "openpyxl", "faster-whisper", "yt-dlp>=2026.6.9", "matplotlib", "numpy>=2.0", "openai", "tiktoken", "boto3", "anthropic", "tree-sitter-sql", "jieba", "tree-sitter-dm", "tree-sitter-hcl", "tree-sitter-pascal"]
+all = ["mcp>=1.28.1", "starlette>=1.3.1", "pyjwt[crypto]>=2.15.0", "cryptography>=50.0.0", "neo4j", "falkordb", "pypdf>=6.16.1", "markdownify", "watchdog", "graspologic-native>=1.3.1,<2", "python-docx", "openpyxl", "faster-whisper", "yt-dlp>=2026.6.9", "matplotlib", "numpy>=2.0", "openai", "tiktoken", "boto3", "anthropic", "tree-sitter-sql", "jieba", "tree-sitter-dm", "tree-sitter-hcl", "tree-sitter-pascal"]
 
 [project.scripts]
 graphify = "graphify.__main__:main"
