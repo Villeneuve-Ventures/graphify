@@ -1397,6 +1397,8 @@ def test_posix_bootstrap_never_executes_workspace_path_mkdir(tmp_path, monkeypat
 def test_posix_bootstrap_pointer_refusal_warns_once_and_continues_under_umask_0002(
     tmp_path, monkeypatch, existing_pointer
 ):
+    # Active-environment discovery selects bin/python, independent of pytest's launcher.
+    expected_python = Path(sys.executable).with_name("python")
     bin_dir = _isolated_bootstrap_bin(tmp_path)
     (bin_dir / "python3.14").symlink_to(Path(sys.executable))
     monkeypatch.setenv("PATH", str(bin_dir))
@@ -1428,7 +1430,7 @@ def test_posix_bootstrap_pointer_refusal_warns_once_and_continues_under_umask_00
     assert result.returncode == 0, result.stderr
     warning = "cannot safely publish the advisory interpreter pointer"
     assert result.stderr.lower().count(warning) == 1
-    assert retained_python.read_text(encoding="utf-8") == str(Path(sys.executable))
+    assert retained_python.read_text(encoding="utf-8") == str(expected_python)
     assert (graphify_out.stat().st_mode & 0o777) == 0o775
     if existing_pointer:
         assert pointer.read_text(encoding="utf-8") == old_pointer
@@ -2004,6 +2006,7 @@ def _query_block_as_help() -> str:
 def test_posix_operation_guard_ignores_exported_hostile_bash_functions(
     tmp_path, guard_source
 ):
+    expected_python = Path(sys.executable).with_name("python")
     guard = (
         gen._POSIX_OPERATION_GUARD
         if guard_source == "owner"
@@ -2038,7 +2041,7 @@ exec /bin/bash "$1"
     env = {
         **os.environ,
         "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
-        "GFY_EXPECTED_PYTHON": str(Path(sys.executable)),
+        "GFY_EXPECTED_PYTHON": str(expected_python),
         "GFY_CONTROL_MARKER": str(control_marker),
         **{
             f"GFY_{name.upper()}_MARKER": str(marker)
@@ -2703,6 +2706,7 @@ def test_explicit_project_local_virtualenv_is_accepted_but_same_ambient_path_is_
 
 
 def test_posix_static_mcp_configuration_emits_fresh_trusted_command(tmp_path):
+    expected_python = Path(sys.executable).with_name("python")
     _, refs = _platform_artifacts("claude")
     blocks = re.findall(r"```(?:bash|sh)\n(.*?)\n```", refs["exports.md"], re.DOTALL)
     config_blocks = [block for block in blocks if '"mcpServers"' in block]
@@ -2728,13 +2732,55 @@ def test_posix_static_mcp_configuration_emits_fresh_trusted_command(tmp_path):
     assert result.returncode == 0, result.stderr
     config = json.loads(result.stdout)
     server = config["mcpServers"]["graphify"]
-    assert server["command"] == sys.executable
+    assert server["command"] == str(expected_python)
     assert server["args"] == [
         "-E", "-P", "-B", "-m", "graphify.serve",
         str(project / "graphify-out" / "graph.json"),
     ]
     assert str(sentinel) not in result.stdout
     assert not marker.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX Python launcher coverage")
+@pytest.mark.parametrize("launcher_name", ["python", "python3"])
+def test_posix_bootstrap_security_cases_under_same_environment_launchers(tmp_path, launcher_name):
+    python = Path(sys.executable).with_name("python")
+    launcher = python.with_name(launcher_name)
+    # A shared resolved binary alone does not prove virtual-environment identity.
+    probe = (
+        "import graphify, json, site, sys; "
+        "print(json.dumps([sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix, "
+        "sys.version, sys.implementation.name, site.getsitepackages(), graphify.__file__]))"
+    )
+    identities = []
+    for executable in (python, launcher):
+        result = subprocess.run(
+            [str(executable), "-E", "-P", "-B", "-c", probe],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=False, timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        identities.append(json.loads(result.stdout))
+    assert identities[0] == identities[1]
+    assert identities[0][0] == sys.prefix
+    assert identities[0][-1] == str(REPO_ROOT / "graphify" / "__init__.py")
+
+    cases = (
+        "test_posix_bootstrap_pointer_refusal_warns_once_and_continues_under_umask_0002",
+        "test_posix_operation_guard_ignores_exported_hostile_bash_functions",
+        "test_posix_static_mcp_configuration_emits_fresh_trusted_command",
+    )
+    result = subprocess.run(
+        [
+            str(launcher), "-m", "pytest",
+            *(f"tests/test_skillgen.py::{case}" for case in cases),
+            "-q", "--tb=short", "-p", "no:cacheprovider", "--basetemp", str(tmp_path / "child"),
+        ],
+        cwd=REPO_ROOT,
+        env={**os.environ, "VIRTUAL_ENV": str(python.parent.parent)},
+        capture_output=True, text=True, check=False, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "5 passed" in result.stdout
 
 
 @pytest.mark.parametrize("command", ["uv", "pipx"])
