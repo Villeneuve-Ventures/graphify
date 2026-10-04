@@ -84,7 +84,7 @@ class InstalledMemberRefusalTests(unittest.TestCase):
 class CompletionCompatibilityTests(unittest.TestCase):
     def test_unrelated_document_cannot_supply_the_compatibility_digest(self):
         common = {
-            "contract": "graphify.workspace.source-inputs", "format_version": 1,
+            "contract": "graphify.workspace.source-inputs", "format_version": 2,
             "roots": ["source"], "code_inputs": [], "outcomes": [], "failure": None,
             "evidence": [{"operation": "directory", "path": ".", "value": [1, 2, 16832]}],
         }

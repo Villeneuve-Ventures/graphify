@@ -146,6 +146,9 @@ class SourceIO:
             if path.is_relative_to(root):
                 rel = path.relative_to(root)
                 key = rel.as_posix() if label == 'source' else f'{label}:{rel.as_posix()}'
+                if (_ACTIVE.get() is self and key == 'git:packed-refs'
+                        and ('packed_refs', key) in self._records):
+                    self.refuse('projected Git container cannot serve as an engine input')
                 return label, rel, key
         self.refuse(f'input outside declared roots: {path}')
 
@@ -154,7 +157,8 @@ class SourceIO:
         if record_key in self._records and self._records[record_key] != value:
             self.refuse(f'{operation} changed: {key}', SourceChanged)
         if record_key not in self._records:
-            cost = 1 + (len(value[1]) if operation == 'list' else 0)
+            cost = 1 + (len(value[1]) if operation == 'list' else
+                        len(value) if operation == 'packed_refs' and value is not None else 0)
             if self._evidence_units + cost > self.max_entries:
                 self.refuse('input evidence entry limit exceeded')
             self._evidence_units += cost
@@ -170,8 +174,30 @@ class SourceIO:
 
     @property
     def evidence(self):
+        # Workspace manifest v2 retains selected packed entries, not the
+        # container's physical identity. Acquisition records remain internal:
+        # repeated reads in this scope must still match all bytes and metadata.
+        projected = ('packed_refs', 'git:packed-refs') in self._records
         return tuple({'operation': op, 'path': key, 'value': value}
-                     for (op, key), value in sorted(self._records.items()))
+                     for (op, key), value in sorted(self._records.items())
+                     if not (projected and key == 'git:packed-refs'
+                             and op in {'read', 'probe'}))
+
+    def record_packed_refs(self, selected):
+        """Retain the workspace adapter's explicit selected-ref projection.
+
+        The adapter owns Git interpretation. This does not skip physical
+        acquisition or discard the evidence used for in-scope stability checks.
+        A null projection is used only by recovery's positive-absence digest;
+        it is not a valid input manifest.
+        """
+        self.check()
+        if 'git' not in self.roots or ('probe', 'git:packed-refs') not in self._records:
+            self.refuse('packed reference projection requires rooted acquisition')
+        if (self._records['probe', 'git:packed-refs'] is not None
+                and ('read', 'git:packed-refs') not in self._records):
+            self.refuse('packed reference projection requires a complete read')
+        self._record('packed_refs', 'git:packed-refs', selected)
 
     @contextmanager
     def _parent(self, path):

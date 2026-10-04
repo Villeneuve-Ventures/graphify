@@ -17,13 +17,13 @@ import stat
 import unicodedata
 
 STATE_SCHEMA_VERSION = 2
-ADAPTER_CONTRACT_VERSION = 2
-INPUT_MANIFEST_VERSION = 1
+ADAPTER_CONTRACT_VERSION = 3
+INPUT_MANIFEST_VERSION = 2
 GRAPH_PAYLOAD_VERSION = 1
 DISTRIBUTION_VERSION = "0.10.0"
 ENGINE_BASELINE = "git:7a6f667acf805b34e28f1658d9c69de16a282892"
-EXTRACTOR_CACHE_ABI = "graphify-v8-structural-1"
-DETECTOR_ID = "graphify-v8/workspace-observer-v2"
+EXTRACTOR_CACHE_ABI = "graphify-v8-structural-2"
+DETECTOR_ID = "graphify-v8/workspace-observer-v3"
 MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
 MAX_ENTRIES = 100_000
 MAX_FILE_BYTES = 64 * 1024 * 1024
@@ -218,6 +218,25 @@ def _evidence(records, roots):
             raise ContractError("invalid or duplicate evidence operation")
         if op == "directory":
             bind(path, _identity(value, directory=True))
+        elif op == "packed_refs":
+            if (path != "git:packed-refs" or "git" not in roots
+                    or not isinstance(value, (list, tuple)) or len(value) > 1):
+                raise ContractError("invalid selected packed reference evidence")
+            units += len(value)
+            for entry in value:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+                    raise ContractError("invalid selected packed reference entry")
+                ref, loose, oid = entry
+                input_label("git:" + ref if isinstance(ref, str) else ref, roots)
+                input_label(loose, roots)
+                if not isinstance(ref, str) or not ref.startswith("refs/"):
+                    raise ContractError("invalid selected packed reference name")
+                local = ref.startswith(("refs/worktree/", "refs/bisect/", "refs/rewritten/"))
+                if (loose != "git:" + ref and not (local and isinstance(loose, str)
+                        and re.fullmatch(r"git:worktrees/[^/]+/" + re.escape(ref), loose))):
+                    raise ContractError("selected packed reference lookup differs")
+                if not isinstance(oid, str) or re.fullmatch(r"[0-9a-f]{40}", oid) is None:
+                    raise ContractError("invalid selected packed reference OID")
         elif op == "probe":
             if value is None:
                 bind(path, None)
@@ -278,6 +297,13 @@ def _evidence(records, roots):
         if ("directory", "." if root == "source" else root + ":.") not in indexed:
             raise ContractError("missing pinned root binding")
     for (op, path), record in indexed.items():
+        if op == "packed_refs":
+            if ("probe", path) in indexed or ("read", path) in indexed:
+                raise ContractError("packed projection cannot include container identity")
+            for _ref, loose, _oid in record["value"]:
+                probe = indexed.get(("probe", loose))
+                if probe is None or probe["value"] is not None:
+                    raise ContractError("packed fallback requires a negative loose probe")
         root, rel = path.split(":", 1) if ":" in path else ("source", path)
         parts = rel.split("/")
         for i in range(1, len(parts)):
@@ -337,9 +363,9 @@ class CompatibilityManifest(Document):
             "contract": "graphify.workspace.compatibility", "schema_version": 2,
             "distribution": "graphifyy", "distribution_version": DISTRIBUTION_VERSION,
             "engine_baseline": ENGINE_BASELINE, "extractor_cache_abi": EXTRACTOR_CACHE_ABI,
-            "adapter_contract_version": 2, "state_schema_version": 2,
+            "adapter_contract_version": ADAPTER_CONTRACT_VERSION, "state_schema_version": 2,
             "detector_id": DETECTOR_ID, "graph_payload_version": 1,
-            "input_manifest_version": 1, "candidate_kind": "local-fixture",
+            "input_manifest_version": INPUT_MANIFEST_VERSION, "candidate_kind": "local-fixture",
             "certified": False,
         }
         exact(value, set(constants) | {"distribution_build", "source_manifest_sha256",
@@ -376,7 +402,7 @@ class InputManifest(Document):
     def validate(value):
         exact(value, {"contract", "format_version", "phase", "roots", "evidence",
                       "code_inputs", "outcomes", "failure"})
-        if value["contract"] != "graphify.workspace.source-inputs" or type(value["format_version"]) is not int or value["format_version"] != 1:
+        if value["contract"] != "graphify.workspace.source-inputs" or type(value["format_version"]) is not int or value["format_version"] != INPUT_MANIFEST_VERSION:
             raise ContractError("unsupported input manifest format")
         roots = value["roots"]
         if (not isinstance(roots, (list, tuple)) or not all(isinstance(r, str) for r in roots)
@@ -449,7 +475,7 @@ class InputManifest(Document):
         if isinstance(failure, Mapping):
             failure = failure["status"]
         return cls.from_mapping({
-            "contract": "graphify.workspace.source-inputs", "format_version": 1,
+            "contract": "graphify.workspace.source-inputs", "format_version": INPUT_MANIFEST_VERSION,
             "phase": phase, "roots": sorted(source_io.roots),
             "evidence": source_io.evidence, "code_inputs": sorted(label(p) for p in code_inputs),
             "outcomes": dispositions, "failure": failure,

@@ -47,6 +47,42 @@ def _optional(inputs, path):
     return None if inputs.probe(path) is None else inputs.read_bytes(path)
 
 
+def _packed_entries(packed, requested, *, allow_missing=False):
+    """Project only consulted entries; unrelated ref names remain opaque bytes."""
+    rows = [] if packed is None else packed.split(b"\n")
+    entries = []
+    for ref, loose in requested:
+        name = ref.encode("utf-8")
+        matches = []
+        for line in rows:
+            if not line or line.startswith(b"#"):
+                continue
+            fields = line.split()
+            if name not in fields:
+                continue
+            # A selected record has exactly one separator and no trailing
+            # fields or whitespace. Do not turn a malformed selected row into
+            # positive absence during recovery. Git also accepts a tab here.
+            if re.fullmatch(rb"[0-9a-fA-F]{40}[ \t]" + re.escape(name), line) is None:
+                raise SourceUnsupported("unsupported packed Git reference")
+            matches.append(fields[0])
+        if not matches and allow_missing:
+            return None  # Positive absence for recovery, never a complete manifest.
+        if len(matches) != 1:
+            raise SourceUnsupported("Git reference is unavailable or ambiguous")
+        oid = matches[0]
+        if re.fullmatch(rb"[0-9a-fA-F]{40}", oid) is None:
+            raise SourceUnsupported("unsupported packed Git reference")
+        entries.append((ref, loose, oid.decode("ascii").lower()))
+    return tuple(entries)
+
+
+def _replay_packed_refs(inputs, record, *, allow_missing=False):
+    requested = [(ref, loose) for ref, loose, _oid in record["value"]]
+    packed = _optional(inputs, inputs.roots["git"] / "packed-refs")
+    inputs.record_packed_refs(_packed_entries(packed, requested, allow_missing=allow_missing))
+
+
 def _git_inputs(inputs, source, *, deadline_ns=None):
     """Bind local routing/ref files, refusing Git modes with unaccounted readers.
 
@@ -86,6 +122,7 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
         if inputs.probe(common / name) is not None:
             raise SourceUnsupported("unsupported Git object/history routing")
     packed = _optional(inputs, common / "packed-refs")
+    selected_packed = []
     head = inputs.read_bytes(git_dir / "HEAD").strip()
     seen = set()
     while head.startswith(b"ref:"):
@@ -110,18 +147,17 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
             raise SourceUnsupported("Git reference requires a canonical UTF-8 input label") from exc
         seen.add(ref)
         local_ref = ref.startswith(("refs/worktree/", "refs/bisect/", "refs/rewritten/"))
-        raw = _optional(inputs, (git_dir if local_ref else common) / ref)
+        loose = (git_dir if local_ref else common) / ref
+        raw = _optional(inputs, loose)
         if raw is None:
-            rows = [] if packed is None else packed.split(b"\n")
-            matches = [line.split(b" ")[0] for line in rows if line.endswith(b" " + ref_bytes)]
-            if len(matches) != 1:
-                raise SourceUnsupported("Git reference is unavailable")
-            head = matches[0]
+            selected_packed = _packed_entries(packed, [(ref, inputs._locate(loose)[2])])
+            head = selected_packed[0][2].encode("ascii")
         else:
             head = raw.strip()
     valid_oid = re.fullmatch(rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head)
     if valid_oid is None or head.lower() != source.head_commit.encode("ascii"):
         raise SourceChanged("Git HEAD changed during observation")
+    inputs.record_packed_refs(tuple(selected_packed))
     policy = inputs.read_bytes(root / ".graphify" / "workspace.toml")
     if hashlib.sha256(policy).hexdigest() != source.config_sha256:
         raise SourceChanged("workspace policy changed during observation")
@@ -143,6 +179,8 @@ def _replay(inputs, manifest):
             inputs.probe(path)
         elif operation == "list":
             inputs.listdir(path)
+        elif operation == "packed_refs":
+            _replay_packed_refs(inputs, record)
         # Directory records are reproduced by the rooted operations themselves.
     replayed = InputManifest.from_engine(
         inputs, phase="consumed", code_inputs=value["code_inputs"], outcomes=value["outcomes"],
@@ -162,6 +200,9 @@ def _consumed_evidence(inputs, manifest):
     if value["roots"] != sorted(inputs.roots):
         raise SourceUnsupported("input roots differ from selected source authority")
     for record in value["evidence"]:
+        if record["operation"] == "packed_refs":
+            _replay_packed_refs(inputs, record, allow_missing=True)
+            continue
         label = record["path"]
         root, relative = label.split(":", 1) if ":" in label else ("source", label)
         path = inputs.roots[root]
@@ -320,7 +361,7 @@ def _query_with_deadline(payload_fd, request, deadline_ns, expected=None):
 
 
 class V8Adapter:
-    adapter_id = "graphify-v8/structural-v2"
+    adapter_id = "graphify-v8/structural-v3"
     detector_id = DETECTOR_ID
 
     def __init__(self, expected=None):

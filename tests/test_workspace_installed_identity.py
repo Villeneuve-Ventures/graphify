@@ -49,8 +49,8 @@ def installed_manifest(root):
         "distribution_build": "fixture:sha256:" + "a" * 64,
         "source_manifest_sha256": "a" * 64, "wheel_sha256": "b" * 64,
         "engine_baseline": ENGINE_BASELINE, "extractor_cache_abi": EXTRACTOR_CACHE_ABI,
-        "adapter_contract_version": 2, "state_schema_version": 2,
-        "detector_id": DETECTOR_ID, "graph_payload_version": 1, "input_manifest_version": 1,
+        "adapter_contract_version": 3, "state_schema_version": 2,
+        "detector_id": DETECTOR_ID, "graph_payload_version": 1, "input_manifest_version": 2,
         "candidate_kind": "local-fixture", "certified": False,
         "package_members": {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
                             for path in (root / "graphify").rglob("*") if path.is_file()},

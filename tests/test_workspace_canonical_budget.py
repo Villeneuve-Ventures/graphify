@@ -112,7 +112,7 @@ class CanonicalBudgetTests(unittest.TestCase):
         validate.assert_not_called()
 
     def test_from_mapping_still_validates_original_filesystem_labels(self):
-        value = {"contract": "graphify.workspace.source-inputs", "format_version": 1,
+        value = {"contract": "graphify.workspace.source-inputs", "format_version": 2,
                  "phase": "detection", "roots": ["source"],
                  "evidence": [{"operation": "directory", "path": ".", "value": [1, 2, 16832]}],
                  "code_inputs": ["e\u0301.py"], "outcomes": [], "failure": None}

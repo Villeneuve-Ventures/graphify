@@ -45,11 +45,11 @@
       "type": "string"
     },
     "extractor_cache_abi": {
-      "const": "graphify-v8-structural-1",
+      "const": "graphify-v8-structural-2",
       "type": "string"
     },
     "adapter_contract_version": {
-      "const": 2,
+      "const": 3,
       "type": "integer"
     },
     "state_schema_version": {
@@ -57,7 +57,7 @@
       "type": "integer"
     },
     "detector_id": {
-      "const": "graphify-v8/workspace-observer-v2",
+      "const": "graphify-v8/workspace-observer-v3",
       "type": "string"
     },
     "graph_payload_version": {
@@ -65,7 +65,7 @@
       "type": "integer"
     },
     "input_manifest_version": {
-      "const": 1,
+      "const": 2,
       "type": "integer"
     },
     "candidate_kind": {

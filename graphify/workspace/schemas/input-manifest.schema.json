@@ -19,7 +19,7 @@
       "type": "string"
     },
     "format_version": {
-      "const": 1,
+      "const": 2,
       "type": "integer"
     },
     "phase": {
@@ -230,6 +230,51 @@
                 "items": false,
                 "minItems": 2,
                 "maxItems": 2
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "path",
+              "value"
+            ],
+            "properties": {
+              "operation": {
+                "const": "packed_refs",
+                "type": "string"
+              },
+              "path": {
+                "const": "git:packed-refs",
+                "type": "string"
+              },
+              "value": {
+                "type": "array",
+                "maxItems": 1,
+                "items": {
+                  "type": "array",
+                  "minItems": 3,
+                  "maxItems": 3,
+                  "prefixItems": [
+                    {
+                      "type": "string",
+                      "pattern": "^refs/",
+                      "maxLength": 4092
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^git:",
+                      "maxLength": 4096
+                    },
+                    {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{40}$"
+                    }
+                  ],
+                  "items": false
+                }
               }
             }
           }
