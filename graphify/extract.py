@@ -1,6 +1,6 @@
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
-from graphify.source_io import diagnostics_enabled, current_source_io, engine_inputs, SourceError, source_ancestors, engine_print, source_read_bytes, source_read_text, source_resolve
+from graphify.source_io import diagnostics_enabled, current_source_io, engine_inputs, SourceError, SourceTooLarge, source_ancestors, engine_print, source_read_bytes, source_read_text, source_resolve
 
 import hashlib
 import importlib
@@ -16,6 +16,7 @@ from typing import Any, Callable
 from .cache import load_cached, save_cached
 from .mcp_ingest import extract_mcp_config, is_mcp_config_path
 from .manifest_ingest import extract_package_manifest, is_package_manifest_path
+from .xml_admission import XMLDeclarationError, parse_xml, read_xml_bytes
 from .resolver_registry import (
     LanguageResolver,
     register as register_language_resolver,
@@ -2916,24 +2917,6 @@ _SCOPED_RESOLVERS = frozenset({
 _PROJECT_XML_MAX_BYTES = 2 * 1024 * 1024
 
 
-def _project_xml_is_safe(src: bytes) -> bool:
-    """Reject XML that declares DTDs or entities.
-
-    Stdlib ``xml.etree.ElementTree`` does not cap entity expansion, so a
-    crafted project file could trigger a billion-laughs style DoS. External
-    entity resolution is already disabled by pyexpat defaults, but rejecting
-    ``<!DOCTYPE`` / ``<!ENTITY`` outright is defense in depth.
-
-    Legitimate MSBuild and Lazarus package files never contain a DOCTYPE
-    or ENTITY declaration, so this is a zero-false-positive screen.
-    """
-    # Only the prolog can hold a DTD/internal subset, but be conservative
-    # and scan the full byte range -- these formats use ASCII tags so a
-    # case-insensitive substring match is sufficient.
-    lowered = src.lower()
-    return b"<!doctype" not in lowered and b"<!entity" not in lowered
-
-
 @strict_aware
 def extract_lazarus_package(path: Path, *, strict: bool = False) -> dict:
     """Extract package metadata from Lazarus .lpk package files (XML format).
@@ -2953,19 +2936,16 @@ def extract_lazarus_package(path: Path, *, strict: bool = False) -> dict:
     - package --contains--> listed unit
     """
     try:
-        import xml.etree.ElementTree as ET
-        src = source_read_bytes(path)
+        src = read_xml_bytes(path, max_bytes=_PROJECT_XML_MAX_BYTES)
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "package file too large"}
     except OSError as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 
-    if len(src) > _PROJECT_XML_MAX_BYTES:
-        return {"nodes": [], "edges": [], "error": "package file too large"}
-    if not _project_xml_is_safe(src):
-        return {"nodes": [], "edges": [],
-                "error": "refusing XML with DOCTYPE/ENTITY declaration"}
-
     try:
-        xml_root = ET.fromstring(src)
+        xml_root = parse_xml(src)
+    except XMLDeclarationError as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
     except Exception as e:
         return {"nodes": [], "edges": [], "error": str(e)}
 
@@ -3062,20 +3042,18 @@ def extract_slnx(path: Path, *, strict: bool = False) -> dict:
     import xml.etree.ElementTree as ET
 
     try:
-        src = source_read_bytes(path)
+        src = read_xml_bytes(path, max_bytes=_PROJECT_XML_MAX_BYTES)
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "project file too large"}
     except OSError:
         if strict:
             raise
         return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
 
-    if len(src) > _PROJECT_XML_MAX_BYTES:
-        return {"nodes": [], "edges": [], "error": "project file too large"}
-    if not _project_xml_is_safe(src):
-        return {"nodes": [], "edges": [],
-                "error": "refusing XML with DOCTYPE/ENTITY declaration"}
-
     try:
-        tree = ET.fromstring(src)
+        tree = parse_xml(src)
+    except XMLDeclarationError as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
     except ET.ParseError as e:
         return {"nodes": [], "edges": [], "error": f"XML parse error: {e}"}
 
@@ -3146,20 +3124,18 @@ def extract_csproj(path: Path, *, strict: bool = False) -> dict:
     import xml.etree.ElementTree as ET
 
     try:
-        src = source_read_bytes(path)
+        src = read_xml_bytes(path, max_bytes=_PROJECT_XML_MAX_BYTES)
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "project file too large"}
     except OSError:
         if strict:
             raise
         return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
 
-    if len(src) > _PROJECT_XML_MAX_BYTES:
-        return {"nodes": [], "edges": [], "error": "project file too large"}
-    if not _project_xml_is_safe(src):
-        return {"nodes": [], "edges": [],
-                "error": "refusing XML with DOCTYPE/ENTITY declaration"}
-
     try:
-        tree = ET.fromstring(src)
+        tree = parse_xml(src)
+    except XMLDeclarationError as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
     except ET.ParseError as e:
         return {"nodes": [], "edges": [], "error": f"XML parse error: {e}"}
 
@@ -3660,18 +3636,16 @@ def extract_xaml(path: Path, *, strict: bool = False) -> dict:
     import xml.etree.ElementTree as ET
 
     try:
-        src = source_read_bytes(path)
+        src = read_xml_bytes(path, max_bytes=_PROJECT_XML_MAX_BYTES)
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "xaml file too large"}
     except OSError:
         return {"nodes": [], "edges": [], "error": f"cannot read {path}"}
 
-    if len(src) > _PROJECT_XML_MAX_BYTES:
-        return {"nodes": [], "edges": [], "error": "xaml file too large"}
-    if not _project_xml_is_safe(src):
-        return {"nodes": [], "edges": [],
-                "error": "refusing XML with DOCTYPE/ENTITY declaration"}
-
     try:
-        tree = ET.fromstring(src)
+        tree = parse_xml(src)
+    except XMLDeclarationError as e:
+        return {"nodes": [], "edges": [], "error": str(e)}
     except ET.ParseError as e:
         return {"nodes": [], "edges": [], "error": f"XML parse error: {e}"}
 
