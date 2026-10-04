@@ -1,4 +1,5 @@
-"""Structural workspace contracts. Importing this package performs no state I/O.
+"""Structural workspace contracts and lazy public one-shot transports.
 
-Lifecycle stores, operational adapters and public commands are later slices.
+Importing this package performs no state I/O. Public commands require explicit
+candidate authority; diagnostics never initialize, migrate, or repair state.
 """

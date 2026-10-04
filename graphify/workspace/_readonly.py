@@ -20,6 +20,12 @@ class ReadOnlyFailure(RuntimeError):
     pass
 
 
+# Set only by the public command worker, which is its process-group leader.
+# Nested helpers must remain in that group so the public supervisor can reap
+# the entire computation even if it has to terminate a blocked command worker.
+_SUPERVISED_GROUP = None
+
+
 # -S prevents site/.pth execution before the audit hook. The worker receives
 # paths from the loaded package and interpreter installation, not caller cwd or
 # arbitrary sys.path entries. Runtime-owned operations revalidate the package.
@@ -155,8 +161,9 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
     startup = json.dumps([paths, sys.pycache_prefix, git_executable])
     command = [sys.executable, '-I', '-S', '-B', '-c', _CHILD_BOOTSTRAP,
                startup, code, *map(str, arguments)]
+    supervised = _SUPERVISED_GROUP == os.getpgrp()
     with subprocess.Popen(command, pass_fds=pass_fds, close_fds=True,
-                          start_new_session=True, stdin=subprocess.PIPE,
+                          start_new_session=not supervised, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           env={'PATH': helper_path,
                                'LANG': 'C', 'LC_ALL': 'C'}) as process:
@@ -199,7 +206,10 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
             # Kill the whole owned group even if its leader failed first. No
             # helper inherits a workspace/generation lock or survives expiry.
             try:
-                os.killpg(process.pid, signal.SIGKILL)
+                if supervised:
+                    process.kill()
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 # The process group has already exited; continue cleanup.
                 pass

@@ -270,6 +270,15 @@ def test_schemas_positive_and_negative_wire_fixtures(tmp_path):
     documents = {"compatibility.schema.json": comp, "input-manifest.schema.json": final,
                  "completion-binding.schema.json": binding,
                  "runtime-authority.schema.json": authority, "state-root.schema.json": marker}
+    from graphify.workspace.cli_contracts import WorkspaceCommandRequest, response
+    command = WorkspaceCommandRequest.from_mapping({
+        "contract": "graphify.workspace.cli.request", "format_version": 1,
+        "command": "status", "request_id": "schema-fixture", "state_root": str(tmp_path.resolve()),
+        "compatibility_manifest": comp.to_dict(), "timeout_ms": 60000,
+        "parameters": {"repo_uuid": "11111111-1111-4111-8111-111111111111"},
+    })
+    documents.update({"cli-request.schema.json": command,
+                      "cli-response.schema.json": response("status", "schema-fixture", result={})})
     assert set(documents) == set(SCHEMA_FILES)
     for name, schema in zip(SCHEMA_FILES, schemas):
         document = documents[name]
