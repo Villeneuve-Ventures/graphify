@@ -15,6 +15,7 @@ import pytest
 from graphify.workspace.composition import StructuralPolicy
 from tests.workspace_s3_helpers import create_repo, tree_snapshot, REPO_UUID
 from tools.workspace_artifacts.candidate import build_fixture
+from tests.test_workspace_packed_refs import packed_fixture, change_checkpoint
 
 
 _LAUNCH = r'''
@@ -102,6 +103,7 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     (source / "main.py").write_text(
         "def leaf(): return 42\ndef caller(): return leaf()\n"
         "def 南京市长江大桥(): return caller()\n", encoding="utf-8")
+    selected_ref, selected_commit, checkpoint_tree = packed_fixture(source)
     wheel_root = root / "wheels"
     env = {k: v for k, v in os.environ.items()
            if not k.endswith("API_KEY") and k not in {"GOOGLE_APPLICATION_CREDENTIALS", "PYTHONPATH", "VIRTUAL_ENV"}}
@@ -165,3 +167,16 @@ def test_installed_candidate_cold_query_no_writes(tmp_path):
     assert first == second
     assert snapshots() == before
     assert not git_marker.exists()
+    # Installed cold query must tolerate explicit unrelated checkpoint packing.
+    change_checkpoint(source, checkpoint_tree)
+    before = snapshots()
+    assert json.loads(run([*args, "query_hostile", *tail, str(hostile)])) == first
+    assert snapshots() == before
+    # A selected route change with the same OID must still withhold all output.
+    (source / ".git" / selected_ref).write_text("ref: refs/heads/selected-alias\n")
+    (source / ".git/refs/heads/selected-alias").write_text(selected_commit + "\n")
+    before = snapshots()
+    rejected = subprocess.run([*args, "query_hostile", *tail, str(hostile)],
+                              env=env, cwd=root, capture_output=True, text=True, timeout=180)
+    assert rejected.returncode != 0 and rejected.stdout == ""
+    assert snapshots() == before

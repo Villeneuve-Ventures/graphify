@@ -130,6 +130,13 @@ def test_adapter_accepts_uppercase_git_oid_with_raw_evidence(tmp_path, location)
     observed = V8Adapter().observe_lifecycle(repo)
     assert observed.source_commit == expected.decode('ascii')
     label = 'git:' + selected.relative_to(repo / '.git').as_posix()
+    if location == 'packed':
+        projected = [e for e in observed.structural.initial_detection.to_dict()['evidence']
+                     if e['operation'] == 'packed_refs']
+        assert projected == [{'operation': 'packed_refs', 'path': 'git:packed-refs',
+                              'value': [[ref.decode('ascii'), 'git:' + ref.decode('ascii'),
+                                         expected.decode('ascii')]]}]
+        return
     reads = [e for e in observed.structural.initial_detection.to_dict()['evidence']
              if e['operation'] == 'read' and e['path'] == label]
     assert len(reads) == 1

@@ -608,6 +608,11 @@ security findings remain advisory.
 
 ## Limits
 
+The packed-ref freshness interpretation below describes observer v2. Issue #173's
+[selected-ref contract](graphify-v8-selected-ref-contract.md) supersedes it for
+observer v3 and manifest format 2; the earlier validation receipts are not proof
+of that revision.
+
 Freshness is observed-current, not an atomic snapshot or proof against changes
 made and reverted between observations. Power-loss and hostile concurrent-rename
 proof are not established. Git observation supports ordinary files-based Git

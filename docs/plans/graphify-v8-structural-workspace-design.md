@@ -38,6 +38,12 @@ Adapt W's lifecycle around v8 computation. Do not copy W extraction, build, clus
 
 ### Source observation must cover what extraction actually consumes
 
+The subsequent [selected-ref contract](graphify-v8-selected-ref-contract.md)
+versions the packed-ref interpretation to adapter 3, observer v3 and input
+manifest 2. Its acceptance distinction applies to A2: unrelated packed entries
+may change, while selected ref values/routes and unsafe inputs still refuse.
+The adapter-2 discussion below records the original design.
+
 The recommended v8 adapter uses the scoped I/O context directly for source reads, rather than retaining W's code-only snapshot as a false completeness boundary. It preserves W's descriptor pinning and repeated observations, but redirects v8's existing input operations to that authority. There is no pathname monkeypatch, second parser, or full-repository blind copy. Reads return bytes from no-follow pinned descriptors; probes and listings record present/absent entries and rooted directory identity. Repeated reads of an input in one build must match the first bytes/identity or fail. An operation outside the registered source/policy/Git allowlist, or a built-in path not adapted to this context, must refuse this workspace build rather than fall back to unrestricted `Path` I/O. Ordinary calls without the context retain their existing behavior.
 
 Persist a bounded, canonical **source-input manifest** beside `graph.json` within the sealed payload: admitted-file identities/hashes, effective policy and Git routing/ref observations, supporting-file reads, negative probes and consulted directory memberships. Use source-relative labels and explicit bounded Git/policy labels, never scratch paths. Directory evidence excludes atime and unrelated operational output; content/type/mode and stable bindings remain material. This manifest is evidence, not authority to read arbitrary paths: validate its schema, counts/bytes and root allowlist before any reopen. A present external dependency not inside the supported allowlist is an explicit unsupported-source result, not silent absence.

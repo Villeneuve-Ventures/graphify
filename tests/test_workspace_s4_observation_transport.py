@@ -43,7 +43,7 @@ def test_near_limit_manifests_fit_observation_transport(tmp_path, monkeypatch):
     record_bytes = len(json.dumps({"operation": "probe", "path": "000000", "value": None},
                                  separators=(",", ":"))) + 1
     prefix = "x" * ((MAX_DOCUMENT_BYTES - 4096) // count - record_bytes)
-    value = {"contract": "graphify.workspace.source-inputs", "format_version": 1,
+    value = {"contract": "graphify.workspace.source-inputs", "format_version": 2,
              "phase": "detection", "roots": ["source"], "code_inputs": [],
              "outcomes": [], "failure": None,
              "evidence": [{"operation": "directory", "path": ".", "value": [1, 1, stat.S_IFDIR | 0o700]}]

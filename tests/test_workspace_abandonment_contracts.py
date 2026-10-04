@@ -122,7 +122,7 @@ def test_extraction_failure_evidence_is_bounded_and_replays_exactly():
     document = _staged_with_intent("PUBLISHING")
     request = StructuralBuildRequest.from_mapping(document["request"])
     failed = InputManifest.from_mapping({
-        "contract": "graphify.workspace.source-inputs", "format_version": 1,
+        "contract": "graphify.workspace.source-inputs", "format_version": 2,
         "phase": "consumed", "roots": ["source"],
         "evidence": [{"operation": "directory", "path": ".", "value": [1, 2, 16832]}],
         "code_inputs": ["script.r"],
