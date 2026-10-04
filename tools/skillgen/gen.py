@@ -2038,11 +2038,35 @@ def _is_prepared_transaction_runner_line(line: str) -> bool:
     }
 
 
+# S5 adds one explicit workspace routing paragraph to every host. Match the
+# complete approved line so unrelated workspace prose cannot bypass roundtrip.
+_WORKSPACE_ROUTING_LINE = (
+    '**Managed workspace commands:** If the user explicitly requests `graphify workspace`, '
+    'use the public workspace transport with their explicit request and existing candidate '
+    'authority. All workspace operations, including query, status, and doctor, require '
+    'non-elevated macOS on local APFS; Windows and Linux support workspace help only. '
+    'On the qualified macOS runtime, launch with `PYTHONDONTWRITEBYTECODE=1 graphify workspace ...` '
+    'or an already '
+    'trusted Python with `-E -P -B -m graphify workspace ...` so cache suppression is set before '
+    'import; bare cold console/module startup cannot guarantee zero writes. Skip ordinary '
+    'Step 1, scan-root persistence, and all `graphify-out` writes. `workspace query`, '
+    '`status`, and `doctor` are read-only: a refusal is not permission to enroll, activate, '
+    'sync, repair, or fall back to ordinary traversal. Registration and activation require '
+    'explicit user intent. Structural sync does not claim semantic completion. Stop after '
+    'reporting the transport result.'
+)
+
+
+def _is_workspace_routing_line(line: str) -> bool:
+    return line == _WORKSPACE_ROUTING_LINE
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
 # all of these is an unsanctioned drift the round-trip must catch.
 _SANCTIONED_MONOLITH_DIFFS = (
+    _is_workspace_routing_line,
     _is_enum_line,
     _is_frontmatter_description_line,
     _is_chunk_cleanup_line,

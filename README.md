@@ -416,6 +416,36 @@ missing required language extra such as `graphifyy[sql]` for SQL. Genuine option
 metadata absence and working documented backend fallbacks remain supported.
 The separate `graphify update` command retains its own AST update behavior.
 
+### Managed structural workspace (S5)
+
+`graphify workspace` exposes explicit registration, source activation, structural
+sync, query, status, and doctor commands. Each command accepts a bounded canonical
+JSON request from a file or stdin. All workspace operations, including query,
+status, and doctor, require non-elevated macOS on local APFS. Windows and Linux
+support workspace help only. On the qualified macOS runtime:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 graphify workspace status --request status.json
+PYTHONDONTWRITEBYTECODE=1 graphify workspace query --request query.json
+PYTHONDONTWRITEBYTECODE=1 graphify workspace doctor --request - < doctor.json
+```
+
+Use an already installed, exact compatible candidate and explicit external state
+root. Set `PYTHONDONTWRITEBYTECODE=1` before console-script startup, or use a
+trusted Python with `-E -P -B -m graphify workspace ...`. Bare cold console/module
+startup cannot guarantee zero writes: CPython can create the first package bytecode
+cache before Graphify code runs. Help stays available on other platforms.
+Status, doctor, and query inspect existing state without repair or ordinary
+`graphify-out` writes. Query text is released only
+after both freshness checks pass. A stale or unavailable result requires an explicit
+operator decision; it does not trigger sync. Freshness is observed-current, not an
+atomic snapshot, and structural sync does not establish semantic completion.
+
+See the [S5 request contract and lifecycle guide](docs/plans/graphify-v8-s5-result.md)
+for request fields, registration/CAS rules, retries, response codes, and limits.
+This surface adds no maintenance, migration, worker, service, or semantic-sync
+transport.
+
 ## Ignoring files
 
 Create a `.graphifyignore` in your project root — same syntax as `.gitignore`, including `!` negation.

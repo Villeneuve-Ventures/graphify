@@ -26,112 +26,124 @@ from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 
 # Install/uninstall subsystem moved to graphify/install.py; re-exported here so
 # `from graphify.__main__ import <name>` keeps working unchanged.
-from graphify.install import (  # noqa: E402,F401
-    dispatch_install_cli,
-    _agents_install,
-    _agents_platform_install,
-    _agents_platform_uninstall,
-    _agents_uninstall,
-    _always_on,
-    _amp_install,
-    _amp_legacy_cleanup,
-    _amp_uninstall,
-    _antigravity_finalize,
-    _antigravity_install,
-    _antigravity_uninstall,
-    _canonical_platform,
-    _claude_pretooluse_hooks,
-    _copy_skill_file,
-    _cursor_install,
-    _cursor_uninstall,
-    _devin_rules_install,
-    _devin_rules_uninstall,
-    _gemini_hook,
-    _install_claude_hook,
-    _install_codebuddy_hook,
-    _install_codex_hook,
-    _install_gemini_hook,
-    _install_kilo_plugin,
-    _install_opencode_plugin,
-    _install_skill_references,
-    _kilo_config_path,
-    _kilo_config_write_path,
-    _kilo_install,
-    _kilo_uninstall,
-    _kilo_uninstall_global,
-    _kiro_install,
-    _kiro_uninstall,
-    _load_json_like,
-    _packaged_skill_refs_dir,
-    _platform_skill_destination,
-    _print_banner,
-    _print_install_usage,
-    _print_project_git_add_hint,
-    _project_install,
-    _project_scope_root,
-    _project_uninstall,
-    _project_uninstall_all,
-    _refresh_all_version_stamps,
-    _remove_claude_skill_registration,
-    _remove_skill_file,
-    _replace_or_append_section,
-    _resolve_graphify_exe,
-    _skill_registration,
-    _strip_graphify_hook,
-    _strip_graphify_md_section,
-    _strip_json_comments,
-    _uninstall_claude_hook,
-    _uninstall_codebuddy_hook,
-    _uninstall_codex_hook,
-    _uninstall_gemini_hook,
-    _uninstall_kilo_plugin,
-    _uninstall_opencode_plugin,
-    claude_install,
-    claude_uninstall,
-    codebuddy_install,
-    codebuddy_uninstall,
-    gemini_install,
-    gemini_uninstall,
-    install,
-    uninstall_all,
-    vscode_install,
-    vscode_uninstall,
-    _PLATFORM_ALIASES,
-    _CLAUDE_MD_MARKER,
-    _CODEBUDDY_MD_MARKER,
-    _AGENTS_MD_MARKER,
-    _GEMINI_MD_MARKER,
-    _VSCODE_INSTRUCTIONS_MARKER,
-    _ANTIGRAVITY_RULES_PATH,
-    _ANTIGRAVITY_WORKFLOW_PATH,
-    _ANTIGRAVITY_WORKFLOW,
-    _CURSOR_RULE_PATH,
-    _CURSOR_RULE,
-    _DEVIN_RULES_PATH,
-    _DEVIN_RULES,
-    _KILO_PLUGIN_JS,
-    _KILO_PLUGIN_PATH,
-    _KILO_CONFIG_JSON_PATH,
-    _KILO_CONFIG_JSONC_PATH,
-    _OPENCODE_PLUGIN_JS,
-    _OPENCODE_PLUGIN_PATH,
-    _OPENCODE_CONFIG_PATH,
-    _PLATFORM_CONFIG,
-)
-from graphify.cli import (  # noqa: E402,F401
-    dispatch_command,
-    _StageTimer,
-    _clone_repo,
-    _default_graph_path,
-    _enforce_graph_size_cap_or_exit,
-    _run_hook_guard,
-    _SEARCH_NUDGE,
-    _READ_NUDGE,
-    _HOOK_SOURCE_EXTS,
-    _GEMINI_NUDGE_TEXT,
-)
+_LEGACY_EXPORTS_LOADED = False
 
 
+def _load_legacy_exports():
+    global _LEGACY_EXPORTS_LOADED, _always_on, _platform_skill_destination
+    global _PLATFORM_CONFIG, dispatch_install_cli, dispatch_command
+    if _LEGACY_EXPORTS_LOADED:
+        return
+    from graphify.install import (  # noqa: E402,F401
+        dispatch_install_cli,
+        _agents_install,
+        _agents_platform_install,
+        _agents_platform_uninstall,
+        _agents_uninstall,
+        _always_on,
+        _amp_install,
+        _amp_legacy_cleanup,
+        _amp_uninstall,
+        _antigravity_finalize,
+        _antigravity_install,
+        _antigravity_uninstall,
+        _canonical_platform,
+        _claude_pretooluse_hooks,
+        _copy_skill_file,
+        _cursor_install,
+        _cursor_uninstall,
+        _devin_rules_install,
+        _devin_rules_uninstall,
+        _gemini_hook,
+        _install_claude_hook,
+        _install_codebuddy_hook,
+        _install_codex_hook,
+        _install_gemini_hook,
+        _install_kilo_plugin,
+        _install_opencode_plugin,
+        _install_skill_references,
+        _kilo_config_path,
+        _kilo_config_write_path,
+        _kilo_install,
+        _kilo_uninstall,
+        _kilo_uninstall_global,
+        _kiro_install,
+        _kiro_uninstall,
+        _load_json_like,
+        _packaged_skill_refs_dir,
+        _platform_skill_destination,
+        _print_banner,
+        _print_install_usage,
+        _print_project_git_add_hint,
+        _project_install,
+        _project_scope_root,
+        _project_uninstall,
+        _project_uninstall_all,
+        _refresh_all_version_stamps,
+        _remove_claude_skill_registration,
+        _remove_skill_file,
+        _replace_or_append_section,
+        _resolve_graphify_exe,
+        _skill_registration,
+        _strip_graphify_hook,
+        _strip_graphify_md_section,
+        _strip_json_comments,
+        _uninstall_claude_hook,
+        _uninstall_codebuddy_hook,
+        _uninstall_codex_hook,
+        _uninstall_gemini_hook,
+        _uninstall_kilo_plugin,
+        _uninstall_opencode_plugin,
+        claude_install,
+        claude_uninstall,
+        codebuddy_install,
+        codebuddy_uninstall,
+        gemini_install,
+        gemini_uninstall,
+        install,
+        uninstall_all,
+        vscode_install,
+        vscode_uninstall,
+        _PLATFORM_ALIASES,
+        _CLAUDE_MD_MARKER,
+        _CODEBUDDY_MD_MARKER,
+        _AGENTS_MD_MARKER,
+        _GEMINI_MD_MARKER,
+        _VSCODE_INSTRUCTIONS_MARKER,
+        _ANTIGRAVITY_RULES_PATH,
+        _ANTIGRAVITY_WORKFLOW_PATH,
+        _ANTIGRAVITY_WORKFLOW,
+        _CURSOR_RULE_PATH,
+        _CURSOR_RULE,
+        _DEVIN_RULES_PATH,
+        _DEVIN_RULES,
+        _KILO_PLUGIN_JS,
+        _KILO_PLUGIN_PATH,
+        _KILO_CONFIG_JSON_PATH,
+        _KILO_CONFIG_JSONC_PATH,
+        _OPENCODE_PLUGIN_JS,
+        _OPENCODE_PLUGIN_PATH,
+        _OPENCODE_CONFIG_PATH,
+        _PLATFORM_CONFIG,
+    )
+    from graphify.cli import (  # noqa: E402,F401
+        dispatch_command,
+        _StageTimer,
+        _clone_repo,
+        _default_graph_path,
+        _enforce_graph_size_cap_or_exit,
+        _run_hook_guard,
+        _SEARCH_NUDGE,
+        _READ_NUDGE,
+        _HOOK_SOURCE_EXTS,
+        _GEMINI_NUDGE_TEXT,
+    )
+    globals().update(locals())
+    _LEGACY_EXPORTS_LOADED = True
+
+
+if not (len(sys.argv) > 1 and sys.argv[1] == "workspace"):
+    _load_legacy_exports()
 
 
 _ALWAYS_ON_ALIASES = {
@@ -144,11 +156,16 @@ _ALWAYS_ON_ALIASES = {
 }
 
 
-def __getattr__(name: str) -> str:
+def __getattr__(name: str):
     # PEP 562: lazily resolve the legacy always-on section constants for external
     # importers (e.g. the install-string tests). In-module code calls _always_on()
     # directly; nothing is read at import time, so a missing block can no longer
     # brick the CLI on `import graphify.__main__` (#1121 follow-up).
+    if name == "__path__":
+        raise AttributeError(name)
+    _load_legacy_exports()
+    if name in globals():
+        return globals()[name]
     base = _ALWAYS_ON_ALIASES.get(name)
     if base is not None:
         return _always_on(base)
@@ -487,6 +504,12 @@ def _run_cli() -> None:
                 _stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
+    if len(sys.argv) > 1 and sys.argv[1] == "workspace":
+        from graphify.workspace.cli import run_workspace_cli
+        raise SystemExit(run_workspace_cli(sys.argv[2:]))
+
+    _load_legacy_exports()
+
     # Check all known skill install locations for a stale version stamp.
     # Skip during install/uninstall (hook writes trigger a fresh check anyway).
     # Skip during hook-check — it runs on every editor tool use and must be silent.
@@ -524,6 +547,7 @@ def _run_cli() -> None:
         print("                            (default follows JSON directed flag;")
         print("                             raw extraction with no flag defaults directed)")
         print("    --extract-path PATH     extractor source for suppression scan")
+        print("  workspace <command> --request FILE  bounded structural workspace commands")
         print("  transaction status --output DIR  inspect validated coordination state")
         print("  transaction recover --output DIR --generation N --device D --inode I --root PATH")
         print("                            [--transaction-id ID] recover one exact generation")

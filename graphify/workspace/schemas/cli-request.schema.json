@@ -1,0 +1,639 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/cli-request.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "format_version",
+    "command",
+    "request_id",
+    "state_root",
+    "compatibility_manifest",
+    "timeout_ms",
+    "parameters"
+  ],
+  "properties": {
+    "contract": {
+      "const": "graphify.workspace.cli.request"
+    },
+    "format_version": {
+      "const": 1,
+      "type": "integer"
+    },
+    "command": {
+      "enum": [
+        "register",
+        "activate",
+        "sync",
+        "query",
+        "status",
+        "doctor"
+      ]
+    },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "state_root": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/",
+      "description": "Model also requires canonical absolute NFC path without NUL or dot segments."
+    },
+    "compatibility_manifest": {
+      "$ref": "compatibility.schema.json"
+    },
+    "timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 300000
+    },
+    "parameters": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "register"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "operation",
+              "source_root",
+              "authorization",
+              "expected_registry_revision"
+            ],
+            "properties": {
+              "operation": {
+                "enum": [
+                  "enroll",
+                  "adopt",
+                  "rebind",
+                  "rotate"
+                ]
+              },
+              "source_root": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^/",
+                "description": "Model also requires canonical absolute NFC path without NUL or dot segments."
+              },
+              "authorization": {
+                "$ref": "#/$defs/authorization"
+              },
+              "expected_registry_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "const": "enroll"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "authorization": {
+                      "properties": {
+                        "action": {
+                          "const": "ENROLL"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "const": "adopt"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "authorization": {
+                      "properties": {
+                        "action": {
+                          "const": "ADOPT"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "const": "rebind"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "authorization": {
+                      "properties": {
+                        "action": {
+                          "const": "REBIND"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "operation": {
+                      "const": "rotate"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "authorization": {
+                      "properties": {
+                        "action": {
+                          "const": "ROTATE"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "activate"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_root",
+              "authorization",
+              "expected_registry_revision",
+              "expected_active_source_revision",
+              "expected_operation_epoch",
+              "expected_migration_epoch",
+              "ttl_ns"
+            ],
+            "properties": {
+              "source_root": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "pattern": "^/",
+                "description": "Model also requires canonical absolute NFC path without NUL or dot segments."
+              },
+              "authorization": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/authorization"
+                  },
+                  {
+                    "properties": {
+                      "action": {
+                        "const": "ACTIVATE"
+                      }
+                    }
+                  }
+                ]
+              },
+              "expected_registry_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "expected_active_source_revision": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "expected_operation_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "expected_migration_epoch": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9223372036854775807
+              },
+              "ttl_ns": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 300000000000
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "sync"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation",
+                  "repo_uuid",
+                  "generation_id",
+                  "source_epoch",
+                  "desired_watermark",
+                  "expected_payload_bytes"
+                ],
+                "properties": {
+                  "operation": {
+                    "const": "prepare"
+                  },
+                  "repo_uuid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  "generation_id": {
+                    "type": "string",
+                    "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+                  },
+                  "source_epoch": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9223372036854775807
+                  },
+                  "desired_watermark": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9223372036854775807
+                  },
+                  "expected_payload_bytes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9223372036854775807
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation",
+                  "sync_request",
+                  "attempt_sha256"
+                ],
+                "properties": {
+                  "operation": {
+                    "const": "execute"
+                  },
+                  "sync_request": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "contract",
+                      "format_version",
+                      "repo_uuid",
+                      "generation_id",
+                      "desired_watermark",
+                      "build"
+                    ],
+                    "properties": {
+                      "contract": {
+                        "const": "graphify.workspace.structural-sync.internal"
+                      },
+                      "format_version": {
+                        "const": 1,
+                        "type": "integer"
+                      },
+                      "repo_uuid": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                      },
+                      "generation_id": {
+                        "type": "string",
+                        "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+                      },
+                      "desired_watermark": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9223372036854775807
+                      },
+                      "build": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "logical_request_sha256",
+                          "expected_registry_revision",
+                          "expected_active_source_revision",
+                          "expected_operation_epoch",
+                          "expected_migration_epoch",
+                          "expected_pointer_revision",
+                          "expected_current_receipt_sha256",
+                          "source_commit",
+                          "source_epoch",
+                          "policy_sha256",
+                          "observation_manifest_sha256",
+                          "observation_evidence_sha256",
+                          "observation_entries_sha256",
+                          "capacity_policy_sha256",
+                          "compatibility_sha256",
+                          "observation_detector_id",
+                          "expected_payload_bytes"
+                        ],
+                        "properties": {
+                          "logical_request_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "expected_registry_revision": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9223372036854775807
+                          },
+                          "expected_active_source_revision": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9223372036854775807
+                          },
+                          "expected_operation_epoch": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9223372036854775807
+                          },
+                          "expected_migration_epoch": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "expected_pointer_revision": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                          },
+                          "expected_current_receipt_sha256": {
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "source_commit": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{40}$"
+                          },
+                          "source_epoch": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9223372036854775807
+                          },
+                          "policy_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "observation_manifest_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "observation_evidence_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "observation_entries_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "capacity_policy_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "compatibility_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          },
+                          "observation_detector_id": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256
+                          },
+                          "expected_payload_bytes": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 9223372036854775807
+                          }
+                        },
+                        "$comment": "Models additionally bind the request digest and pointer null/revision coordinates."
+                      }
+                    }
+                  },
+                  "attempt_sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "query"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo_uuid",
+              "question",
+              "mode",
+              "depth",
+              "token_budget",
+              "context_filters"
+            ],
+            "properties": {
+              "repo_uuid": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              },
+              "question": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "mode": {
+                "enum": [
+                  "bfs",
+                  "dfs"
+                ]
+              },
+              "depth": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 8
+              },
+              "token_budget": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 32768
+              },
+              "context_filters": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              }
+            },
+            "$comment": "Models enforce UTF-8 byte limits, trim rules, 256 term units, and 1024 total filter bytes."
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "status"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo_uuid"
+            ],
+            "properties": {
+              "repo_uuid": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "doctor"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "repo_uuid"
+            ],
+            "properties": {
+              "repo_uuid": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "authorization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action",
+        "operator_id",
+        "reason",
+        "issued_at",
+        "nonce"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "ENROLL",
+            "ADOPT",
+            "REBIND",
+            "ROTATE",
+            "ACTIVATE"
+          ]
+        },
+        "operator_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "issued_at": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+        },
+        "nonce": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      }
+    }
+  },
+  "$comment": "Canonical newline-terminated NFC JSON bytes required; maximum request bytes 1048576."
+}
