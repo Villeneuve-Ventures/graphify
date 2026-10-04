@@ -14,10 +14,10 @@ Mirrors ``mcp_ingest``: recognized by filename, routed to the deterministic AST
 path (never the LLM), so a manifest is extracted exactly once.
 """
 from __future__ import annotations
-from graphify.source_io import source_read_text, source_stat
+from graphify.source_io import source_read_text, source_stat, SourceTooLarge
+from graphify.xml_admission import parse_xml, read_xml_bytes
 
 import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -51,14 +51,21 @@ def _pkg_id(name: str) -> str:
 
 def extract_package_manifest(path: Path) -> dict[str, Any]:
     """Parse a package manifest into a canonical package node + ``depends_on`` edges."""
+    eco = PACKAGE_MANIFEST_NAMES[path.name.lower()]
     try:
-        if source_stat(path).st_size > _MAX_MANIFEST_BYTES:
-            return {"nodes": [], "edges": [], "error": "manifest too large to index"}
-        text = source_read_text(path, encoding="utf-8", errors="replace")
+        if eco == "maven":
+            # Keep Maven's existing UTF-8 decoding; raw XML decoding would widen it.
+            raw = read_xml_bytes(path, max_bytes=_MAX_MANIFEST_BYTES)
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            if source_stat(path).st_size > _MAX_MANIFEST_BYTES:
+                return {"nodes": [], "edges": [], "error": "manifest too large to index"}
+            text = source_read_text(path, encoding="utf-8", errors="replace")
+    except SourceTooLarge:
+        return {"nodes": [], "edges": [], "error": "manifest too large to index"}
     except OSError as exc:
         return {"nodes": [], "edges": [], "error": f"manifest read error: {exc}"}
 
-    eco = PACKAGE_MANIFEST_NAMES[path.name.lower()]
     try:
         info = _PARSERS[eco](text)
     except Exception as exc:  # noqa: BLE001 — a malformed manifest must not abort extraction
@@ -225,7 +232,7 @@ def _parse_gomod(text: str) -> dict | None:
 def _parse_pom(text: str) -> dict | None:
     # Drop the default namespace so findtext/findall don't need the {uri} prefix.
     text = re.sub(r'\sxmlns="[^"]*"', '', text, count=1)
-    root = ET.fromstring(text)
+    root = parse_xml(text)
     aid = root.findtext("artifactId")
     gid = root.findtext("groupId")
     if not aid:
