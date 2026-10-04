@@ -1,7 +1,7 @@
 # Graphify consolidation delivery status
 
-Status reconciled on 2026-10-02 against v8
-`920ffe9c0c186d80b2ac8f1096b1236123af1862`, with S1–S4 merged.
+Status reconciled on 2026-10-04 against v8
+`ae12b4bdde7da7c32d575bb640f170b868ec4c8b`, with S1–S5 merged.
 The [original consolidation plan](graphify-product-consolidation-2026-09-18.md)
 and [structural design](graphify-v8-structural-workspace-design.md) retain their
 historical planning claims. This status record does not authorize successor
@@ -15,6 +15,7 @@ implementation, release, migration, installation, or consumer adoption.
 | S2 — structural contracts and candidate composition | Delivered by the separate contracts task through [PR #149](https://github.com/Villeneuve-Ventures/graphify/pull/149) | `af72150524c791db2d13d55bd762604a739a8995` |
 | S3 — lifecycle stores and storage separation | Delivered through the integration stack ending in [PR #164](https://github.com/Villeneuve-Ventures/graphify/pull/164) | `d7f6972be1ce62674bbb96c77e8c2d626952fe4b` |
 | S4 — v8 adapter and structural library round trip | Delivered through [PR #167](https://github.com/Villeneuve-Ventures/graphify/pull/167) | `45c7529811006e6fe8dc6d3d3137a59ad8b589de` |
+| S5 — public structural commands and diagnostics | Delivered through [PR #175](https://github.com/Villeneuve-Ventures/graphify/pull/175) | `153fa8360488745e9633b3b54a25497e3500f1fd` |
 
 S3 provides lifecycle stores, pointer transitions and recovery, internal GC,
 structural-policy enforcement, and ordinary-write refusal for managed state.
@@ -33,13 +34,16 @@ The batch and capability IDs retain their meanings from the original plan.
 | --- | --- | --- |
 | B1 / T3f, T2a; preserve T6–T10 | S1 and S2 merged | Later exact-candidate and aggregate qualification belongs to S7; these merges do not establish release certification. |
 | B2 / T3a–c, T3f, T3j | S3 and S4 merged | B2 implementation delivered; later exact-candidate and aggregate release qualification belongs to S7. |
-| B3 / T3d–f, T2a | Incomplete | S5 public one-shot commands and diagnostics, then S7 exact-candidate aggregate proof. |
+| B3 / T3d–f, T2a | S5 merged; S7 incomplete | S7 exact-candidate aggregate proof and release compatibility statement. |
 | B4 / T3g–i, T11f | S3 core recovery and GC safety dependencies merged; S6 transports incomplete | Public maintenance transports; an optional legacy reader only if D3 selects that option. |
 
-S4 has a separate [implementation and historical validation record](graphify-v8-s4-result.md).
-S5 is the next slice after the merged S4 library delivery, and is not activated
-by this record. S6 maintenance
-work can start after S3, with public dispatch integration depending on S5, as
+The [S4 result](graphify-v8-s4-result.md) and [S5 result](graphify-v8-s5-result.md)
+retain separate implementation and historical validation records.
+S6 public rollback, repair, and offline GC transports are the next bounded
+implementation slice. Their S3 core safety and S5 dispatch dependencies have
+merged. D3 governs only the optional legacy reader within S6; it does not block
+the core maintenance transports. S7 follows S5 and the selected maintenance
+delivery, with D3 required for its final release compatibility statement, as
 specified in the design. Later implementation owners remain unassigned; no
 successor task is activated by this status update.
 
@@ -67,9 +71,28 @@ has not been completed.
   and cold-query coverage, at the scopes identified in that record. These are
   historical receipts, not a fresh validation run at the merge revision.
   This merge does not complete S5–S7 or qualify a release candidate.
+- [PR #175](https://github.com/Villeneuve-Ventures/graphify/pull/175) merged S5 into
+  v8 at `153fa8360488745e9633b3b54a25497e3500f1fd` on 2026-10-04 UTC.
+  The [S5 result](graphify-v8-s5-result.md) records its command/request contract,
+  support limits, installed-entry-point coverage, and historical local validation.
+  These receipts are not a fresh validation run at the merge revision. S5
+  delivery does not establish S6 maintenance transport acceptance, S7 exact
+  release qualification, semantic completion, or live adoption.
 - These are historical delivery results. Publishing this status record does
   not constitute a new runtime test or acceptance run. Raw local logs remain
   session-local; the linked result document records their scope and revisions.
+
+## Selected-ref compatibility update
+
+[PR #174](https://github.com/Villeneuve-Ventures/graphify/pull/174) merged at
+`68985c6bb74fe2898a10708af7eeb082d4f11799` on 2026-10-04 UTC. The
+[selected-ref contract](graphify-v8-selected-ref-contract.md) supersedes the
+whole-file packed-ref freshness interpretation with adapter contract 3, observer
+`graphify-v8/workspace-observer-v3`, input-manifest format 2, and scoped-input ABI
+`graphify-v8-structural-2`. S5 uses this compatibility tuple. Old authority
+bundles, manifests, receipts, and staged requests refuse under the new candidate;
+they are not converted or re-signed. This change adds no migration or historical
+query transport and does not resolve D3.
 
 ## Preserved decisions and limits
 
@@ -78,8 +101,8 @@ D3 old certified-state access remains unresolved: it governs the optional S6
 legacy reader and S7 release compatibility promise, and does not block S4
 new-format work in disposable roots.
 
-S5 public commands, S6 maintenance transports, S7 aggregate candidate proof,
-and overall consolidation remain incomplete. Native power-loss and hostile
+S6 maintenance transports, S7 aggregate candidate proof, and overall
+consolidation remain incomplete. Native power-loss and hostile
 concurrent-rename proof remain unestablished. Aletheia first-use acceptance,
 other repository enrollment, global installation changes, migration, and
 workspace/v1 retirement remain separate later decisions.
