@@ -449,12 +449,22 @@ def test_frozen_normative_case(
         pth_marker = tmp_path / "pth-ran"
         site_marker = tmp_path / "sitecustomize-ran"
         for filename, marker in (("hostile.pth", pth_marker), ("sitecustomize.py", site_marker)):
+            # Homebrew has a stdlib sitecustomize; let site startup resolve ours first.
+            startup_path = (
+                f"import sys; sys.path.insert(0, {str(site_directory)!r}); "
+                if filename.endswith(".pth") else ""
+            )
             (site_directory / filename).write_text(
-                f"import pathlib; p = pathlib.Path({str(marker)!r}); "
+                startup_path + f"import pathlib; p = pathlib.Path({str(marker)!r}); "
                 "p.write_bytes(p.read_bytes() + b'x' if p.exists() else b'x')\n",
                 encoding="utf-8",
             )
-        subprocess.run([str(pinned_python), "-I", "-B", "-c", "pass"], check=True)
+        startup = subprocess.run(
+            [str(pinned_python), "-I", "-B", "-c",
+             "import sys; print(sys.modules['sitecustomize'].__file__)"],
+            check=True, capture_output=True, text=True,
+        )
+        _expect(startup.stdout.strip() == str(site_directory / "sitecustomize.py"))
         hook_baseline = (pth_marker.read_bytes(), site_marker.read_bytes())
         pinned_module = tmp_path / "pinned-verifier" / "protected_change_verifier.py"
         pinned_module.parent.mkdir()
