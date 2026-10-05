@@ -99,12 +99,27 @@ queries contact PyPI; service availability and advisory data can change.
 
 ## Remaining issue #113 work
 
-This batch does not resolve the whole issue. Remaining acceptance work includes
-contextual disposition of each Bandit alert against its threat model, an
-explicit baseline/new-finding policy before making scans blocking, and narrowly
-justified repairs with focused regressions. Do not replace format-required
-checksums, graph identities, parsers, or dependency versions merely to clear
-these reports.
+The [historical security triage report and unaccepted policy proposal](security-triage.md)
+records local receipts and dispositions at
+`a558766ba5a2958ea96695878429a76189b94323` on 2026-10-05: Bandit completed
+with 11 medium/high records across 111 Python files, and pip-audit completed
+with zero advisory records across 90 frozen default-plus-dev packages.
+Those counts describe that revision, not a fresh scan of the RC1 repair.
+Raw receipts remain locally retained and are not PR-visible or shared proof.
+
+The [appended RC1 fix status](security-triage.md#rc1-fix-status--2026-10-05)
+records the separate collision repair delivered by
+[PR #192](https://github.com/Villeneuve-Ventures/graphify/pull/192), merged on
+2026-10-05 at `a511df7089c4c7bb271c2e30d4bdcc2043bc4058`, with public
+source and regression links. The original audit and its failure reproduction
+remain bound to the earlier revision.
+
+This does not resolve the whole issue. D1 security enforcement remains deferred;
+the baseline/new-finding proposal is not accepted or implemented. Remaining work
+includes the owner decision, separately authorized enforcement regressions, and
+narrowly justified repairs with focused regressions. Do not replace
+format-required checksums, graph identities, parsers, or dependency versions
+merely to clear these reports. Scanners remain advisory.
 
 ## Command references
 
