@@ -618,7 +618,7 @@ def _disambiguate_colliding_node_ids(
         if isinstance(nid, str) and nid:
             by_id.setdefault(nid, []).append(node)
 
-    remap: dict[tuple[str, str], str] = {}
+    preferred: dict[tuple[str, str], str] = {}
     ambiguous_ids: set[str] = set()
     for old_id, group in by_id.items():
         source_keys = {_node_disambiguation_source_key(node, root, strict=strict) for node in group}
@@ -632,9 +632,10 @@ def _disambiguate_colliding_node_ids(
         # (``a/b/c.md`` vs ``a.b/c.md``, ``foo/bar_baz.md`` vs ``foo_bar/baz.md``)
         # normalize to the SAME salted id and still collide (#1522 — the residual
         # of #1504 the 0.9.0 full-path stem didn't reach). When that happens,
-        # append a short stable hash of the *raw* source_key, which IS injective
-        # over distinct paths, so the colliders separate. Computed in code from
-        # source_file (never trusted from the LLM), so AST↔semantic parity holds.
+        # append a short stable hash of the *raw* source_key. This is only a
+        # preferred ID: the digest can collide too (RC1), or the result can be
+        # occupied by another node. Allocation below checks the whole inventory.
+        # Computed from source_file, so AST↔semantic parity holds.
         naive: dict[str, str] = {}  # source_key -> _make_id(source_key, old_id)
         for source_key in source_keys:
             if source_key:
@@ -644,8 +645,7 @@ def _disambiguate_colliding_node_ids(
         for nid in naive.values():
             seen[nid] = seen.get(nid, 0) + 1
         needs_hash = {sk for sk, nid in naive.items() if seen.get(nid, 0) > 1}
-        for node in group:
-            source_key = _node_disambiguation_source_key(node, root, strict=strict)
+        for source_key in sorted(source_keys):
             if not source_key:
                 continue
             if source_key in needs_hash:
@@ -653,8 +653,38 @@ def _disambiguate_colliding_node_ids(
                 new_id = _make_id(source_key, old_id, salt)
             else:
                 new_id = naive.get(source_key) or _make_id(source_key, old_id)
-            remap[(old_id, source_key)] = new_id
-            if new_id != old_id:
+            preferred[(old_id, source_key)] = new_id
+
+    # Reserve every original ID, including exempt module/namespace anchors.
+    # First allocate available preferred IDs across ALL groups, so a numeric
+    # fallback cannot take another owner's otherwise distinct preferred ID.
+    # Sorting by (old ID, raw source path) makes contested allocation independent
+    # of input order. Duplicate records for the same owner share one allocation.
+    occupied = {node["id"] for node in nodes
+                if isinstance(node.get("id"), str) and node["id"]}
+    remap: dict[tuple[str, str], str] = {}
+    pending: list[tuple[str, str]] = []
+    for key, new_id in sorted(preferred.items()):
+        if new_id in occupied:
+            pending.append(key)
+        else:
+            remap[key] = new_id
+            occupied.add(new_id)
+    for key in pending:
+        base_id = preferred[key]
+        suffix = 2
+        new_id = f"{base_id}_{suffix}"
+        while new_id in occupied:
+            suffix += 1
+            new_id = f"{base_id}_{suffix}"
+        remap[key] = new_id
+        occupied.add(new_id)
+
+    for old_id in ambiguous_ids:
+        for node in by_id[old_id]:
+            source_key = _node_disambiguation_source_key(node, root, strict=strict)
+            new_id = remap.get((old_id, source_key))
+            if new_id is not None:
                 node["id"] = new_id
 
     if not remap:
