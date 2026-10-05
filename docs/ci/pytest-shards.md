@@ -71,8 +71,13 @@ and `install` in a disposable process-scoped home.
 It never reruns the full suite. Skill generation, advisory security scans and the
 macOS Leiden job retain their policies.
 
-Timing uploads remain advisory and run after failed tests. The observer includes
-full and selected node/module inventories, counts, shard and allocation hash. Only
+Timing uploads remain advisory and run after failed tests. The `timings.json`
+artifact includes full and selected node/module inventories, counts, shard and
+allocation hash. Console output uses `CI_TIMING_SUMMARY=` for a fixed set of
+counts, status, shard and timings; it does not print inventories, module lists or
+environment data. This avoids sending potentially huge parameter-derived node
+IDs through the runner's log processing. Read the artifact for the full record;
+the former full-record `CI_TIMING_JSON=` console line is no longer emitted. Only
 validated shard deselection is eligible for complete timing telemetry; arbitrary
 selection, failed/partial execution, collection errors, invalid reports and output
 failures retain incomplete diagnostics. Timing writes and pytest 9 subtest handling

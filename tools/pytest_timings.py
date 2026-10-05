@@ -4,6 +4,7 @@ Load with ``-p tools.pytest_timings --ci-timing-json PATH``. Fixture costs follo
 pytest's module attribution; subtest intervals are included in the parent call.
 A complete record is a successful, fully reported run of the selected inventory,
 not a claim that arbitrary invocation paths represent the repository's full suite.
+The artifact holds the full record; console output contains only a compact summary.
 """
 from __future__ import annotations
 
@@ -298,8 +299,22 @@ class _Timing:
                     payload = self._payload(payload["exit_code"], finished=finished)
                 reporter = self.config.pluginmanager.getplugin("terminalreporter")
                 if reporter is not None:
-                    reporter.write_line("CI_TIMING_JSON=" + json.dumps(
-                        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+                    # Node IDs can include megabyte-sized parameter values. Keep
+                    # inventories and other variable-size data in the artifact,
+                    # away from the runner's synchronous log masking passes.
+                    summary = {key: payload[key] for key in (
+                        "schema_version", "status", "mode", "exit_code", "full_items",
+                        "selected_items", "executed_items", "completed_items", "deselected_items",
+                        "collection_completed", "collection_errors", "sessionfinish_completed",
+                        "collection_seconds", "session_seconds",
+                    )}
+                    summary.update(
+                        subtests=payload["subtests"],
+                        shard=payload["partition"]["shard"] if payload["partition"] else None,
+                        output_error_count=len(payload["output_errors"]),
+                    )
+                    reporter.write_line("CI_TIMING_SUMMARY=" + json.dumps(
+                        summary, sort_keys=True, separators=(",", ":"), allow_nan=False
                     ))
             except Exception:
                 # Diagnostics must never replace a test result or an inner error.

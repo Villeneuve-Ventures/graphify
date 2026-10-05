@@ -47,17 +47,50 @@ def run(root, *args, instrument=True, output=None, opt_in=True, env_extra=None, 
     )
 
 
-def timing(result, root, *, file=True):
-    lines = [line.removeprefix("CI_TIMING_JSON=") for line in result.stdout.splitlines()
-             if line.startswith("CI_TIMING_JSON=")]
-    assert len(lines) == 1, result.stdout + result.stderr
+def summary(result):
+    lines = [line.removeprefix("CI_TIMING_SUMMARY=") for line in result.stdout.splitlines()
+             if line.startswith("CI_TIMING_SUMMARY=")]
+    assert len(lines) == 1, result.stdout[:500] + result.stderr[:500]
     payload = json.loads(lines[0], parse_constant=pytest.fail)
+    assert len(lines[0].encode()) < 2048
+    assert "CI_TIMING_JSON=" not in result.stdout
     assert lines[0] == json.dumps(payload, sort_keys=True, separators=(",", ":"))
     assert payload["exit_code"] == result.returncode
     assert payload["schema_version"] == 1
-    if file:
-        assert json.loads((root / "timings.json").read_text()) == payload
+    assert set(payload) == {
+        "schema_version", "status", "mode", "exit_code", "full_items",
+        "selected_items", "executed_items", "completed_items", "deselected_items",
+        "collection_completed", "collection_errors", "sessionfinish_completed",
+        "collection_seconds", "session_seconds", "subtests", "shard", "output_error_count",
+    }
     return payload
+
+
+def timing(result, root):
+    console = summary(result)
+    payload = json.loads((root / "timings.json").read_text(), parse_constant=pytest.fail)
+    for key in console.keys() - {"shard", "output_error_count"}:
+        assert console[key] == payload[key]
+    assert console["shard"] == (payload["partition"]["shard"] if payload["partition"] else None)
+    assert console["output_error_count"] == len(payload["output_errors"])
+    return payload
+
+
+@pytest.mark.parametrize("fail", [False, True])
+@pytest.mark.parametrize("shard", [False, True])
+def test_large_parameter_inventory_stays_in_artifact(suite, fail, shard):
+    (suite / "tests/test_large.py").write_text(
+        "import pytest\n@pytest.mark.parametrize('blob', [b'x' * (1024 * 1024 + 1)])\n"
+        f"def test_large(blob): assert len(blob) == {0 if fail else 1048577}\n"
+    )
+    result = run(suite, "--tb=no", "-rN", shard=shard)
+    assert result.returncode == int(fail)
+    payload = timing(result, suite)
+    assert payload["status"] == ("incomplete" if fail else "complete")
+    assert payload["selected_items"] == payload["executed_items"] == payload["completed_items"] == 1
+    assert payload["full_inventory"] == payload["selected_inventory"]
+    assert len(next(iter(payload["full_inventory"]))) > 1024 * 1024
+    assert len(result.stdout.encode()) < 4096
 
 
 @pytest.mark.parametrize("platform,python_name,launcher", [
@@ -92,6 +125,7 @@ def test_inert_without_explicit_option(suite):
     assert result.returncode == 0
     assert "1 passed" in result.stdout
     assert "CI_TIMING_JSON=" not in result.stdout
+    assert "CI_TIMING_SUMMARY=" not in result.stdout
     assert not (suite / "timings.json").exists()
 
 
@@ -269,9 +303,9 @@ def test_unwritable_artifact_preserves_test_result(suite, fail, shard):
     blocker.write_text("preserve")
     result = run(suite, output=blocker / "timings.json", shard=shard)
     assert result.returncode == int(fail)
-    payload = timing(result, suite, file=False)
+    payload = summary(result)
     assert payload["status"] == "incomplete"
-    assert payload["output_errors"]
+    assert payload["output_error_count"]
     assert blocker.read_text() == "preserve"
 
 
@@ -284,7 +318,7 @@ def test_terminal_output_failure_preserves_result_and_artifact(suite, error, fai
         "    reporter = session.config.pluginmanager.getplugin('terminalreporter')\n"
         "    original = reporter.write_line\n"
         "    def write(line, **kwargs):\n"
-        f"        if line.startswith('CI_TIMING_JSON='): raise {error}('output')\n"
+        f"        if line.startswith('CI_TIMING_SUMMARY='): raise {error}('output')\n"
         "        return original(line, **kwargs)\n"
         "    reporter.write_line = write\n"
     )
