@@ -750,23 +750,27 @@ def _prepare_hook_install(
     script: str,
     marker: str,
     marker_end: str,
+    snapshot=...,
 ) -> _HookInstallPlan:
     """Prepare one hook installation without mutating the hook."""
     hook_path = hooks_dir / name
-    try:
-        metadata = hook_path.lstat()
-    except FileNotFoundError:
-        metadata = None
+    if snapshot is ...:
+        try:
+            metadata = hook_path.lstat()
+        except FileNotFoundError:
+            metadata = None
+    else:
+        metadata = None if snapshot is None else snapshot[0]
     if metadata is not None:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             raise RuntimeError(f"Unsafe non-regular {name} hook at {hook_path}")
         original_mode = stat.S_IMODE(metadata.st_mode)
-        raw = hook_path.read_bytes()
+        raw = hook_path.read_bytes() if snapshot is ... else snapshot[1]
         owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
         if owned is None:
             # Preserve the established append behavior, including UTF-8
             # validation, trailing-whitespace trimming, and LF output.
-            content = hook_path.read_text(encoding="utf-8")
+            content = hook_path.read_text(encoding="utf-8") if snapshot is ... else raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
             return _HookInstallPlan(
                 hook_path,
                 f"appended to existing {name} hook at {hook_path}",
@@ -827,12 +831,18 @@ def _prepare_hook_uninstall(
     name: str,
     marker: str,
     marker_end: str,
+    snapshot=...,
 ) -> _HookUninstallPlan:
     """Prepare removal of one exact owned hook interval without mutating it."""
     hook_path = hooks_dir / name
-    try:
-        metadata = hook_path.lstat()
-    except FileNotFoundError:
+    if snapshot is ...:
+        try:
+            metadata = hook_path.lstat()
+        except FileNotFoundError:
+            metadata = None
+    else:
+        metadata = None if snapshot is None else snapshot[0]
+    if metadata is None:
         return _HookUninstallPlan(
             hook_path,
             f"no {name} hook found - nothing to remove.",
@@ -840,7 +850,7 @@ def _prepare_hook_uninstall(
     if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
         raise RuntimeError(f"Unsafe non-regular {name} hook at {hook_path}")
 
-    raw = hook_path.read_bytes()
+    raw = hook_path.read_bytes() if snapshot is ... else snapshot[1]
     owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
     if owned is None:
         return _HookUninstallPlan(
@@ -1004,7 +1014,7 @@ def _register_merge_driver(root: Path) -> str:
     return f"registered ({line})"
 
 
-def _unregister_merge_driver(root: Path) -> str:
+def _unregister_merge_driver(root: Path, *, strict: bool = False) -> str:
     """Remove the merge-driver git config keys and the .gitattributes line."""
     import subprocess as _sp
     for key in (
@@ -1014,12 +1024,17 @@ def _unregister_merge_driver(root: Path) -> str:
     ):
         try:
             # --unset exits nonzero if the key is absent; that is fine.
-            _sp.run(
+            result = _sp.run(
                 ["git", "-C", str(root), "config", "--unset", key],
                 capture_output=True, text=True,
             )
-        except OSError:
-            pass
+            if strict and result.returncode:
+                absent = _sp.run(["git", "-C", str(root), "config", "--get-all", key], capture_output=True)
+                if absent.returncode != 1:
+                    raise RuntimeError(f"Hooks removed; merge-driver config removal failed for {key}")
+        except OSError as exc:
+            if strict:
+                raise RuntimeError(f"Hooks removed; merge-driver config removal failed: {exc}") from exc
     attrs = root / ".gitattributes"
     if not attrs.exists():
         return "not registered - nothing to remove."
@@ -1093,6 +1108,25 @@ def _user_hooks_dir(hooks_dir: Path) -> Path:
     return hooks_dir
 
 
+def _atomic_hooks_supported() -> bool:
+    return os.name != "nt" and (sys.platform == "darwin" or sys.platform.startswith("linux"))
+
+
+def _hook_request(root: Path) -> dict:
+    """Bind a retry to the originating Git/configuration and interpreter context."""
+    import hashlib
+    import subprocess
+    gitdir = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-dir"],
+                            capture_output=True, text=True, check=True).stdout.strip()
+    config = subprocess.run(["git", "-C", str(root), "config", "--local", "--includes", "--show-origin", "--null", "--list"],
+                            capture_output=True, check=True).stdout
+    attrs = root / ".gitattributes"
+    return {"gitdir": str((root / gitdir).resolve()), "interpreter": _pinned_python(),
+            "output": _hook_output_path(), "repo_output": _hook_repo_output_path(root),
+            "registration_config": hashlib.sha256(config).hexdigest(),
+            "registration_attributes": hashlib.sha256(attrs.read_bytes()).hexdigest() if attrs.exists() else None}
+
+
 def install(path: Path = Path(".")) -> str:
     """Install Graphify lifecycle hooks in the nearest git repository."""
     root = _git_root(path)
@@ -1129,6 +1163,18 @@ def install(path: Path = Path(".")) -> str:
     post_merge = _POST_MERGE_SCRIPT.replace(
         "__PINNED_PYTHON__", quoted_pinned
     ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
+
+    if _atomic_hooks_supported():
+        from graphify.hook_installation import run
+        specs = (("post-commit", hook, _HOOK_MARKER, _HOOK_MARKER_END),
+                 ("post-checkout", checkout, _CHECKOUT_MARKER, _CHECKOUT_MARKER_END),
+                 ("post-merge", post_merge, _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
+        messages = run(root, hooks_dir, "install", _hook_request(root),
+                       lambda snapshots: [_prepare_hook_install(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs])
+        merge_msg = _register_merge_driver(root)
+        if merge_msg.startswith("not registered"):
+            raise RuntimeError(f"Hooks installed; merge driver {merge_msg}")
+        return "\n".join(f"{spec[0]}: {message}" for spec, message in zip(specs, messages, strict=True)) + f"\nmerge driver: {merge_msg}"
 
     # Prepare both hooks before applying either so deterministic malformed
     # ownership in one hook cannot leave the other partially upgraded.
@@ -1169,6 +1215,15 @@ def uninstall(path: Path = Path(".")) -> str:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
 
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
+    if _atomic_hooks_supported():
+        from graphify.hook_installation import run
+        specs = (("post-commit", _HOOK_MARKER, _HOOK_MARKER_END),
+                 ("post-checkout", _CHECKOUT_MARKER, _CHECKOUT_MARKER_END),
+                 ("post-merge", _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
+        messages = run(root, hooks_dir, "uninstall", _hook_request(root),
+                       lambda snapshots: [_prepare_hook_uninstall(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs])
+        merge_msg = _unregister_merge_driver(root, strict=True)
+        return "\n".join(f"{spec[0]}: {message}" for spec, message in zip(specs, messages, strict=True)) + f"\nmerge driver: {merge_msg}"
     commit_plan = _prepare_hook_uninstall(
         hooks_dir, "post-commit", _HOOK_MARKER, _HOOK_MARKER_END
     )
@@ -1203,6 +1258,11 @@ def status(path: Path = Path(".")) -> str:
     if root is None:
         return "Not in a git repository."
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
+    if _atomic_hooks_supported():
+        from graphify.hook_installation import pending
+        recovery = pending(hooks_dir)
+        if recovery:
+            return f"hook installation: {recovery}"
 
     def _check(name: str, marker: str, marker_end: str) -> str:
         p = hooks_dir / name

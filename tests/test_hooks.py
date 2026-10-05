@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
@@ -24,6 +25,17 @@ from graphify.hooks import (
     status,
     uninstall,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_hook_authority(monkeypatch):
+    if os.name == "nt":
+        yield
+        return
+    with tempfile.TemporaryDirectory(prefix=".graphify-hook-tests-", dir=Path.home()) as home:
+        monkeypatch.setenv("HOME", home)
+        monkeypatch.setenv("XDG_STATE_HOME", str(Path(home) / "state"))
+        yield
 
 
 def _make_git_repo(tmp_path: Path) -> Path:
