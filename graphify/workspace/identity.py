@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 import hashlib
 import os
-from pathlib import Path
+from pathlib import Path, PosixPath, PurePath
 import re
 import selectors
 import stat
@@ -163,6 +163,15 @@ def _check_deadline(deadline_ns: int | None) -> None:
     _remaining_timeout_seconds(deadline_ns)
 
 
+def _git_path_is_relative_to(path: PurePath, parent: PurePath) -> bool:
+    # Exact POSIX paths have case-sensitive lexical component comparisons.
+    # Keep pathlib behavior for other flavours and caller-defined subclasses.
+    if type(path) is PosixPath and type(parent) is PosixPath:
+        parent_parts = parent.parts
+        return path.anchor == parent.anchor and path.parts[:len(parent_parts)] == parent_parts
+    return path.is_relative_to(parent)
+
+
 def _git_search_path(root: Path, git_common_dir: Path) -> str:
     """Keep operator installation paths; never search relative to the source."""
     root = root.resolve(strict=True)
@@ -175,7 +184,7 @@ def _git_search_path(root: Path, git_common_dir: Path) -> str:
             resolved = directory.resolve(strict=True)
         except (OSError, RuntimeError):
             continue
-        if any(directory.is_relative_to(denied) or resolved.is_relative_to(denied)
+        if any(_git_path_is_relative_to(directory, denied) or _git_path_is_relative_to(resolved, denied)
                for denied in (root, git_common_dir)):
             continue
         if resolved.is_dir():
@@ -200,7 +209,7 @@ def _git_executable(root: Path, *, deadline_ns: int | None = None,
         try:
             resolved = path.resolve(strict=True)
             if (path.is_absolute() and not any(
-                    path.is_relative_to(denied) or resolved.is_relative_to(denied)
+                    _git_path_is_relative_to(path, denied) or _git_path_is_relative_to(resolved, denied)
                     for denied in (root, git_common_dir))
                     and resolved.is_file() and os.access(resolved, os.X_OK)):
                 return str(resolved)
