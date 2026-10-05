@@ -869,8 +869,11 @@ def _write_candidate_startup_sentinels(
         name: tmp_path / f"{python.parent.parent.name}-{name}-startup"
         for name in ("pth", "sitecustomize", "usercustomize")
     }
+    # The .pth hook runs before sitecustomize resolution, including on Homebrew
+    # where a stdlib sitecustomize would otherwise shadow this disposable module.
     (site_packages / "graphify_startup_probe.pth").write_text(
-        f"import sys; open({str(markers['pth'])!r}, 'a').write('ran\\n')\n",
+        f"import sys; sys.path.insert(0, {str(site_packages)!r}); "
+        f"open({str(markers['pth'])!r}, 'a').write('ran\\n')\n",
         encoding="utf-8",
     )
     (site_packages / "sitecustomize.py").write_text(
@@ -882,6 +885,38 @@ def _write_candidate_startup_sentinels(
         encoding="utf-8",
     )
     return markers, env
+
+
+def test_candidate_startup_sentinels_execute_with_site_and_are_excluded_without_site(tmp_path):
+    python, graphify_marker = _disposable_graphify_python(tmp_path, "startup-control")
+    site_packages = Path(subprocess.check_output(
+        [str(python), "-E", "-P", "-B", "-S", "-c",
+         "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True,
+    ).strip())
+    markers, startup_env = _write_candidate_startup_sentinels(python, site_packages, tmp_path)
+    probe = (
+        "import json, sys; print(json.dumps({name: getattr(sys.modules.get(name), "
+        "'__file__', None) for name in ('sitecustomize', 'usercustomize')}))"
+    )
+    command = [str(python), "-E", "-P", "-B"]
+    env = {**os.environ, **startup_env}
+    normal = subprocess.run(
+        [*command, "-c", probe], env=env, check=True, capture_output=True, text=True,
+    )
+    modules = json.loads(normal.stdout)
+    assert modules["sitecustomize"] == str(site_packages / "sitecustomize.py")
+    assert Path(modules["usercustomize"]).name == "usercustomize.py"
+    assert Path(modules["usercustomize"]).is_relative_to(Path(startup_env["HOME"]))
+    baseline = {name: marker.read_bytes() for name, marker in markers.items()}
+    assert baseline == {"pth": b"ran\nran\n", "sitecustomize": b"ran\n", "usercustomize": b"ran\n"}
+
+    no_site = subprocess.run(
+        [*command, "-S", "-c", probe], env=env, check=True, capture_output=True, text=True,
+    )
+    assert json.loads(no_site.stdout) == {"sitecustomize": None, "usercustomize": None}
+    assert {name: marker.read_bytes() for name, marker in markers.items()} == baseline
+    assert not graphify_marker.exists()
 
 
 def _run_posix_query_with_python(
