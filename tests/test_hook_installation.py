@@ -88,10 +88,10 @@ def test_prepublication_failure_preserves_all_live_hooks(repo, monkeypatch, fail
     write = publication._write
     save = publication._Store.save
 
-    def fail_write(fd, name, data, mode):
+    def fail_write(fd, name, data, mode, metadata=None):
         if name == "1":
             raise OSError("stage write failed")
-        return write(fd, name, data, mode)
+        return write(fd, name, data, mode, metadata)
 
     def fail_mode(fd, mode):
         if mode == 0o751:
@@ -646,10 +646,10 @@ def test_stage_exclusion_write_failure_precedes_payload_and_live_publication(rep
     before = _live(repo)
     payloads = []
 
-    def record_write(fd, name, data, mode):
+    def record_write(fd, name, data, mode, metadata=None):
         if name.isdigit() or name.startswith("pre-"):
             payloads.append(name)
-        return real_write(fd, name, data, mode)
+        return real_write(fd, name, data, mode, metadata)
 
     def fail(fd):
         if stat.S_ISDIR(os.fstat(fd).st_mode) and os.listdir(fd) == [".gitignore"]:
@@ -665,3 +665,200 @@ def test_stage_exclusion_write_failure_precedes_payload_and_live_publication(rep
     stage, = _hooks(repo).glob(publication._PREFIX + "*")
     assert list(stage.iterdir()) == [stage / ".gitignore"]
     assert (stage / ".gitignore").read_bytes() == b"*\n"
+
+
+@pytest.mark.parametrize("mask", [0o177, 0o777])
+@pytest.mark.parametrize("boundary", ["authority", "slot", "stage"])
+def test_private_directory_birth_ignores_parent_umask(repo, mask, boundary):
+    # Keep the separate merge-driver file-creation behavior outside this probe.
+    (repo / ".gitattributes").write_bytes(b"# existing repository attributes\n")
+    if boundary in ("slot", "stage"):
+        with publication._authority(publication._state_root(), True):
+            pass
+    if boundary == "stage":
+        with publication._authority(publication._state_root(), True) as (fd, _):
+            identity = publication._identity(_hooks(repo).stat())
+            name = publication._slot(identity)
+            os.mkdir(name, 0o700, dir_fd=fd)
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+            try:
+                publication._Store(child, identity, True)
+            finally:
+                os.close(child)
+    old_mask = os.umask(mask)
+    try:
+        hooks.install(repo)
+        assert os.umask(mask) == mask
+        hooks.uninstall(repo)
+        assert os.umask(mask) == mask
+    finally:
+        os.umask(old_mask)
+    assert "pending" not in hooks.status(repo)
+    for parent in (publication._state_root(), _hooks(repo)):
+        for child in parent.iterdir():
+            if child.is_dir():
+                assert stat.S_IMODE(child.stat().st_mode) == 0o700
+
+
+def _set_extended_metadata(path, kind):
+    if kind == "xattr":
+        if sys.platform == "darwin":
+            subprocess.run(["/usr/bin/xattr", "-w", "user.graphify-proof", "preserve-me", str(path)], check=True)
+        else:
+            os.setxattr(path, "user.graphify-proof", b"preserve-me")
+    elif sys.platform == "darwin":
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
+        subprocess.run(["/bin/chmod", "+a", f"user:{user} deny execute", str(path)], check=True)
+    else:
+        import struct
+        entries = [(1, 7, 0xffffffff), (2, 5, 65534), (4, 5, 0xffffffff),
+                   (16, 5, 0xffffffff), (32, 1, 0xffffffff)]
+        os.setxattr(path, "system.posix_acl_access", struct.pack("<I", 2)
+                    + b"".join(struct.pack("<HHI", *entry) for entry in entries))
+
+
+def _assert_extended_metadata(path, kind):
+    if kind == "xattr":
+        value = (subprocess.check_output(["/usr/bin/xattr", "-p", "user.graphify-proof", str(path)]).rstrip(b"\n")
+                 if sys.platform == "darwin" else os.getxattr(path, "user.graphify-proof"))
+        assert value == b"preserve-me"
+    elif sys.platform == "darwin":
+        assert not os.access(path, os.X_OK)
+        assert "deny execute" in subprocess.check_output(["/bin/ls", "-le", str(path)], text=True)
+    else:
+        import struct
+        raw = os.getxattr(path, "system.posix_acl_access")
+        assert (2, 5, 65534) in list(struct.iter_unpack("<HHI", raw[4:]))
+
+
+@pytest.mark.parametrize("kind", ["xattr", "acl"])
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_public_replacement_preserves_extended_metadata(repo, kind, operation):
+    if operation == "uninstall":
+        hooks.install(repo)
+    target = _hooks(repo) / "post-commit"
+    _set_extended_metadata(target, kind)
+    _assert_extended_metadata(target, kind)
+    old_inode = target.stat().st_ino
+    getattr(hooks, operation)(repo)
+    assert target.stat().st_ino != old_inode
+    _assert_extended_metadata(target, kind)
+    assert b"printf 'user hook\\n'" in target.read_bytes()
+    assert stat.S_IMODE(target.stat().st_mode) == 0o751
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_restrictive_umask_never_normalizes_preexisting_authority(repo, kind):
+    authority = publication._state_root()
+    authority.parent.mkdir(parents=True)
+    foreign = Path.home() / "foreign"
+    foreign.mkdir()
+    (foreign / "marker").write_bytes(b"keep foreign metadata")
+    if kind == "symlink":
+        authority.symlink_to(foreign, target_is_directory=True)
+    else:
+        authority.mkdir()
+        (authority / "marker").write_bytes(b"keep authority metadata")
+        authority.chmod(0o500)
+    before = (_snapshot(Path.home()), authority.lstat(), _live(repo))
+    old_mask = os.umask(0o777)
+    try:
+        with pytest.raises(RuntimeError, match="incomplete"):
+            hooks.install(repo)
+        assert os.umask(0o777) == 0o777
+    finally:
+        os.umask(old_mask)
+    assert _snapshot(Path.home()) == before[0]
+    assert (authority.lstat().st_ino, authority.lstat().st_mode) == (before[1].st_ino, before[1].st_mode)
+    assert _live(repo) == before[2] and not (repo / ".gitattributes").exists()
+
+
+@pytest.mark.parametrize("outcome", ["failure", "created-then-killed"])
+def test_private_directory_child_failure_does_not_publish(repo, monkeypatch, outcome):
+    import errno
+    real = subprocess.run
+    before = _live(repo)
+    affected = []
+
+    def fail(args, **kwargs):
+        if publication._MKDIR_CODE not in args:
+            return real(args, **kwargs)
+        assert kwargs["pass_fds"] and kwargs["umask"] == 0o077
+        if outcome == "created-then-killed":
+            result = real(args, **kwargs)
+            assert result.returncode == 0
+            affected.append(os.stat(args[-2], dir_fd=int(args[-1])).st_ino)
+            return subprocess.CompletedProcess(args, -9, "", "")
+        return subprocess.CompletedProcess(args, 1, str(errno.EACCES), "")
+
+    monkeypatch.setattr(subprocess, "run", fail)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        hooks.install(repo)
+    assert _live(repo) == before and not (repo / ".gitattributes").exists()
+    if outcome == "created-then-killed":
+        assert len(affected) == 1
+        assert any(p.stat().st_ino == affected[0] for p in Path.home().rglob("*") if p.is_dir())
+
+
+def test_mode_only_replacement_keeps_acl_and_legacy_chmod_rules(repo):
+    hooks.install(repo)
+    target = _hooks(repo) / "post-commit"
+    _set_extended_metadata(target, "acl")
+    target.chmod(0o640)
+    before = target.read_bytes()
+    hooks.install(repo)
+    assert target.read_bytes() == before and stat.S_IMODE(target.stat().st_mode) == 0o751
+    _assert_extended_metadata(target, "acl")
+
+
+@pytest.mark.parametrize("failure", ["read", "copy"])
+def test_metadata_failure_refuses_before_live_publication(repo, monkeypatch, failure):
+    target = _hooks(repo) / "post-commit"
+    _set_extended_metadata(target, "xattr")
+    before = _live(repo)
+    if failure == "read":
+        def unreadable(_):
+            raise OSError("injected metadata inspection failure")
+        monkeypatch.setattr(publication, "_extended", unreadable)
+    else:
+        monkeypatch.setattr(publication, "_copy_metadata", lambda *args: None)
+    with pytest.raises(RuntimeError, match="metadata"):
+        hooks.install(repo)
+    assert _live(repo) == before and not (repo / ".gitattributes").exists()
+    _assert_extended_metadata(target, "xattr")
+
+
+def test_changed_metadata_refuses_pending_resume_without_mutation(repo, monkeypatch):
+    _interrupt(repo, monkeypatch)
+    target = _hooks(repo) / "post-checkout"
+    _set_extended_metadata(target, "xattr")
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    with pytest.raises(RuntimeError, match="Foreign or uncertain"):
+        hooks.install(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+    _assert_extended_metadata(target, "xattr")
+    assert "pending install" in hooks.status(repo)
+
+
+def test_legacy_active_batch_without_metadata_binding_refuses(repo, monkeypatch):
+    _interrupt(repo, monkeypatch)
+    with publication._authority(publication._state_root(), False) as (fd, _):
+        identity = publication._identity(_hooks(repo).stat())
+        slot = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            store = publication._Store(slot, identity, False)
+            batch = store.body["active"]
+            del batch["metadata_version"]
+            for entry in batch["entries"]:
+                for key in ("old", "new", "preimage"):
+                    if entry[key] is not None:
+                        entry[key].pop("metadata")
+            store.save()
+        finally:
+            os.close(slot)
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    monkeypatch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("legacy batch cannot register"))
+    with pytest.raises(RuntimeError, match="Legacy pending batch lacks hook metadata binding"):
+        hooks.install(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))

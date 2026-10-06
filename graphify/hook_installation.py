@@ -17,11 +17,19 @@ import os
 from pathlib import Path
 import secrets
 import stat
+import subprocess
 import sys
 
 NAMES = ("post-commit", "post-checkout", "post-merge")
 _PREFIX = ".graphify-hook-batch-"
 _SCHEMA = "graphify.hook-installation.v1"
+_MKDIR_CODE = """import os, sys
+try:
+    os.mkdir(sys.argv[1], 0o700, dir_fd=int(sys.argv[2]))
+except OSError as exc:
+    print(exc.errno)
+    sys.exit(1)
+"""
 
 
 def _state_root():
@@ -36,6 +44,103 @@ def _canonical(value):
 
 def _identity(info):
     return [info.st_dev, info.st_ino]
+
+
+def _mkdir_private(fd, name):
+    # Set permissions at birth without changing this process's umask or
+    # chmodding a pathname that could have been replaced after mkdir.
+    result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _MKDIR_CODE, name, str(fd)],
+                            pass_fds=(fd,), umask=0o077, capture_output=True, text=True)
+    if result.returncode:
+        if result.returncode == 1 and result.stdout.strip().isdigit():
+            error = int(result.stdout)
+            raise OSError(error, os.strerror(error), name)
+        raise RuntimeError("Private directory creation failed; retain uncertain state")
+
+
+def _darwin_xattrs(fd, values=None):
+    libc = ctypes.CDLL(None, use_errno=True)
+    if values is not None:
+        libc.fsetxattr.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                                  ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int)
+        for name, value in values.items():
+            data = bytes.fromhex(value)
+            if libc.fsetxattr(fd, os.fsencode(name), data, len(data), 0, 0):
+                raise OSError(ctypes.get_errno(), f"Cannot preserve hook attribute {name}")
+        return
+    libc.flistxattr.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    libc.flistxattr.restype = ctypes.c_ssize_t
+    libc.fgetxattr.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
+                              ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int)
+    libc.fgetxattr.restype = ctypes.c_ssize_t
+
+    def read(function, prefix, suffix):
+        size = function(*prefix, None, 0, *suffix)
+        if size < 0:
+            raise OSError(ctypes.get_errno(), "Cannot inspect hook attributes")
+        buffer = ctypes.create_string_buffer(size)
+        if function(*prefix, buffer, size, *suffix) != size:
+            raise RuntimeError("Hook attributes changed or could not be read")
+        return buffer.raw
+
+    names = read(libc.flistxattr, (fd,), (0,)).split(b"\0")[:-1]
+    return {os.fsdecode(name): read(libc.fgetxattr, (fd, name), (0, 0)).hex() for name in sorted(names)}
+
+
+def _darwin_acl(fd, value=...):
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.acl_free.argtypes = (ctypes.c_void_p,)
+    if value is not ...:
+        libc.acl_copy_int.argtypes = (ctypes.c_void_p,)
+        libc.acl_copy_int.restype = ctypes.c_void_p
+        libc.acl_set_fd_np.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_int)
+        acl = libc.acl_copy_int(bytes.fromhex(value))
+    else:
+        libc.acl_get_fd_np.argtypes = (ctypes.c_int, ctypes.c_int)
+        libc.acl_get_fd_np.restype = ctypes.c_void_p
+        acl = libc.acl_get_fd_np(fd, 0x100)
+        if not acl and ctypes.get_errno() == errno.ENOENT and os.fstat(fd).st_nlink:
+            return None
+    if not acl:
+        raise OSError(ctypes.get_errno(), "Cannot inspect or preserve hook ACL")
+    try:
+        if value is not ...:
+            if libc.acl_set_fd_np(fd, acl, 0x100):
+                raise OSError(ctypes.get_errno(), "Cannot preserve hook ACL")
+            return
+        libc.acl_size.argtypes = (ctypes.c_void_p,)
+        libc.acl_size.restype = ctypes.c_ssize_t
+        libc.acl_copy_ext.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ssize_t)
+        libc.acl_copy_ext.restype = ctypes.c_ssize_t
+        size = libc.acl_size(acl)
+        if size < 0:
+            raise OSError(ctypes.get_errno(), "Cannot inspect hook ACL size")
+        buffer = ctypes.create_string_buffer(size)
+        count = libc.acl_copy_ext(buffer, acl, size)
+        if count < 0:
+            raise OSError(ctypes.get_errno(), "Cannot capture hook ACL")
+        return buffer.raw[:count].hex()
+    finally:
+        libc.acl_free(acl)
+
+
+def _extended(fd):
+    if sys.platform == "darwin":
+        return {"xattrs": _darwin_xattrs(fd), "acl": _darwin_acl(fd)}
+    return {"xattrs": {name: os.getxattr(fd, name).hex() for name in sorted(os.listxattr(fd))}, "acl": None}
+
+
+def _copy_metadata(fd, metadata):
+    current = _extended(fd)
+    changed = {name: value for name, value in metadata["xattrs"].items()
+               if current["xattrs"].get(name) != value}
+    if sys.platform == "darwin":
+        _darwin_xattrs(fd, changed)
+        if metadata["acl"] is not None and metadata["acl"] != current["acl"]:
+            _darwin_acl(fd, metadata["acl"])
+    else:
+        for name, value in changed.items():
+            os.setxattr(fd, name, bytes.fromhex(value))
 
 
 def _acl_safe(fd):
@@ -87,13 +192,17 @@ def _authority(path, create):
     try:
         for name in path.parts[1:]:
             _admit(fd)
-            if create:
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
                 try:
-                    os.mkdir(name, 0o700, dir_fd=fd)
+                    _mkdir_private(fd, name)
                     os.fsync(fd)
                 except FileExistsError:
                     pass
-            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             parents.append((fd, name, _identity(os.fstat(child))))
             fd = child
         _admit(fd, private=True)
@@ -129,6 +238,7 @@ def _read(fd, name, private=False):
         if private and (before.st_uid != os.getuid() or before.st_nlink != 1
                         or stat.S_IMODE(before.st_mode) != 0o600 or not _acl_safe(source)):
             raise RuntimeError(f"Unsafe installer authority file: {name}")
+        metadata = None if private else _extended(source)
         chunks = []
         remaining = before.st_size
         while remaining:
@@ -137,6 +247,8 @@ def _read(fd, name, private=False):
                 raise RuntimeError(f"File changed while reading: {name}")
             chunks.append(chunk)
             remaining -= len(chunk)
+        if not private and _extended(source) != metadata:
+            raise RuntimeError(f"Hook metadata changed while reading: {name}")
         after = os.fstat(source)
         stable = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
                             s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
@@ -144,7 +256,7 @@ def _read(fd, name, private=False):
                 or _identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) != _identity(after)):
             raise RuntimeError(f"File changed while reading: {name}")
         data = b"".join(chunks)
-        return before, data
+        return before, data, metadata
     finally:
         os.close(source)
 
@@ -152,12 +264,15 @@ def _read(fd, name, private=False):
 def _signature(snapshot):
     if snapshot is None:
         return None
-    info, data = snapshot
-    return {"identity": _identity(info), "mode": stat.S_IMODE(info.st_mode),
-            "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    info, data, metadata = snapshot
+    result = {"identity": _identity(info), "mode": stat.S_IMODE(info.st_mode),
+              "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
+    if metadata is not None:
+        result["metadata"] = metadata
+    return result
 
 
-def _write(fd, name, data, mode):
+def _write(fd, name, data, mode, metadata=None):
     target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
     try:
         view = memoryview(data)
@@ -167,6 +282,12 @@ def _write(fd, name, data, mode):
                 raise OSError("Short installer stage write")
             view = view[count:]
         os.fchmod(target, mode)
+        if metadata is not None:
+            _copy_metadata(target, metadata)
+            if _extended(target) != metadata:
+                raise RuntimeError("Hook metadata could not be preserved; retain staging")
+            # Preserve the prior installer's chmod effects on POSIX ACL masks.
+            os.fchmod(target, mode)
         os.fsync(target)
         if sys.platform == "darwin":
             fcntl.fcntl(target, 51)  # F_FULLFSYNC; errors are not success.
@@ -336,7 +457,7 @@ def _prepare(fd, store, snapshots, plans, request, operation):
            for snapshot, (data, mode) in zip(snapshots.values(), desired, strict=True)):
         return None
     stage = _PREFIX + secrets.token_hex(16)
-    os.mkdir(stage, 0o700, dir_fd=fd)
+    _mkdir_private(fd, stage)
     stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
     try:
         _admit(stage_fd, private=True)
@@ -351,16 +472,16 @@ def _prepare(fd, store, snapshots, plans, request, operation):
                      "changed": not unchanged, "slot": str(index), "preimage": None}
             if not unchanged:
                 if snapshot is not None:
-                    _write(stage_fd, "pre-" + str(index), snapshot[1], old["mode"])
+                    _write(stage_fd, "pre-" + str(index), snapshot[1], old["mode"], snapshot[2])
                     entry["preimage"] = _signature(_read(stage_fd, "pre-" + str(index)))
                 if data is not None:
-                    _write(stage_fd, str(index), data, mode)
+                    _write(stage_fd, str(index), data, mode, None if snapshot is None else snapshot[2])
                     entry["new"] = _signature(_read(stage_fd, str(index)))
             entries.append(entry)
         os.fsync(stage_fd)
         os.fsync(fd)
         batch = {"stage": stage, "identity": _identity(os.fstat(stage_fd)), "binding": binding,
-                 "entries": entries, "messages": [p.message for p in plans], "phase": "PREPARED"}
+                 "entries": entries, "messages": [p.message for p in plans], "phase": "PREPARED", "metadata_version": 1}
         store.body["active"] = batch
         store.save()
         return batch
@@ -412,7 +533,7 @@ def run(root, hooks_dir, operation, request, prepare):
             name = _slot(hooks_identity)
             created = False
             try:
-                os.mkdir(name, 0o700, dir_fd=authority_fd)
+                _mkdir_private(authority_fd, name)
                 created = True
                 os.fsync(authority_fd)
             except FileExistsError:
@@ -421,6 +542,8 @@ def run(root, hooks_dir, operation, request, prepare):
             try:
                 state_identity = _identity(_admit(state_fd, private=True))
                 store = _Store(state_fd, hooks_identity, created)
+                if store.body["active"] is not None and store.body["active"].get("metadata_version") != 1:
+                    raise RuntimeError("Legacy pending batch lacks hook metadata binding; retain all evidence for manual reconciliation")
                 _check_stages(fd, store)
 
                 def check():

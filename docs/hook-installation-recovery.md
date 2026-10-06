@@ -6,6 +6,14 @@ file has its complete content and final executable mode. Existing user-hook
 composition and Graphify marker rules still apply. Windows uses the existing
 installer and does not have this new atomic publication or recovery guarantee.
 
+Replacement hooks preserve extended attributes exposed by the native file APIs
+and access-control lists (ACLs), including macOS deny entries and Linux named-user
+entries. The existing executable-mode update still applies; on Linux this can
+change the ACL mask just as the previous in-place chmod did. Metadata is copied
+and verified on staging files before publication. During preparation, an
+inspection or preservation failure stops the batch before any live hook changes.
+Changed metadata also blocks recovery, just as changed hook bytes or modes do.
+
 The three hooks are not one atomic transaction. An interruption can leave a mix
 of old and new, individually complete hooks. Git configuration and
 `.gitattributes` registration are separate steps. A registration failure returns
@@ -31,6 +39,11 @@ an incomplete authority record, or an unrecognized stage. No live hook has been
 published at that point, but an exact retry cannot establish ownership of that
 state. Retain it for manual reconciliation; automatic initialization recovery
 is not provided.
+
+A pending batch created by an older installer without metadata binding cannot
+be resumed by this version. Retain its staging and authority records for manual
+reconciliation. Completed older history remains usable; it is not migrated or
+deleted.
 
 If hook files, staging files, or authority records changed, Graphify refuses
 automatic continuation. Keep those files for manual reconciliation. Do not
@@ -58,6 +71,11 @@ or changed authority store cannot be rebuilt from hook-local files alone.
 Completed staging is retained; this installer does not perform automatic
 historical-stage cleanup. Preimages can contain user-hook content, so protect
 these directories as you protect the hooks themselves.
+
+New private directories receive mode `0700` at creation through an isolated
+child process. This does not change the caller's umask or repair permissions on
+preexisting directories. Failed or uncertain child creation retains any artifacts
+under the same pre-batch reconciliation rules.
 
 New stages contain a private `.gitignore` that excludes their contents from
 ordinary Git staging, including stages under `.githooks` or Husky user-hook
