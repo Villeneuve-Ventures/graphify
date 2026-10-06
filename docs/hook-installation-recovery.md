@@ -6,6 +6,15 @@ file has its complete content and final executable mode. Existing user-hook
 composition and Graphify marker rules still apply. Windows uses the existing
 installer and does not have this new atomic publication or recovery guarantee.
 
+Existing hard-linked hooks are refused before staging or publication, including
+no-op install and uninstall. Atomic replacement would separate their shared
+inode and leave another alias unchanged. Graphify retains every alias; it does
+not edit the shared inode or remove links. Private authority initialization can
+precede this refusal. Active hook and recovery-file reads also reject a newly
+observed hard link before further publication. A link created after a check can
+still race publication; later detection retains recovery evidence and reports
+failure, without rolling back an already published hook.
+
 Replacement hooks preserve extended attributes exposed by the native file APIs
 and access-control lists (ACLs), including macOS deny entries and Linux named-user
 entries. The existing executable-mode update still applies; on Linux this can

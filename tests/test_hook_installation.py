@@ -966,3 +966,73 @@ def test_legacy_pending_request_without_physical_origin_refuses(repo, monkeypatc
         hooks.install(repo)
     assert before == (_snapshot(repo), _snapshot(publication._state_root()))
     assert "pending install" in hooks.status(repo)
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("noop", [False, True])
+def test_hardlinked_hook_refuses_before_staging(repo, monkeypatch, tmp_path, operation, noop):
+    if (operation == "uninstall") != noop:
+        hooks.install(repo)
+    other = tmp_path / "other-repo"
+    subprocess.run(["git", "init", str(other)], check=True, capture_output=True)
+    target, alias = _hooks(repo) / "post-commit", _hooks(other) / "post-commit"
+    _set_extended_metadata(target, "xattr")
+    os.link(target, alias)
+    assert target.stat().st_nlink == alias.stat().st_nlink == 2
+    before = (_snapshot(repo), _snapshot(other))
+    monkeypatch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("linked hook must not register"))
+    monkeypatch.setattr(hooks, "_unregister_merge_driver", lambda *a, **k: pytest.fail("linked hook must not unregister"))
+    with pytest.raises(RuntimeError, match="hard-linked"):
+        getattr(hooks, operation)(repo)
+    assert before == (_snapshot(repo), _snapshot(other))
+    assert target.stat().st_ino == alias.stat().st_ino
+    assert target.stat().st_nlink == alias.stat().st_nlink == 2
+    _assert_extended_metadata(target, "xattr")
+    _assert_extended_metadata(alias, "xattr")
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("point", ["prepared", "published"])
+def test_new_hardlink_stops_further_publication(repo, monkeypatch, tmp_path, operation, point):
+    if operation == "uninstall":
+        hooks.install(repo)
+    other = tmp_path / "other-repo"
+    subprocess.run(["git", "init", str(other)], check=True, capture_output=True)
+    target, alias = _hooks(repo) / "post-checkout", _hooks(other) / "post-checkout"
+    _set_extended_metadata(target, "xattr")
+    original_prepare, original_rename = publication._prepare, publication._rename
+    stopped = []
+
+    def add_link():
+        os.link(target, alias)
+        stopped.append((_snapshot(repo), _snapshot(other)))
+
+    def prepare(*args, **kwargs):
+        batch = original_prepare(*args, **kwargs)
+        if point == "prepared":
+            add_link()
+        return batch
+
+    def rename(source_fd, source, target_fd, destination, **kwargs):
+        result = original_rename(source_fd, source, target_fd, destination, **kwargs)
+        if point == "published" and destination == "post-commit":
+            add_link()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_prepare", prepare)
+        patch.setattr(publication, "_rename", rename)
+        patch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("linked hook must not register"))
+        patch.setattr(hooks, "_unregister_merge_driver", lambda *a, **k: pytest.fail("linked hook must not unregister"))
+        with pytest.raises(RuntimeError, match="hard-linked"):
+            getattr(hooks, operation)(repo)
+    assert len(stopped) == 1
+    assert stopped[0] == (_snapshot(repo), _snapshot(other))
+    assert target.stat().st_ino == alias.stat().st_ino
+    assert target.stat().st_nlink == alias.stat().st_nlink == 2
+    _assert_extended_metadata(target, "xattr")
+    _assert_extended_metadata(alias, "xattr")
+    alias.unlink()  # Remove only the alias created by this fixture.
+    assert f"pending {operation}" in hooks.status(repo)
+    assert getattr(hooks, operation)(repo)
+    assert "pending" not in hooks.status(repo)

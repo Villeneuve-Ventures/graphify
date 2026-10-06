@@ -236,6 +236,8 @@ def _read(fd, name, private=False):
         before = os.fstat(source)
         if not stat.S_ISREG(before.st_mode):
             raise RuntimeError(f"Unsafe non-regular {name} hook or recovery file")
+        if not private and before.st_nlink != 1:
+            raise RuntimeError(f"Unsafe hard-linked {name} hook or recovery file; retain all aliases")
         if private and (before.st_uid != os.getuid() or before.st_nlink != 1
                         or stat.S_IMODE(before.st_mode) != 0o600 or not _acl_safe(source)):
             raise RuntimeError(f"Unsafe installer authority file: {name}")
