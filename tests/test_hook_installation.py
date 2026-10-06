@@ -585,3 +585,83 @@ def test_missing_historical_stage_reports_unverified_without_mutation(repo, monk
         hooks.install(repo)
     assert before == (_snapshot(repo), _snapshot(publication._state_root()))
     assert retained.is_dir() and not stage.exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux XDG authority selection")
+def test_empty_xdg_state_home_uses_default_for_public_operations(repo, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", "")
+    assert publication._state_root() == Path.home() / ".local/state/graphify/hook-installations"
+    hooks.install(repo)
+    assert "pending" not in hooks.status(repo)
+    hooks.uninstall(repo)
+    assert all(b"graphify-hook-start" not in data for data in _live(repo).values())
+
+
+def test_status_without_attempt_distinguishes_unsafe_authority_and_preserves_state(repo):
+    Path.home().chmod(0o770)
+    authority = publication._state_root()
+    assert not authority.exists()
+    before = (_snapshot(repo), _snapshot(Path.home()))
+    result = hooks.status(repo)
+    assert "unverified authority" in result and "pending" not in result
+    assert "Unsafe installer authority" in result
+    assert all(f"{name}: not installed" in result for name in publication.NAMES)
+    assert "merge driver:" in result
+    assert before == (_snapshot(repo), _snapshot(Path.home()))
+    assert not authority.exists()
+
+
+@pytest.mark.parametrize("hooks_path", [".githooks", ".husky/_"])
+def test_worktree_stage_content_is_excluded_from_ordinary_git_add(repo, hooks_path):
+    resolved = repo / hooks_path
+    resolved.mkdir(parents=True)
+    selected = resolved.parent if resolved.name == "_" else resolved
+    target = selected / "post-commit"
+    target.write_bytes(b"#!/bin/sh\n# retained user content\n")
+    target.chmod(0o755)
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", hooks_path], check=True)
+    hooks.install(repo)
+    stage, = selected.glob(publication._PREFIX + "*")
+    assert (stage / "pre-0").read_bytes() == b"#!/bin/sh\n# retained user content\n"
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    tracked = subprocess.check_output(["git", "-C", str(repo), "ls-files", "-z"]).split(b"\0")
+    assert os.fsencode(target.relative_to(repo)) in tracked
+    assert not any(publication._PREFIX.encode() in path for path in tracked)
+    assert stat.S_IMODE((stage / ".gitignore").stat().st_mode) == 0o600
+
+
+def test_existing_unrecognized_stage_is_not_adopted_or_given_exclusion(repo):
+    stage = _hooks(repo) / (publication._PREFIX + "foreign")
+    stage.mkdir()
+    (stage / "pre-0").write_bytes(b"foreign preserved content\n")
+    before = _snapshot(repo)
+    with pytest.raises(RuntimeError, match="Unrecognized hook staging"):
+        hooks.install(repo)
+    assert before == _snapshot(repo)
+    assert not (stage / ".gitignore").exists()
+
+
+def test_stage_exclusion_write_failure_precedes_payload_and_live_publication(repo, monkeypatch):
+    real_write, real_fsync = publication._write, os.fsync
+    before = _live(repo)
+    payloads = []
+
+    def record_write(fd, name, data, mode):
+        if name.isdigit() or name.startswith("pre-"):
+            payloads.append(name)
+        return real_write(fd, name, data, mode)
+
+    def fail(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and os.listdir(fd) == [".gitignore"]:
+            raise OSError("injected exclusion persistence failure")
+        return real_fsync(fd)
+
+    monkeypatch.setattr(publication, "_write", record_write)
+    monkeypatch.setattr(publication.os, "fsync", fail)
+    with pytest.raises(RuntimeError, match="exclusion persistence failure"):
+        hooks.install(repo)
+    assert not payloads and _live(repo) == before
+    assert not (repo / ".gitattributes").exists()
+    stage, = _hooks(repo).glob(publication._PREFIX + "*")
+    assert list(stage.iterdir()) == [stage / ".gitignore"]
+    assert (stage / ".gitignore").read_bytes() == b"*\n"

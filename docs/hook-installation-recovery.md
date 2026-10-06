@@ -21,6 +21,17 @@ environment, with the same output configuration. A different operation,
 interpreter, output, repository sharing the hooks directory, or registration
 configuration cannot resume that pending batch.
 
+An `unverified authority` warning means Graphify could not safely inspect the
+private store. It does not prove that an installation was attempted. Any hook
+and driver observations shown below that warning describe visible files and
+configuration only; they do not prove completion or authorize recovery.
+
+Interruption before a sealed batch exists can leave an empty authority slot,
+an incomplete authority record, or an unrecognized stage. No live hook has been
+published at that point, but an exact retry cannot establish ownership of that
+state. Retain it for manual reconciliation; automatic initialization recovery
+is not provided.
+
 If hook files, staging files, or authority records changed, Graphify refuses
 automatic continuation. Keep those files for manual reconciliation. Do not
 remove a staging directory or copy a journal to make a retry pass. Matching
@@ -47,6 +58,18 @@ or changed authority store cannot be rebuilt from hook-local files alone.
 Completed staging is retained; this installer does not perform automatic
 historical-stage cleanup. Preimages can contain user-hook content, so protect
 these directories as you protect the hooks themselves.
+
+New stages contain a private `.gitignore` that excludes their contents from
+ordinary Git staging, including stages under `.githooks` or Husky user-hook
+directories. The ignore file is persisted before any staged hook or preimage
+is written. It is not ownership evidence. Existing stages are not modified,
+already tracked recovery files remain tracked, and explicit force-add can
+still add ignored content. Check for recovery artifacts before committing.
+
+Do not run cleanup commands such as `git clean -xdf` over retained stages.
+Ignoring files does not protect them from `git clean -x`. Removing or changing
+historical stages makes later operations refuse; no automatic history cleanup
+or reconstruction is provided.
 
 A sealed completion record stays pending until terminal journal persistence is
 acknowledged. It is then moved to a retained private name. If persistence of

@@ -27,7 +27,7 @@ _SCHEMA = "graphify.hook-installation.v1"
 def _state_root():
     if sys.platform == "darwin":
         return Path.home() / "Library/Application Support/graphify/hook-installations"
-    return Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local/state"))) / "graphify/hook-installations"
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "graphify/hook-installations"
 
 
 def _canonical(value):
@@ -340,6 +340,8 @@ def _prepare(fd, store, snapshots, plans, request, operation):
     stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
     try:
         _admit(stage_fd, private=True)
+        _write(stage_fd, ".gitignore", b"*\n", 0o600)
+        os.fsync(stage_fd)  # Persist exclusion before any preimage or successor.
         entries = []
         for index, (name, (data, mode)) in enumerate(zip(NAMES, desired, strict=True)):
             snapshot = snapshots[name]
@@ -484,22 +486,34 @@ def pending(hooks_dir):
     fd = os.open(hooks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         identity = _identity(os.fstat(fd))
-        try:
-            with _authority(_state_root(), False) as (authority_fd, _):
-                slot_fd = os.open(_slot(identity), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
-                try:
-                    _admit(slot_fd, private=True)
-                    store = _Store(slot_fd, identity, False)
-                    _check_stages(fd, store)
-                    active = store.body["active"]
-                    return None if active is None else f"pending {active['binding']['operation']}; recovery files: {hooks_dir / active['stage']}"
-                finally:
-                    os.close(slot_fd)
-        except FileNotFoundError:
+        admitted = False
+
+        def absent():
             if any(name.startswith(_PREFIX) for name in os.listdir(fd)):
                 return "pending/unverified: installer authority missing; retain hook staging"
             return None
+
+        try:
+            with _authority(_state_root(), False) as (authority_fd, _):
+                admitted = True
+                try:
+                    slot_fd = os.open(_slot(identity), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
+                except FileNotFoundError:
+                    result = absent()
+                else:
+                    try:
+                        _admit(slot_fd, private=True)
+                        store = _Store(slot_fd, identity, False)
+                        _check_stages(fd, store)
+                        active = store.body["active"]
+                        result = None if active is None else f"pending {active['binding']['operation']}; recovery files: {hooks_dir / active['stage']}"
+                    finally:
+                        os.close(slot_fd)
+            return result
+        except FileNotFoundError as exc:
+            return f"unverified authority: {exc}" if admitted else absent()
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
-            return f"pending/unverified: {exc}"
+            label = "pending/unverified" if admitted else "unverified authority"
+            return f"{label}: {exc}"
     finally:
         os.close(fd)

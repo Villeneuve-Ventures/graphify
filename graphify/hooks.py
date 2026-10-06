@@ -1258,11 +1258,15 @@ def status(path: Path = Path(".")) -> str:
     if root is None:
         return "Not in a git repository."
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
+    warning = ""
     if _atomic_hooks_supported():
         from graphify.hook_installation import pending
         recovery = pending(hooks_dir)
         if recovery:
-            return f"hook installation: {recovery}"
+            if not recovery.startswith("unverified authority:"):
+                return f"hook installation: {recovery}"
+            warning = (f"hook installation: {recovery}\n"
+                       "Hook and driver observations only; recovery state is unverified.\n")
 
     def _check(name: str, marker: str, marker_end: str) -> str:
         p = hooks_dir / name
@@ -1289,6 +1293,7 @@ def status(path: Path = Path(".")) -> str:
     )
     merge = _merge_driver_status(root)
     return (
+        warning +
         f"post-commit: {commit}\n"
         f"post-checkout: {checkout}\n"
         f"post-merge: {post_merge}\n"
