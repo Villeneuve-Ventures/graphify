@@ -28,6 +28,9 @@ then repeat the original command from the same repository and Python
 environment, with the same output configuration. A different operation,
 interpreter, output, repository sharing the hooks directory, or registration
 configuration cannot resume that pending batch.
+The request includes the physical identities of the repository root and Git
+directory. Recreating either directory at the same pathname does not preserve
+the original request.
 
 An `unverified authority` warning means Graphify could not safely inspect the
 private store. It does not prove that an installation was attempted. Any hook
@@ -40,13 +43,14 @@ published at that point, but an exact retry cannot establish ownership of that
 state. Retain it for manual reconciliation; automatic initialization recovery
 is not provided.
 
-A pending batch created by an older installer without metadata binding cannot
-be resumed by this version. Retain its staging and authority records for manual
-reconciliation. Completed older history remains usable; it is not migrated or
-deleted.
+A pending batch created by an older installer without metadata or physical
+repository identity binding cannot be resumed by this version. Retain its
+staging and authority records for manual reconciliation. Completed older history
+remains usable; it is not migrated or deleted.
 
-If hook files, staging files, or authority records changed, Graphify refuses
-automatic continuation. Keep those files for manual reconciliation. Do not
+If a pending batch's recorded hooks, staged successors, preimages, or authority
+records changed, Graphify refuses automatic continuation. Keep those files for
+manual reconciliation. Do not
 remove a staging directory or copy a journal to make a retry pass. Matching
 filenames, Graphify markers, or content hashes do not establish ownership.
 
@@ -86,8 +90,13 @@ still add ignored content. Check for recovery artifacts before committing.
 
 Do not run cleanup commands such as `git clean -xdf` over retained stages.
 Ignoring files does not protect them from `git clean -x`. Removing or changing
-historical stages makes later operations refuse; no automatic history cleanup
-or reconstruction is provided.
+the identity of a historical staging directory makes later operations refuse;
+no automatic history cleanup or reconstruction is provided. Later operations
+check retained directory identities and private completion records, but do not
+revalidate completed-stage contents. Preserve preimages and the stage's
+`.gitignore`: changing or removing the ignore file can expose recovery contents
+to ordinary Git staging. Independently check retained files before using them
+for manual reconciliation.
 
 A sealed completion record stays pending until terminal journal persistence is
 acknowledged. It is then moved to a retained private name. If persistence of

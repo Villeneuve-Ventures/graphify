@@ -1118,13 +1118,28 @@ def _hook_request(root: Path) -> dict:
     import subprocess
     gitdir = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-dir"],
                             capture_output=True, text=True, check=True).stdout.strip()
+    gitdir = (root / gitdir).resolve()
+
+    def identities():
+        result = []
+        for directory in (root, gitdir):
+            info = directory.stat()
+            if not stat.S_ISDIR(info.st_mode):
+                raise RuntimeError("Hook request root and Git directory must remain directories")
+            result.append([info.st_dev, info.st_ino])
+        return result
+
+    origin = identities()
     config = subprocess.run(["git", "-C", str(root), "config", "--local", "--includes", "--show-origin", "--null", "--list"],
                             capture_output=True, check=True).stdout
     attrs = root / ".gitattributes"
-    return {"gitdir": str((root / gitdir).resolve()), "interpreter": _pinned_python(),
-            "output": _hook_output_path(), "repo_output": _hook_repo_output_path(root),
-            "registration_config": hashlib.sha256(config).hexdigest(),
-            "registration_attributes": hashlib.sha256(attrs.read_bytes()).hexdigest() if attrs.exists() else None}
+    request = {"gitdir": str(gitdir), "root_identity": origin[0], "gitdir_identity": origin[1],
+               "interpreter": _pinned_python(), "output": _hook_output_path(), "repo_output": _hook_repo_output_path(root),
+               "registration_config": hashlib.sha256(config).hexdigest(),
+               "registration_attributes": hashlib.sha256(attrs.read_bytes()).hexdigest() if attrs.exists() else None}
+    if identities() != origin:
+        raise RuntimeError("Repository identity changed while preparing the hook request")
+    return request
 
 
 def install(path: Path = Path(".")) -> str:

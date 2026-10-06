@@ -862,3 +862,106 @@ def test_legacy_active_batch_without_metadata_binding_refuses(repo, monkeypatch)
     with pytest.raises(RuntimeError, match="Legacy pending batch lacks hook metadata binding"):
         hooks.install(repo)
     assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("point,kind", [("prepared", "mode"), ("prepared", "acl"), ("published", "mode")])
+def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch, operation, point, kind):
+    if operation == "uninstall":
+        hooks.install(repo)
+    home = Path.home()
+    original_prepare, original_rename = publication._prepare, publication._rename
+    config = (repo / ".git/config").read_bytes()
+    attrs = (repo / ".gitattributes").read_bytes() if (repo / ".gitattributes").exists() else None
+    stopped = {}
+
+    def change_ancestor():
+        if kind == "mode":
+            home.chmod(0o777)
+        elif sys.platform == "darwin":
+            import pwd
+            user = pwd.getpwuid(os.getuid()).pw_name
+            subprocess.run(["/bin/chmod", "+a", f"user:{user} allow read", str(home)], check=True)
+        else:
+            _set_extended_metadata(home, "acl")
+        stopped.update({name: value for name, value in _snapshot(_hooks(repo)).items() if "/" not in name})
+
+    def prepare(*args, **kwargs):
+        batch = original_prepare(*args, **kwargs)
+        if point == "prepared":
+            change_ancestor()
+        return batch
+
+    def rename(source_fd, source, target_fd, target, **kwargs):
+        result = original_rename(source_fd, source, target_fd, target, **kwargs)
+        if point == "published" and target == "post-commit":
+            change_ancestor()
+        return result
+
+    monkeypatch.setattr(publication, "_prepare", prepare)
+    monkeypatch.setattr(publication, "_rename", rename)
+    try:
+        with pytest.raises(RuntimeError, match="Unsafe installer authority"):
+            getattr(hooks, operation)(repo)
+        assert stopped
+        assert stopped == {name: value for name, value in _snapshot(_hooks(repo)).items() if "/" not in name}
+        assert (repo / ".git/config").read_bytes() == config
+        assert ((repo / ".gitattributes").read_bytes() if (repo / ".gitattributes").exists() else None) == attrs
+        assert "unverified authority" in hooks.status(repo)
+    finally:
+        if kind == "acl":
+            if sys.platform == "darwin":
+                subprocess.run(["/bin/chmod", "-N", str(home)], check=True)
+            else:
+                os.removexattr(home, "system.posix_acl_access")
+        home.chmod(0o700)
+    assert f"pending {operation}" in hooks.status(repo)
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("replacement", ["root", "gitdir"])
+def test_replacement_repository_cannot_resume_shared_hooks(repo, monkeypatch, tmp_path, operation, replacement):
+    shared = tmp_path / "shared-hooks"
+    _hooks(repo).rename(shared)
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(shared)], check=True)
+    if operation == "uninstall":
+        hooks.install(repo)
+    _interrupt(repo, monkeypatch, operation)
+    config = (repo / ".git/config").read_bytes()
+    attrs = (repo / ".gitattributes").read_bytes() if (repo / ".gitattributes").exists() else None
+    selected = repo if replacement == "root" else repo / ".git"
+    old_identity = publication._identity(selected.stat())
+    selected.rename(tmp_path / "original-retained")
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    (repo / ".git/config").write_bytes(config)
+    if attrs is not None:
+        (repo / ".gitattributes").write_bytes(attrs)
+    assert publication._identity(selected.stat()) != old_identity
+    before = (_snapshot(repo), _snapshot(shared), _snapshot(publication._state_root()))
+    monkeypatch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("replacement must not register"))
+    monkeypatch.setattr(hooks, "_unregister_merge_driver", lambda *a, **k: pytest.fail("replacement must not unregister"))
+    with pytest.raises(RuntimeError, match="different request"):
+        getattr(hooks, operation)(repo)
+    assert before == (_snapshot(repo), _snapshot(shared), _snapshot(publication._state_root()))
+    assert f"pending {operation}" in hooks.status(repo)
+
+
+def test_legacy_pending_request_without_physical_origin_refuses(repo, monkeypatch):
+    _interrupt(repo, monkeypatch)
+    with publication._authority(publication._state_root(), False) as (fd, _):
+        identity = publication._identity(_hooks(repo).stat())
+        slot = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            store = publication._Store(slot, identity, False)
+            request = store.body["active"]["binding"]["request"]
+            request.pop("root_identity", None)
+            request.pop("gitdir_identity", None)
+            store.save()
+        finally:
+            os.close(slot)
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    monkeypatch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("legacy request must not register"))
+    with pytest.raises(RuntimeError, match="different request"):
+        hooks.install(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+    assert "pending install" in hooks.status(repo)

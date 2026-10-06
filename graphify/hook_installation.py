@@ -209,6 +209,7 @@ def _authority(path, create):
 
         def check():
             for parent, name, identity in parents:
+                _admit(parent)
                 if _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity:
                     raise RuntimeError("Installer authority ancestor changed; retain all recovery files")
             _admit(fd, private=True)
