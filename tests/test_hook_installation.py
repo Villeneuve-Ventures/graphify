@@ -19,7 +19,8 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX atomic installer;
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
-    with tempfile.TemporaryDirectory(prefix=".graphify-hook-proof-", dir=Path.home()) as home:
+    parent = os.environ.get("GRAPHIFY_TEST_AUTHORITY_PARENT") or Path.home()
+    with tempfile.TemporaryDirectory(prefix=".graphify-hook-proof-", dir=parent) as home:
         monkeypatch.setenv("HOME", home)
         monkeypatch.setenv("XDG_STATE_HOME", str(Path(home) / "state"))
         root = tmp_path / "repo"

@@ -93,6 +93,16 @@ jobs:
           echo "$git_build/install/bin" >> "$GITHUB_PATH"
           test "$("$git_build/install/bin/git" --version)" = "git version 2.55.0"
 
+      # Hook authority checks include every ancestor. The hosted runner's HOME
+      # need not be private, so fixtures use a separate trusted parent.
+      - name: Prepare trusted hook test parent
+        run: |
+          set -euo pipefail
+          fixture_parent="$(sudo mktemp -d /opt/graphify-hook-tests.XXXXXXXX)"
+          sudo chown "$(id -u):$(id -g)" "$fixture_parent"
+          stat -c '%a %u:%g %n' / /opt "$HOME" "$fixture_parent"
+          echo "GRAPHIFY_TEST_AUTHORITY_PARENT=$fixture_parent" >> "$GITHUB_ENV"
+
       - name: Run tests
         id: pytest
         # Module invocation makes the checkout-local observer importable.

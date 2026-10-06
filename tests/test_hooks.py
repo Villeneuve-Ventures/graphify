@@ -32,7 +32,8 @@ def _isolated_hook_authority(monkeypatch):
     if os.name == "nt":
         yield
         return
-    with tempfile.TemporaryDirectory(prefix=".graphify-hook-tests-", dir=Path.home()) as home:
+    parent = os.environ.get("GRAPHIFY_TEST_AUTHORITY_PARENT") or Path.home()
+    with tempfile.TemporaryDirectory(prefix=".graphify-hook-tests-", dir=parent) as home:
         monkeypatch.setenv("HOME", home)
         monkeypatch.setenv("XDG_STATE_HOME", str(Path(home) / "state"))
         yield

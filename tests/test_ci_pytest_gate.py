@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 import pytest
 import yaml
@@ -80,6 +81,33 @@ def test_matrix_and_gate_preserve_execution_and_environment():
     assert gate_steps["Reject whole-run cancellation"] == {
         "name": "Reject whole-run cancellation", "if": "cancelled()", "run": "exit 1"}
     assert not any("continue-on-error" in step for step in gate["steps"])
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX hook authority")
+@pytest.mark.parametrize("configured_parent", [False, True])
+def test_hook_fixtures_can_use_trusted_parent_with_unsafe_home(tmp_path, configured_parent):
+    parent = os.environ.get("GRAPHIFY_TEST_AUTHORITY_PARENT") or Path.home()
+    with tempfile.TemporaryDirectory(prefix=".graphify-ci-fixture-", dir=parent) as directory:
+        root = Path(directory)
+        home, trusted = root / "home", root / "trusted"
+        home.mkdir()
+        home.chmod(0o777)
+        trusted.mkdir(mode=0o700)
+        env = {**os.environ, "HOME": str(home), "PYTHONDONTWRITEBYTECODE": "1"}
+        env.pop("GRAPHIFY_TEST_AUTHORITY_PARENT", None)
+        if configured_parent:
+            env["GRAPHIFY_TEST_AUTHORITY_PARENT"] = str(trusted)
+        result = subprocess.run([
+            sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
+            "tests/test_hook_installation.py::test_partial_batch_is_complete_per_path_and_resumes_exactly",
+            "tests/test_hooks.py::test_install_creates_hook", "-q", "--tb=short",
+            "--basetemp", str(tmp_path / "pytest"),
+        ], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+        assert result.returncode == (0 if configured_parent else 1), result.stdout + result.stderr
+        if not configured_parent:
+            assert "Unsafe installer authority directory owner, mode or ACL" in result.stdout
+        assert home.stat().st_mode & 0o777 == 0o777
+        assert not list(home.iterdir()) and not list(trusted.iterdir())
 
 
 def test_gate_accepts_only_four_successful_receipts_even_with_successful_rollup(receipts):
