@@ -1,4 +1,5 @@
 """Public installer interruption, authority and preservation regressions."""
+import errno
 import hashlib
 import json
 import os
@@ -1036,3 +1037,108 @@ def test_new_hardlink_stops_further_publication(repo, monkeypatch, tmp_path, ope
     assert f"pending {operation}" in hooks.status(repo)
     assert getattr(hooks, operation)(repo)
     assert "pending" not in hooks.status(repo)
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("entry_point", ["api", "cli"])
+def test_readonly_hooks_directory_refuses_with_actionable_error_and_retries(repo, operation, entry_point):
+    if os.geteuid() == 0:
+        pytest.skip("real directory permission denial requires a non-root process")
+    if operation == "uninstall":
+        hooks.install(repo)
+    directory = _hooks(repo)
+    target = directory / "post-commit"
+    _set_extended_metadata(target, "xattr")
+    mode = stat.S_IMODE(directory.stat().st_mode)
+
+    def invoke():
+        if entry_point == "api":
+            return getattr(hooks, operation)(repo)
+        return subprocess.run(
+            [sys.executable, "-B", "-m", "graphify", "hook", operation], cwd=repo,
+            env={**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent),
+                 "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True,
+        )
+
+    directory.chmod(0o555)
+    try:
+        assert not os.access(directory, os.W_OK)
+        assert all(os.access(directory / name, os.W_OK) for name in publication.NAMES)
+        before = _snapshot(repo)
+        entries = sorted(directory.iterdir())
+        if entry_point == "api":
+            with pytest.raises(RuntimeError) as error:
+                invoke()
+            message = str(error.value)
+        else:
+            result = invoke()
+            assert result.returncode == 1
+            message = result.stderr
+        assert "atomic hook updates require permission to create and rename entries" in message
+        assert "Ask the directory administrator" in message
+        assert "retry the exact original command" in message
+        assert str(directory) in message
+        assert before == _snapshot(repo)
+        assert entries == sorted(directory.iterdir())
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o555
+        _assert_extended_metadata(target, "xattr")
+    finally:
+        directory.chmod(mode)  # Restore only this fixture's directory access.
+    result = invoke()
+    if entry_point == "api":
+        assert "post-commit:" in result
+    else:
+        assert result.returncode == 0
+        assert "post-commit:" in result.stdout
+    assert (hooks._HOOK_MARKER.encode() in target.read_bytes()) == (operation == "install")
+    assert "pending" not in hooks.status(repo)
+    _assert_extended_metadata(target, "xattr")
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_readonly_hooks_directory_keeps_noop_behavior(repo, operation):
+    if os.geteuid() == 0:
+        pytest.skip("real directory permission denial requires a non-root process")
+    if operation == "install":
+        hooks.install(repo)
+    directory = _hooks(repo)
+    mode = stat.S_IMODE(directory.stat().st_mode)
+    directory.chmod(0o555)
+    try:
+        assert not os.access(directory, os.W_OK)
+        before = _snapshot(directory)
+        config = (repo / ".git/config").read_bytes()
+        attributes = repo / ".gitattributes"
+        attrs = attributes.read_bytes() if attributes.exists() else None
+        assert getattr(hooks, operation)(repo)
+        assert before == _snapshot(directory)
+        assert config == (repo / ".git/config").read_bytes()
+        assert attrs == (attributes.read_bytes() if attributes.exists() else None)
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o555
+    finally:
+        directory.chmod(mode)
+
+
+@pytest.mark.parametrize("error_source", ["stage", "interpreter"])
+def test_stage_permission_diagnostic_does_not_relabel_other_errors(repo, monkeypatch, error_source):
+    mkdir = publication._mkdir_private
+    error_number = errno.EPERM if error_source == "stage" else errno.EACCES
+
+    def fail_stage(fd, name):
+        if name.startswith(publication._PREFIX):
+            filename = name if error_source == "stage" else sys.executable
+            raise OSError(error_number, os.strerror(error_number), filename)
+        return mkdir(fd, name)
+
+    before = _snapshot(repo)
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_mkdir_private", fail_stage)
+        with pytest.raises(RuntimeError) as error:
+            hooks.install(repo)
+    message = str(error.value)
+    assert ("Ask the directory administrator" in message) == (error_source == "stage")
+    if error_source == "interpreter":
+        assert sys.executable in message
+        assert os.strerror(errno.EACCES) in message
+    assert before == _snapshot(repo)
+    assert hooks.install(repo)

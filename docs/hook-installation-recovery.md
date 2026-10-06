@@ -6,6 +6,16 @@ file has its complete content and final executable mode. Existing user-hook
 composition and Graphify marker rules still apply. Windows uses the existing
 installer and does not have this new atomic publication or recovery guarantee.
 
+Changing hooks requires permission to create and rename entries in the selected
+hooks directory. Writable hook files alone are not sufficient. If staging
+creation is denied, the error identifies the directory and explains this
+requirement. Ask the directory administrator for suitable directory access, then
+retry the exact original command. This failure leaves live hooks and registration
+unchanged; private authority initialization can occur before it. Graphify does not
+change directory permissions or fall back to editing live hooks in place. A no-op
+hook batch does not need staging; other authority and registration checks still
+apply.
+
 Existing hard-linked hooks are refused before staging or publication, including
 no-op install and uninstall. Atomic replacement would separate their shared
 inode and leave another alias unchanged. Graphify retains every alias; it does

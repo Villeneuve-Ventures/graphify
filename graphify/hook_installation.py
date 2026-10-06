@@ -460,7 +460,14 @@ def _prepare(fd, store, snapshots, plans, request, operation):
            for snapshot, (data, mode) in zip(snapshots.values(), desired, strict=True)):
         return None
     stage = _PREFIX + secrets.token_hex(16)
-    _mkdir_private(fd, stage)
+    try:
+        _mkdir_private(fd, stage)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EPERM) or exc.filename != stage:
+            raise
+        raise RuntimeError("Cannot create hook staging: atomic hook updates require permission to create and rename entries "
+                           "in the hooks directory. Ask the directory administrator to grant suitable directory access, "
+                           "then retry the exact original command") from exc
     stage_fd = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
     try:
         _admit(stage_fd, private=True)
