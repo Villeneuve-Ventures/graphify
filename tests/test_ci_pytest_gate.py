@@ -3,6 +3,7 @@ from itertools import product
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -81,6 +82,50 @@ def test_matrix_and_gate_preserve_execution_and_environment():
     assert gate_steps["Reject whole-run cancellation"] == {
         "name": "Reject whole-run cancellation", "if": "cancelled()", "run": "exit 1"}
     assert not any("continue-on-error" in step for step in gate["steps"])
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX hook authority")
+@pytest.mark.parametrize("unsafe_ancestor", [False, True])
+def test_workflow_checks_hook_parent_before_exporting_it(tmp_path, unsafe_ancestor):
+    step = next(s for s in workflow()["jobs"]["test"]["steps"]
+                if s.get("name") == "Prepare trusted hook test parent")
+    parent = os.environ.get("GRAPHIFY_TEST_AUTHORITY_PARENT") or Path.home()
+    with tempfile.TemporaryDirectory(prefix=".graphify-ci-preflight-", dir=parent) as directory:
+        ancestor = Path(directory) / "ancestor"
+        ancestor.mkdir()
+        mode = 0o777 if unsafe_ancestor else 0o700
+        ancestor.chmod(mode)
+        authority = ancestor / "private"
+        authority.mkdir(mode=0o700)
+        output, template = tmp_path / "github-env", tmp_path / "allocation-template"
+        # Intercept allocation, ownership changes and platform-specific diagnostics.
+        # The workflow's Python admission check runs unchanged against real paths.
+        harness = """sudo() {
+            case "$1" in
+                mktemp) printf '%s\\n' "$3" > "$ALLOCATION_TEMPLATE";
+                        printf '%s\\n' "$TEST_AUTHORITY" ;;
+                chown) return 0 ;;
+                *) return 99 ;;
+            esac
+        }
+        stat() { :; }
+        """
+        command = harness + step["run"].replace(".venv/bin/python", shlex.quote(sys.executable))
+        env = {**os.environ, "GITHUB_ENV": str(output), "ALLOCATION_TEMPLATE": str(template),
+               "TEST_AUTHORITY": str(authority), "PYTHONPATH": str(ROOT),
+               "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], cwd=ROOT,
+                                env=env, capture_output=True, text=True, timeout=10)
+        assert Path(template.read_text().strip()).parent == Path("/")
+        assert (result.returncode != 0) == unsafe_ancestor, result.stdout + result.stderr
+        if unsafe_ancestor:
+            assert "Unsafe installer authority" in result.stderr
+            assert not output.exists()
+        else:
+            assert output.read_text() == f"GRAPHIFY_TEST_AUTHORITY_PARENT={authority}\n"
+        assert ancestor.stat().st_mode & 0o777 == mode
+        assert authority.stat().st_mode & 0o777 == 0o700
+        assert not list(authority.iterdir())
 
 
 @pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX hook authority")
