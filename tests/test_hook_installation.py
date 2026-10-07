@@ -1110,6 +1110,46 @@ def test_uninstall_preserves_inherited_global_driver_config(repo, monkeypatch, t
             assert local.returncode == 1
 
 
+@pytest.mark.parametrize("key", ["name", "driver", "recursive"])
+@pytest.mark.parametrize("entry_point", ["api", "cli"])
+def test_uninstall_removes_duplicate_local_driver_values(repo, monkeypatch, tmp_path, key, entry_point):
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text('[merge "graphify"]\n name = inherited driver\n driver = true\n recursive = binary\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    before_global = global_config.read_bytes()
+    user_hooks = {name: data + b"\n" for name, data in _live(repo).items()}
+    attrs = repo / ".gitattributes"
+    attrs.write_text("*.dat binary\n")
+    git_config = ["git", "-C", str(repo), "config", "--local"]
+    subprocess.run([*git_config, "merge.other.driver", "keep this driver"], check=True)
+    hooks.install(repo)
+    subprocess.run([*git_config, "--add", f"merge.graphify.{key}", "duplicate value"], check=True)
+    duplicate = subprocess.run([*git_config, "--get-all", f"merge.graphify.{key}"], capture_output=True, text=True, check=True)
+    assert len(duplicate.stdout.splitlines()) == 2
+
+    for _ in range(2):
+        if entry_point == "api":
+            result = hooks.uninstall(repo)
+        else:
+            command = subprocess.run(
+                [sys.executable, "-B", "-m", "graphify", "hook", "uninstall"], cwd=repo,
+                env={**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent),
+                     "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True,
+            )
+            assert command.returncode == 0, command.stderr
+            result = command.stdout
+        assert "merge driver:" in result
+        assert global_config.read_bytes() == before_global
+        assert _live(repo) == user_hooks
+        assert attrs.read_text() == "*.dat binary\n"
+        unrelated = subprocess.run([*git_config, "--get", "merge.other.driver"], capture_output=True, text=True, check=True)
+        assert unrelated.stdout == "keep this driver\n"
+        for removed in ("name", "driver", "recursive"):
+            local = subprocess.run([*git_config, "--get-all", f"merge.graphify.{removed}"], capture_output=True)
+            assert local.returncode == 1
+
+
 def test_uninstall_reports_local_config_removal_failure_and_retries(repo):
     hooks.install(repo)
     config = (repo / ".git/config").read_bytes()

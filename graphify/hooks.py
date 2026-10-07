@@ -1050,9 +1050,9 @@ def _unregister_merge_driver(root: Path, *, strict: bool = False) -> str:
         "merge.graphify.recursive",
     ):
         try:
-            # --unset exits nonzero if the key is absent; that is fine.
+            # --unset-all removes duplicate local values; an absent key is fine.
             result = _sp.run(
-                ["git", "-C", str(root), "config", "--unset", key],
+                ["git", "-C", str(root), "config", "--local", "--unset-all", key],
                 capture_output=True, text=True,
             )
             if strict and result.returncode:
