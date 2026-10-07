@@ -126,7 +126,7 @@ def _darwin_acl(fd, value=...):
 
 def _extended(fd):
     if sys.platform == "darwin":
-        return {"xattrs": _darwin_xattrs(fd), "acl": _darwin_acl(fd)}
+        return {"xattrs": _darwin_xattrs(fd), "acl": _darwin_acl(fd), "flags": os.fstat(fd).st_flags}
     return {"xattrs": {name: os.getxattr(fd, name).hex() for name in sorted(os.listxattr(fd))}, "acl": None}
 
 
@@ -135,9 +135,18 @@ def _copy_metadata(fd, metadata):
     changed = {name: value for name, value in metadata["xattrs"].items()
                if current["xattrs"].get(name) != value}
     if sys.platform == "darwin":
+        flags = metadata["flags"]
+        if flags & ~(stat.UF_HIDDEN | stat.UF_NODUMP):
+            raise RuntimeError("Unsupported BSD hook flags; retain the original hook and staging")
         _darwin_xattrs(fd, changed)
         if metadata["acl"] is not None and metadata["acl"] != current["acl"]:
             _darwin_acl(fd, metadata["acl"])
+        if flags != current["flags"]:
+            libc = ctypes.CDLL(None, use_errno=True)
+            libc.fchflags.argtypes = (ctypes.c_int, ctypes.c_uint32)
+            libc.fchflags.restype = ctypes.c_int
+            if libc.fchflags(fd, flags):
+                raise OSError(ctypes.get_errno(), "Cannot preserve BSD hook flags")
     else:
         for name, value in changed.items():
             os.setxattr(fd, name, bytes.fromhex(value))

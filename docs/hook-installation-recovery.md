@@ -33,6 +33,13 @@ and verified on staging files before publication. During preparation, an
 inspection or preservation failure stops the batch before any live hook changes.
 Changed metadata also blocks recovery, just as changed hook bytes or modes do.
 
+On macOS, replacements and preimages also preserve the BSD flags `UF_HIDDEN`
+and `UF_NODUMP`. A changed hook with any other flag is refused during preparation,
+before any live hook or registration change. Graphify does not clear unsupported
+flags or promise to preserve compressed, immutable, append-only or synthetic
+file state. Unchanged no-op hooks keep their existing flags. Changed flags on
+live hooks, staged successors or preimages block pending recovery.
+
 The three hooks are not one atomic transaction. An interruption can leave a mix
 of old and new, individually complete hooks. Git configuration and
 `.gitattributes` registration are separate steps. A registration failure returns
@@ -62,8 +69,8 @@ published at that point, but an exact retry cannot establish ownership of that
 state. Retain it for manual reconciliation; automatic initialization recovery
 is not provided.
 
-A pending batch created by an older installer without metadata or physical
-repository identity binding cannot be resumed by this version. Retain its
+A pending batch created by an older installer without metadata, macOS BSD flag,
+or physical repository identity binding cannot be resumed by this version. Retain its
 staging and authority records for manual reconciliation. Completed older history
 remains usable; it is not migrated or deleted.
 

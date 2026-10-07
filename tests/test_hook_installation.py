@@ -703,7 +703,11 @@ def test_private_directory_birth_ignores_parent_umask(repo, mask, boundary):
 
 
 def _set_extended_metadata(path, kind):
-    if kind == "xattr":
+    if kind == "flags":
+        if sys.platform != "darwin":
+            pytest.skip("BSD flags require native macOS")
+        os.chflags(path, stat.UF_HIDDEN | stat.UF_NODUMP)
+    elif kind == "xattr":
         if sys.platform == "darwin":
             subprocess.run(["/usr/bin/xattr", "-w", "user.graphify-proof", "preserve-me", str(path)], check=True)
         else:
@@ -721,7 +725,9 @@ def _set_extended_metadata(path, kind):
 
 
 def _assert_extended_metadata(path, kind):
-    if kind == "xattr":
+    if kind == "flags":
+        assert path.stat().st_flags == stat.UF_HIDDEN | stat.UF_NODUMP
+    elif kind == "xattr":
         value = (subprocess.check_output(["/usr/bin/xattr", "-p", "user.graphify-proof", str(path)]).rstrip(b"\n")
                  if sys.platform == "darwin" else os.getxattr(path, "user.graphify-proof"))
         assert value == b"preserve-me"
@@ -734,7 +740,7 @@ def _assert_extended_metadata(path, kind):
         assert (2, 5, 65534) in list(struct.iter_unpack("<HHI", raw[4:]))
 
 
-@pytest.mark.parametrize("kind", ["xattr", "acl"])
+@pytest.mark.parametrize("kind", ["xattr", "acl", "flags"])
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
 def test_public_replacement_preserves_extended_metadata(repo, kind, operation):
     if operation == "uninstall":
@@ -748,6 +754,154 @@ def test_public_replacement_preserves_extended_metadata(repo, kind, operation):
     _assert_extended_metadata(target, kind)
     assert b"printf 'user hook\\n'" in target.read_bytes()
     assert stat.S_IMODE(target.stat().st_mode) == 0o751
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+def test_bsd_flags_survive_mode_repair_and_noop(repo):
+    hooks.install(repo)
+    target = _hooks(repo) / "post-commit"
+    _set_extended_metadata(target, "flags")
+    target.chmod(0o640)
+    content, inode = target.read_bytes(), target.stat().st_ino
+    hooks.install(repo)
+    assert target.read_bytes() == content and target.stat().st_ino != inode
+    assert stat.S_IMODE(target.stat().st_mode) == 0o751
+    _assert_extended_metadata(target, "flags")
+    before = _snapshot(_hooks(repo))
+    hooks.install(repo)
+    assert _snapshot(_hooks(repo)) == before
+    _assert_extended_metadata(target, "flags")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_unsupported_bsd_flags_refuse_before_any_publication(repo, operation):
+    if operation == "uninstall":
+        hooks.install(repo)
+    target = _hooks(repo) / "post-merge"
+    os.chflags(target, stat.UF_IMMUTABLE)
+    try:
+        before = _snapshot(repo)
+        with pytest.raises(RuntimeError, match="Unsupported BSD hook flags"):
+            getattr(hooks, operation)(repo)
+        after = _snapshot(repo)
+        assert {name: after[name] for name in before} == before
+        assert target.stat().st_flags == stat.UF_IMMUTABLE
+    finally:
+        os.chflags(target, 0)  # Release only this fixture's immutable flag.
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+def test_bsd_flag_copy_failure_precedes_live_publication(repo, monkeypatch):
+    target = _hooks(repo) / "post-merge"
+    _set_extended_metadata(target, "flags")
+    before = _snapshot(repo)
+    real = publication.ctypes.CDLL
+    calls = []
+
+    def denied(fd, flags):
+        calls.append((fd, flags))
+        publication.ctypes.set_errno(errno.EIO)
+        return -1
+
+    def library(*args, **kwargs):
+        result = real(*args, **kwargs)
+        result.fchflags = denied
+        return result
+
+    monkeypatch.setattr(publication.ctypes, "CDLL", library)
+    with pytest.raises(RuntimeError, match="Cannot preserve BSD hook flags"):
+        hooks.install(repo)
+    after = _snapshot(repo)
+    assert calls and {name: after[name] for name in before} == before
+    _assert_extended_metadata(target, "flags")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_unsupported_bsd_flags_keep_unchanged_noop_hooks(repo, operation):
+    if operation == "install":
+        hooks.install(repo)
+    target = _hooks(repo) / "post-commit"
+    os.chflags(target, stat.UF_IMMUTABLE)
+    try:
+        before = _snapshot(_hooks(repo))
+        assert getattr(hooks, operation)(repo)
+        assert _snapshot(_hooks(repo)) == before
+        assert target.stat().st_flags == stat.UF_IMMUTABLE
+    finally:
+        os.chflags(target, 0)  # Release only this fixture's immutable flag.
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_changed_bsd_flags_refuse_pending_resume_and_exact_retry(repo, monkeypatch, operation):
+    if operation == "uninstall":
+        hooks.install(repo)
+    _interrupt(repo, monkeypatch, operation)
+    target = _hooks(repo) / "post-merge"
+    os.chflags(target, stat.UF_NODUMP)
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    with pytest.raises(RuntimeError, match="Foreign or uncertain"):
+        getattr(hooks, operation)(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+    assert target.stat().st_flags == stat.UF_NODUMP
+    os.chflags(target, 0)
+    assert getattr(hooks, operation)(repo)
+    assert "pending" not in hooks.status(repo)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+def test_legacy_pending_batch_without_bsd_flag_binding_refuses(repo, monkeypatch):
+    _interrupt(repo, monkeypatch)
+    with publication._authority(publication._state_root(), False) as (fd, _):
+        identity = publication._identity(_hooks(repo).stat())
+        slot = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            store = publication._Store(slot, identity, False)
+            for entry in store.body["active"]["entries"]:
+                for key in ("old", "new", "preimage"):
+                    if entry[key] is not None:
+                        entry[key]["metadata"].pop("flags", None)
+            store.save()
+        finally:
+            os.close(slot)
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    with pytest.raises(RuntimeError, match="preimage changed|Foreign or uncertain"):
+        hooks.install(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+@pytest.mark.parametrize("name", ["2", "pre-2"])
+def test_changed_staged_bsd_flags_refuse_pending_resume(repo, monkeypatch, name):
+    _interrupt(repo, monkeypatch)
+    target = next(_hooks(repo).glob(".graphify-hook-batch-*")) / name
+    os.chflags(target, stat.UF_NODUMP)
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    with pytest.raises(RuntimeError, match="preimage changed|Foreign or uncertain"):
+        hooks.install(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+    assert target.stat().st_flags == stat.UF_NODUMP
+    os.chflags(target, 0)
+    assert hooks.install(repo)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
+def test_completed_history_without_bsd_flag_binding_remains_usable(repo, monkeypatch):
+    original = publication._signature
+
+    def legacy(snapshot):
+        result = original(snapshot)
+        if result is not None and "metadata" in result:
+            result["metadata"] = {key: value for key, value in result["metadata"].items() if key != "flags"}
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_signature", legacy)
+        hooks.install(repo)
+    assert hooks.uninstall(repo)
+    assert "pending" not in hooks.status(repo)
 
 
 @pytest.mark.parametrize("kind", ["directory", "symlink"])
