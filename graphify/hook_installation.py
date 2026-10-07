@@ -558,6 +558,7 @@ def run(root, hooks_dir, operation, request, prepare):
 
                 def check():
                     authority_check()
+                    _admit(state_fd, private=True)
                     if (_identity(os.stat(name, dir_fd=authority_fd, follow_symlinks=False)) != state_identity
                             or _identity(os.stat(hooks_dir, follow_symlinks=False)) != hooks_identity):
                         raise RuntimeError("Hook or authority directory changed; retain all recovery files")
@@ -583,6 +584,7 @@ def run(root, hooks_dir, operation, request, prepare):
                         store.save()
                     for entry in batch["entries"]:
                         check()
+                        _admit(stage_fd, private=True)
                         if _identity(os.stat(batch["stage"], dir_fd=fd, follow_symlinks=False)) != batch["identity"]:
                             raise RuntimeError("Hook staging path changed; retain the admitted directory")
                         _apply(fd, stage_fd, entry)

@@ -1029,7 +1029,7 @@ def _unregister_merge_driver(root: Path, *, strict: bool = False) -> str:
                 capture_output=True, text=True,
             )
             if strict and result.returncode:
-                absent = _sp.run(["git", "-C", str(root), "config", "--get-all", key], capture_output=True)
+                absent = _sp.run(["git", "-C", str(root), "config", "--local", "--get-all", key], capture_output=True)
                 if absent.returncode != 1:
                     raise RuntimeError(f"Hooks removed; merge-driver config removal failed for {key}")
         except OSError as exc:

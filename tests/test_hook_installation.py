@@ -867,11 +867,13 @@ def test_legacy_active_batch_without_metadata_binding_refuses(repo, monkeypatch)
 
 
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("directory_kind", ["ancestor", "slot", "stage"])
 @pytest.mark.parametrize("point,kind", [("prepared", "mode"), ("prepared", "acl"), ("published", "mode")])
-def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch, operation, point, kind):
+def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch, operation, directory_kind, point, kind):
     if operation == "uninstall":
         hooks.install(repo)
     home = Path.home()
+    directory = home
     original_prepare, original_rename = publication._prepare, publication._rename
     config = (repo / ".git/config").read_bytes()
     attrs = (repo / ".gitattributes").read_bytes() if (repo / ".gitattributes").exists() else None
@@ -879,17 +881,22 @@ def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch,
 
     def change_ancestor():
         if kind == "mode":
-            home.chmod(0o777)
+            directory.chmod(0o777)
         elif sys.platform == "darwin":
             import pwd
             user = pwd.getpwuid(os.getuid()).pw_name
-            subprocess.run(["/bin/chmod", "+a", f"user:{user} allow read", str(home)], check=True)
+            subprocess.run(["/bin/chmod", "+a", f"user:{user} allow read", str(directory)], check=True)
         else:
-            _set_extended_metadata(home, "acl")
+            _set_extended_metadata(directory, "acl")
         stopped.update({name: value for name, value in _snapshot(_hooks(repo)).items() if "/" not in name})
 
     def prepare(*args, **kwargs):
+        nonlocal directory
         batch = original_prepare(*args, **kwargs)
+        if directory_kind == "slot":
+            directory = publication._state_root() / publication._slot(publication._identity(_hooks(repo).stat()))
+        elif directory_kind == "stage":
+            directory = _hooks(repo) / batch["stage"]
         if point == "prepared":
             change_ancestor()
         return batch
@@ -909,15 +916,62 @@ def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch,
         assert stopped == {name: value for name, value in _snapshot(_hooks(repo)).items() if "/" not in name}
         assert (repo / ".git/config").read_bytes() == config
         assert ((repo / ".gitattributes").read_bytes() if (repo / ".gitattributes").exists() else None) == attrs
-        assert "unverified authority" in hooks.status(repo)
+        expected_status = f"pending {operation}" if directory_kind == "stage" else "unverified"
+        assert expected_status in hooks.status(repo)
     finally:
         if kind == "acl":
             if sys.platform == "darwin":
-                subprocess.run(["/bin/chmod", "-N", str(home)], check=True)
+                subprocess.run(["/bin/chmod", "-N", str(directory)], check=True)
             else:
-                os.removexattr(home, "system.posix_acl_access")
-        home.chmod(0o700)
+                os.removexattr(directory, "system.posix_acl_access")
+        directory.chmod(0o700)
     assert f"pending {operation}" in hooks.status(repo)
+    monkeypatch.setattr(publication, "_prepare", original_prepare)
+    monkeypatch.setattr(publication, "_rename", original_rename)
+    getattr(hooks, operation)(repo)
+    assert "pending" not in hooks.status(repo)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_uninstall_preserves_inherited_global_driver_config(repo, monkeypatch, tmp_path, installed):
+    global_config = tmp_path / "global.gitconfig"
+    global_config.write_text('[merge "graphify"]\n name = inherited driver\n driver = true\n recursive = binary\n')
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    before_global = global_config.read_bytes()
+    user_hooks = _live(repo)
+    attrs = repo / ".gitattributes"
+    attrs.write_text("*.dat binary\n")
+    if installed:
+        hooks.install(repo)
+        user_hooks = {name: data + b"\n" for name, data in user_hooks.items()}
+    for _ in range(2):
+        result = hooks.uninstall(repo)
+        assert "merge driver:" in result
+        assert global_config.read_bytes() == before_global
+        assert _live(repo) == user_hooks
+        assert attrs.read_text() == "*.dat binary\n"
+        for key in ("name", "driver", "recursive"):
+            local = subprocess.run(["git", "-C", str(repo), "config", "--local", "--get-all", f"merge.graphify.{key}"], capture_output=True)
+            assert local.returncode == 1
+
+
+def test_uninstall_reports_local_config_removal_failure_and_retries(repo):
+    hooks.install(repo)
+    config = (repo / ".git/config").read_bytes()
+    attrs = (repo / ".gitattributes").read_bytes()
+    lock = repo / ".git/config.lock"
+    lock.write_text("fixture lock")
+    try:
+        with pytest.raises(RuntimeError, match="merge-driver config removal failed"):
+            hooks.uninstall(repo)
+        assert (repo / ".git/config").read_bytes() == config
+        assert (repo / ".gitattributes").read_bytes() == attrs
+        assert all(b"graphify-hook-start" not in data for data in _live(repo).values())
+    finally:
+        lock.unlink()
+    assert "removed" in hooks.uninstall(repo)
+    assert not (repo / ".gitattributes").exists()
 
 
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
