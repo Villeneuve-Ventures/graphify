@@ -752,7 +752,17 @@ def _prepare_hook_install(
     marker_end: str,
     snapshot=...,
 ) -> _HookInstallPlan:
-    """Prepare one hook installation without mutating the hook."""
+    """Prepare one hook installation without mutating the hook.
+
+    Omit snapshot to read the path, pass None for an absent hook, or pass a
+    snapshot whose first two items are stat data and bytes to avoid rereading.
+    Replace an owned marker interval while preserving surrounding bytes, or
+    append to unowned UTF-8 content after normalizing newlines and trimming
+    trailing whitespace. Return a plan, including when content is unchanged.
+
+    Raise RuntimeError for nonregular hooks or malformed marker pairs.
+    File access errors and UnicodeDecodeError for unowned content propagate.
+    """
     hook_path = hooks_dir / name
     if snapshot is ...:
         try:
@@ -833,7 +843,17 @@ def _prepare_hook_uninstall(
     marker_end: str,
     snapshot=...,
 ) -> _HookUninstallPlan:
-    """Prepare removal of one exact owned hook interval without mutating it."""
+    """Prepare removal of one exact owned hook interval without mutating it.
+
+    Omit snapshot to read the path, pass None for an absent hook, or pass a
+    snapshot whose first two items are stat data and bytes to avoid rereading.
+    Return a no-op plan for absent or unowned hooks. Delete only when the
+    remainder is whitespace or a lone /bin/sh or /bin/bash shebang; otherwise
+    preserve the remaining bytes.
+
+    Raise RuntimeError for nonregular hooks or malformed marker pairs;
+    file access errors propagate.
+    """
     hook_path = hooks_dir / name
     if snapshot is ...:
         try:
@@ -1015,7 +1035,14 @@ def _register_merge_driver(root: Path) -> str:
 
 
 def _unregister_merge_driver(root: Path, *, strict: bool = False) -> str:
-    """Remove the merge-driver git config keys and the .gitattributes line."""
+    """Remove the merge-driver git config keys and the .gitattributes line.
+
+    Return a removal summary, preserving unrelated attribute lines and deleting
+    .gitattributes if no lines remain. With strict=True, raise RuntimeError if
+    Git cannot run or a failed unset cannot be confirmed absent in local config.
+    Otherwise ignore Git command failures. Attribute I/O and decoding errors
+    propagate in either mode; earlier removals are not rolled back.
+    """
     import subprocess as _sp
     for key in (
         "merge.graphify.name",
@@ -1109,11 +1136,19 @@ def _user_hooks_dir(hooks_dir: Path) -> Path:
 
 
 def _atomic_hooks_supported() -> bool:
+    """Return whether platform dispatch selects the macOS/Linux atomic installer."""
     return os.name != "nt" and (sys.platform == "darwin" or sys.platform.startswith("linux"))
 
 
 def _hook_request(root: Path) -> dict:
-    """Bind a retry to the originating Git/configuration and interpreter context."""
+    """Bind a retry to the originating Git/configuration and interpreter context.
+
+    Return directory identities, interpreter/output paths, and hashes of local
+    Git config (including includes and origins) and .gitattributes bytes, or None
+    for absent attributes. Raise RuntimeError for changed or non-directory
+    repository identities. CalledProcessError from Git, filesystem errors,
+    and decoding errors propagate.
+    """
     import hashlib
     import subprocess
     gitdir = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-dir"],
@@ -1121,6 +1156,7 @@ def _hook_request(root: Path) -> dict:
     gitdir = (root / gitdir).resolve()
 
     def identities():
+        """Return root and Git directory device/inode pairs, rejecting nondirectories."""
         result = []
         for directory in (root, gitdir):
             info = directory.stat()
@@ -1143,7 +1179,20 @@ def _hook_request(root: Path) -> dict:
 
 
 def install(path: Path = Path(".")) -> str:
-    """Install Graphify lifecycle hooks in the nearest git repository."""
+    """Install Graphify lifecycle hooks in the nearest git repository.
+
+    Return per-hook and merge-driver status lines. Prepare post-commit,
+    post-checkout, and post-merge before applying them, then register the driver
+    in Git config and .gitattributes. On macOS/Linux, publication is atomic per
+    file and retains recovery records for retries with the original context.
+    Other platforms use direct writes.
+
+    Raise RuntimeError for a missing repository, unsafe hooks, or refused
+    recovery. On macOS/Linux, driver registration failure also raises after
+    hooks are installed; other platforms report Git registration failure in
+    the returned text. Filesystem and decoding errors propagate, as does
+    CalledProcessError from request preparation. Failure does not roll back completed changes.
+    """
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
@@ -1224,7 +1273,20 @@ def install(path: Path = Path(".")) -> str:
 
 
 def uninstall(path: Path = Path(".")) -> str:
-    """Remove Graphify lifecycle hooks."""
+    """Remove Graphify lifecycle hooks from the nearest git repository.
+
+    Preserve content outside owned marker intervals, deleting hooks whose
+    remainder is whitespace or only a /bin/sh or /bin/bash shebang. Then remove driver
+    config and Graphify attribute lines. Return per-hook and driver summaries.
+    On macOS/Linux, hook changes are atomic per file, retain recovery records,
+    and require the original context for retries; other platforms write directly.
+
+    Raise RuntimeError for a missing repository, unsafe hooks, or refused
+    recovery. On macOS/Linux, failed driver config removal raises after hook
+    removal; other platforms ignore Git removal failures. Filesystem and decoding
+    errors propagate, as does CalledProcessError from request preparation.
+    Completed changes are not rolled back.
+    """
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
@@ -1268,7 +1330,14 @@ def uninstall(path: Path = Path(".")) -> str:
 
 
 def status(path: Path = Path(".")) -> str:
-    """Check if graphify hooks are installed."""
+    """Return hook, merge-driver, and macOS/Linux recovery status text.
+
+    Return 'Not in a git repository.' when no repository is found. Pending or
+    unverified recovery normally replaces hook observations; an unverified
+    authority instead prefixes them with a warning. Recovery inspection does
+    not repair state, but resolving the hooks directory may create it.
+    Filesystem and decoding errors outside recovery diagnostics can propagate.
+    """
     root = _git_root(path)
     if root is None:
         return "Not in a git repository."

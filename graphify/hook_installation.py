@@ -33,22 +33,34 @@ except OSError as exc:
 
 
 def _state_root():
+    """Return the authority path without creating it.
+
+    Use Application Support on macOS; elsewhere use nonempty XDG_STATE_HOME
+    or ~/.local/state, with graphify/hook-installations appended.
+    """
     if sys.platform == "darwin":
         return Path.home() / "Library/Application Support/graphify/hook-installations"
     return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "graphify/hook-installations"
 
 
 def _canonical(value):
+    """Encode sorted, compact ASCII JSON bytes, rejecting nonfinite numbers."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
 
 
 def _identity(info):
+    """Return the device and inode numbers used to recognize a filesystem object."""
     return [info.st_dev, info.st_ino]
 
 
 def _mkdir_private(fd, name):
     # Set permissions at birth without changing this process's umask or
     # chmodding a pathname that could have been replaced after mkdir.
+    """Create a directory relative to fd with mode 0700 and a private umask.
+
+    Leave the calling process's umask unchanged. Propagate filesystem errors as
+    OSError; raise RuntimeError if the child fails without a recognized errno.
+    """
     result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _MKDIR_CODE, name, str(fd)],
                             pass_fds=(fd,), umask=0o077, capture_output=True, text=True)
     if result.returncode:
@@ -59,6 +71,11 @@ def _mkdir_private(fd, name):
 
 
 def _darwin_xattrs(fd, values=None):
+    """Read macOS extended attributes as a name-to-hex mapping, or set values.
+
+    Passing values sets only those attributes and returns None. Native access
+    failures raise OSError; inconsistent reads raise RuntimeError.
+    """
     libc = ctypes.CDLL(None, use_errno=True)
     if values is not None:
         libc.fsetxattr.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p,
@@ -75,6 +92,7 @@ def _darwin_xattrs(fd, values=None):
     libc.fgetxattr.restype = ctypes.c_ssize_t
 
     def read(function, prefix, suffix):
+        """Read a native variable-length attribute buffer, rejecting size changes."""
         size = function(*prefix, None, 0, *suffix)
         if size < 0:
             raise OSError(ctypes.get_errno(), "Cannot inspect hook attributes")
@@ -88,6 +106,11 @@ def _darwin_xattrs(fd, values=None):
 
 
 def _darwin_acl(fd, value=...):
+    """Capture a macOS extended ACL as hex, or restore the supplied hex value.
+
+    With value omitted, return None if a linked file has no extended ACL.
+    Restoring returns None. Native ACL failures propagate as OSError.
+    """
     libc = ctypes.CDLL(None, use_errno=True)
     libc.acl_free.argtypes = (ctypes.c_void_p,)
     if value is not ...:
@@ -125,12 +148,22 @@ def _darwin_acl(fd, value=...):
 
 
 def _extended(fd):
+    """Capture hex-encoded extended attributes and macOS ACL and BSD flags.
+
+    On Linux, ACLs are included among xattrs and the separate acl field is None.
+    Metadata access errors propagate.
+    """
     if sys.platform == "darwin":
         return {"xattrs": _darwin_xattrs(fd), "acl": _darwin_acl(fd), "flags": os.fstat(fd).st_flags}
     return {"xattrs": {name: os.getxattr(fd, name).hex() for name in sorted(os.listxattr(fd))}, "acl": None}
 
 
 def _copy_metadata(fd, metadata):
+    """Apply captured metadata to fd, leaving unlisted attributes in place.
+
+    Raise RuntimeError for macOS flags other than UF_HIDDEN and UF_NODUMP;
+    native metadata access and update failures propagate as OSError.
+    """
     current = _extended(fd)
     changed = {name: value for name, value in metadata["xattrs"].items()
                if current["xattrs"].get(name) != value}
@@ -153,6 +186,11 @@ def _copy_metadata(fd, metadata):
 
 
 def _acl_safe(fd):
+    """Return whether the ACL passes the installer authority policy.
+
+    Linux requires no POSIX ACL attributes; macOS permits only deny entries
+    and inspects at most 1,000 entries. Inspection errors propagate as OSError.
+    """
     if sys.platform != "darwin":
         return not {"system.posix_acl_access", "system.posix_acl_default"}.intersection(os.listxattr(fd))
     libc = ctypes.CDLL(None, use_errno=True)
@@ -183,6 +221,12 @@ def _acl_safe(fd):
 
 
 def _admit(fd, private=False):
+    """Return directory stat data after checking owner, mode, and ACL safety.
+
+    Allow root or the current user as owner and forbid group/other writes.
+    With private=True, require current-user ownership and exactly mode 0700.
+    Raise RuntimeError for rejected metadata; propagate inspection errors.
+    """
     info = os.fstat(fd)
     owners = (os.getuid(),) if private else (0, os.getuid())
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
@@ -194,6 +238,13 @@ def _admit(fd, private=False):
 
 @contextmanager
 def _authority(path, create):
+    """Yield an authority directory descriptor and a callback to recheck its path.
+
+    Require an absolute path without '..', safe ancestors, and a private final
+    directory. If create is true, create missing components; otherwise missing
+    components raise FileNotFoundError. Close all opened descriptors on exit.
+    Unsafe or replaced directories raise RuntimeError; other I/O errors propagate.
+    """
     if not path.is_absolute() or ".." in path.parts:
         raise RuntimeError("Installer authority path must be absolute")
     fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
@@ -217,6 +268,7 @@ def _authority(path, create):
         _admit(fd, private=True)
 
         def check():
+            """Revalidate authority ancestors, path identities, and the private directory."""
             for parent, name, identity in parents:
                 _admit(parent)
                 if _identity(os.stat(name, dir_fd=parent, follow_symlinks=False)) != identity:
@@ -233,6 +285,13 @@ def _authority(path, create):
 
 
 def _read(fd, name, private=False):
+    """Return (stat, bytes, extended metadata) for a stable file, or None if absent.
+
+    Resolve name relative to fd without following symlinks. With private=True,
+    require current-user ownership, mode 0600, and a safe ACL, and omit extended
+    metadata. Reject nonregular files, hard links, and detected changes with
+    RuntimeError. Other I/O errors propagate; only absence at open returns None.
+    """
     try:
         source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     except FileNotFoundError:
@@ -274,6 +333,10 @@ def _read(fd, name, private=False):
 
 
 def _signature(snapshot):
+    """Summarize snapshot identity, mode, content hash, byte size, and metadata.
+
+    Return None for an absent snapshot; omit metadata when it was not captured.
+    """
     if snapshot is None:
         return None
     info, data, metadata = snapshot
@@ -285,6 +348,12 @@ def _signature(snapshot):
 
 
 def _write(fd, name, data, mode, metadata=None):
+    """Exclusively create and flush a file relative to fd with the requested mode.
+
+    If supplied, copy and verify extended metadata before reapplying mode, which
+    may adjust POSIX ACL masks. Raise RuntimeError if metadata cannot be preserved;
+    propagate I/O errors. A failure may leave the newly created file in place.
+    """
     target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
     try:
         view = memoryview(data)
@@ -308,6 +377,12 @@ def _write(fd, name, data, mode, metadata=None):
 
 
 def _rename(source_fd, source, target_fd, target, exchange=False):
+    """Atomically move between directory descriptors without replacing a target.
+
+    With exchange=True, swap two existing entries instead. Raise RuntimeError
+    if the native rename function is unavailable and OSError if it fails.
+    This does not flush either directory.
+    """
     libc = ctypes.CDLL(None, use_errno=True)
     function = getattr(libc, "renameatx_np" if sys.platform == "darwin" else "renameat2", None)
     if function is None:
@@ -322,6 +397,13 @@ def _rename(source_fd, source, target_fd, target, exchange=False):
 
 class _Store:
     def __init__(self, fd, hooks_identity, create):
+        """Load authenticated recovery state bound to the hooks directory identity.
+
+        If create is true, initialize a missing capability only in an empty store.
+        Reconcile completion evidence in memory and validate retained history.
+        Invalid authority or evidence raises RuntimeError; I/O errors propagate.
+        The caller retains ownership of fd.
+        """
         self.fd = fd
         self.hooks_identity = hooks_identity
         key = _read(fd, "capability", private=True)
@@ -361,6 +443,11 @@ class _Store:
             self._decode(retired[1])
 
     def _decode(self, data):
+        """Return the journal body after authenticating its seal and directory bindings.
+
+        Convert malformed data and binding failures to RuntimeError; descriptor
+        inspection errors propagate as OSError.
+        """
         try:
             envelope = json.loads(data)
             body = envelope["body"]
@@ -375,14 +462,21 @@ class _Store:
             raise RuntimeError("Unauthenticated installer journal; retain all recovery files") from exc
 
     def _sealed(self):
+        """Return the current journal body and its HMAC seal as canonical JSON bytes."""
         return _canonical({"body": self.body,
                            "seal": hmac.new(self.key, _canonical(self.body), hashlib.sha256).hexdigest()})
 
     def _completion_record(self, batch):
+        """Describe the retained stage and completion evidence for a finished batch."""
         return {"name": batch["stage"], "identity": batch["identity"],
                 "retired": batch["retirement"], "completion": _signature(self.guard)}
 
     def save(self):
+        """Replace and flush the sealed journal after rechecking the capability.
+
+        Changed authority raises RuntimeError; I/O errors propagate and may leave
+        a temporary journal file or an unconfirmed replacement.
+        """
         if _signature(_read(self.fd, "capability", private=True)) != self.identity:
             raise RuntimeError("Installer authority changed; retain all recovery files")
         name = "journal-" + secrets.token_hex(16)
@@ -391,7 +485,13 @@ class _Store:
         os.fsync(self.fd)
 
     def finish(self, check):
-        """Keep an authenticated obligation until terminal durability is acknowledged."""
+        """Keep an authenticated obligation until terminal durability is acknowledged.
+
+        Call check before and after saving terminal state; its errors propagate.
+        Retain completed stages and completion evidence. Validation and I/O failures
+        propagate except rename/flush errors after verified completion retirement,
+        which leave the durable terminal journal usable and return normally.
+        """
         batch = self.body["active"]
         if self.guard is None:
             batch["retirement"] = "completed-" + secrets.token_hex(16)
@@ -428,10 +528,17 @@ class _Store:
 
 
 def _slot(identity):
+    """Return a SHA-256 hex directory name for a hooks directory identity."""
     return hashlib.sha256(_canonical(identity)).hexdigest()
 
 
 def _check_stages(fd, store):
+    """Check retained stage identities and reject unrecognized batch directories.
+
+    Raise RuntimeError for missing, replaced, or unknown stages without removing
+    them. Other filesystem errors propagate; active stage identity is checked
+    by the caller.
+    """
     known = {item["name"] for item in store.body["history"]}
     for item in store.body["history"]:
         try:
@@ -447,6 +554,11 @@ def _check_stages(fd, store):
 
 
 def _desired(plan, snapshot, operation):
+    """Return desired hook bytes and permission bits for an install or uninstall.
+
+    Install uses mode 0755 for new hooks and adds execute bits to existing modes.
+    Uninstall preserves the old mode; deletion or absence yields (None, None).
+    """
     old = None if snapshot is None else snapshot[1]
     mode = None if snapshot is None else stat.S_IMODE(snapshot[0].st_mode)
     if operation == "install":
@@ -456,6 +568,14 @@ def _desired(plan, snapshot, operation):
 
 
 def _prepare(fd, store, snapshots, plans, request, operation):
+    """Return a matching pending batch, stage a new one, or return None for no change.
+
+    Plans and snapshots must follow NAMES order. Stage preimages and successors
+    for changed hooks and save recovery state before any live publication. A pending
+    batch must match request, operation, and rendered content and modes.
+    Mismatch or denied stage creation raises RuntimeError; other I/O errors
+    propagate. Staging remains in place after failure.
+    """
     desired = [_desired(plan, snapshots[name], operation) for name, plan in zip(NAMES, plans, strict=True)]
     rendered = [{"sha256": None if data is None else hashlib.sha256(data).hexdigest(), "mode": mode}
                 for data, mode in desired]
@@ -509,6 +629,14 @@ def _prepare(fd, store, snapshots, plans, request, operation):
 
 
 def _apply(fd, stage_fd, entry, publish=True):
+    """Validate one batch entry and optionally publish its atomic file operation.
+
+    With publish=False, accept either the original or already applied state
+    without modifying files. With publish=True, flush directories for changed
+    entries, including on retries of an already applied entry. Raise RuntimeError for
+    unexpected live, staged, or preimage state; propagate I/O errors. Displaced
+    files and preimages remain in staging.
+    """
     name, slot = entry["name"], entry["slot"]
     live = _signature(_read(fd, name))
     old, new = entry["old"], entry["new"]
@@ -542,7 +670,21 @@ def _apply(fd, stage_fd, entry, publish=True):
 
 
 def run(root, hooks_dir, operation, request, prepare):
-    """Publish a complete prepared batch; callers register the driver afterward."""
+    """Publish a complete prepared batch; callers register the driver afterward.
+
+    operation is 'install' or 'uninstall'. prepare receives a mapping from NAMES
+    to snapshots returned by _read and returns plans in that order. Return the
+    per-hook messages, reusing saved messages when resuming a matching request.
+
+    Lock out concurrent installers without waiting, prepare all three hooks,
+    and publish atomically per file, not across the batch. Retain staging and
+    authenticated recovery records; retries must match the original request,
+    operation, and rendered result. This does not update driver registration.
+
+    Opening or closing hooks_dir can raise OSError. During batch processing,
+    OSError, ValueError, KeyError, TypeError, and RuntimeError are wrapped in
+    RuntimeError with recovery guidance. Failure may leave partial publication.
+    """
     fd = os.open(hooks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -566,6 +708,7 @@ def run(root, hooks_dir, operation, request, prepare):
                 _check_stages(fd, store)
 
                 def check():
+                    """Recheck authority and hook directory identities before proceeding."""
                     authority_check()
                     _admit(state_fd, private=True)
                     if (_identity(os.stat(name, dir_fd=authority_fd, follow_symlinks=False)) != state_identity
@@ -598,6 +741,7 @@ def run(root, hooks_dir, operation, request, prepare):
                             raise RuntimeError("Hook staging path changed; retain the admitted directory")
                         _apply(fd, stage_fd, entry)
                     def completed():
+                        """Require the admitted stage and live hooks to match the completed batch."""
                         check()
                         info = os.stat(batch["stage"], dir_fd=fd, follow_symlinks=False)
                         if (not stat.S_ISDIR(info.st_mode) or _identity(info) != batch["identity"]
@@ -626,13 +770,20 @@ def run(root, hooks_dir, operation, request, prepare):
 
 
 def pending(hooks_dir):
-    """Inspect pending authority without creating, updating, or repairing it."""
+    """Inspect pending authority without creating, updating, or repairing it.
+
+    Return None when no pending or unverified recovery is found, otherwise a
+    status message. Missing authority with retained staging is unverified;
+    invalid authority or recovery records become diagnostic strings. Errors
+    opening or initially inspecting hooks_dir propagate as OSError.
+    """
     fd = os.open(hooks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         identity = _identity(os.fstat(fd))
         admitted = False
 
         def absent():
+            """Report unverified staging without authority, or None when no staging exists."""
             if any(name.startswith(_PREFIX) for name in os.listdir(fd)):
                 return "pending/unverified: installer authority missing; retain hook staging"
             return None
