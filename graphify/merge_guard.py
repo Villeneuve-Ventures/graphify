@@ -109,6 +109,9 @@ not qualified here; passing this guard does not establish clone readability.
                     or type(watermark.get("protocol_epoch")) is not int or watermark["protocol_epoch"] != 1
                     or watermark.get("state") not in ("active", "merge_pending")):
                 raise ValueError("invalid graph watermark")
+            if (watermark["state"] == "active"
+                    and type(watermark.get("generation")) is not int):
+                raise ValueError("invalid active graph watermark generation")
     except (ValueError, UnicodeError, RecursionError) as exc:
         raise MergeGuardError(f"cannot classify staged {graph}: {exc}; merge commit refused") from exc
     if watermark is not None and watermark.get("state") == "merge_pending":

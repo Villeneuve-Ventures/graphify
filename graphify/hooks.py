@@ -749,6 +749,12 @@ def _owned_hook_span(
     return starts[0][0], ends[0][1]
 
 
+def _is_standalone_merge_guard(raw: bytes, owned: tuple[int, int] | None) -> bool:
+    """Require the supported shell interpreter and no foreign hook content."""
+    return (owned is not None and raw[:owned[0]] == b"#!/bin/sh\n"
+            and not raw[owned[1]:].strip())
+
+
 def _prepare_hook_install(
     hooks_dir: Path,
     name: str,
@@ -782,9 +788,7 @@ def _prepare_hook_install(
         original_mode = stat.S_IMODE(metadata.st_mode)
         raw = hook_path.read_bytes() if snapshot is ... else snapshot[1]
         owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
-        if name in _MERGE_GUARD_HOOKS and (
-            owned is None or raw[:owned[0]] != b"#!/bin/sh\n" or raw[owned[1]:].strip()
-        ):
+        if name in _MERGE_GUARD_HOOKS and not _is_standalone_merge_guard(raw, owned):
             raise RuntimeError(
                 f"Cannot compose merge guard with existing {name}; leave the user hook unchanged. "
                 "Only an absent hook or standalone Graphify guard is supported."
@@ -1447,12 +1451,15 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             return "not installed (unsafe non-regular hook)"
         try:
+            raw = p.read_bytes()
             owned = _owned_hook_span(
-                p.read_bytes(), marker, marker_end, f"{name} hook at {p}"
+                raw, marker, marker_end, f"{name} hook at {p}"
             )
         except RuntimeError:
             return "not installed (malformed Graphify markers)"
         if owned is not None:
+            if name in _MERGE_GUARD_HOOKS and not _is_standalone_merge_guard(raw, owned):
+                return "not installed (unsupported standalone guard)"
             return "installed"
         return "not installed (hook exists but graphify not found)"
 

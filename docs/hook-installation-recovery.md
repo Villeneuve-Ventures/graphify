@@ -50,8 +50,13 @@ post-hook composition retains its current behavior.
 
 Use `graphify hook status --merge-guard` to inspect the optional guards and
 `graphify hook uninstall --merge-guard` to remove all five Graphify hooks.
-Default install/uninstall still manages only the original three post-hooks;
-default uninstall leaves opted-in guards in place, which status displays.
+Status applies the same standalone-hook shape check as installation; foreign
+content outside the markers or a different interpreter is reported as
+unsupported. It does not attest the owned script body or runtime availability.
+Default `graphify hook install` and `graphify hook uninstall` still manage only
+the original three post-hooks; default hook uninstall leaves opted-in guards in
+place, which status displays. The broader `graphify uninstall` removes all five
+hooks on macOS/Linux and reports cleanup failures before advising package removal.
 The five-hook batch has the same individually atomic file publication and
 retained recovery limits described below, not a whole-batch atomic guarantee.
 

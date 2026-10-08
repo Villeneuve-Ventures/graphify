@@ -1680,14 +1680,14 @@ def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
     _uninstall_opencode_plugin(pd)
     _uninstall_codex_hook(pd)
 
-    # Git hook
-    try:
-        from graphify.hooks import uninstall as hook_uninstall
-        result = hook_uninstall(pd)
+    # Remove every supported Git hook before recommending package removal.
+    # Cleanup failures must remain visible: an orphaned merge guard fails closed
+    # after its Python runtime is removed. Non-Git projects need no hook cleanup.
+    from graphify.hooks import _atomic_hooks_supported, _git_root, uninstall as hook_uninstall
+    if _git_root(pd) is not None:
+        result = hook_uninstall(pd, merge_guard=_atomic_hooks_supported())
         if result:
             print(result)
-    except Exception:
-        pass
 
     if purge:
         import shutil as _shutil

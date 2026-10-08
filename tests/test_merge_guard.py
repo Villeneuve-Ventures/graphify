@@ -57,6 +57,23 @@ def test_active_and_legacy_graphs_do_not_require_portable_receipts(tmp_path, dat
     check_merge_commit("graphify-out", "pre-merge-commit", root=repo)
 
 
+@pytest.mark.parametrize("generation", [None, "1", 1.0, True, "missing"])
+def test_active_watermark_requires_integer_generation_without_mutation(tmp_path, generation):
+    from graphify.merge_guard import MergeGuardError, check_merge_commit
+
+    data = payload("active")
+    watermark = data["graph"][transaction.GRAPH_WATERMARK_KEY]
+    if generation == "missing":
+        del watermark["generation"]
+    else:
+        watermark["generation"] = generation
+    repo, graph = staged_repo(tmp_path, data)
+    before = ((repo / ".git/index").read_bytes(), graph.read_bytes())
+    with pytest.raises(MergeGuardError, match="generation"):
+        check_merge_commit("graphify-out", "pre-commit", root=repo)
+    assert before == ((repo / ".git/index").read_bytes(), graph.read_bytes())
+
+
 def test_ordinary_commit_and_untracked_graph_are_outside_guard(tmp_path):
     from graphify.merge_guard import check_merge_commit
 
@@ -286,6 +303,53 @@ def test_module_cli_merge_guard_roundtrip_and_default_scope(tmp_path):
     removed = hook_cli(repo, "uninstall", "--merge-guard")
     assert removed.returncode == 0, removed.stdout + removed.stderr
     assert installed_hook_names(repo) == set()
+
+
+@pytest.mark.parametrize("name", ["pre-commit", "pre-merge-commit"])
+@pytest.mark.parametrize("change", ["prefix", "suffix", "interpreter"])
+def test_guard_status_refuses_unsupported_shape_without_mutation(tmp_path, name, change):
+    repo = init_repo(tmp_path / "repo")
+    hooks.install(repo, merge_guard=True)
+    hook = repo / ".git/hooks" / name
+    original = hook.read_bytes()
+    if change == "prefix":
+        changed = original.replace(b"#!/bin/sh\n", b"#!/bin/sh\nexit 0\n", 1)
+    elif change == "suffix":
+        changed = original + b"echo foreign-hook-content\n"
+    else:
+        changed = original.replace(b"#!/bin/sh\n", b"#!/usr/bin/env python3\n", 1)
+    hook.write_bytes(changed)
+    before = (hook.read_bytes(), hook.stat().st_ino, hook.stat().st_mode)
+    result = hook_cli(repo, "status", "--merge-guard")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"{name}: not installed (unsupported standalone guard)" in result.stdout
+    assert before == (hook.read_bytes(), hook.stat().st_ino, hook.stat().st_mode)
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_global_uninstall_removes_opted_in_guards(tmp_path, malformed):
+    repo = init_repo(tmp_path / "repo")
+    hooks.install(repo, merge_guard=True)
+    assert {"pre-commit", "pre-merge-commit"} <= installed_hook_names(repo)
+    if malformed:
+        guard = repo / ".git/hooks/pre-commit"
+        start, end = hooks._merge_guard_markers("pre-commit")
+        guard.write_text(f"#!/bin/sh\n{start}\nexit 0\n")
+        before = {name: (repo / ".git/hooks" / name).read_bytes()
+                  for name in installed_hook_names(repo)}
+    result = subprocess.run(
+        [sys.executable, "-E", "-P", "-B", "-m", "graphify", "uninstall"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if malformed:
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert "pip uninstall graphifyy" not in result.stdout
+        assert before == {name: (repo / ".git/hooks" / name).read_bytes()
+                          for name in installed_hook_names(repo)}
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert installed_hook_names(repo) == set()
+    assert git(repo, "config", "--get", "merge.graphify.driver", check=False).returncode != 0
 
 
 @pytest.mark.parametrize("arguments", [
