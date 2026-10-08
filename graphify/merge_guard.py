@@ -56,7 +56,8 @@ def _unique_object(pairs):
     return result
 
 
-def check_merge_commit(output: str, event: str, *, root: Path = Path(".")) -> None:
+def check_merge_commit(output: str, event: str, *, root: Path = Path("."),
+                       entry_header: str | None = None) -> None:
     """Reject a pending staged graph without changing Git or Graphify state.
 
 Only ordinary merge boundaries are covered. Valid legacy/active graphs are
@@ -64,6 +65,8 @@ not qualified here; passing this guard does not establish clone readability.
 """
     if event not in _EVENTS:
         raise MergeGuardError("unsupported merge guard event")
+    if entry_header is not None and event != "pre-merge-commit":
+        raise MergeGuardError("a captured entry is only supported for automatic merge hooks")
     if os.environ.get("GRAPHIFY_SKIP_HOOK") == "1":
         return
     root = root.absolute()
@@ -81,19 +84,27 @@ not qualified here; passing this guard does not establish clone readability.
     # omits them from the committed tree. Compare only the effective index with
     # the empty tree, including unchanged tracked files without reading HEAD or
     # the working tree. hash-object without -w does not publish an object.
-    empty_tree = _git(root, "hash-object", "-t", "tree", "--stdin", input=b"").decode("ascii").strip()
-    records = _git(root, "diff-index", "--cached", "--ita-invisible-in-index",
-                   "--raw", "-z", "-r", "--no-abbrev", "--no-ext-diff",
-                   "--no-textconv", "--no-renames", "--no-relative", empty_tree,
-                   "--", f":(top,literal){graph}")
-    if not records:
-        return
+    if entry_header is None:
+        empty_tree = _git(root, "hash-object", "-t", "tree", "--stdin", input=b"").decode("ascii").strip()
+        records = _git(root, "diff-index", "--cached", "--ita-invisible-in-index",
+                       "--raw", "-z", "-r", "--no-abbrev", "--no-ext-diff",
+                       "--no-textconv", "--no-renames", "--no-relative", empty_tree,
+                       "--", f":(top,literal){graph}")
+        if not records:
+            return
     try:
-        header, path, end = records.split(b"\0")
+        if entry_header is None:
+            header, path, end = records.split(b"\0")
+            if path != os.fsencode(graph) or end:
+                raise ValueError("unsafe index entry")
+        else:
+            # The generated hook already selected the literal output path.
+            # Keep its first mode/OID observation across interpreter discovery;
+            # a later active or absent index cannot conceal a pending object.
+            header = entry_header.encode("ascii")
         old_mode, mode, old_oid, oid, state = header.split()
         if (old_mode != b":000000" or any(c != ord("0") for c in old_oid)
-                or mode not in (b"100644", b"100755") or state != b"A"
-                or path != os.fsencode(graph) or end):
+                or mode not in (b"100644", b"100755") or state != b"A"):
             raise ValueError("unsafe index entry")
         object_id = oid.decode("ascii")
         if len(object_id) not in (40, 64) or any(c not in "0123456789abcdef" for c in object_id):
@@ -137,9 +148,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--event", choices=_EVENTS, required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--entry-header", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        check_merge_commit(args.output, args.event)
+        check_merge_commit(args.output, args.event, entry_header=args.entry_header)
     except MergeGuardError as exc:
         print(f"[graphify merge guard] {exc}", file=sys.stderr)
         return 1

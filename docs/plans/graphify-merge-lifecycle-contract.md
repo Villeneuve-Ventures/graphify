@@ -39,6 +39,10 @@ does not close #105.
   before invoking a user hook. A user hook must not conceal a pending candidate
   that Git may already have selected for the commit. This capture grants no
   staging or mutation authority.
+  The installed standalone guard freezes the selected mode and object ID before
+  interpreter discovery. Its guarantee starts at that observation: Git does not
+  supply its private selected tree to the hook, so concurrent index changes
+  before capture remain unsupported. This is not isolation from other index writers.
 - At manual/continued merge commit, inspect the effective candidate index.
   Support the ordinary two-parent merge case first. Detect unsupported cases
   without claiming to cover squash, octopus, rebase, or cherry-pick delivery.

@@ -1269,13 +1269,16 @@ done
 if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
 """
     script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
-_GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --name-only -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
+_GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --raw --no-abbrev -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
 [ -n "$_GFY_TRACKED" ] || exit 0
+# The raw header before Git's tab separator binds the observed mode and OID.
+_GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
 """
     # Existing post-event discovery deliberately fails open. A selected tracked
     # merge graph must instead refuse if its trusted runtime cannot be found.
     script += _PYTHON_DETECT.replace("__PINNED_PYTHON__", shlex.quote(pinned)).replace("exit 0", "exit 1")
-    script += f'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_guard --event {shlex.quote(name)} --output "$GRAPHIFY_OUT"\nexit $?\n{end}\n'
+    entry_option = ' --entry-header "$_GFY_ENTRY_HEADER"' if name == "pre-merge-commit" else ""
+    script += f'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_guard --event {shlex.quote(name)} --output "$GRAPHIFY_OUT"{entry_option}\nexit $?\n{end}\n'
     return script
 
 

@@ -30,6 +30,12 @@ merge changes can already be present when the hook refuses.
 The automatic guard runs at hook entry without requiring `MERGE_HEAD`. The
 qualified Git 2.55.0 implementation selects its automatic commit tree before the
 pre-merge hook; staging different output in that hook does not repair that tree.
+The hook captures the selected graph's mode and object ID before interpreter
+discovery and validates that captured object. Later index replacement or removal
+cannot hide a pending captured graph. Git does not expose its already-selected
+tree to this hook: index changes before the first capture remain outside this
+guarantee. Do not run concurrent index writers during a merge. Reinstall opted-in
+hooks after upgrading to receive the current generated guard script.
 The manual guard requires ordinary merge state. Rebase, cherry-pick, revert,
 sequencers, ordinary non-merge commits, fast-forwards, and commits after
 `git merge --quit` are outside this guard's coverage. An untracked graph is not
