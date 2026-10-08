@@ -56,9 +56,10 @@ def _identity(info):
 def _mkdir_private(fd, name):
     # Set permissions at birth without changing this process's umask or
     # chmodding a pathname that could have been replaced after mkdir.
-    """Create a directory relative to fd with mode 0700 and a private umask.
+    """Request mode 0700 relative to fd with a private umask.
 
-    Leave the calling process's umask unchanged. Propagate filesystem errors as
+    Linux can inherit setgid from the parent. Do not normalize the resulting
+    mode or change the calling process's umask. Propagate filesystem errors as
     OSError; raise RuntimeError if the child fails without a recognized errno.
     """
     result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _MKDIR_CODE, name, str(fd)],
@@ -224,14 +225,16 @@ def _admit(fd, private=False):
     """Return directory stat data after checking owner, mode, and ACL safety.
 
     Allow root or the current user as owner and forbid group/other writes.
-    With private=True, require current-user ownership and exactly mode 0700.
+    With private=True, require current-user ownership and exactly mode 0700,
+    also allowing 02700 on Linux, where directories can inherit setgid.
     Raise RuntimeError for rejected metadata; propagate inspection errors.
     """
     info = os.fstat(fd)
     owners = (os.getuid(),) if private else (0, os.getuid())
+    private_modes = (0o700, 0o2700) if sys.platform.startswith("linux") else (0o700,)
     if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in owners
             or info.st_mode & 0o022 or not _acl_safe(fd)
-            or (private and stat.S_IMODE(info.st_mode) != 0o700)):
+            or (private and stat.S_IMODE(info.st_mode) not in private_modes)):
         raise RuntimeError("Unsafe installer authority directory owner, mode or ACL")
     return info
 

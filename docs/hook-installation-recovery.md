@@ -42,8 +42,8 @@ live hooks, staged successors or preimages block pending recovery.
 
 The three hooks are not one atomic transaction. An interruption can leave a mix
 of old and new, individually complete hooks. Git configuration and
-`.gitattributes` registration are separate steps. A registration failure returns
-an error even if hook publication completed.
+`.gitattributes` registration are separate steps. On macOS and Linux, a
+registration failure returns an error even if hook publication completed.
 
 ## Retry an interrupted operation
 
@@ -68,6 +68,11 @@ an incomplete authority record, or an unrecognized stage. No live hook has been
 published at that point, but an exact retry cannot establish ownership of that
 state. Retain it for manual reconciliation; automatic initialization recovery
 is not provided.
+
+After hook publication, a missing or torn completion record can also prevent an
+exact retry, even though individually complete hooks are already live. Retain
+the staging and authority evidence for manual reconciliation; Graphify does not
+reconstruct completion authority from those hooks.
 
 A pending batch created by an older installer without metadata, macOS BSD flag,
 or physical repository identity binding cannot be resumed by this version. Retain its
@@ -95,16 +100,24 @@ hooks directory:
 - macOS: `~/Library/Application Support/graphify/hook-installations`
 - Linux: `${XDG_STATE_HOME:-$HOME/.local/state}/graphify/hook-installations`
 
-The authority path must use trusted, non-symlink ancestors and a private owner
-and permissions. Unexpected ACLs or unsafe permissions cause refusal. A lost
-or changed authority store cannot be rebuilt from hook-local files alone.
+The authority path must use trusted, non-symlink ancestors. Private directories
+must be owned by the current user, with exactly `0700` on macOS or exactly
+`0700` or `02700` on Linux. Linux setgid is allowed without group or other
+access; sticky and setuid bits remain forbidden. Unexpected ACLs or unsafe
+permissions cause refusal. A lost or changed authority store cannot be rebuilt
+from hook-local files alone.
 Completed staging is retained; this installer does not perform automatic
 historical-stage cleanup. Preimages can contain user-hook content, so protect
 these directories as you protect the hooks themselves.
 
-New private directories receive mode `0700` at creation through an isolated
-child process. This does not change the caller's umask or repair permissions on
-preexisting directories. Failed or uncertain child creation retains any artifacts
+New private directories request mode `0700` through an isolated child process
+with umask `0077`; Linux can inherit setgid from the parent and produce `02700`.
+Otherwise safe existing `02700` Linux private directories are also allowed:
+mode bits do not show whether setgid was inherited or set later. This mode
+allowance does not authenticate unknown stages. Graphify does not normalize
+directory modes, change directory ownership, or change the caller's umask.
+Preexisting and substituted directory permissions are not repaired.
+Failed or uncertain child creation retains any artifacts
 under the same pre-batch reconciliation rules.
 
 New stages contain a private `.gitignore` that excludes their contents from

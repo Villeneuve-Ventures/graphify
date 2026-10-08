@@ -702,6 +702,172 @@ def test_private_directory_birth_ignores_parent_umask(repo, mask, boundary):
                 assert stat.S_IMODE(child.stat().st_mode) == 0o700
 
 
+def _forbid_directory_permission_changes(monkeypatch):
+    def guarded(function, descriptor):
+        def invoke(target, *args, **kwargs):
+            info = (os.fstat(target) if descriptor or isinstance(target, int)
+                    else os.stat(target, dir_fd=kwargs.get("dir_fd"), follow_symlinks=False))
+            assert not stat.S_ISDIR(info.st_mode), "installer changed directory permissions"
+            return function(target, *args, **kwargs)
+        return invoke
+
+    for name in ("chmod", "fchmod", "chown", "fchown", "lchown"):
+        monkeypatch.setattr(os, name, guarded(getattr(os, name), name.startswith("f")))
+
+
+def _private_boundary(root, boundary):
+    if boundary == "authority":
+        return publication._state_root()
+    if boundary == "slot":
+        slot, = (p for p in publication._state_root().iterdir() if p.is_dir())
+        return slot
+    stage, = _hooks(root).glob(publication._PREFIX + "*")
+    return stage
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="setgid inheritance requires native Linux")
+@pytest.mark.parametrize("parent", ["hooks", "xdg"])
+@pytest.mark.parametrize("entry_point", ["api", "cli"])
+def test_native_setgid_public_lifecycle(repo, monkeypatch, parent, entry_point):
+    directory = _hooks(repo) if parent == "hooks" else Path(os.environ["XDG_STATE_HOME"])
+    directory.mkdir(exist_ok=True)
+    directory.chmod(0o2755)
+    parent_info = directory.stat()
+    original = _live(repo)
+    attrs = repo / ".gitattributes"
+    attrs.write_bytes(b"*.dat binary\n")
+    unrelated = _hooks(repo) / "pre-push"
+    unrelated.write_bytes(b"#!/bin/sh\n# unrelated user hook\n")
+    subprocess.run(["git", "-C", str(repo), "config", "merge.other.driver", "keep this driver"], check=True)
+    protected = _snapshot(_hooks(repo))["pre-push"]
+
+    def invoke(operation):
+        if entry_point == "api":
+            return getattr(hooks, operation)(repo)
+        result = subprocess.run(
+            [sys.executable, "-B", "-m", "graphify", "hook", operation], cwd=repo,
+            env={**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent)},
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout
+
+    with monkeypatch.context() as patch:
+        _forbid_directory_permission_changes(patch)
+        assert "appended to existing" in invoke("install")
+        result = invoke("status")
+        assert "pending" not in result and "unverified" not in result
+        assert all(f"{name}: installed" in result for name in publication.NAMES)
+        for name in publication.NAMES:
+            assert original[name].rstrip() in (_hooks(repo) / name).read_bytes()
+            assert stat.S_IMODE((_hooks(repo) / name).stat().st_mode) == 0o751
+        before = (_snapshot(_hooks(repo)), _snapshot(publication._state_root()))
+        assert "already installed" in invoke("install")
+        assert before == (_snapshot(_hooks(repo)), _snapshot(publication._state_root()))
+        for operation in ("uninstall", "install"):
+            # The CLI retries the same authenticated request and interpreter.
+            _interrupt(repo, patch, operation)
+            before = (_snapshot(repo), _snapshot(publication._state_root()))
+            assert f"pending {operation}" in invoke("status")
+            assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+            assert invoke(operation)
+            assert "pending" not in invoke("status")
+        assert "removed" in invoke("uninstall")
+        result = invoke("status")
+        assert "pending" not in result and "unverified" not in result
+        assert all(f"{name}: not installed" in result for name in publication.NAMES)
+
+    assert _live(repo) == {name: data.rstrip() + b"\n\n" for name, data in original.items()}
+    assert attrs.read_bytes() == b"*.dat binary\n"
+    assert protected == _snapshot(_hooks(repo))["pre-push"]
+    assert subprocess.check_output(["git", "-C", str(repo), "config", "merge.other.driver"], text=True).strip() == "keep this driver"
+    assert (directory.stat().st_ino, directory.stat().st_mode) == (parent_info.st_ino, parent_info.st_mode)
+    authority = publication._state_root()
+    assert stat.S_IMODE(authority.stat().st_mode) == (0o2700 if parent == "xdg" else 0o700)
+    slot, = (p for p in authority.iterdir() if p.is_dir())
+    assert stat.S_IMODE(slot.stat().st_mode) == (0o2700 if parent == "xdg" else 0o700)
+    stages = list(_hooks(repo).glob(publication._PREFIX + "*"))
+    assert len(stages) == 4
+    for stage in stages:
+        assert stat.S_IMODE(stage.stat().st_mode) == (0o2700 if parent == "hooks" else 0o700)
+        assert (stage / ".gitignore").read_bytes() == b"*\n"
+        assert stat.S_IMODE((stage / ".gitignore").stat().st_mode) == 0o600
+        assert all(stat.S_IMODE(p.stat().st_mode) == 0o751 for p in stage.iterdir() if p.name != ".gitignore")
+        assert all(p.stat().st_uid == os.getuid() for p in stage.iterdir())
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in slot.iterdir())
+
+
+@pytest.mark.parametrize("boundary", ["authority", "slot", "stage"])
+@pytest.mark.parametrize("mode", [0o700, 0o2700])
+def test_existing_private_directory_exact_native_mode_set(repo, monkeypatch, boundary, mode):
+    if boundary == "authority":
+        directory = publication._state_root()
+        directory.mkdir(parents=True, mode=0o700)
+    else:
+        _interrupt(repo, monkeypatch)
+        directory = _private_boundary(repo, boundary)
+    directory.chmod(mode)
+    info = directory.stat()
+    assert stat.S_IMODE(info.st_mode) == mode
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    with monkeypatch.context() as patch:
+        _forbid_directory_permission_changes(patch)
+        if mode == 0o2700 and sys.platform == "darwin":
+            with pytest.raises(RuntimeError, match="Unsafe installer authority"):
+                hooks.install(repo)
+            assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+        else:
+            assert "appended to existing" in hooks.install(repo)
+            assert "pending" not in hooks.status(repo)
+            before = (_snapshot(_hooks(repo)), _snapshot(publication._state_root()))
+            assert "already installed" in hooks.install(repo)
+            assert before == (_snapshot(_hooks(repo)), _snapshot(publication._state_root()))
+            hooks.uninstall(repo)
+    assert (directory.stat().st_ino, directory.stat().st_mode) == (info.st_ino, info.st_mode)
+
+
+@pytest.mark.parametrize("boundary", ["authority", "slot", "stage"])
+@pytest.mark.parametrize("mode", [0o1700, 0o4700, 0o6700, 0o2770, 0o2701])
+def test_unsafe_private_special_modes_refuse_without_normalization(repo, monkeypatch, boundary, mode):
+    _interrupt(repo, monkeypatch)
+    directory = _private_boundary(repo, boundary)
+    directory.chmod(mode)
+    info = directory.stat()
+    assert stat.S_IMODE(info.st_mode) == mode
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    with monkeypatch.context() as patch:
+        _forbid_directory_permission_changes(patch)
+        with pytest.raises(RuntimeError, match="Unsafe installer authority"):
+            hooks.install(repo)
+        assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+        hooks.status(repo)
+        assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+    assert (directory.stat().st_ino, directory.stat().st_mode) == (info.st_ino, info.st_mode)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="02700 admission requires native Linux")
+@pytest.mark.parametrize("stage_kind", ["unknown", "substituted"])
+def test_safe_setgid_stage_mode_does_not_grant_ownership(repo, monkeypatch, stage_kind):
+    if stage_kind == "substituted":
+        _interrupt(repo, monkeypatch)
+        stage = _private_boundary(repo, "stage")
+        stage.rename(stage.with_name("retained-stage"))
+    else:
+        stage = _hooks(repo) / (publication._PREFIX + "foreign")
+    stage.mkdir(mode=0o700)
+    stage.chmod(0o2700)
+    (stage / "pre-0").write_bytes(b"foreign preserved content\n")
+    info = stage.stat()
+    before = _snapshot(repo)
+    with monkeypatch.context() as patch:
+        _forbid_directory_permission_changes(patch)
+        with pytest.raises(RuntimeError, match="Unrecognized hook staging|staging directory changed"):
+            hooks.install(repo)
+    assert before == _snapshot(repo)
+    assert (stage.stat().st_ino, stage.stat().st_mode) == (info.st_ino, info.st_mode)
+    assert not (stage / ".gitignore").exists()
+
+
 def _set_extended_metadata(path, kind):
     if kind == "flags":
         if sys.platform != "darwin":
