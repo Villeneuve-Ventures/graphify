@@ -1156,6 +1156,34 @@ def _atomic_hooks_supported() -> bool:
     return os.name != "nt" and (sys.platform == "darwin" or sys.platform.startswith("linux"))
 
 
+def _has_merge_guards(root: Path) -> bool:
+    """Select optional cleanup from pending recovery or a regular owned prehook.
+
+    Do not follow unrelated symlinks or apply mutation-time hard-link checks.
+    The atomic remover still validates every selected hook and refuses malformed
+    owned sections. This observation does not confer recovery authority.
+    """
+    hooks_dir = _user_hooks_dir(_hooks_dir(root))
+    from graphify.hook_installation import pending_merge_guard_uninstall
+    if pending_merge_guard_uninstall(hooks_dir):
+        return True
+    for name in _MERGE_GUARD_HOOKS:
+        path = hooks_dir / name
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                continue
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            continue
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise RuntimeError(f"Hook changed during merge guard detection: {path}")
+            raw = stream.read()
+        if any(_standalone_marker_spans(raw, marker) for marker in _merge_guard_markers(name)):
+            return True
+    return False
+
+
 def _hook_request(root: Path, *, merge_guard: bool = False) -> dict:
     """Bind a retry to the originating Git/configuration and interpreter context.
 
@@ -1240,7 +1268,8 @@ done
         script += """_GFY_MERGE_HEAD=$(git rev-parse --git-path MERGE_HEAD) || exit 1
 if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
 """
-    script += """_GFY_TRACKED=$(git --no-optional-locks -c core.fsmonitor=false ls-files --stage -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
+    script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
+_GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --name-only -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
 [ -n "$_GFY_TRACKED" ] || exit 0
 """
     # Existing post-event discovery deliberately fails open. A selected tracked

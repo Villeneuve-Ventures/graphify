@@ -1683,9 +1683,10 @@ def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
     # Remove every supported Git hook before recommending package removal.
     # Cleanup failures must remain visible: an orphaned merge guard fails closed
     # after its Python runtime is removed. Non-Git projects need no hook cleanup.
-    from graphify.hooks import _atomic_hooks_supported, _git_root, uninstall as hook_uninstall
-    if _git_root(pd) is not None:
-        result = hook_uninstall(pd, merge_guard=_atomic_hooks_supported())
+    from graphify.hooks import _atomic_hooks_supported, _git_root, _has_merge_guards, uninstall as hook_uninstall
+    root = _git_root(pd)
+    if root is not None:
+        result = hook_uninstall(pd, merge_guard=_atomic_hooks_supported() and _has_merge_guards(root))
         if result:
             print(result)
 

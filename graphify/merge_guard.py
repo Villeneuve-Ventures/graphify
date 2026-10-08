@@ -20,7 +20,7 @@ class MergeGuardError(RuntimeError):
     """The selected staged graph cannot safely pass ordinary merge containment."""
 
 
-def _git(root: Path, *args: str) -> bytes:
+def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
     # Inspect the literal committed object and exact path, while retaining Git's
     # effective repository/index selection (including GIT_INDEX_FILE).
     env = os.environ.copy()
@@ -31,7 +31,7 @@ def _git(root: Path, *args: str) -> bytes:
         result = subprocess.run(
             ["git", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-c",
              "core.fsmonitor=false", "-C", str(root), *args],
-            capture_output=True, check=True, timeout=30, env=env,
+            capture_output=True, check=True, timeout=30, env=env, input=input,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise MergeGuardError("cannot inspect the effective Git index; no graph was changed") from exc
@@ -76,16 +76,23 @@ not qualified here; passing this guard does not establish clone readability.
             or "\\" in output or "\x00" in output or relative == PurePosixPath(".")):
         raise MergeGuardError("merge guard requires a repository-relative output")
     graph = (relative / "graph.json").as_posix()
-    records = _git(root, "ls-files", "--stage", "-z", "--", f":(top,literal){graph}")
+    # ls-files exposes intent-to-add placeholders as empty blobs, although Git
+    # omits them from the committed tree. Compare only the effective index with
+    # the empty tree, including unchanged tracked files without reading HEAD or
+    # the working tree. hash-object without -w does not publish an object.
+    empty_tree = _git(root, "hash-object", "-t", "tree", "--stdin", input=b"").decode("ascii").strip()
+    records = _git(root, "diff-index", "--cached", "--ita-invisible-in-index",
+                   "--raw", "-z", "-r", "--no-abbrev", "--no-ext-diff",
+                   "--no-textconv", "--no-renames", "--no-relative", empty_tree,
+                   "--", f":(top,literal){graph}")
     if not records:
         return
-    entries = records.rstrip(b"\0").split(b"\0")
     try:
-        if len(entries) != 1:
-            raise ValueError("unresolved index entries")
-        header, path = entries[0].split(b"\t", 1)
-        mode, oid, stage = header.split()
-        if mode not in (b"100644", b"100755") or stage != b"0" or path != os.fsencode(graph):
+        header, path, end = records.split(b"\0")
+        old_mode, mode, old_oid, oid, state = header.split()
+        if (old_mode != b":000000" or any(c != ord("0") for c in old_oid)
+                or mode not in (b"100644", b"100755") or state != b"A"
+                or path != os.fsencode(graph) or end):
             raise ValueError("unsafe index entry")
         object_id = oid.decode("ascii")
         if len(object_id) not in (40, 64) or any(c not in "0123456789abcdef" for c in object_id):

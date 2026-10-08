@@ -382,6 +382,64 @@ def test_global_uninstall_removes_opted_in_guards(tmp_path, malformed):
     assert git(repo, "config", "--get", "merge.graphify.driver", check=False).returncode != 0
 
 
+@pytest.mark.parametrize("name", ["pre-commit", "pre-merge-commit"])
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"])
+def test_global_uninstall_preserves_unrelated_linked_prehook(tmp_path, name, kind):
+    repo = init_repo(tmp_path / "repo")
+    hooks.install(repo)
+    target = tmp_path / "user-hook"
+    target.write_bytes(b"#!/bin/sh\nexit 0\n")
+    target.chmod(0o755)
+    hook = repo / ".git/hooks" / name
+    if kind == "symlink":
+        hook.symlink_to(target)
+    else:
+        os.link(target, hook)
+    before = (hook.lstat(), target.stat(), target.read_bytes())
+    output = repo / "graphify-out"
+    output.mkdir()
+    (output / "artifact").write_text("purge me")
+    result = subprocess.run(
+        [sys.executable, "-E", "-P", "-B", "-m", "graphify", "uninstall", "--purge"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "pip uninstall graphifyy" in result.stdout
+    assert installed_hook_names(repo) == {name}
+    assert not output.exists()
+    after = (hook.lstat(), target.stat(), target.read_bytes())
+    for original, current in zip(before[:2], after[:2], strict=True):
+        assert (original.st_ino, original.st_nlink, original.st_mode) == (
+            current.st_ino, current.st_nlink, current.st_mode,
+        )
+    assert before[2] == after[2]
+    if kind == "symlink":
+        assert hook.readlink() == target
+
+
+def test_global_uninstall_retries_after_guards_removed(tmp_path, monkeypatch, capsys):
+    from graphify import hook_installation, install as installer
+
+    repo = init_repo(tmp_path / "repo")
+    hooks.install(repo, merge_guard=True)
+    capsys.readouterr()
+
+    def interrupted_finish(self, check):
+        assert not installed_hook_names(repo)
+        raise RuntimeError("interrupted before completion")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hook_installation._Store, "finish", interrupted_finish)
+        with pytest.raises(RuntimeError, match="interrupted before completion"):
+            installer.uninstall_all(repo)
+    assert "pip uninstall graphifyy" not in capsys.readouterr().out
+    assert "pending uninstall" in hooks.status(repo)
+    installer.uninstall_all(repo)
+    assert "pip uninstall graphifyy" in capsys.readouterr().out
+    assert not installed_hook_names(repo)
+    assert hook_installation.pending(repo / ".git/hooks") is None
+
+
 @pytest.mark.parametrize("arguments", [
     ("install", "--unknown"), ("status", "--unknown"), ("uninstall", "--unknown"),
     ("install", "--merge-guard", "--merge-guard"), ("install", "--merge-guard=true"),
@@ -400,7 +458,7 @@ def test_module_cli_unknown_or_duplicate_option_has_no_repository_effect(tmp_pat
     assert not (repo / ".gitattributes").exists()
 
 
-@pytest.mark.parametrize("case", ["selected", "ordinary", "untracked", "absent"])
+@pytest.mark.parametrize("case", ["selected", "ordinary", "untracked", "absent", "intent"])
 def test_missing_runtime_is_required_only_for_selected_merge_graph(tmp_path, monkeypatch, case):
     repo, graph = staged_repo(tmp_path)
     # A failed pinned-runtime probe is observable. PATH offers Git but no Python
@@ -418,10 +476,12 @@ def test_missing_runtime_is_required_only_for_selected_merge_graph(tmp_path, mon
     hooks.install(repo, merge_guard=True)
     if case == "ordinary":
         (repo / ".git/MERGE_HEAD").unlink()
-    elif case in {"untracked", "absent"}:
+    elif case in {"untracked", "absent", "intent"}:
         git(repo, "rm", "--cached", "graphify-out/graph.json")
         if case == "absent":
             graph.unlink()
+        elif case == "intent":
+            git(repo, "add", "--intent-to-add", "graphify-out/graph.json")
     before_index = (repo / ".git/index").read_bytes()
     before_graph = graph.read_bytes() if graph.exists() else None
     event = "pre-commit" if case == "ordinary" else "pre-merge-commit"

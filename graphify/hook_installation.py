@@ -791,11 +791,12 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, name
         os.close(fd)
 
 
-def pending(hooks_dir):
+def _pending_record(hooks_dir):
     """Inspect pending authority without creating, updating, or repairing it.
 
     Return None when no pending or unverified recovery is found, otherwise a
-    status message. Missing authority with retained staging is unverified;
+    authenticated active binding and message, or diagnostic. Missing authority
+    with retained staging is unverified;
     invalid authority or recovery records become diagnostic strings. Errors
     opening or initially inspecting hooks_dir propagate as OSError.
     """
@@ -823,7 +824,10 @@ def pending(hooks_dir):
                         store = _Store(slot_fd, identity, False)
                         _check_stages(fd, store)
                         active = store.body["active"]
-                        result = None if active is None else f"pending {active['binding']['operation']}; recovery files: {hooks_dir / active['stage']}"
+                        result = None if active is None else {
+                            "binding": active["binding"],
+                            "message": f"pending {active['binding']['operation']}; recovery files: {hooks_dir / active['stage']}",
+                        }
                     finally:
                         os.close(slot_fd)
             return result
@@ -834,3 +838,25 @@ def pending(hooks_dir):
             return f"{label}: {exc}"
     finally:
         os.close(fd)
+
+
+def pending(hooks_dir):
+    """Return a read-only pending recovery diagnostic, or None when complete."""
+    result = _pending_record(hooks_dir)
+    if isinstance(result, dict):
+        return result["message"]
+    return result
+
+
+def pending_merge_guard_uninstall(hooks_dir):
+    """Preserve five-hook retry selection from authenticated pending evidence.
+
+    This is routing only. The remover still requires the complete original
+    request and validates recovery under its lock before changing any hook.
+    """
+    result = _pending_record(hooks_dir)
+    if not isinstance(result, dict):
+        return False
+    binding = result["binding"]
+    return (binding["operation"] == "uninstall"
+            and binding["request"].get("merge_guard_hooks") == list(MERGE_GUARD_NAMES))

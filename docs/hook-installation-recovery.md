@@ -29,7 +29,9 @@ pre-merge hook; staging different output in that hook does not repair that tree.
 The manual guard requires ordinary merge state. Rebase, cherry-pick, revert,
 sequencers, ordinary non-merge commits, fast-forwards, and commits after
 `git merge --quit` are outside this guard's coverage. An untracked graph is not
-staged or inspected. The output path is bound at installation. This first opt-in
+staged or inspected. Intent-to-add entries are also omitted, as they are from
+Git's candidate commit tree; a genuinely staged empty graph still refuses.
+The output path is bound at installation. This first opt-in
 requires a canonical repository-relative literal selector without whitespace or
 Git attribute pattern characters. Spellings such as `./graphify-out`,
 `out//nested`, and `out/./nested` are refused because the emitted attribute
@@ -57,8 +59,13 @@ unsupported. It does not attest the owned script body or runtime availability.
 Guards without execute permission are reported as not installed.
 Default `graphify hook install` and `graphify hook uninstall` still manage only
 the original three post-hooks; default hook uninstall leaves opted-in guards in
-place, which status displays. The broader `graphify uninstall` removes all five
-hooks on macOS/Linux and reports cleanup failures before advising package removal.
+place, which status displays. On macOS/Linux, the broader `graphify uninstall`
+selects all five hooks when a regular prehook contains either Graphify guard
+marker, including a malformed owned section. Otherwise it removes only the
+original three hooks, preserving unrelated prehooks such as user symlinks and
+hard links. An authenticated pending five-hook uninstall retains that selection
+on retry even after the live guards have been removed. Cleanup failures are
+reported before advising package removal.
 The five-hook batch has the same individually atomic file publication and
 retained recovery limits described below, not a whole-batch atomic guarantee.
 
