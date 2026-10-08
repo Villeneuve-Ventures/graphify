@@ -1874,14 +1874,19 @@ def _dispatch_command(cmd: str) -> None:
         )
 
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
+        options = sys.argv[3:]
+        if options not in ([], ["--merge-guard"]):
+            print("Usage: graphify hook [install|uninstall|status] [--merge-guard]", file=sys.stderr)
+            sys.exit(1)
+        merge_guard = options == ["--merge-guard"]
         if subcmd == "install":
-            print(hook_install(Path(".")))
+            print(hook_install(Path("."), merge_guard=merge_guard))
         elif subcmd == "uninstall":
-            print(hook_uninstall(Path(".")))
+            print(hook_uninstall(Path("."), merge_guard=merge_guard))
         elif subcmd == "status":
-            print(hook_status(Path(".")))
+            print(hook_status(Path("."), merge_guard=merge_guard))
         else:
-            print("Usage: graphify hook [install|uninstall|status]", file=sys.stderr)
+            print("Usage: graphify hook [install|uninstall|status] [--merge-guard]", file=sys.stderr)
             sys.exit(1)
     elif cmd == "query":
         if len(sys.argv) < 3:

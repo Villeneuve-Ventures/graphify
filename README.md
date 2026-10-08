@@ -478,12 +478,12 @@ graphify-out/cost.json        # local only
 # graphify-out/cache/         # optional: commit for speed, skip to keep repo small
 ```
 
-> `manifest.json` is now portable — keys are stored as relative paths and re-anchored on load, so committing it is safe and avoids a full rebuild on first checkout.
+> `manifest.json` uses relative paths that are re-anchored on load. This does not make a managed generation receipt portable: current receipts also bind to the original output directory's identity.
 
 **Workflow:**
 1. One person runs `/graphify .` and commits `graphify-out/`.
-2. Everyone pulls — their assistant reads the graph immediately.
-3. Run `graphify hook install` to auto-rebuild after commits, checkouts, and merges (AST only, no API cost). This also sets up a git merge driver so `graph.json` is union-merged and then finalized automatically after a successful merge. Legacy outputs without generation receipts must be rebuilt once with `graphify update .` before Git can safely merge their graph snapshots.
+2. Everyone pulls. Receipt-managed output is not yet guaranteed readable in a fresh clone without an authorized local rebuild. A committed `merge_pending` graph is rejected by ordinary readers.
+3. Run `graphify hook install` to auto-rebuild after commits, checkouts, and merges (AST only, no API cost). This also sets up a git merge driver. Post-event recovery can finalize its pending union in the working tree, but does not repair an already recorded commit. On macOS/Linux, `graphify hook install --merge-guard` additionally refuses pending ordinary merge commits; it does not finalize them. It requires standalone Graphify prehooks and a repository-relative output without whitespace or attribute patterns. See [merge guard behavior and recovery](docs/hook-installation-recovery.md#optional-ordinary-merge-guards). Legacy outputs without generation receipts must be rebuilt once with `graphify update .` before Git can safely merge their graph snapshots.
 4. When docs or papers change, run `/graphify --update` to refresh those nodes.
 
 ---

@@ -21,6 +21,7 @@ import subprocess
 import sys
 
 NAMES = ("post-commit", "post-checkout", "post-merge")
+MERGE_GUARD_NAMES = (*NAMES, "pre-merge-commit", "pre-commit")
 _PREFIX = ".graphify-hook-batch-"
 _SCHEMA = "graphify.hook-installation.v1"
 _MKDIR_CODE = """import os, sys
@@ -570,16 +571,16 @@ def _desired(plan, snapshot, operation):
     return (None, None) if plan.delete else (plan.data if plan.data is not None else old, mode)
 
 
-def _prepare(fd, store, snapshots, plans, request, operation):
+def _prepare(fd, store, snapshots, plans, request, operation, names=NAMES):
     """Return a matching pending batch, stage a new one, or return None for no change.
 
-    Plans and snapshots must follow NAMES order. Stage preimages and successors
+    Plans and snapshots must follow names order. Stage preimages and successors
     for changed hooks and save recovery state before any live publication. A pending
     batch must match request, operation, and rendered content and modes.
     Mismatch or denied stage creation raises RuntimeError; other I/O errors
     propagate. Staging remains in place after failure.
     """
-    desired = [_desired(plan, snapshots[name], operation) for name, plan in zip(NAMES, plans, strict=True)]
+    desired = [_desired(plan, snapshots[name], operation) for name, plan in zip(names, plans, strict=True)]
     rendered = [{"sha256": None if data is None else hashlib.sha256(data).hexdigest(), "mode": mode}
                 for data, mode in desired]
     binding = {"request": request, "operation": operation, "rendered": rendered}
@@ -606,7 +607,7 @@ def _prepare(fd, store, snapshots, plans, request, operation):
         _write(stage_fd, ".gitignore", b"*\n", 0o600)
         os.fsync(stage_fd)  # Persist exclusion before any preimage or successor.
         entries = []
-        for index, (name, (data, mode)) in enumerate(zip(NAMES, desired, strict=True)):
+        for index, (name, (data, mode)) in enumerate(zip(names, desired, strict=True)):
             snapshot = snapshots[name]
             old = _signature(snapshot)
             unchanged = snapshot is None and data is None or snapshot is not None and data == snapshot[1] and mode == old["mode"]
@@ -672,10 +673,10 @@ def _apply(fd, stage_fd, entry, publish=True):
         raise RuntimeError(f"Concurrent replacement of {name}; displaced object and preimage retained for manual reconciliation")
 
 
-def run(root, hooks_dir, operation, request, prepare, *, recapture_request):
+def run(root, hooks_dir, operation, request, prepare, *, recapture_request, names=NAMES):
     """Publish a complete prepared batch; callers register the driver afterward.
 
-    operation is 'install' or 'uninstall'. prepare receives a mapping from NAMES
+    operation is 'install' or 'uninstall'. prepare receives a mapping from names
     to snapshots returned by _read and returns plans in that order. Return the
     per-hook messages, reusing saved messages when resuming a matching request.
     recapture_request observes context under the lock; it must match the original
@@ -690,6 +691,9 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request):
     OSError, ValueError, KeyError, TypeError, and RuntimeError are wrapped in
     RuntimeError with recovery guidance. Failure may leave partial publication.
     """
+    if names not in (NAMES, MERGE_GUARD_NAMES):
+        raise ValueError("Unsupported hook batch")
+
     def check_request():
         """Reject changed or unreadable context without adopting a new binding."""
         try:
@@ -731,14 +735,14 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request):
                             or _identity(os.stat(hooks_dir, follow_symlinks=False)) != hooks_identity):
                         raise RuntimeError("Hook or authority directory changed; retain all recovery files")
 
-                snapshots = {name: _read(fd, name) for name in NAMES}
+                snapshots = {name: _read(fd, name) for name in names}
                 check()
                 plans = prepare(snapshots)
                 check()
-                batch = _prepare(fd, store, snapshots, plans, bound_request, operation)
+                batch = _prepare(fd, store, snapshots, plans, bound_request, operation, names)
                 if batch is None:
                     check()
-                    if any(_signature(_read(fd, name)) != _signature(snapshots[name]) for name in NAMES):
+                    if any(_signature(_read(fd, name)) != _signature(snapshots[name]) for name in names):
                         raise RuntimeError("Hook set changed during no-op installation")
                     check()
                     return [plan.message for plan in plans]
