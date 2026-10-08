@@ -200,6 +200,238 @@ def test_changed_pending_request_refuses_before_hook_or_registration_mutation(re
     assert before == (_snapshot(repo), _snapshot(publication._state_root()))
 
 
+def _request_window_state(*roots):
+    return [(_snapshot(root), {str(p.relative_to(root)): (
+        p.lstat().st_mode, p.lstat().st_dev, p.lstat().st_ino,
+        p.lstat().st_uid, p.lstat().st_gid)
+        for p in (root, *root.rglob("*"))}) for root in roots]
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("change", ["config", "attributes", "root", "gitdir"])
+@pytest.mark.parametrize("timing", ["before-capture", "after-capture"])
+def test_pending_request_window_refuses_and_preserves_external_edit(repo, monkeypatch, operation, change, timing):
+    shared = repo.parent / "shared-hooks"
+    _hooks(repo).rename(shared)
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(shared)], check=True)
+    attrs = repo / ".gitattributes"
+    attrs.write_bytes(b"*.dat binary\n")
+    if operation == "uninstall":
+        hooks.install(repo)
+    _interrupt(repo, monkeypatch, operation)
+    partial = _snapshot(shared)
+    hook_identity = publication._identity(shared.stat())
+    request = hooks._hook_request
+    original_request = request(repo)
+    observed = {}
+
+    def edit():
+        if change == "config":
+            subprocess.run(["git", "-C", str(repo), "config", "merge.graphify.driver", "foreign-editor-driver --preserve-me"], check=True)
+        elif change == "attributes":
+            attrs.write_bytes(attrs.read_bytes() + b"*.foreign text\n")
+        else:
+            config, attributes = (repo / ".git/config").read_bytes(), attrs.read_bytes()
+            selected = repo if change == "root" else repo / ".git"
+            identity = publication._identity(selected.stat())
+            selected.rename(repo.parent / "original-retained")
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / ".git/config").write_bytes(config)
+            attrs.write_bytes(attributes)
+            assert publication._identity(selected.stat()) != identity
+        assert hooks._hooks_dir(repo) == shared
+        assert publication._identity(shared.stat()) == hook_identity
+        assert _snapshot(shared) == partial
+        assert request(repo) != original_request
+        observed["state"] = _request_window_state(repo.parent, Path.home())
+
+    calls = 0
+
+    def capture_then_edit(root):
+        nonlocal calls
+        calls += 1
+        captured = request(root)
+        if calls == 1 and timing == "after-capture":
+            assert captured == original_request
+            edit()
+        return captured
+
+    if timing == "before-capture":
+        edit()
+    with monkeypatch.context() as patch:
+        patch.setattr(hooks, "_hook_request", capture_then_edit)
+        with pytest.raises(RuntimeError, match="different request|request context changed"):
+            getattr(hooks, operation)(repo)
+    assert calls >= 1
+    assert observed["state"] == _request_window_state(repo.parent, Path.home())
+    assert f"pending {operation}" in hooks.status(repo)
+    assert observed["state"] == _request_window_state(repo.parent, Path.home())
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_request_revalidation_allows_unchanged_exact_retry(repo, monkeypatch, operation):
+    original = _live(repo)
+    (repo / ".gitattributes").write_bytes(b"*.dat binary\n")
+    subprocess.run(["git", "-C", str(repo), "config", "merge.other.driver", "keep this driver"], check=True)
+    if operation == "uninstall":
+        hooks.install(repo)
+    _interrupt(repo, monkeypatch, operation)
+    before = _request_window_state(repo.parent, Path.home())
+    assert f"pending {operation}" in hooks.status(repo)
+    assert before == _request_window_state(repo.parent, Path.home())
+    assert getattr(hooks, operation)(repo)
+    assert "pending" not in hooks.status(repo)
+    assert b"*.dat binary\n" in (repo / ".gitattributes").read_bytes()
+    assert subprocess.check_output(["git", "-C", str(repo), "config", "merge.other.driver"], text=True).strip() == "keep this driver"
+    for (name, data), marker in zip(_live(repo).items(), (hooks._HOOK_MARKER, hooks._CHECKOUT_MARKER, hooks._POST_MERGE_MARKER), strict=True):
+        assert original[name].rstrip() in data
+        assert stat.S_IMODE((_hooks(repo) / name).stat().st_mode) == 0o751
+        assert (marker.encode() in data) == (operation == "install")
+    before = _request_window_state(_hooks(repo), Path.home())
+    assert getattr(hooks, operation)(repo)
+    assert before == _request_window_state(_hooks(repo), Path.home())
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_request_change_after_first_publication_stops_remaining_hooks(repo, monkeypatch, operation):
+    if operation == "uninstall":
+        hooks.install(repo)
+    before = _live(repo)
+    rename = publication._rename
+    observed = {}
+
+    def publish_then_edit(*args, **kwargs):
+        result = rename(*args, **kwargs)
+        if args[3] == "post-commit":
+            subprocess.run(["git", "-C", str(repo), "config", "merge.graphify.driver", "foreign-editor-driver --preserve-me"], check=True)
+            observed["state"] = _request_window_state(repo.parent, Path.home())
+            observed["published"] = (_hooks(repo) / "post-commit").read_bytes()
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_rename", publish_then_edit)
+        with pytest.raises(RuntimeError, match="request context changed"):
+            getattr(hooks, operation)(repo)
+    assert observed["state"] == _request_window_state(repo.parent, Path.home())
+    assert (_hooks(repo) / "post-commit").read_bytes() == observed["published"] != before["post-commit"]
+    assert (hooks._HOOK_MARKER.encode() in observed["published"]) == (operation == "install")
+    if operation == "install":
+        assert hooks._HOOK_MARKER_END.encode() in observed["published"]
+    assert stat.S_IMODE((_hooks(repo) / "post-commit").stat().st_mode) == 0o751
+    assert all(_live(repo)[name] == before[name] for name in publication.NAMES[1:])
+    assert f"pending {operation}" in hooks.status(repo)
+    assert observed["state"] == _request_window_state(repo.parent, Path.home())
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_initial_locked_request_change_precedes_authority_creation(repo, monkeypatch, operation):
+    request = hooks._hook_request
+    observed = {}
+    calls = 0
+
+    def capture_then_edit(root):
+        nonlocal calls
+        calls += 1
+        captured = request(root)
+        if calls == 1:
+            (repo / ".gitattributes").write_bytes(b"*.foreign text\n")
+            observed["state"] = _request_window_state(repo.parent, Path.home())
+        return captured
+
+    monkeypatch.setattr(hooks, "_hook_request", capture_then_edit)
+    with pytest.raises(RuntimeError, match="request context changed"):
+        getattr(hooks, operation)(repo)
+    assert calls == 2
+    assert not publication._state_root().exists()
+    assert observed["state"] == _request_window_state(repo.parent, Path.home())
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("failure", ["io", "git"])
+def test_unreadable_locked_request_refuses_without_authority_mutation(repo, monkeypatch, operation, failure):
+    request = hooks._hook_request
+    calls = 0
+    before = _request_window_state(repo.parent, Path.home())
+
+    def unreadable(root):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            if failure == "io":
+                raise OSError("injected request read failure")
+            raise subprocess.CalledProcessError(128, ["git", "config"])
+        return request(root)
+
+    monkeypatch.setattr(hooks, "_hook_request", unreadable)
+    with pytest.raises(RuntimeError, match="Cannot revalidate hook request"):
+        getattr(hooks, operation)(repo)
+    assert calls == 2
+    assert not publication._state_root().exists()
+    assert before == _request_window_state(repo.parent, Path.home())
+
+
+@pytest.mark.parametrize("point", ["before-prepare", "before-stage", "noop", "completion"])
+def test_request_change_at_preparation_noop_and_completion_checks(repo, monkeypatch, point):
+    if point == "noop":
+        hooks.install(repo)
+    before = _live(repo)
+    read, prepare_hook = publication._read, hooks._prepare_hook_install
+    prepare, rename = publication._prepare, publication._rename
+    observed, prepared = {}, []
+    hook_identity = publication._identity(_hooks(repo).stat())
+
+    def edit():
+        assert not observed
+        subprocess.run(["git", "-C", str(repo), "config", "merge.graphify.driver", "foreign-editor-driver --preserve-me"], check=True)
+        observed["state"] = _request_window_state(repo.parent, Path.home())
+
+    def read_then_edit(fd, name, private=False):
+        result = read(fd, name, private=private)
+        if not observed and name == "post-merge" and publication._identity(os.fstat(fd)) == hook_identity:
+            edit()
+        return result
+
+    def prepare_then_edit(*args, **kwargs):
+        result = prepare_hook(*args, **kwargs)
+        prepared.append(result)
+        if len(prepared) == 3:
+            edit()
+        return result
+
+    def noop_then_edit(*args, **kwargs):
+        result = prepare(*args, **kwargs)
+        assert result is None
+        edit()
+        return result
+
+    def publish_then_edit(*args, **kwargs):
+        result = rename(*args, **kwargs)
+        if args[3] == "post-merge":
+            edit()
+        return result
+
+    with monkeypatch.context() as patch:
+        if point == "before-prepare":
+            patch.setattr(publication, "_read", read_then_edit)
+        elif point == "before-stage":
+            patch.setattr(hooks, "_prepare_hook_install", prepare_then_edit)
+        elif point == "noop":
+            patch.setattr(publication, "_prepare", noop_then_edit)
+        else:
+            patch.setattr(publication, "_rename", publish_then_edit)
+        with pytest.raises(RuntimeError, match="request context changed"):
+            hooks.install(repo)
+    assert observed["state"] == _request_window_state(repo.parent, Path.home())
+    if point != "completion":
+        assert _live(repo) == before
+    else:
+        for name, marker in zip(publication.NAMES, (hooks._HOOK_MARKER_END, hooks._CHECKOUT_MARKER_END, hooks._POST_MERGE_MARKER_END), strict=True):
+            assert marker.encode() in _live(repo)[name]
+            assert stat.S_IMODE((_hooks(repo) / name).stat().st_mode) == 0o751
+        assert "pending install" in hooks.status(repo)
+        assert observed["state"] == _request_window_state(repo.parent, Path.home())
+
+
 @pytest.mark.parametrize("damage", ["missing-key", "corrupt-journal", "substituted-stage", "changed-stage-file",
                                     "missing-journal", "substituted-key", "substituted-authority"])
 def test_unknown_authority_or_stage_refuses_without_cleanup(repo, monkeypatch, damage):

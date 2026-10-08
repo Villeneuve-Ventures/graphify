@@ -58,6 +58,19 @@ The request includes the physical identities of the repository root and Git
 directory. Recreating either directory at the same pathname does not preserve
 the original request.
 
+On macOS and Linux, Graphify observes the request context again immediately
+after acquiring the hooks lock, before creating or changing private authority.
+It also rechecks before preparation and staging, and at publication, no-op and
+completion checks. An observed change or an unreadable context stops the
+operation without adopting a new request or overwriting the observed edit.
+Later refusal retains earlier, individually complete hook publications and
+pending recovery evidence; it does not roll them back.
+
+These observations are not an atomic transaction with non-cooperating editors.
+An edit between checks can still race publication. Merge-driver registration
+remains a separate step after the hooks lock is released; this does not add
+registration locking or a whole-operation atomicity guarantee.
+
 An `unverified authority` warning means Graphify could not safely inspect the
 private store. It does not prove that an installation was attempted. Any hook
 and driver observations shown below that warning describe visible files and

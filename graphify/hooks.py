@@ -1234,7 +1234,8 @@ def install(path: Path = Path(".")) -> str:
                  ("post-checkout", checkout, _CHECKOUT_MARKER, _CHECKOUT_MARKER_END),
                  ("post-merge", post_merge, _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
         messages = run(root, hooks_dir, "install", _hook_request(root),
-                       lambda snapshots: [_prepare_hook_install(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs])
+                       lambda snapshots: [_prepare_hook_install(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs],
+                       recapture_request=lambda: _hook_request(root))
         merge_msg = _register_merge_driver(root)
         if merge_msg.startswith("not registered"):
             raise RuntimeError(f"Hooks installed; merge driver {merge_msg}")
@@ -1298,7 +1299,8 @@ def uninstall(path: Path = Path(".")) -> str:
                  ("post-checkout", _CHECKOUT_MARKER, _CHECKOUT_MARKER_END),
                  ("post-merge", _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
         messages = run(root, hooks_dir, "uninstall", _hook_request(root),
-                       lambda snapshots: [_prepare_hook_uninstall(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs])
+                       lambda snapshots: [_prepare_hook_uninstall(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs],
+                       recapture_request=lambda: _hook_request(root))
         merge_msg = _unregister_merge_driver(root, strict=True)
         return "\n".join(f"{spec[0]}: {message}" for spec, message in zip(specs, messages, strict=True)) + f"\nmerge driver: {merge_msg}"
     commit_plan = _prepare_hook_uninstall(

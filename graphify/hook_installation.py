@@ -672,12 +672,14 @@ def _apply(fd, stage_fd, entry, publish=True):
         raise RuntimeError(f"Concurrent replacement of {name}; displaced object and preimage retained for manual reconciliation")
 
 
-def run(root, hooks_dir, operation, request, prepare):
+def run(root, hooks_dir, operation, request, prepare, *, recapture_request):
     """Publish a complete prepared batch; callers register the driver afterward.
 
     operation is 'install' or 'uninstall'. prepare receives a mapping from NAMES
     to snapshots returned by _read and returns plans in that order. Return the
     per-hook messages, reusing saved messages when resuming a matching request.
+    recapture_request observes context under the lock; it must match the original
+    request at admission and later checks. Changed or unreadable context refuses.
 
     Lock out concurrent installers without waiting, prepare all three hooks,
     and publish atomically per file, not across the batch. Retain staging and
@@ -688,11 +690,21 @@ def run(root, hooks_dir, operation, request, prepare):
     OSError, ValueError, KeyError, TypeError, and RuntimeError are wrapped in
     RuntimeError with recovery guidance. Failure may leave partial publication.
     """
+    def check_request():
+        """Reject changed or unreadable context without adopting a new binding."""
+        try:
+            current = recapture_request()
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(f"Cannot revalidate hook request: {exc}; retain all recovery files") from exc
+        if current != request:
+            raise RuntimeError("Hook request context changed; retry the original request and retain all recovery files")
+
     fd = os.open(hooks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        check_request()
         hooks_identity = _identity(os.fstat(fd))
-        request = {**request, "root": str(root), "hooks_path": str(hooks_dir)}
+        bound_request = {**request, "root": str(root), "hooks_path": str(hooks_dir)}
         with _authority(_state_root(), True) as (authority_fd, authority_check):
             name = _slot(hooks_identity)
             created = False
@@ -711,7 +723,8 @@ def run(root, hooks_dir, operation, request, prepare):
                 _check_stages(fd, store)
 
                 def check():
-                    """Recheck authority and hook directory identities before proceeding."""
+                    """Recheck request, authority and hook identities before proceeding."""
+                    check_request()
                     authority_check()
                     _admit(state_fd, private=True)
                     if (_identity(os.stat(name, dir_fd=authority_fd, follow_symlinks=False)) != state_identity
@@ -719,8 +732,10 @@ def run(root, hooks_dir, operation, request, prepare):
                         raise RuntimeError("Hook or authority directory changed; retain all recovery files")
 
                 snapshots = {name: _read(fd, name) for name in NAMES}
+                check()
                 plans = prepare(snapshots)
-                batch = _prepare(fd, store, snapshots, plans, request, operation)
+                check()
+                batch = _prepare(fd, store, snapshots, plans, bound_request, operation)
                 if batch is None:
                     check()
                     if any(_signature(_read(fd, name)) != _signature(snapshots[name]) for name in NAMES):
