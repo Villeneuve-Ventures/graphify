@@ -93,6 +93,25 @@ jobs:
           echo "$git_build/install/bin" >> "$GITHUB_PATH"
           test "$("$git_build/install/bin/git" --version)" = "git version 2.55.0"
 
+      # Hook authority checks include every ancestor. Hosted images can make
+      # /opt world-writable, so allocate below / and admit the path before pytest.
+      - name: Prepare trusted hook test parent
+        run: |
+          set -euo pipefail
+          fixture_parent="$(sudo mktemp -d /graphify-hook-tests.XXXXXXXX)"
+          sudo chown "$(id -u):$(id -g)" "$fixture_parent"
+          stat -c '%a %u:%g %n' / /opt "$HOME" "$fixture_parent"
+          .venv/bin/python - "$fixture_parent" <<'PY'
+          import sys
+          from pathlib import Path
+          from graphify.hook_installation import _authority
+
+          with _authority(Path(sys.argv[1]), False):
+              pass
+          print(f"Admitted hook test authority parent: {sys.argv[1]}")
+          PY
+          echo "GRAPHIFY_TEST_AUTHORITY_PARENT=$fixture_parent" >> "$GITHUB_ENV"
+
       - name: Run tests
         id: pytest
         # Module invocation makes the checkout-local observer importable.

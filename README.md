@@ -198,6 +198,8 @@ for example `graphify claude install --project` or `graphify codex install --pro
 
 > **Git hooks and uv tool / pipx:** `graphify hook install` embeds the current interpreter path directly into the hook scripts at install time, so the post-commit, post-checkout, and post-merge hooks fire correctly even in GUI git clients and CI runners where `~/.local/bin` is not on PATH. If you reinstall or upgrade graphify, re-run `graphify hook install` to refresh the embedded path.
 
+> **Interrupted hook installation:** On macOS and Linux, each hook is published as a complete file. An interrupted batch can leave a mix of old and new hooks; `graphify hook status` reports pending recovery. Retain the recovery files and retry the original command from the same repository and environment. See [hook installation and recovery](docs/hook-installation-recovery.md) for refusal conditions and storage details. Windows retains its existing installer behavior.
+
 <details>
 <summary><b>Pick your platform</b> (20+ assistants, click to expand)</summary>
 
