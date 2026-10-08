@@ -1460,6 +1460,8 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
         if owned is not None:
             if name in _MERGE_GUARD_HOOKS and not _is_standalone_merge_guard(raw, owned):
                 return "not installed (unsupported standalone guard)"
+            if name in _MERGE_GUARD_HOOKS and not os.access(p, os.X_OK):
+                return "not installed (hook is not executable)"
             return "installed"
         return "not installed (hook exists but graphify not found)"
 

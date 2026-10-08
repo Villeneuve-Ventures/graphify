@@ -6,7 +6,8 @@
 macOS/Linux. They read the effective Git index and refuse a configured, tracked
 `graph.json` containing `merge_pending` at an ordinary automatic or manual merge
 commit boundary. An unreadable, malformed, oversized, unresolved, or non-regular
-selected graph also refuses. Valid active and legacy graphs are not required to
+selected graph also refuses. Graph JSON must use UTF-8 without a byte-order mark,
+matching ordinary graph readers. Valid active and legacy graphs are not required to
 have a new receipt format. Passing the guard is not receipt, source-freshness,
 or fresh-clone qualification.
 
@@ -53,6 +54,7 @@ Use `graphify hook status --merge-guard` to inspect the optional guards and
 Status applies the same standalone-hook shape check as installation; foreign
 content outside the markers or a different interpreter is reported as
 unsupported. It does not attest the owned script body or runtime availability.
+Guards without execute permission are reported as not installed.
 Default `graphify hook install` and `graphify hook uninstall` still manage only
 the original three post-hooks; default hook uninstall leaves opted-in guards in
 place, which status displays. The broader `graphify uninstall` removes all five

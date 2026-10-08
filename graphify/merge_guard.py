@@ -96,7 +96,9 @@ not qualified here; passing this guard does not establish clone readability.
         payload = _git(root, "cat-file", "blob", object_id)
         if len(payload) != size:
             raise ValueError("graph size changed")
-        data = json.loads(payload, object_pairs_hook=_unique_object)
+        # Match ordinary graph readers; bytes parsing would also admit BOMs and
+        # UTF-16/UTF-32 streams that those readers reject.
+        data = json.loads(payload.decode("utf-8"), object_pairs_hook=_unique_object)
         if not isinstance(data, dict):
             raise ValueError("invalid graph shape")
         metadata = data.get("graph", {})

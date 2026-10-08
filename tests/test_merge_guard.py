@@ -74,6 +74,23 @@ def test_active_watermark_requires_integer_generation_without_mutation(tmp_path,
     assert before == ((repo / ".git/index").read_bytes(), graph.read_bytes())
 
 
+@pytest.mark.parametrize("data", [payload("active"), {"nodes": [], "links": [], "graph": {}}],
+                         ids=["active", "legacy"])
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-16-le", "utf-32", "utf-32-le"])
+def test_guard_refuses_encodings_rejected_by_reader(tmp_path, data, encoding):
+    from graphify.merge_guard import MergeGuardError, check_merge_commit
+
+    repo, graph = staged_repo(tmp_path, data)
+    graph.write_bytes(json.dumps(data).encode(encoding))
+    git(repo, "add", "graphify-out/graph.json")
+    before = ((repo / ".git/index").read_bytes(), graph.read_bytes())
+    with pytest.raises(transaction.PendingTransactionError, match="malformed"):
+        transaction.open_graph_snapshot(graph, purpose="merge-guard-encoding-proof")
+    with pytest.raises(MergeGuardError, match="cannot classify"):
+        check_merge_commit("graphify-out", "pre-commit", root=repo)
+    assert before == ((repo / ".git/index").read_bytes(), graph.read_bytes())
+
+
 def test_ordinary_commit_and_untracked_graph_are_outside_guard(tmp_path):
     from graphify.merge_guard import check_merge_commit
 
@@ -323,6 +340,19 @@ def test_guard_status_refuses_unsupported_shape_without_mutation(tmp_path, name,
     result = hook_cli(repo, "status", "--merge-guard")
     assert result.returncode == 0, result.stdout + result.stderr
     assert f"{name}: not installed (unsupported standalone guard)" in result.stdout
+    assert before == (hook.read_bytes(), hook.stat().st_ino, hook.stat().st_mode)
+
+
+@pytest.mark.parametrize("name", ["pre-commit", "pre-merge-commit"])
+def test_guard_status_reports_non_executable_without_mutation(tmp_path, name):
+    repo = init_repo(tmp_path / "repo")
+    hooks.install(repo, merge_guard=True)
+    hook = repo / ".git/hooks" / name
+    hook.chmod(0o644)
+    before = (hook.read_bytes(), hook.stat().st_ino, hook.stat().st_mode)
+    result = hook_cli(repo, "status", "--merge-guard")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"{name}: not installed (hook is not executable)" in result.stdout
     assert before == (hook.read_bytes(), hook.stat().st_ino, hook.stat().st_mode)
 
 
