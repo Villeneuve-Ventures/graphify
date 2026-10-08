@@ -57,6 +57,48 @@ def test_active_and_legacy_graphs_do_not_require_portable_receipts(tmp_path, dat
     check_merge_commit("graphify-out", "pre-merge-commit", root=repo)
 
 
+def test_guard_accepts_graph_above_old_cap_with_default_reader_limit(tmp_path, monkeypatch):
+    from graphify.merge_guard import check_merge_commit
+    from graphify.security import check_graph_file_size_cap
+
+    monkeypatch.delenv("GRAPHIFY_MAX_GRAPH_BYTES", raising=False)
+    repo, graph = staged_repo(tmp_path, {"nodes": [], "links": []})
+    with graph.open("ab") as stream:
+        stream.write(b" " * (64 * 1024 * 1024 + 1 - graph.stat().st_size))
+    git(repo, "add", "--", "graphify-out/graph.json")
+    check_graph_file_size_cap(graph)
+    before_index = (repo / ".git/index").read_bytes()
+    before_stat = graph.stat()
+    check_merge_commit("graphify-out", "pre-merge-commit", root=repo)
+    assert (repo / ".git/index").read_bytes() == before_index
+    assert graph.stat() == before_stat
+
+
+@pytest.mark.parametrize("extra", [-1, 0, 1])
+def test_guard_cli_honors_reader_size_boundary(tmp_path, monkeypatch, extra):
+    from graphify.security import check_graph_file_size_cap
+
+    repo, graph = staged_repo(tmp_path, payload("active"))
+    monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", str(graph.stat().st_size + extra))
+    if extra < 0:
+        with pytest.raises(ValueError, match="exceeds"):
+            check_graph_file_size_cap(graph)
+    else:
+        check_graph_file_size_cap(graph)
+    before = ((repo / ".git/index").read_bytes(), graph.read_bytes())
+    result = subprocess.run(
+        [sys.executable, "-E", "-P", "-B", "-m", "graphify.merge_guard",
+         "--event", "pre-commit", "--output", "graphify-out"],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if extra < 0:
+        assert result.returncode != 0
+        assert "unsupported graph size" in result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+    assert ((repo / ".git/index").read_bytes(), graph.read_bytes()) == before
+
+
 @pytest.mark.parametrize("generation", [None, "1", 1.0, True, "missing"])
 def test_active_watermark_requires_integer_generation_without_mutation(tmp_path, generation):
     from graphify.merge_guard import MergeGuardError, check_merge_commit

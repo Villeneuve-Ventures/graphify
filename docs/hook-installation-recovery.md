@@ -10,6 +10,10 @@ selected graph also refuses. Graph JSON must use UTF-8 without a byte-order mark
 matching ordinary graph readers. Valid active and legacy graphs are not required to
 have a new receipt format. Passing the guard is not receipt, source-freshness,
 or fresh-clone qualification.
+The guard shares the readers' 512 MiB default size cap and the
+`GRAPHIFY_MAX_GRAPH_BYTES` override (plain bytes or `MB`/`GB` suffixes).
+A graph exactly at the effective limit is allowed; a larger graph is refused
+before its blob is loaded.
 
 Inspection uses literal index paths and object IDs, ignoring replacement refs
 and inherited pathspec switches. It refuses missing local objects without

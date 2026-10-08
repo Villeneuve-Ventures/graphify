@@ -12,7 +12,8 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import sys
 
-_MAX_GRAPH_BYTES = 64 * 1024 * 1024
+from graphify.security import _max_graph_file_bytes
+
 _EVENTS = ("pre-commit", "pre-merge-commit")
 
 
@@ -98,7 +99,7 @@ not qualified here; passing this guard does not establish clone readability.
         if len(object_id) not in (40, 64) or any(c not in "0123456789abcdef" for c in object_id):
             raise ValueError("invalid object id")
         size = int(_git(root, "cat-file", "-s", object_id))
-        if size < 1 or size > _MAX_GRAPH_BYTES:
+        if size < 1 or size > _max_graph_file_bytes():
             raise ValueError("unsupported graph size")
         payload = _git(root, "cat-file", "blob", object_id)
         if len(payload) != size:
