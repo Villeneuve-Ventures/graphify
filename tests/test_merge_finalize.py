@@ -20,6 +20,124 @@ def pending_repo():
     return repo
 
 
+@pytest.mark.parametrize("sizes,source_limit,total_limit,graph_limit,expected_reads", [
+    ([33], 32, 96, 128, 0),
+    ([24, 24, 1], 32, 48, 128, 2),
+    ([17], 32, 96, 16, 0),
+    ([12, 12], 32, 96, 20, 1),
+])
+def test_source_limits_refuse_before_loading_excess_git_bytes(
+    monkeypatch, sizes, source_limit, total_limit, graph_limit, expected_reads,
+):
+    import subprocess
+    from graphify import merge_finalize, portable
+
+    repo = Path.home() / "source-objects"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    entries = {}
+    for number, size in enumerate(sizes):
+        oid = subprocess.check_output(
+            ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+            input=bytes([65 + number]) * size).decode().strip()
+        path = f"source{number}.py"
+        git(repo, "update-index", "--add", "--cacheinfo", "100644", oid, path)
+        entries[path] = ("100644", oid)
+    output = repo / "graphify-out"
+    output.mkdir()
+    (output / "graph.json").write_bytes(b"protected output")
+    before_index = (repo / ".git/index").read_bytes()
+    before_output = (output / "graph.json").read_bytes()
+    before_refs = git(repo, "show-ref", check=False).stdout
+    monkeypatch.setattr(portable, "_MAX_BLOB", source_limit)
+    monkeypatch.setattr(portable, "_MAX_TOTAL", total_limit)
+    monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", str(graph_limit))
+    original = merge_finalize._git
+    reads = []
+
+    def observe(root, *args, **kwargs):
+        result = original(root, *args, **kwargs)
+        if args[:2] == ("cat-file", "blob"):
+            reads.append((args[-1], len(result)))
+        return result
+
+    monkeypatch.setattr(merge_finalize, "_git", observe)
+    with pytest.raises(merge_finalize.MergeFinalizeError, match="limit"):
+        merge_finalize._source_blobs(repo, entries, "graphify-out")
+    assert len(reads) == expected_reads
+    assert [size for _oid, size in reads] == sizes[:expected_reads]
+    assert (repo / ".git/index").read_bytes() == before_index
+    assert (output / "graph.json").read_bytes() == before_output
+    assert git(repo, "show-ref", check=False).stdout == before_refs
+
+
+def test_source_limits_accept_exact_boundaries_and_ignore_unselected_git_objects(monkeypatch):
+    import subprocess
+    from graphify import merge_finalize, portable
+
+    repo = Path.home() / "source-objects"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    payloads = {"a.py": b"a" * 16, "b.py": b"b" * 16,
+                "notes.txt": b"ignored" * 16, "graphify-out/generated.py": b"ignored" * 16}
+    entries = {}
+    for path, payload in payloads.items():
+        oid = subprocess.check_output(
+            ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+            input=payload).decode().strip()
+        entries[path] = ("100644", oid)
+    monkeypatch.setattr(portable, "_MAX_BLOB", 16)
+    monkeypatch.setattr(portable, "_MAX_TOTAL", 32)
+    monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", "32")
+    original = merge_finalize._git
+    reads = []
+
+    def observe(root, *args, **kwargs):
+        result = original(root, *args, **kwargs)
+        if args[:2] == ("cat-file", "blob"):
+            reads.append(args[-1])
+        return result
+
+    monkeypatch.setattr(merge_finalize, "_git", observe)
+    assert merge_finalize._source_blobs(repo, entries, "graphify-out") == {
+        path: ("100644", payloads[path]) for path in ("a.py", "b.py")}
+    assert reads == [entries[path][1] for path in ("a.py", "b.py")]
+
+
+def test_finalization_source_limit_refuses_before_blob_read_and_preserves_state(monkeypatch):
+    import subprocess
+    from graphify import merge_finalize, portable
+
+    repo = pending_repo()
+    monkeypatch.setattr(portable, "_MAX_BLOB", 64)
+    oid = subprocess.check_output(
+        ["git", "-C", str(repo), "hash-object", "-w", "--stdin"],
+        input=b"\n" * 65).decode().strip()
+    git(repo, "update-index", "--add", "--cacheinfo", "100644", oid, "large.py")
+    output = repo / "graphify-out"
+    before_output = {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()}
+    before_index = (repo / ".git/index").read_bytes()
+    before_refs = git(repo, "show-ref").stdout
+    before_merge_head = (repo / ".git/MERGE_HEAD").read_bytes()
+    original = merge_finalize._git
+    calls = []
+
+    def observe(root, *args, **kwargs):
+        result = original(root, *args, **kwargs)
+        if args[0] == "cat-file" and args[-1] == oid:
+            calls.append((args[1], len(result)))
+        return result
+
+    monkeypatch.setattr(merge_finalize, "_git", observe)
+    with pytest.raises(merge_finalize.MergeFinalizeError, match="limit|bounds"):
+        merge_finalize.finalize_merge(repo, "graphify-out")
+    assert calls == [("-s", 3)]
+    assert (repo / ".git/index").read_bytes() == before_index
+    assert {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()} == before_output
+    assert git(repo, "show-ref").stdout == before_refs
+    assert (repo / ".git/MERGE_HEAD").read_bytes() == before_merge_head
+
+
 @pytest.mark.parametrize("staged", [False, True])
 def test_commit_refuses_output_conversion_added_after_finalization(staged):
     from graphify import hooks

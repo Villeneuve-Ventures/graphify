@@ -4902,6 +4902,48 @@ def test_codex_uses_compact_extraction_windows_uses_verbose():
     assert "(compact)" not in windows_refs["extraction-spec.md"]
 
 
+@pytest.mark.parametrize("surface", ("namespace", "stub", "reference"))
+def test_windows_portable_query_refuses_before_runtime_discovery(surface):
+    core, refs = _platform_artifacts("windows")
+    bodies = {
+        "namespace": core.split("**Portable namespace", 1)[1].split("**Fast path", 1)[0],
+        "stub": core.split("\n## For /graphify query\n", 1)[1].split("\n\n", 1)[0],
+        "reference": refs["query.md"].split("**Portable query", 1)[1].split(
+            "**Ordinary graph", 1
+        )[0],
+    }
+    portable = bodies[surface]
+    assert "unsupported on native Windows" in portable
+    assert "qualified POSIX host profile" in portable
+    assert "graphify-out/.graphify_portable.json" in portable
+    assert "dangling symlink" in portable
+    assert "malformed or orphaned" in portable
+    assert "Do not run Step 1" in portable
+    assert "runtime discovery" in portable
+    assert "inline fallback" in portable
+    assert "output writes" in portable
+    assert "Stop after reporting" in portable
+    assert "Only query is supported" not in portable
+    assert _executable_blocks(portable) == []
+    assert "--portable" not in portable
+
+
+def test_windows_portable_refusal_preserves_shared_ordinary_query_flow():
+    platform = gen.load_platforms()["windows"]
+    core, refs = _platform_artifacts("windows")
+    default_query = gen._render_saved_interpreter_commands(
+        gen._read_fragment(gen._QUERY_REFERENCE), platform, artifact_role="reference"
+    )
+    ordinary_heading = "**Ordinary graph — only when no portable envelope entry exists:**"
+    assert refs["query.md"].split(ordinary_heading, 1)[1] == default_query.split(
+        ordinary_heading, 1
+    )[1]
+    stub = core.split("\n## For /graphify query\n", 1)[1].split("\n## ", 1)[0]
+    assert stub.split("\n\n", 1)[1].split("\n\n---", 1)[0].rstrip() == gen._read_fragment(
+        gen._QUERY_STUB
+    ).split("\n\n", 1)[1].rstrip()
+
+
 @pytest.mark.parametrize("platform_key", tuple(gen.load_platforms()))
 def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
     platform = gen.load_platforms()[platform_key]
@@ -4925,12 +4967,18 @@ def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
     if platform.bucket == "split":
         assert "references/query.md" in query_stub
         assert "before any bootstrap or ordinary action" in query_stub
-        assert "Only query is supported" in query_stub
+        if platform_key == "windows":
+            assert "unsupported on native Windows" in query_stub
+        else:
+            assert "Only query is supported" in query_stub
         assert "`path`, `explain`, and `affected` are unsupported and must stop" in query_stub
         assert "malformed or orphaned" in query_stub and "dangling symlink" in query_stub
         assert "Do not run Step 1" in query_stub
         assert "output writes" in query_stub
-        assert "Stop after reporting its answer or refusal" in query_stub
+        if platform_key == "windows":
+            assert "Stop after reporting the platform refusal" in query_stub
+        else:
+            assert "Stop after reporting its answer or refusal" in query_stub
         assert _executable_blocks(query_stub) == []
         query_bodies = [next(
             artifact.content for artifact in artifacts
@@ -4944,13 +4992,17 @@ def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
         )[0]
         assert "graphify-out/.graphify_portable.json" in portable_branch
         assert "even when graph.json is absent" in portable_branch
-        assert "compatible trusted installed runtime" in portable_branch
-        assert "prerequisite" in portable_branch
         assert "Do not run Step 1" in portable_branch
         assert "query expansion" in portable_branch
         assert "inline fallback" in portable_branch
         assert "save-result" in portable_branch
         assert "Stop after" in portable_branch
+        if platform_key == "windows":
+            assert "unsupported on native Windows" in portable_branch
+            assert _executable_blocks(portable_branch) == []
+            continue
+        assert "compatible trusted installed runtime" in portable_branch
+        assert "prerequisite" in portable_branch
         block = _block_containing(portable_branch, '--portable --output graphify-out --revision HEAD')
         assert "-E -P -B -m graphify query 'QUESTION' --portable" in block
         assert "Replace the complete" in portable_branch

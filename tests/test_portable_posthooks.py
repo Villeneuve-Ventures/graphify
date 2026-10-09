@@ -173,12 +173,16 @@ def test_ordinary_portable_closure_refused_without_changes(tmp_path, defect):
 
 
 @pytest.mark.parametrize("state", ["legacy", "active"])
-def test_ordinary_legacy_commit_skips_trusted_runtime_discovery(tmp_path, monkeypatch, state):
+@pytest.mark.parametrize("unborn", [False, True])
+def test_ordinary_legacy_commit_skips_trusted_runtime_discovery(tmp_path, monkeypatch, state, unborn):
     from tests.test_merge_guard import staged_repo, payload
 
     data = payload("active") if state == "active" else {"nodes": [], "links": [], "graph": {}}
     repo, graph = staged_repo(tmp_path, data)
     (repo / ".git/MERGE_HEAD").unlink()
+    if unborn:
+        git(repo, "update-ref", "-d", "HEAD")
+    check_merge_commit("graphify-out", "pre-commit", root=repo)
     monkeypatch.setattr(hooks, "_pinned_python", lambda: "/missing/python")
     hooks.install(repo, merge_guard=True)
     script = (repo / ".git/hooks/pre-commit").read_text()
@@ -188,3 +192,49 @@ def test_ordinary_legacy_commit_skips_trusted_runtime_discovery(tmp_path, monkey
     result = subprocess.run(["/bin/sh"], input=script, cwd=repo, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert before == ((repo / ".git/index").read_bytes(), graph.read_bytes())
+
+
+@pytest.mark.parametrize("also_remove", [None, "graph.json", "manifest.json"])
+def test_ordinary_portable_envelope_deletion_refused(tmp_path, also_remove):
+    from tests.test_portable_cli import bundle_repo
+
+    output = bundle_repo(tmp_path)
+    hooks.install(tmp_path, merge_guard=True)
+    git(tmp_path, "rm", "graphify-out/.graphify_portable.json")
+    if also_remove:
+        git(tmp_path, "rm", "graphify-out/" + also_remove)
+    before_head = git(tmp_path, "rev-parse", "HEAD").stdout
+    before_index = (tmp_path / ".git/index").read_bytes()
+    before_bytes = {p.name: p.read_bytes() for p in output.iterdir()}
+    try:
+        check_merge_commit("graphify-out", "pre-commit", root=tmp_path)
+        refusal = None
+    except MergeGuardError as exc:
+        refusal = str(exc)
+    assert (tmp_path / ".git/index").read_bytes() == before_index
+    staged_before = git(tmp_path, "ls-files", "--stage", "-z").stdout
+    result = git(tmp_path, "commit", "-m", "remove envelope", skip_hooks=False, check=False)
+    assert result.returncode != 0, "partial portable deletion advanced HEAD"
+    assert refusal is not None and "portable" in refusal
+    assert "portable" in result.stderr
+    assert git(tmp_path, "rev-parse", "HEAD").stdout == before_head
+    assert git(tmp_path, "ls-files", "--stage", "-z").stdout == staged_before
+    assert before_bytes == {p.name: p.read_bytes() for p in output.iterdir()}
+
+
+@pytest.mark.parametrize("missing_runtime", [False, True])
+def test_ordinary_complete_portable_removal_is_not_partial_bundle(tmp_path, monkeypatch, missing_runtime):
+    from tests.test_portable_cli import bundle_repo
+
+    bundle_repo(tmp_path)
+    if missing_runtime:
+        monkeypatch.setattr(hooks, "_pinned_python", lambda: "/missing/python")
+    hooks.install(tmp_path, merge_guard=True)
+    git(tmp_path, "rm", "-r", "graphify-out")
+    check_merge_commit("graphify-out", "pre-commit", root=tmp_path)
+    script = (tmp_path / ".git/hooks/pre-commit").read_text()
+    if missing_runtime:
+        script = script[: script.index("# Detect a trusted Python interpreter")]
+        script += 'printf "unexpected-runtime-discovery\\n" >&2\nexit 1\n'
+    result = subprocess.run(["/bin/sh"], input=script, cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr

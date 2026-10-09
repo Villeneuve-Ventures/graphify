@@ -172,9 +172,12 @@ def _entries(root: Path, revision: str | None = None) -> dict[str, tuple[str, st
     return entries
 
 
-def _blob(root: Path, oid: str) -> bytes:
+def _blob(root: Path, oid: str, *, max_bytes: int | None = None) -> bytes:
     size = int(_git(root, "cat-file", "-s", oid))
-    if size > _max_graph_file_bytes():
+    limit = _max_graph_file_bytes()
+    if max_bytes is not None:
+        limit = min(limit, max_bytes)
+    if size > limit:
         raise MergeFinalizeError("selected Git blob exceeds the reader limit")
     payload = _git(root, "cat-file", "blob", oid)
     if len(payload) != size:
@@ -183,6 +186,8 @@ def _blob(root: Path, oid: str) -> bytes:
 
 
 def _source_blobs(root: Path, entries: Mapping[str, tuple[str, str]], output: str):
+    from graphify.portable import _MAX_BLOB, _MAX_TOTAL
+
     blobs = {}
     total = 0
     for path, (mode, oid) in entries.items():
@@ -191,10 +196,9 @@ def _source_blobs(root: Path, entries: Mapping[str, tuple[str, str]], output: st
         if mode == "160000" or (path.endswith(".py") and mode not in ("100644", "100755")):
             raise MergeFinalizeError("submodules and nonregular Python sources are unsupported")
         if path.endswith(".py"):
-            payload = _blob(root, oid)
+            remaining = min(_MAX_TOTAL, _max_graph_file_bytes()) - total
+            payload = _blob(root, oid, max_bytes=min(_MAX_BLOB, remaining))
             total += len(payload)
-            if total > _max_graph_file_bytes():
-                raise MergeFinalizeError("source projection exceeds the aggregate reader limit")
             blobs[path] = (mode, payload)
     return blobs
 

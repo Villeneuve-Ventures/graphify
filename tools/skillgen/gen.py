@@ -1296,6 +1296,12 @@ def _render_core(platform: Platform) -> str:
     install = _read_fragment(f"shell/{platform.shell}.md").rstrip("\n")
     dispatch = _read_fragment(f"dispatch/{platform.dispatch}.md").rstrip("\n")
     query_stub = _read_fragment(_QUERY_STUB).rstrip("\n")
+    if platform.key == "windows":
+        _, ordinary_stub = query_stub.split("\n\n", 1)
+        query_stub = (
+            _read_fragment("query-stub/windows.md").rstrip("\n")
+            + "\n\n" + ordinary_stub
+        )
 
     if platform.extra_sections:
         extra = "".join(
@@ -1313,6 +1319,14 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    if platform.key == "windows":
+        if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
+            raise ValueError("Windows core must have exactly one portable namespace target")
+        body = body.replace(
+            _PORTABLE_NAMESPACE_MIGRATION,
+            _read_fragment("core/windows-portable.md") + "\n",
+            1,
+        )
     body = _render_saved_interpreter_commands(body, platform, artifact_role="core")
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
@@ -1382,6 +1396,14 @@ def render(platform: Platform) -> list[RenderedArtifact]:
             body = _render_agents_md_hooks(platform)
         else:
             body = _read_fragment(references[name])
+        if platform.key == "windows" and name == "query":
+            if body.count(_PORTABLE_QUERY_MIGRATION) != 1:
+                raise ValueError("Windows query must have exactly one portable branch target")
+            body = body.replace(
+                _PORTABLE_QUERY_MIGRATION,
+                _read_fragment("references/query/windows-portable.md") + "\n",
+                1,
+            )
         body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))

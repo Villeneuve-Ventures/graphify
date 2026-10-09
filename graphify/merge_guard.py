@@ -60,7 +60,7 @@ def check_merge_commit(output: str, event: str, *, root: Path = Path("."),
                        entry_header: str | None = None) -> None:
     """Reject a pending staged graph without changing Git or Graphify state.
 
-    Ordinary merges and commits with staged portable envelopes are covered.
+    Ordinary merges and commits with staged or removed portable envelopes are covered.
     Valid legacy/active graphs are not qualified here; passing this guard does
     not establish clone readability.
     """
@@ -96,7 +96,17 @@ def check_merge_commit(output: str, event: str, *, root: Path = Path("."),
             portable_paths.append(raw_path)
     if any(path != expected_path for path in portable_paths):
         raise MergeGuardError("case-aliased portable envelope is unsupported; commit refused")
-    if portable_paths:
+    removed_portable = b""
+    if ordinary_commit and not portable_paths and output_entries:
+        # Check removals against Git's implicit HEAD (or its empty-tree baseline
+        # for an unborn branch). Complete output removal has no staged closure.
+        removed_portable = _git(
+            root, "diff", "--cached", "--diff-filter=D", "--name-only", "-z",
+            "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative", "--",
+            f":(top,literal,icase){relative.as_posix()}/{PORTABLE_FILE}",
+            f":(top,literal,icase){relative.as_posix()}/.graphify_portable.jſon",
+        )
+    if portable_paths or removed_portable:
         if event == "pre-merge-commit":
             raise MergeGuardError("automatic portable finalization is unsupported; use a manual merge")
         try:

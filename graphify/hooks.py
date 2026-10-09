@@ -1289,14 +1289,21 @@ for _GFY_STATE in rebase-merge rebase-apply sequencer CHERRY_PICK_HEAD REVERT_HE
     _GFY_STATE_PATH=$(git rev-parse --git-path "$_GFY_STATE") || exit 1
     if [ -e "$_GFY_STATE_PATH" ] || [ -L "$_GFY_STATE_PATH" ]; then exit 0; fi
 done
+_GFY_REMOVED_ENVELOPE=
 """
     if name == "pre-commit":
         script += """_GFY_MERGE_HEAD=$(git rev-parse --git-path MERGE_HEAD) || exit 1
 if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then
-    # Ordinary legacy commits need no runtime. A staged portable envelope must
-    # still match the complete staged source projection before Git records it.
+    # Ordinary legacy commits need no runtime. Removing a portable envelope
+    # must not turn its remaining staged payloads into a legacy output.
     _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
-    [ -n "$_GFY_ENVELOPE" ] || exit 0
+    if [ -z "$_GFY_ENVELOPE" ]; then
+        _GFY_REMOVED_ENVELOPE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff --cached --diff-filter=D --name-only --no-ext-diff --no-textconv --no-renames --no-relative -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
+        [ -n "$_GFY_REMOVED_ENVELOPE" ] || exit 0
+        # Complete output removal leaves no portable closure to validate.
+        _GFY_REMAINING_OUTPUT=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT") || exit 1
+        [ -n "$_GFY_REMAINING_OUTPUT" ] || exit 0
+    fi
 fi
 """
     script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
@@ -1305,7 +1312,7 @@ if [ -z "$_GFY_TRACKED" ]; then
     # Long s is the fixed envelope basename's only non-ASCII casefold alias.
     # Keep unrelated siblings and intent-to-add graphs outside runtime discovery.
     _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
-    [ -n "$_GFY_ENVELOPE" ] || exit 0
+    [ -n "$_GFY_ENVELOPE" ] || [ -n "$_GFY_REMOVED_ENVELOPE" ] || exit 0
 fi
 # The raw header before Git's tab separator binds the observed mode and OID.
 _GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
