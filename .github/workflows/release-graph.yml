@@ -12,12 +12,13 @@ jobs:
       contents: write  # needed to upload release assets
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: "3.14"
+          prune-cache: true
 
       - name: Install graphify
         run: uv sync --frozen
@@ -51,13 +52,13 @@ jobs:
 
       - name: Upload to GitHub release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.3
         with:
           files: graphify-self-graph.tar.gz
 
       - name: Upload as workflow artifact (for workflow_dispatch runs)
         if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: graphify-self-graph
           path: graphify-self-graph.tar.gz
