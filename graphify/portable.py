@@ -14,9 +14,7 @@ import math
 import os
 from pathlib import Path
 import re
-import selectors
 import subprocess
-import time
 import unicodedata
 from types import MappingProxyType
 from typing import Any, NoReturn
@@ -133,6 +131,30 @@ def _digest(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _alias_key(path: str) -> str:
+    return unicodedata.normalize("NFC", unicodedata.normalize("NFC", path).casefold())
+
+
+def _validate_tree_inventory(entries: Mapping[str, tuple[str, str]], output: str) -> None:
+    """Apply the same tree-size and output-parent admission on both sides."""
+    _path(output)
+    parts = output.split("/")
+    prefixes = {_alias_key("/".join(parts[:depth])): "/".join(parts[:depth])
+                for depth in range(1, len(parts) + 1)}
+    size = 0
+    for path, (mode, oid) in entries.items():
+        kind = "commit" if mode == "160000" else "blob"
+        size += len(f"{mode} {kind} {oid}\t{path}\0".encode("utf-8"))
+        if size > _MAX_METADATA:
+            _fail("portable tree inventory exceeds reader bounds")
+        parts = path.split("/")
+        for depth in range(1, len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            original = prefixes.get(_alias_key(prefix))
+            if original is not None and (prefix != original or depth == len(parts)):
+                _fail("repository path collides with a portable output directory")
+
+
 def _source_records(sources: Sequence[Mapping[str, Any]], output: str) -> tuple[dict[str, str], ...]:
     """Retain exact UTF-8 paths; reject case/Unicode aliases, including parents."""
     _path(output)
@@ -161,8 +183,7 @@ def _source_records(sources: Sequence[Mapping[str, Any]], output: str) -> tuple[
             prefix = "/".join(parts[:depth])
             # Normalization is only an alias-detection key. Source records and
             # byte sorting retain the original, unnormalized Git path.
-            key = unicodedata.normalize("NFC", prefix).casefold()
-            key = unicodedata.normalize("NFC", key)
+            key = _alias_key(prefix)
             if path == output:
                 output_prefixes.add(key)
             elif depth == len(parts) and key in output_prefixes:
@@ -200,38 +221,19 @@ def source_records_from_blobs(
     return _source_records(records, output)
 
 
-def _git(root: Path, *args: str, limit: int = _MAX_METADATA) -> bytes:
+def _git(root: Path, *args: str, limit: int | None = None) -> bytes:
     """Read local Git objects with a bounded pipe; never fetch or replace objects."""
+    from graphify._git_io import GitReadError, git_stdout
+
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1", GIT_OPTIONAL_LOCKS="0",
                GIT_TERMINAL_PROMPT="0")
     command = ["git", "--no-replace-objects", "-C", str(root), "-c",
                "core.fsmonitor=false", *args]
-    with subprocess.Popen(  # nosec B603 - fixed Git program/arguments, no shell
-        command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env
-    ) as process:
-        if process.stdout is None:
-            process.kill()
-            _fail("portable Git inspection pipe is unavailable")
-        result = bytearray()
-        deadline = time.monotonic() + 30
-        with selectors.DefaultSelector() as selector:
-            selector.register(process.stdout, selectors.EVENT_READ)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not selector.select(max(0, remaining)):
-                    process.kill()
-                    _fail("portable Git object inspection timed out")
-                chunk = os.read(process.stdout.fileno(), min(65536, limit + 1 - len(result)))
-                if not chunk:
-                    break
-                result.extend(chunk)
-                if len(result) > limit:
-                    process.kill()
-                    _fail("portable Git object inspection exceeds bounds")
-        if process.wait(timeout=max(0.1, deadline - time.monotonic())) != 0:
-            _fail("portable Git object inspection failed")
-        return bytes(result)
+    try:
+        return b"".join(git_stdout(command, env, _MAX_METADATA if limit is None else limit))
+    except GitReadError as exc:
+        raise PortableGraphError(f"portable {exc}") from exc
 
 
 def _tree_entries(root: Path, revision: str) -> tuple[str, dict[str, tuple[str, str]]]:
@@ -261,6 +263,7 @@ def _tree_entries(root: Path, revision: str) -> tuple[str, dict[str, tuple[str, 
 
 def _records_for_entries(root: Path, entries: Mapping[str, tuple[str, str]], output: str
                          ) -> tuple[dict[str, str], ...]:
+    _validate_tree_inventory(entries, output)
     selected: dict[str, tuple[str, bytes]] = {}
     total = 0
     for path, (mode, oid) in entries.items():

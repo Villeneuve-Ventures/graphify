@@ -527,7 +527,6 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 
 [ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
 
-""" + _WORKTREE_GUARD + """
 CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null)
 if [ -z "$CHANGED" ]; then
     exit 0
@@ -538,7 +537,7 @@ fi
 # shared absolute outputs are outside the repository and omit this block.
 __GRAPHIFY_OUTPUT_EXCLUSION__
 
-""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + _WORKTREE_GUARD + """
 export GRAPHIFY_CHANGED="$CHANGED"
 
 # Run the rebuild detached so git commit returns immediately. Full-repo rebuilds
@@ -608,7 +607,7 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 _GFY_REBUILD_CURRENT_ROOT=0
 export _GFY_REBUILD_CURRENT_ROOT
 
-""" + _WORKTREE_GUARD + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + _WORKTREE_GUARD + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
@@ -1374,8 +1373,10 @@ def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     # than rejecting valid path punctuation; import verification catches a stale
     # pin so it safely falls through to dynamic detection.
     pinned = _pinned_python()
-    output_path = _hook_output_path()
-    repo_output_path = _hook_repo_output_path(root)
+    # Guard admission normalizes trailing slashes. Render every coupled hook
+    # with that same selector so publication's exact-byte checks can admit it.
+    output_path = guard_output if guard_output is not None else _hook_output_path()
+    repo_output_path = guard_output if guard_output is not None else _hook_repo_output_path(root)
     post_scripts = _post_event_scripts(output_path, repo_output_path, pinned)
     hook, checkout, post_merge = (post_scripts[name] for name in (
         "post-commit", "post-checkout", "post-merge"))

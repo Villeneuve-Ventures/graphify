@@ -21,17 +21,38 @@ class MergeGuardError(RuntimeError):
     """The selected staged graph cannot safely pass commit containment."""
 
 
-def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
+def _git_invocation(root: Path, *args: str) -> tuple[list[str], dict[str, str]]:
     # Inspect the literal committed object and exact path, while retaining Git's
     # effective repository/index selection (including GIT_INDEX_FILE).
     env = os.environ.copy()
     for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
                  "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
         env.pop(name, None)
+    return (["git", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-c",
+             "core.fsmonitor=false", "-C", str(root), *args], env)
+
+
+def _git_chunks(root: Path, *args: str, limit: int):
+    """Stream read-only Git output while retaining the effective index context."""
+    from graphify._git_io import GitReadError, git_stdout
+
+    command, env = _git_invocation(root, *args)
+    try:
+        yield from git_stdout(command, env, limit)
+    except (GitReadError, OSError, subprocess.SubprocessError) as exc:
+        raise MergeGuardError(f"cannot inspect the effective Git index: {exc}") from exc
+
+
+def _git(root: Path, *args: str, input: bytes | None = None,
+         max_bytes: int | None = None) -> bytes:
+    if max_bytes is not None:
+        if input is not None:
+            raise ValueError("bounded Git inspection does not accept input")
+        return b"".join(_git_chunks(root, *args, limit=max_bytes))
+    command, env = _git_invocation(root, *args)
     try:
         result = subprocess.run(
-            ["git", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-c",
-             "core.fsmonitor=false", "-C", str(root), *args],
+            command,
             capture_output=True, check=True, timeout=30, env=env, input=input,
         )
     except (OSError, subprocess.SubprocessError) as exc:

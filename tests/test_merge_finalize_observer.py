@@ -1,10 +1,7 @@
 """Post-event portable classification must preserve ordinary legacy hook routes."""
 import hashlib
-import json
 import os
-from pathlib import Path
 import shlex
-import subprocess
 import sys
 
 import pytest

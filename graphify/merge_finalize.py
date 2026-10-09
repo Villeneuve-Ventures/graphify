@@ -1,6 +1,7 @@
 """Explicit, index-only publication for a v1-origin manual two-parent merge."""
 from __future__ import annotations
 
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -14,7 +15,7 @@ import time
 from collections.abc import Mapping
 
 from graphify import transaction
-from graphify.merge_guard import MergeGuardError, _git, _git_path
+from graphify.merge_guard import MergeGuardError, _git, _git_chunks, _git_path
 from graphify.security import _max_graph_file_bytes
 
 
@@ -136,8 +137,11 @@ def _refresh_candidate(root: Path, candidate: Path, output: str):
 
 
 def _entries(root: Path, revision: str | None = None) -> dict[str, tuple[str, str]]:
-    records = (_git(root, "ls-files", "--stage", "-z") if revision is None
-               else _git(root, "ls-tree", "-r", "-z", revision))
+    """Read a bounded literal inventory from the effective index or a tree."""
+    from graphify.portable import _MAX_METADATA
+
+    records = (_git(root, "ls-files", "--stage", "-z", max_bytes=_MAX_METADATA) if revision is None
+               else _git(root, "ls-tree", "-r", "-z", revision, max_bytes=_MAX_METADATA))
     entries: dict[str, tuple[str, str]] = {}
     for record in records.split(b"\0"):
         if not record:
@@ -163,7 +167,7 @@ def _entries(root: Path, revision: str | None = None) -> dict[str, tuple[str, st
         empty = _git(root, "hash-object", "-t", "tree", "--stdin", input=b"").decode().strip()
         committed = _git(root, "diff-index", "--cached", "--ita-invisible-in-index", "--raw", "-z",
                          "-r", "--no-abbrev", "--no-ext-diff", "--no-textconv", "--no-renames",
-                         "--no-relative", empty).split(b"\0")
+                         "--no-relative", empty, max_bytes=2 * _MAX_METADATA).split(b"\0")
         present = {os.fsdecode(committed[i]) for i in range(1, len(committed) - 1, 2)}
         if set(entries) != present:
             raise MergeFinalizeError("intent-to-add entries are unsupported")
@@ -173,13 +177,14 @@ def _entries(root: Path, revision: str | None = None) -> dict[str, tuple[str, st
 
 
 def _blob(root: Path, oid: str, *, max_bytes: int | None = None) -> bytes:
+    """Preflight an immutable object and cap the pipe before retaining its bytes."""
     size = int(_git(root, "cat-file", "-s", oid))
     limit = _max_graph_file_bytes()
     if max_bytes is not None:
         limit = min(limit, max_bytes)
     if size > limit:
         raise MergeFinalizeError("selected Git blob exceeds the reader limit")
-    payload = _git(root, "cat-file", "blob", oid)
+    payload = _git(root, "cat-file", "blob", oid, max_bytes=limit)
     if len(payload) != size:
         raise MergeFinalizeError("Git blob size changed")
     return payload
@@ -205,16 +210,31 @@ def _source_blobs(root: Path, entries: Mapping[str, tuple[str, str]], output: st
 
 def validate_index_bundle(root: Path, output: str, *, revision: str | None = None):
     """Validate portable closure against exact index or committed-tree objects."""
-    from graphify.portable import PORTABLE_FILE, source_records_from_blobs, validate_bundle
+    from graphify.portable import (PORTABLE_FILE, _MAX_METADATA, _MAX_TOTAL,
+                                   _validate_tree_inventory, source_records_from_blobs,
+                                   validate_bundle)
 
     _require_local_object_storage()
     output = _output_selector(output)
     entries = _entries(root, revision)
+    _validate_tree_inventory(entries, output)
     selected = {p[len(output) + 1:]: value for p, value in entries.items()
                 if p.startswith(output + "/")}
     if set(selected) != {"graph.json", "manifest.json", PORTABLE_FILE}:
         raise MergeFinalizeError("portable output must contain its exact three-file closure")
-    payloads = {p: _blob(root, oid) for p, (_mode, oid) in selected.items()}
+    # Preflight the complete closure before materializing any artifact. The
+    # global graph cap alone is too large for metadata or the combined bundle.
+    sizes = {}
+    total = 0
+    for name, (_mode, oid) in selected.items():
+        size = int(_git(root, "cat-file", "-s", oid))
+        limit = min(_max_graph_file_bytes(), _MAX_TOTAL if name == "graph.json" else _MAX_METADATA)
+        total += size
+        if size > limit or total > _MAX_TOTAL:
+            raise MergeFinalizeError("portable bundle exceeds byte bounds")
+        sizes[name] = size
+    payloads = {name: _blob(root, oid, max_bytes=sizes[name])
+                for name, (_mode, oid) in selected.items()}
     sources = source_records_from_blobs(_source_blobs(root, entries, output), output)
     return validate_bundle(payloads, sources, output,
                            modes={p: mode for p, (mode, _oid) in selected.items()})
@@ -278,11 +298,18 @@ def observe_committed_portable(root: Path, output: str) -> bool:
     present = output + "/" + PORTABLE_FILE in entries
     graph_entry = entries.get(output + "/graph.json")
     if graph_entry is not None and not present:
+        from graphify._graph_marker import GraphMarkerLimitError, portable_schema_marker
+        from graphify.portable import _MAX_METADATA
+
+        size = int(_git(root, "cat-file", "-s", graph_entry[1]))
+        if size > _max_graph_file_bytes():
+            raise MergeFinalizeError("selected Git blob exceeds the reader limit")
         try:
-            graph = json.loads(_blob(root, graph_entry[1]).decode("utf-8"))
-            marker = graph.get("graph", {}).get(transaction.GRAPH_WATERMARK_KEY)
-            present = isinstance(marker, dict) and marker.get("schema") == 2
-        except (ValueError, AttributeError, UnicodeError):
+            with closing(_git_chunks(root, "cat-file", "blob", graph_entry[1], limit=size)) as chunks:
+                present = portable_schema_marker(chunks, token_limit=_MAX_METADATA)
+        except GraphMarkerLimitError as exc:
+            raise MergeFinalizeError(str(exc)) from exc
+        except ValueError:
             return False
     if not present:
         return False
@@ -464,11 +491,12 @@ def _record_path(root: Path, output: str) -> Path:
 
 
 def _read_record(path: Path):
+    """Read only a private regular record, without blocking on special files."""
     from graphify.portable import parse_json
 
     if not os.path.lexists(path):
         return None
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
@@ -582,15 +610,16 @@ def _remove_record(path, captured):
 
 
 def _require_full_index(root: Path) -> None:
+    """Refuse unsupported index settings using Git's own boolean semantics."""
     _require_local_object_storage()
     if os.name != "posix" or any(name in os.environ for name in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")):
         raise MergeFinalizeError("only the default full POSIX index is supported")
     for option in ("core.sparseCheckout", "core.splitIndex", "index.sparse"):
-        result = subprocess.run(["git", "-C", str(root), "config", "--get", option], capture_output=True,
+        result = subprocess.run(["git", "-C", str(root), "config", "--type=bool", "--get", option], capture_output=True,
                                 check=False, timeout=30)
         if result.returncode not in (0, 1):
             raise MergeFinalizeError("cannot classify supported index settings")
-        if result.stdout.strip().lower() in (b"true", b"1", b"yes", b"on"):
+        if result.stdout.strip() == b"true":
             raise MergeFinalizeError("sparse and split indexes are unsupported")
     if _git(root, "rev-parse", "--shared-index-path").strip():
         raise MergeFinalizeError("split indexes are unsupported")
@@ -603,6 +632,7 @@ def _require_plain_output_entries(root: Path, output: str) -> None:
 
 
 def _publication_hooks(root: Path, output: str):
+    """Capture installed hooks and require exact current managed guard bytes."""
     from graphify import hooks
 
     directory = _git_path(root, "hooks")
@@ -660,7 +690,8 @@ def validate_prepared_merge(root: Path, output: str) -> None:
 
 def finalize_merge(root: Path, output: str) -> str:
     """Stage a validated portable closure; do not commit or rewrite local output."""
-    from graphify.portable import PORTABLE_FILE, make_bundle, source_records_from_blobs, validate_bundle
+    from graphify.portable import (PORTABLE_FILE, _validate_tree_inventory, make_bundle,
+                                   source_records_from_blobs, validate_bundle)
 
     root = root.absolute()
     output = _output_selector(output)
@@ -684,6 +715,12 @@ def finalize_merge(root: Path, output: str) -> str:
         selected = {p[len(output)+1:]: value for p, value in entries.items() if p.startswith(output + "/")}
         if set(selected) - closure or any(mode != "100644" for mode, _oid in selected.values()):
             raise MergeFinalizeError("tracked output contains unsupported siblings or modes")
+        # The new closure can make a previously readable inventory exceed the
+        # reader's bound. Git object-id width is fixed for this repository.
+        prospective = dict(entries)
+        prospective.update({f"{output}/{name}": ("100644", "0" * len(state[0]))
+                            for name in closure})
+        _validate_tree_inventory(prospective, output)
         payload, admission = _admit(root, output, state)
         record_path = _record_path(root, output)
         captured_record = _read_record(record_path)
@@ -694,7 +731,7 @@ def finalize_merge(root: Path, output: str) -> str:
         if PORTABLE_FILE in selected:
             if captured_record is None:
                 raise MergeFinalizeError("prepared output lacks this operation's private finalization record")
-            snapshot = validate_index_bundle(root, output)
+            validate_index_bundle(root, output)
             # A retry still needs unchanged merge operands and live pending
             # authority. Recompute exact extraction below before accepting it.
         elif selected.get("graph.json") is None or _blob(root, selected["graph.json"][1]) != payload:

@@ -5,11 +5,9 @@ import sys
 
 import pytest
 
+from graphify import merge_finalize as finalizer
+
 from graphify import hooks
-from graphify.merge_finalize import (
-    MergeFinalizeError, _entries, _record_path, _source_blobs, cancel_merge,
-    finalize_merge, validate_index_bundle,
-)
 from graphify.merge_guard import MergeGuardError, _git, check_merge_commit
 from graphify.portable import PORTABLE_FILE, canonical_json, make_bundle, source_records_from_blobs
 from tests.test_merge_commit_lifecycle import git, isolated_authority  # noqa: F401
@@ -41,10 +39,10 @@ def test_finalizer_requires_executable_current_guards(name, state):
     else:
         hook.chmod(0o644)
     before = preserved(repo)
-    with pytest.raises(MergeFinalizeError, match="merge-guard"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="merge-guard"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert preserved(repo) == before
-    assert not _record_path(repo, "graphify-out").exists()
+    assert not finalizer._record_path(repo, "graphify-out").exists()
 
 
 @pytest.mark.parametrize("name", ["post-commit", "post-checkout", "post-merge"])
@@ -55,10 +53,10 @@ def test_finalizer_refuses_stale_managed_post_hooks(name):
     assert hooks._PORTABLE_POST_EVENT_GUARD in current
     hook.write_text(current.replace(hooks._PORTABLE_POST_EVENT_GUARD, ""))
     before = preserved(repo)
-    with pytest.raises(MergeFinalizeError, match="post.*hook"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="post.*hook"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert preserved(repo) == before
-    assert not _record_path(repo, "graphify-out").exists()
+    assert not finalizer._record_path(repo, "graphify-out").exists()
 
 
 @pytest.mark.parametrize("state", ["absent", "nonexecutable", "foreign-comment"])
@@ -72,14 +70,13 @@ def test_optional_post_hook_states_preserve_supported_manual_route(state):
     else:
         hook.write_text(hook.read_text() + "\n# user-maintained comment\n")
     output_before = preserved(repo)[1]
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     check_merge_commit("graphify-out", "pre-commit", root=repo)
-    cancel_merge(repo, "graphify-out")
+    finalizer.cancel_merge(repo, "graphify-out")
     assert preserved(repo)[1] == output_before
 
 
 def test_post_hook_change_during_preparation_refuses_without_publication(monkeypatch):
-    import graphify.merge_finalize as finalizer
 
     repo = guarded_repo()
     before = preserved(repo)
@@ -90,15 +87,15 @@ def test_post_hook_change_during_preparation_refuses_without_publication(monkeyp
         hook.write_text(hook.read_text() + "\n# changed during preparation\n")
         return graph
     monkeypatch.setattr(finalizer, "_extract", changed_hook)
-    with pytest.raises(MergeFinalizeError, match="hook inputs changed"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="hook inputs changed"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert preserved(repo) == before
-    assert not _record_path(repo, "graphify-out").exists()
+    assert not finalizer._record_path(repo, "graphify-out").exists()
 
 
 def test_guard_rechecks_post_hooks_after_preparation():
     repo = guarded_repo()
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     hook = repo / ".git/hooks/post-commit"
     hook.write_text(hook.read_text().replace(hooks._PORTABLE_POST_EVENT_GUARD, ""))
     before = preserved(repo)
@@ -112,19 +109,19 @@ def test_guard_rechecks_post_hooks_after_preparation():
 def test_output_index_flags_refuse_without_loss(flag, operation):
     repo = guarded_repo()
     if operation == "cancel":
-        finalize_merge(repo, "graphify-out")
+        finalizer.finalize_merge(repo, "graphify-out")
     git(repo, "update-index", "--" + flag, "graphify-out/graph.json")
     before = preserved(repo)
     before_flags = git(repo, "ls-files", "-v", "--", "graphify-out").stdout
-    with pytest.raises(MergeFinalizeError, match="index flags"):
-        (cancel_merge if operation == "cancel" else finalize_merge)(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="index flags"):
+        (finalizer.cancel_merge if operation == "cancel" else finalizer.finalize_merge)(repo, "graphify-out")
     assert preserved(repo) == before
     assert git(repo, "ls-files", "-v", "--", "graphify-out").stdout == before_flags
-    assert _record_path(repo, "graphify-out").exists() is (operation == "cancel")
+    assert finalizer._record_path(repo, "graphify-out").exists() is (operation == "cancel")
 
 
 def stage_unprepared_bundle(repo):
-    sources = source_records_from_blobs(_source_blobs(repo, _entries(repo), "graphify-out"), "graphify-out")
+    sources = source_records_from_blobs(finalizer._source_blobs(repo, finalizer._entries(repo), "graphify-out"), "graphify-out")
     graph = {"directed": True, "multigraph": False, "graph": {},
              "nodes": [{"id": "invented", "label": "invented"}], "links": []}
     for name, payload in make_bundle(graph, sources, "graphify-out").items():
@@ -136,15 +133,15 @@ def stage_unprepared_bundle(repo):
 def test_guard_requires_current_prepared_bundle(kind):
     repo = guarded_repo()
     if kind != "unprepared":
-        finalize_merge(repo, "graphify-out")
+        finalizer.finalize_merge(repo, "graphify-out")
     if kind == "foreign-record":
-        record = _record_path(repo, "graphify-out")
+        record = finalizer._record_path(repo, "graphify-out")
         data = json.loads(record.read_bytes())
         data["receipt_digest"] = "0" * 64
         record.write_bytes(canonical_json(data))
     else:
         stage_unprepared_bundle(repo)
-    validate_index_bundle(repo, "graphify-out")  # Integrity alone is insufficient.
+    finalizer.validate_index_bundle(repo, "graphify-out")  # Integrity alone is insufficient.
     before = preserved(repo)
     with pytest.raises(MergeGuardError, match="finalization|prepared"):
         check_merge_commit("graphify-out", "pre-commit", root=repo)

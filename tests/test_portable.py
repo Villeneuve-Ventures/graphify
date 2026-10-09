@@ -355,8 +355,11 @@ def test_selected_git_revision_is_pinned(repository):
     assert snapshot.revision == prior
 
 
-@pytest.mark.parametrize("route", ["ordinary", "external", "detached"])
-def test_baseline_reader_rejects_portable_format(repository, monkeypatch, route):
+@pytest.mark.parametrize("route,role", [
+    ("ordinary", None), ("external", None),
+    ("detached", "ancestor"), ("detached", "current"), ("detached", "other"),
+])
+def test_baseline_reader_rejects_portable_format(repository, monkeypatch, route, role):
     checkout = Path(__file__).resolve().parents[1]
     source = git(checkout, "show", "3cecae9bed3f9cb02caa70788fae8faa583f8828:graphify/transaction.py")
     baseline = types.ModuleType("graphify_baseline_transaction")
@@ -365,13 +368,14 @@ def test_baseline_reader_rejects_portable_format(repository, monkeypatch, route)
     exec(compile(source, baseline.__file__, "exec"), baseline.__dict__)
     before, index = state(repository), (repository / ".git/index").read_bytes()
     path = repository / "graphify-out/graph.json"
-    with pytest.raises(baseline.PendingTransactionError):
+    reason = "managed watermark authority" if route == "external" else "unsupported.*watermark schema"
+    with pytest.raises(baseline.PendingTransactionError, match=reason):
         if route == "ordinary":
             baseline.open_graph_snapshot(path, purpose="compatibility")
         elif route == "external":
             baseline.open_external_graph_snapshot(path)
         else:
-            baseline.load_detached_merge_snapshot(path, role="ours")
+            baseline.load_detached_merge_snapshot(path, role=role)
     assert state(repository) == before
     assert (repository / ".git/index").read_bytes() == index
 

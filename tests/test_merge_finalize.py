@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from graphify import merge_finalize as finalizer, portable
+
 from tests.test_merge_commit_lifecycle import graph_repo, git, isolated_authority  # noqa: F401
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX manual finalization")
@@ -30,7 +32,6 @@ def test_source_limits_refuse_before_loading_excess_git_bytes(
     monkeypatch, sizes, source_limit, total_limit, graph_limit, expected_reads,
 ):
     import subprocess
-    from graphify import merge_finalize, portable
 
     repo = Path.home() / "source-objects"
     repo.mkdir()
@@ -52,7 +53,7 @@ def test_source_limits_refuse_before_loading_excess_git_bytes(
     monkeypatch.setattr(portable, "_MAX_BLOB", source_limit)
     monkeypatch.setattr(portable, "_MAX_TOTAL", total_limit)
     monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", str(graph_limit))
-    original = merge_finalize._git
+    original = finalizer._git
     reads = []
 
     def observe(root, *args, **kwargs):
@@ -61,9 +62,9 @@ def test_source_limits_refuse_before_loading_excess_git_bytes(
             reads.append((args[-1], len(result)))
         return result
 
-    monkeypatch.setattr(merge_finalize, "_git", observe)
-    with pytest.raises(merge_finalize.MergeFinalizeError, match="limit"):
-        merge_finalize._source_blobs(repo, entries, "graphify-out")
+    monkeypatch.setattr(finalizer, "_git", observe)
+    with pytest.raises(finalizer.MergeFinalizeError, match="limit"):
+        finalizer._source_blobs(repo, entries, "graphify-out")
     assert len(reads) == expected_reads
     assert [size for _oid, size in reads] == sizes[:expected_reads]
     assert (repo / ".git/index").read_bytes() == before_index
@@ -73,7 +74,6 @@ def test_source_limits_refuse_before_loading_excess_git_bytes(
 
 def test_source_limits_accept_exact_boundaries_and_ignore_unselected_git_objects(monkeypatch):
     import subprocess
-    from graphify import merge_finalize, portable
 
     repo = Path.home() / "source-objects"
     repo.mkdir()
@@ -89,7 +89,7 @@ def test_source_limits_accept_exact_boundaries_and_ignore_unselected_git_objects
     monkeypatch.setattr(portable, "_MAX_BLOB", 16)
     monkeypatch.setattr(portable, "_MAX_TOTAL", 32)
     monkeypatch.setenv("GRAPHIFY_MAX_GRAPH_BYTES", "32")
-    original = merge_finalize._git
+    original = finalizer._git
     reads = []
 
     def observe(root, *args, **kwargs):
@@ -98,15 +98,14 @@ def test_source_limits_accept_exact_boundaries_and_ignore_unselected_git_objects
             reads.append(args[-1])
         return result
 
-    monkeypatch.setattr(merge_finalize, "_git", observe)
-    assert merge_finalize._source_blobs(repo, entries, "graphify-out") == {
+    monkeypatch.setattr(finalizer, "_git", observe)
+    assert finalizer._source_blobs(repo, entries, "graphify-out") == {
         path: ("100644", payloads[path]) for path in ("a.py", "b.py")}
     assert reads == [entries[path][1] for path in ("a.py", "b.py")]
 
 
 def test_finalization_source_limit_refuses_before_blob_read_and_preserves_state(monkeypatch):
     import subprocess
-    from graphify import merge_finalize, portable
 
     repo = pending_repo()
     monkeypatch.setattr(portable, "_MAX_BLOB", 64)
@@ -119,7 +118,7 @@ def test_finalization_source_limit_refuses_before_blob_read_and_preserves_state(
     before_index = (repo / ".git/index").read_bytes()
     before_refs = git(repo, "show-ref").stdout
     before_merge_head = (repo / ".git/MERGE_HEAD").read_bytes()
-    original = merge_finalize._git
+    original = finalizer._git
     calls = []
 
     def observe(root, *args, **kwargs):
@@ -128,9 +127,9 @@ def test_finalization_source_limit_refuses_before_blob_read_and_preserves_state(
             calls.append((args[1], len(result)))
         return result
 
-    monkeypatch.setattr(merge_finalize, "_git", observe)
-    with pytest.raises(merge_finalize.MergeFinalizeError, match="limit|bounds"):
-        merge_finalize.finalize_merge(repo, "graphify-out")
+    monkeypatch.setattr(finalizer, "_git", observe)
+    with pytest.raises(finalizer.MergeFinalizeError, match="limit|bounds"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert calls == [("-s", 3)]
     assert (repo / ".git/index").read_bytes() == before_index
     assert {p.name: p.read_bytes() for p in output.iterdir() if p.is_file()} == before_output
@@ -141,11 +140,10 @@ def test_finalization_source_limit_refuses_before_blob_read_and_preserves_state(
 @pytest.mark.parametrize("staged", [False, True])
 def test_commit_refuses_output_conversion_added_after_finalization(staged):
     from graphify import hooks
-    from graphify.merge_finalize import finalize_merge
 
     repo = pending_repo()
     hooks.install(repo, merge_guard=True)
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     with (repo / ".gitattributes").open("a") as stream:
         stream.write("\ngraphify-out/*.json working-tree-encoding=UTF-16LE-BOM\n")
     if staged:
@@ -162,24 +160,23 @@ def test_commit_refuses_output_conversion_added_after_finalization(staged):
 
 @pytest.mark.parametrize("operation", ["finalize", "cancel", "guard"])
 def test_relocated_objects_refuse_without_changing_index(monkeypatch, operation):
-    from graphify.merge_finalize import MergeFinalizeError, cancel_merge, finalize_merge
     from graphify.merge_guard import MergeGuardError, check_merge_commit
 
     repo = pending_repo()
     if operation != "finalize":
-        finalize_merge(repo, "graphify-out")
+        finalizer.finalize_merge(repo, "graphify-out")
     external = Path.home() / "external-objects"
     external.mkdir()
     monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(external))
     monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(repo / ".git/objects"))
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises((MergeFinalizeError, MergeGuardError), match="object storage"):
+    with pytest.raises((finalizer.MergeFinalizeError, MergeGuardError), match="object storage"):
         if operation == "guard":
             check_merge_commit("graphify-out", "pre-commit", root=repo)
         elif operation == "cancel":
-            cancel_merge(repo, "graphify-out")
+            finalizer.cancel_merge(repo, "graphify-out")
         else:
-            finalize_merge(repo, "graphify-out")
+            finalizer.finalize_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
     assert list(external.iterdir()) == []
 
@@ -187,7 +184,6 @@ def test_relocated_objects_refuse_without_changing_index(monkeypatch, operation)
 @pytest.mark.parametrize("sibling", [".graphify_root", "notes.md"])
 def test_staged_deletion_cannot_hide_tracked_output_sibling(sibling):
     from graphify import hooks
-    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = graph_repo(Path.home(), manual=True)
     hooks.install(repo, merge_guard=True)
@@ -203,13 +199,12 @@ def test_staged_deletion_cannot_hide_tracked_output_sibling(sibling):
     git(repo, "add", "conflict.txt")
     git(repo, "update-index", "--force-remove", f"graphify-out/{sibling}")
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError, match="tracked output sibling"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="tracked output sibling"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
 
 
 def test_manual_finalization_records_readable_clone_and_preserves_worktree():
-    from graphify.merge_finalize import finalize_merge
     from graphify.portable import open_portable_graph_snapshot
 
     repo = pending_repo()
@@ -220,7 +215,7 @@ def test_manual_finalization_records_readable_clone_and_preserves_worktree():
     (repo / "main.py").write_text("def dirty():\n    return 99\n")
     (repo / "untracked.py").write_text("def untracked():\n    return 100\n")
     unrelated = git(repo, "ls-files", "--stage", "--", "conflict.txt").stdout
-    finalized = finalize_merge(repo, "graphify-out")
+    finalized = finalizer.finalize_merge(repo, "graphify-out")
     assert finalized
     assert git(repo, "ls-files", "--stage", "--", "conflict.txt").stdout == unrelated
     assert {p.relative_to(output): p.read_bytes() for p in output.rglob("*") if p.is_file()} == before
@@ -244,25 +239,23 @@ def test_manual_finalization_records_readable_clone_and_preserves_worktree():
 
 
 def test_identical_retry_preserves_index_and_changed_source_refuses():
-    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = pending_repo()
-    content = finalize_merge(repo, "graphify-out")
+    content = finalizer.finalize_merge(repo, "graphify-out")
     index = repo / ".git/index"
     before = index.read_bytes()
-    assert finalize_merge(repo, "graphify-out") == content
+    assert finalizer.finalize_merge(repo, "graphify-out") == content
     assert index.read_bytes() == before
     (repo / "main.py").write_text("def replacement():\n    return 9\n")
     git(repo, "add", "main.py")
     changed = index.read_bytes()
-    with pytest.raises(MergeFinalizeError):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert index.read_bytes() == changed
 
 
 @pytest.mark.parametrize("kind", ["alternate", "sparse", "split", "unmerged", "user-hook", "sibling", "locked"])
 def test_unsupported_states_refuse_without_publication(monkeypatch, kind):
-    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = pending_repo()
     if kind == "alternate":
@@ -287,15 +280,14 @@ def test_unsupported_states_refuse_without_publication(monkeypatch, kind):
     elif kind == "locked":
         (repo / ".git/index.lock").write_bytes(b"another owner")
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
     if kind == "locked":
         assert (repo / ".git/index.lock").read_bytes() == b"another owner"
 
 
 def test_input_change_during_preparation_preserves_concurrent_index(monkeypatch):
-    import graphify.merge_finalize as finalizer
 
     repo = pending_repo()
     original = finalizer._extract
@@ -314,11 +306,10 @@ def test_input_change_during_preparation_preserves_concurrent_index(monkeypatch)
 
 
 def test_premerge_portable_refused_manual_closure_validated():
-    from graphify.merge_finalize import finalize_merge
     from graphify.merge_guard import MergeGuardError, check_merge_commit
 
     repo = pending_repo()
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     check_merge_commit("graphify-out", "pre-commit", root=repo)
     with pytest.raises(MergeGuardError, match="automatic"):
         check_merge_commit("graphify-out", "pre-merge-commit", root=repo)
@@ -331,7 +322,6 @@ def test_premerge_portable_refused_manual_closure_validated():
 
 
 def test_publication_does_not_remove_next_writer_lock(monkeypatch):
-    import graphify.merge_finalize as finalizer
 
     repo = pending_repo()
     original = finalizer.os.replace
@@ -347,24 +337,22 @@ def test_publication_does_not_remove_next_writer_lock(monkeypatch):
 
 
 def test_intent_to_add_is_refused():
-    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = pending_repo()
     (repo / "intent.py").write_text("def intent():\n    pass\n")
     git(repo, "add", "--intent-to-add", "intent.py")
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError, match="intent-to-add"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="intent-to-add"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
 
 
 def test_orphan_envelope_guard_refuses_without_mutation():
     from graphify import hooks
-    from graphify.merge_finalize import finalize_merge
 
     repo = pending_repo()
     hooks.install(repo, merge_guard=True)
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     git(repo, "update-index", "--force-remove", "graphify-out/graph.json")
     from graphify.merge_guard import MergeGuardError, check_merge_commit
     before = (repo / ".git/index").read_bytes()
@@ -379,29 +367,27 @@ def test_orphan_envelope_guard_refuses_without_mutation():
 
 
 def test_abort_keeps_complete_bundle_until_git_cancels():
-    from graphify.merge_finalize import MergeFinalizeError, cancel_merge, finalize_merge, validate_index_bundle
 
     repo = pending_repo()
-    content = finalize_merge(repo, "graphify-out")
-    assert validate_index_bundle(repo, "graphify-out").content_id == content
-    cancel_merge(repo, "graphify-out")
+    content = finalizer.finalize_merge(repo, "graphify-out")
+    assert finalizer.validate_index_bundle(repo, "graphify-out").content_id == content
+    finalizer.cancel_merge(repo, "graphify-out")
     git(repo, "merge", "--abort")
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError, match="uncommitted"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="uncommitted"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
 
 
 def test_frozen_python_relations_keep_declared_endpoints():
-    from graphify.merge_finalize import finalize_merge, validate_index_bundle
 
     repo = pending_repo()
     (repo / "relations.py").write_text(
         "import os\nclass Base:\n    def method(self):\n        return os.getcwd()\n"
         "class Child(Base):\n    def call(self):\n        return self.method()\n")
     git(repo, "add", "relations.py")
-    finalize_merge(repo, "graphify-out")
-    snapshot = validate_index_bundle(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
+    snapshot = finalizer.validate_index_bundle(repo, "graphify-out")
     identities = {node["id"] for node in snapshot.data["nodes"]}
     links = snapshot.data["links"]
     assert links
@@ -410,26 +396,24 @@ def test_frozen_python_relations_keep_declared_endpoints():
 
 
 def test_cancel_preserves_unrelated_current_staging_and_flags():
-    from graphify.merge_finalize import cancel_merge, finalize_merge
 
     repo = pending_repo()
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     (repo / "main.py").write_text("def after_preparation():\n    return 12\n")
     git(repo, "add", "main.py")
     git(repo, "update-index", "--assume-unchanged", "conflict.txt")
     before = git(repo, "ls-files", "--debug", "--", "main.py", "conflict.txt").stdout
-    cancel_merge(repo, "graphify-out")
+    finalizer.cancel_merge(repo, "graphify-out")
     assert git(repo, "ls-files", "--debug", "--", "main.py", "conflict.txt").stdout == before
     assert git(repo, "show", ":graphify-out/graph.json").stdout == (repo / "graphify-out/graph.json").read_text()
 
 
 @pytest.mark.parametrize("kind", ["malformed-record", "symlink-record", "changed-bundle"])
 def test_cancel_refuses_changed_or_foreign_state_without_index_changes(kind):
-    from graphify.merge_finalize import MergeFinalizeError, _record_path, cancel_merge, finalize_merge
 
     repo = pending_repo()
-    finalize_merge(repo, "graphify-out")
-    record = _record_path(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
+    record = finalizer._record_path(repo, "graphify-out")
     if kind == "malformed-record":
         record.write_bytes(b"{}")
     elif kind == "symlink-record":
@@ -440,13 +424,12 @@ def test_cancel_refuses_changed_or_foreign_state_without_index_changes(kind):
         oid = git(repo, "rev-parse", "HEAD:base.py").stdout.strip()
         git(repo, "update-index", "--cacheinfo", f"100644,{oid},graphify-out/manifest.json")
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError):
-        cancel_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError):
+        finalizer.cancel_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
 
 
 def test_interrupted_record_retries_exact_preparation(monkeypatch):
-    import graphify.merge_finalize as finalizer
 
     repo = pending_repo()
     original = finalizer.os.replace
@@ -468,7 +451,6 @@ def test_interrupted_record_retries_exact_preparation(monkeypatch):
 
 
 def test_output_filter_is_refused_without_executing_it():
-    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = pending_repo()
     marker = repo / "filter-was-invoked"
@@ -483,28 +465,26 @@ def test_output_filter_is_refused_without_executing_it():
     git(repo, "config", "filter.probe.clean", str(script))
     assert not marker.exists()
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError, match="filters"):
-        finalize_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="filters"):
+        finalizer.finalize_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before
     assert not marker.exists()
 
 
 def test_output_symlink_cannot_borrow_local_authority():
-    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = pending_repo()
     (repo / "alias").symlink_to(repo / "graphify-out", target_is_directory=True)
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError, match="aliases"):
-        finalize_merge(repo, "alias")
+    with pytest.raises(finalizer.MergeFinalizeError, match="aliases"):
+        finalizer.finalize_merge(repo, "alias")
     assert (repo / ".git/index").read_bytes() == before
 
 
 def test_cancel_does_not_read_unrelated_filter_sources():
-    from graphify.merge_finalize import cancel_merge, finalize_merge
 
     repo = pending_repo()
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     marker = repo / "unrelated-filter-invoked"
     script = repo / ".git/filter.sh"
     script.write_text("#!/bin/sh\ntouch " + str(marker) + "\ncat\n")
@@ -515,14 +495,13 @@ def test_cancel_does_not_read_unrelated_filter_sources():
     git(repo, "add", ".gitattributes")
     (repo / "main.py").write_text("def dirty_unrelated():\n    return 77\n")
     before = git(repo, "ls-files", "--stage", "--", "main.py", ".gitattributes").stdout
-    cancel_merge(repo, "graphify-out")
+    finalizer.cancel_merge(repo, "graphify-out")
     assert git(repo, "ls-files", "--stage", "--", "main.py", ".gitattributes").stdout == before
     assert not marker.exists()
 
 
 def test_repository_identity_change_during_preparation_refuses(monkeypatch):
     import shutil
-    import graphify.merge_finalize as finalizer
 
     repo = pending_repo()
     index_bytes = (repo / ".git/index").read_bytes()
@@ -541,7 +520,6 @@ def test_repository_identity_change_during_preparation_refuses(monkeypatch):
 
 
 def test_changed_effective_prehook_selector_refuses(monkeypatch):
-    import graphify.merge_finalize as finalizer
 
     repo = pending_repo()
     original = finalizer._extract
@@ -563,15 +541,14 @@ def test_changed_effective_prehook_selector_refuses(monkeypatch):
 
 @pytest.mark.parametrize("profile", ["sparse", "split"])
 def test_cancel_refuses_new_unsupported_index_profile(profile):
-    from graphify.merge_finalize import MergeFinalizeError, cancel_merge, finalize_merge
 
     repo = pending_repo()
-    finalize_merge(repo, "graphify-out")
+    finalizer.finalize_merge(repo, "graphify-out")
     if profile == "sparse":
         git(repo, "config", "core.sparseCheckout", "true")
     else:
         git(repo, "update-index", "--split-index")
     before = (repo / ".git/index").read_bytes()
-    with pytest.raises(MergeFinalizeError, match="unsupported"):
-        cancel_merge(repo, "graphify-out")
+    with pytest.raises(finalizer.MergeFinalizeError, match="unsupported"):
+        finalizer.cancel_merge(repo, "graphify-out")
     assert (repo / ".git/index").read_bytes() == before

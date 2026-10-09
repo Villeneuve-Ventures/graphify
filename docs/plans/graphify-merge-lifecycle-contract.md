@@ -131,7 +131,13 @@ with sorted keys and compact separators. Duplicate keys, unknown schema fields,
 non-finite numbers, lone surrogates, invalid field types, and noncanonical metadata
 bytes refuse. Metadata fields use bounded integers, not floats. Graph attributes
 may contain finite floats. Paths are canonical relative POSIX paths; aliases,
-traversal, case/Unicode-normalization collisions and unsupported path forms refuse. Inventories are
+traversal, case/Unicode-normalization collisions and unsupported path forms refuse.
+Every tracked path, including non-Python files, must avoid aliases of the output
+directory and its parents. The complete serialized Git tree inventory is limited
+to 8 MiB; preparation includes the prospective three-file closure in that check.
+Each metadata artifact is limited to 8 MiB, and the combined portable closure to
+256 MiB. The producer's bundle validation checks all object sizes before reading
+any artifact. Inventories are
 sorted by path. Content identity is SHA-256 of `graphify.portable.v1` followed by
 a NUL byte and the canonical envelope without `content_id`. The envelope excludes
 itself from its artifact list; the graph does not embed this content identifier.
@@ -211,6 +217,8 @@ standalone Graphify merge-guard prehooks are required; install them with
 `graphify hook install --merge-guard`. Foreign user prehooks refuse. Executable
 managed posthook sections must match the current portable-aware implementation;
 optional absent or nonexecutable posthooks do not launch rebuilding.
+Guard installation uses one canonical output selector for all coupled hooks,
+including when the configured selector has trailing slashes.
 Hook inputs are rechecked before publication. Finalization rebuilds from frozen
 Python blobs through the existing strict Python AST extractor, stages exact
 prepared blobs without filters, and preserves unrelated index entries.
@@ -226,6 +234,10 @@ Case-aliased portable envelopes refuse at the ordinary merge guard boundary.
 Publication is index-only. No local graph, receipt or coordination is rewritten.
 Post-events verify committed portable output and suppress the legacy rebuild
 route for that operation while continuing preserved user hook commands.
+The observer runs before linked-worktree legacy rebuild suppression. Without an
+envelope, it scans the committed graph for the portable marker through EOF using
+bounded buffers, without materializing node and edge collections. Input, token,
+nesting and transport limits refuse observation when exceeded.
 Ordinary pre-commit checks with staged portable authority require a valid bundle
 for the staged Python projection and unchanged output conversion rules. A source
 change without a matching bundle refuses; this adds no portable refresh route.
