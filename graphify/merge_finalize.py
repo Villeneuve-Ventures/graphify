@@ -211,13 +211,15 @@ def _source_blobs(root: Path, entries: Mapping[str, tuple[str, str]], output: st
 def validate_index_bundle(root: Path, output: str, *, revision: str | None = None):
     """Validate portable closure against exact index or committed-tree objects."""
     from graphify.portable import (PORTABLE_FILE, _MAX_METADATA, _MAX_TOTAL,
-                                   _validate_tree_inventory, source_records_from_blobs,
+                                   _validate_ancestor_authority, _validate_tree_inventory, source_records_from_blobs,
                                    validate_bundle)
 
     _require_local_object_storage()
     output = _output_selector(output)
     entries = _entries(root, revision)
     _validate_tree_inventory(entries, output)
+    _validate_ancestor_authority(entries, output,
+                                 lambda oid, limit: _blob(root, oid, max_bytes=limit))
     selected = {p[len(output) + 1:]: value for p, value in entries.items()
                 if p.startswith(output + "/")}
     if set(selected) != {"graph.json", "manifest.json", PORTABLE_FILE}:
@@ -540,6 +542,52 @@ def _check_record(root, record, output, state, admission):
         raise MergeFinalizeError("private finalization record lacks the admitted pending predecessor")
 
 
+def _prior_object_root(root: Path, record):
+    """Bind a shared GC root to this worktree's exact private preparation."""
+    from graphify.portable import canonical_json
+
+    # Collection can run from another worktree and does not retain arbitrary
+    # refs/worktree trees. The full record includes the owning Git identity.
+    ref = "refs/graphify/merge-finalize/" + hashlib.sha256(canonical_json(record)).hexdigest()
+    tree = b"".join(
+        f"{entry[0]} {name}".encode() + b"\0" + bytes.fromhex(entry[1])
+        for name, entry in sorted(record["prior_entries"].items()) if entry is not None
+    )
+    oid = _git(root, "hash-object", "-t", "tree", "--stdin", input=tree).decode().strip()
+    return ref, oid, tree
+
+
+def _retained_prior_objects(root: Path, record) -> bool:
+    """Inspect a retention root without accepting symbolic or foreign refs."""
+    ref, oid, _tree = _prior_object_root(root, record)
+    current = _git(root, "for-each-ref", "--count=2",
+                   "--format=%(refname)%00%(objectname)%00%(symref)", ref, max_bytes=1024)
+    if not current:
+        return False
+    if current != f"{ref}\0{oid}\0\n".encode():
+        raise MergeFinalizeError("saved-output retention root changed or is foreign")
+    return True
+
+
+def _retain_prior_objects(root: Path, record) -> None:
+    """Pin all saved blobs before replacing the index that currently retains them."""
+    if _retained_prior_objects(root, record):
+        return
+    for entry in record["prior_entries"].values():
+        if entry is not None and _git(root, "cat-file", "-t", entry[1]).strip() != b"blob":
+            raise MergeFinalizeError("saved output is not a regular Git blob")
+    ref, oid, tree = _prior_object_root(root, record)
+    _git(root, "hash-object", "-w", "-t", "tree", "--stdin", input=tree)
+    _git(root, "update-ref", "--no-deref", ref, oid, "0" * len(oid))
+
+
+def _release_prior_objects(root: Path, record) -> None:
+    """Release only the exact root after the restored index retains the blobs."""
+    if _retained_prior_objects(root, record):
+        ref, oid, _tree = _prior_object_root(root, record)
+        _git(root, "update-ref", "--no-deref", "-d", ref, oid)
+
+
 def _index_identity(info):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
@@ -550,6 +598,11 @@ def _replace_index(root, output, index, info, frozen, state, admission, candidat
     lock_info = os.fstat(fd)
     published = False
     try:
+        # The replacement takes the lock file's metadata. Preserve the admitted
+        # index's group and access mode instead of publishing private mode0600.
+        if lock_info.st_gid != info.st_gid:
+            os.fchown(fd, -1, info.st_gid)
+        os.fchmod(fd, stat.S_IMODE(info.st_mode))
         if (_git_identity(root) != git_identity or _index_identity(index.lstat()) != _index_identity(info) or index.read_bytes() != frozen
                 or _merge_state(root) != state or _admit(root, output, state)[1] != admission):
             raise MergeFinalizeError("finalizer inputs changed before index publication")
@@ -682,6 +735,8 @@ def validate_prepared_merge(root: Path, output: str) -> None:
         raise MergeFinalizeError("portable staged bundle lacks its private finalization record")
     record = captured[0]
     _check_record(root, record, output, state, admission)
+    if not _retained_prior_objects(root, record):
+        raise MergeFinalizeError("saved-output retention root is missing; cancel preparation before retrying")
     selected = {p[len(output) + 1:]: list(value) for p, value in _entries(root).items()
                 if p.startswith(output + "/")}
     if selected != record["prepared_entries"] or snapshot.content_id != record["content_id"]:
@@ -690,7 +745,7 @@ def validate_prepared_merge(root: Path, output: str) -> None:
 
 def finalize_merge(root: Path, output: str) -> str:
     """Stage a validated portable closure; do not commit or rewrite local output."""
-    from graphify.portable import (PORTABLE_FILE, _validate_tree_inventory, make_bundle,
+    from graphify.portable import (PORTABLE_FILE, _validate_ancestor_authority, _validate_tree_inventory, make_bundle,
                                    source_records_from_blobs, validate_bundle)
 
     root = root.absolute()
@@ -721,6 +776,8 @@ def finalize_merge(root: Path, output: str) -> str:
         prospective.update({f"{output}/{name}": ("100644", "0" * len(state[0]))
                             for name in closure})
         _validate_tree_inventory(prospective, output)
+        _validate_ancestor_authority(prospective, output,
+                                     lambda oid, limit: _blob(root, oid, max_bytes=limit))
         payload, admission = _admit(root, output, state)
         record_path = _record_path(root, output)
         captured_record = _read_record(record_path)
@@ -732,6 +789,8 @@ def finalize_merge(root: Path, output: str) -> str:
             if captured_record is None:
                 raise MergeFinalizeError("prepared output lacks this operation's private finalization record")
             validate_index_bundle(root, output)
+            if not _retained_prior_objects(root, captured_record[0]):
+                raise MergeFinalizeError("saved-output retention root is missing; cancel preparation before retrying")
             # A retry still needs unchanged merge operands and live pending
             # authority. Recompute exact extraction below before accepting it.
         elif selected.get("graph.json") is None or _blob(root, selected["graph.json"][1]) != payload:
@@ -774,6 +833,10 @@ def finalize_merge(root: Path, output: str) -> str:
                     _write_record(record_path, record)
                 elif not _same_record(record_path, captured_record):
                     raise MergeFinalizeError("private finalization record changed")
+                # The original index still roots the saved objects until this
+                # record and its GC root are complete. An interruption leaves
+                # a discoverable record with no unowned retention ref.
+                _retain_prior_objects(root, record)
             _replace_index(root, output, index, info, frozen, state, admission, candidate, before_publish, git_identity)
         return snapshot.content_id
     except (MergeGuardError, transaction.PendingTransactionError, OSError, ValueError,
@@ -825,7 +888,13 @@ def cancel_merge(root: Path, output: str) -> None:
                 _output_attributes(root, output)
                 if not _same_record(path, captured):
                     raise MergeFinalizeError("private finalization record changed")
+                # Cancellation may recover a missing root only after the
+                # admitted graph and every saved object were read above.
+                _retain_prior_objects(root, record)
             _replace_index(root, output, index, info, frozen, state, admission, candidate, before_publish, git_identity)
+            if not _same_record(path, captured):
+                raise MergeFinalizeError("private finalization record changed; retention root retained")
+            _release_prior_objects(root, record)
             _remove_record(path, captured)
     except (MergeGuardError, transaction.PendingTransactionError, OSError, ValueError,
             subprocess.SubprocessError) as exc:

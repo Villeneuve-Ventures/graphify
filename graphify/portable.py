@@ -5,7 +5,7 @@ projection. It grants no local publication authority or extraction trust.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 import hashlib
@@ -153,6 +153,51 @@ def _validate_tree_inventory(entries: Mapping[str, tuple[str, str]], output: str
             original = prefixes.get(_alias_key(prefix))
             if original is not None and (prefix != original or depth == len(parts)):
                 _fail("repository path collides with a portable output directory")
+
+
+def _validate_ancestor_authority(
+    entries: Mapping[str, tuple[str, str]], output: str,
+    read_blob: Callable[[str, int], bytes],
+) -> None:
+    """Refuse Git ancestors that the filesystem reader would treat as managed.
+
+    Infer immediate child directories from descendant paths. Only selected
+    ancestor graph blobs are read; working-copy authority is a separate check.
+    """
+    from graphify.security import _max_graph_file_bytes
+
+    _path(output)
+    parts = output.split("/")
+    for depth in range(len(parts)):
+        parent = "/".join(parts[:depth])
+        prefix = parent + "/" if parent else ""
+        graphs: dict[str, tuple[str, str] | None] = {}
+        for path, entry in entries.items():
+            if not path.startswith(prefix):
+                continue
+            name, separator, _rest = path[len(prefix):].partition("/")
+            if tx._portable_authority_name(name) or tx._coordination_name(name):
+                _fail("portable output is nested beneath managed ancestor authority")
+            if name.casefold() == "graph.json":
+                graphs[name] = None if separator else entry
+        if not graphs:
+            continue
+        if len(graphs) != 1:
+            _fail("destination graph authority is ambiguous in portable ancestor")
+        entry = next(iter(graphs.values()))
+        if entry is None or entry[0] not in {"100644", "100755"}:
+            _fail("unsafe non-regular graph authority in portable ancestor")
+        limit = _max_graph_file_bytes()
+        payload = read_blob(entry[1], limit)
+        if len(payload) > limit:
+            _fail("ancestor graph authority exceeds reader limit")
+        try:
+            graph = json.loads(payload.decode("utf-8"))
+            managed = tx._managed_graph_authority(graph)
+        except (UnicodeDecodeError, json.JSONDecodeError, tx.PendingTransactionError) as exc:
+            raise PortableGraphError("destination graph authority is malformed in portable ancestor") from exc
+        if managed:
+            _fail("portable output is nested beneath managed ancestor authority")
 
 
 def _source_records(sources: Sequence[Mapping[str, Any]], output: str) -> tuple[dict[str, str], ...]:

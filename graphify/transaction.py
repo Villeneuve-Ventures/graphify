@@ -7265,9 +7265,14 @@ def _validate_receipt_locked(
     return receipt, digest, inventory
 
 
+def _portable_authority_name(name: str) -> bool:
+    """Classify an immediate child name without interpreting its contents."""
+    return name.casefold() == PORTABLE_ENVELOPE_FILE
+
+
 def _portable_authority_present(capability: OutputCapability) -> bool:
     """Presence reserves the namespace, even for malformed or orphaned envelopes."""
-    return any(name.casefold() == PORTABLE_ENVELOPE_FILE for name in _list_entries(capability))
+    return any(_portable_authority_name(name) for name in _list_entries(capability))
 
 
 def _reject_portable_authority(capability: OutputCapability) -> None:
@@ -7293,24 +7298,34 @@ def _reject_portable_path(path: Path) -> None:
             continue
 
 
+_COORDINATION_NAMES = frozenset(name.casefold() for name in _COORDINATION_FILES)
+_COORDINATION_NAME_PREFIXES = tuple(name.casefold() for name in _COORDINATION_PREFIXES) + (
+    ".graphify-prepare-",
+    ".graphify-retired-",
+    ".graphify-gc-root-",
+    ".graphify-gc-journal-",
+    ".graphify-gc-quarantine-",
+)
+
+
+def _coordination_name(name: str) -> bool:
+    """Recognize the same exact names and prefixes for files or directories."""
+    folded = name.casefold()
+    return folded in _COORDINATION_NAMES or folded.startswith(_COORDINATION_NAME_PREFIXES)
+
+
 def _coordination_present(
     capability: OutputCapability, *, ignored_names: frozenset[str] = frozenset()
 ) -> bool:
-    files = {name.casefold() for name in _COORDINATION_FILES}
-    prefixes = tuple(name.casefold() for name in _COORDINATION_PREFIXES) + (
-        ".graphify-prepare-",
-        ".graphify-retired-",
-        ".graphify-gc-root-",
-        ".graphify-gc-journal-",
-        ".graphify-gc-quarantine-",
-    )
-    for name in _list_entries(capability):
-        if name in ignored_names:
-            continue
-        folded = name.casefold()
-        if folded in files or folded.startswith(prefixes):
-            return True
-    return False
+    return any(name not in ignored_names and _coordination_name(name)
+               for name in _list_entries(capability))
+
+
+def _managed_graph_authority(graph: Any) -> bool:
+    """A malformed graph refuses; any watermark member establishes authority."""
+    if not isinstance(graph, dict) or not isinstance(graph.get("graph", {}), dict):
+        raise PendingTransactionError("destination graph authority is malformed")
+    return GRAPH_WATERMARK_KEY in graph.get("graph", {})
 
 
 def _managed_authority_present(
@@ -7337,9 +7352,7 @@ def _managed_authority_present(
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("destination graph authority is malformed") from exc
-    if not isinstance(graph, dict) or not isinstance(graph.get("graph", {}), dict):
-        raise PendingTransactionError("destination graph authority is malformed")
-    return GRAPH_WATERMARK_KEY in graph.get("graph", {})
+    return _managed_graph_authority(graph)
 
 
 def managed_output_containing(path: Path | str) -> Path | None:

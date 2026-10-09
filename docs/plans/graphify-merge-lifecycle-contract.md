@@ -210,7 +210,9 @@ staging a deletion does not remove that admission requirement.
 Only the default full index on POSIX is admitted initially. Alternate, sparse,
 split and unresolved indexes refuse. Output entries marked `assume-unchanged`
 or `skip-worktree` refuse preparation and cancellation without clearing their
-flags; unrelated index flags remain unchanged. `GIT_OBJECT_DIRECTORY` and
+flags; unrelated index flags remain unchanged. Preparation and cancellation
+preserve the existing index access mode and group when replacing it. A failure
+to preserve that metadata refuses before index publication. `GIT_OBJECT_DIRECTORY` and
 `GIT_ALTERNATE_OBJECT_DIRECTORIES` also refuse, so normal index entries cannot
 depend on temporary object-storage environment settings. Both current executable
 standalone Graphify merge-guard prehooks are required; install them with
@@ -241,6 +243,12 @@ nesting and transport limits refuse observation when exceeded.
 Ordinary pre-commit checks with staged portable authority require a valid bundle
 for the staged Python projection and unchanged output conversion rules. A source
 change without a matching bundle refuses; this adds no portable refresh route.
+Publication also applies the reader's ancestor-authority rules to the indexed
+or committed namespace: coordination names and prefixes, portable envelopes,
+and ancestor graph authority must not make a fresh clone unreadable. Implicit
+tracked directories participate in this check. Untracked local authority is
+not an input to this prospective-tree check; the working-copy reader checks it
+separately.
 The producing checkout may therefore retain pending
 or conflicting local authority; report that condition separately and use a fresh
 clone for portable reading. Reconciliation failure cannot undo a recorded commit.
@@ -253,6 +261,17 @@ working-tree content. A bounded preparation record under Git's per-worktree
 administrative directory binds those entries to the selected merge and prepared
 bundle. The complete record is flushed and published atomically without replacing
 an existing record; an interrupted partial write cannot become retry authority.
+Before replacing the index, preparation also retains every saved output blob
+through a Git tree under `refs/graphify/merge-finalize/`. Its name binds the exact
+private record, including worktree identity. The ref is shared so garbage
+collection from another worktree retains those objects. The private record is
+published first, while the original index still retains them. Cancellation
+restores the index before deleting only the matching ref and record. A missing
+ref can be recovered during cancellation only after all saved blobs, the pending
+digest, and the current record have been validated; a foreign ref refuses.
+Identical prepared retries and commit guards require the matching retention ref.
+Successful commits retain the existing private record and its ref for deferred
+local reconciliation; read-only post-event observation does not remove them.
 It grants no local graph authority. The operator can then use ordinary
 `git merge --abort`; unrelated worktree changes may still require resolution.
 Plain Git abort may refuse
