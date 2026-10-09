@@ -1,4 +1,4 @@
-"""Read-only containment for tracked pending graphs at ordinary merge commits.
+"""Read-only containment for tracked merge graphs and staged portable commits.
 
 Git supplies the effective index through its environment; no working-tree
 graph is opened. Explicit portable manual publication validates its closure.
@@ -18,7 +18,7 @@ _EVENTS = ("pre-commit", "pre-merge-commit")
 
 
 class MergeGuardError(RuntimeError):
-    """The selected staged graph cannot safely pass ordinary merge containment."""
+    """The selected staged graph cannot safely pass commit containment."""
 
 
 def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
@@ -60,9 +60,10 @@ def check_merge_commit(output: str, event: str, *, root: Path = Path("."),
                        entry_header: str | None = None) -> None:
     """Reject a pending staged graph without changing Git or Graphify state.
 
-Only ordinary merge boundaries are covered. Valid legacy/active graphs are
-not qualified here; passing this guard does not establish clone readability.
-"""
+    Ordinary merges and commits with staged portable envelopes are covered.
+    Valid legacy/active graphs are not qualified here; passing this guard does
+    not establish clone readability.
+    """
     if event not in _EVENTS:
         raise MergeGuardError("unsupported merge guard event")
     if entry_header is not None and event != "pre-merge-commit":
@@ -73,15 +74,15 @@ not qualified here; passing this guard does not establish clone readability.
     for name in ("rebase-merge", "rebase-apply", "sequencer", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
         if os.path.lexists(_git_path(root, name)):
             return
-    if event == "pre-commit" and not os.path.lexists(_git_path(root, "MERGE_HEAD")):
-        return
+    ordinary_commit = event == "pre-commit" and not os.path.lexists(_git_path(root, "MERGE_HEAD"))
     relative = PurePosixPath(output)
     if (not output or relative.is_absolute() or ".." in relative.parts
             or "\\" in output or "\x00" in output or relative == PurePosixPath(".")):
         raise MergeGuardError("merge guard requires a repository-relative output")
     graph = (relative / "graph.json").as_posix()
     from graphify.portable import PORTABLE_FILE
-    from graphify.merge_finalize import MergeFinalizeError, validate_prepared_merge
+    from graphify.merge_finalize import (MergeFinalizeError, _output_attributes,
+                                        validate_index_bundle, validate_prepared_merge)
 
     output_entries = _git(root, "ls-files", "--stage", "-z", "--",
                           f":(top,literal,icase){relative.as_posix()}")
@@ -94,14 +95,20 @@ not qualified here; passing this guard does not establish clone readability.
         if os.fsdecode(raw_path).casefold() == os.fsdecode(expected_path).casefold():
             portable_paths.append(raw_path)
     if any(path != expected_path for path in portable_paths):
-        raise MergeGuardError("case-aliased portable envelope is unsupported; merge commit refused")
+        raise MergeGuardError("case-aliased portable envelope is unsupported; commit refused")
     if portable_paths:
         if event == "pre-merge-commit":
             raise MergeGuardError("automatic portable finalization is unsupported; use a manual merge")
         try:
-            validate_prepared_merge(root, relative.as_posix())
+            if ordinary_commit:
+                _output_attributes(root, relative.as_posix())
+                validate_index_bundle(root, relative.as_posix())
+            else:
+                validate_prepared_merge(root, relative.as_posix())
         except (MergeFinalizeError, OSError, ValueError, RuntimeError) as exc:
             raise MergeGuardError(f"portable staged bundle refused: {exc}") from exc
+        return
+    if ordinary_commit:
         return
     if entry_header == "":
         # The shell reached this classifier for output siblings without a graph.

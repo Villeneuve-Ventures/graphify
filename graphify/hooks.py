@@ -477,8 +477,11 @@ fi
 _PORTABLE_POST_EVENT_GUARD = """\
 # A committed portable output is authoritative only through its recorded tree.
 # Postevents observe that tree and leave pending local reconciliation explicit.
-"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_finalize --observe --output "$GRAPHIFY_OUT"
-_GFY_PORTABLE_STATUS=$?
+if "$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_finalize --observe --output "$GRAPHIFY_OUT"; then
+    _GFY_PORTABLE_STATUS=0
+else
+    _GFY_PORTABLE_STATUS=$?
+fi
 if [ "$_GFY_PORTABLE_STATUS" != "0" ]; then
     if [ "$_GFY_PORTABLE_STATUS" != "10" ]; then
         echo "[graphify hook] portable observation failed; rebuild suppressed" >&2
@@ -490,6 +493,8 @@ fi
 
 _HOOK_SCRIPT = """\
 # graphify-hook-start
+# Keep managed exit paths inside this section, preserving composed user hooks.
+(
 # Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
 # Installed by: graphify hook install
 
@@ -544,12 +549,15 @@ _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify hook] launching background rebuild (log: $_GRAPHIFY_LOG)"
-""" + _detached_launch(_REBUILD_BODY_COMMIT) + """# graphify-hook-end
+""" + _detached_launch(_REBUILD_BODY_COMMIT) + """\n)
+# graphify-hook-end
 """
 
 
 _CHECKOUT_SCRIPT = """\
 # graphify-checkout-hook-start
+# Keep managed exit paths inside this section, preserving composed user hooks.
+(
 # Auto-rebuilds the knowledge graph (code only) when switching branches.
 # Installed by: graphify hook install
 
@@ -605,12 +613,15 @@ _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify] Branch switched - launching background rebuild (log: $_GRAPHIFY_LOG)"
-""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """# graphify-checkout-hook-end
+""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """\n)
+# graphify-checkout-hook-end
 """
 
 
 _POST_MERGE_SCRIPT = """\
 # graphify-post-merge-hook-start
+# Keep managed exit paths inside this section, preserving composed user hooks.
+(
 # Finalizes a merge-driver union after Git creates a merge commit.
 # Installed by: graphify hook install
 
@@ -645,7 +656,8 @@ _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify] Merge completed - launching background rebuild (log: $_GRAPHIFY_LOG)"
-""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """# graphify-post-merge-hook-end
+""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """\n)
+# graphify-post-merge-hook-end
 """
 
 
@@ -1280,7 +1292,12 @@ done
 """
     if name == "pre-commit":
         script += """_GFY_MERGE_HEAD=$(git rev-parse --git-path MERGE_HEAD) || exit 1
-if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
+if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then
+    # Ordinary legacy commits need no runtime. A staged portable envelope must
+    # still match the complete staged source projection before Git records it.
+    _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
+    [ -n "$_GFY_ENVELOPE" ] || exit 0
+fi
 """
     script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
 _GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --raw --no-abbrev -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1

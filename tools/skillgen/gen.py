@@ -2344,18 +2344,18 @@ def _validate_provider_push_order(text: str) -> str | None:
 _PORTABLE_NAMESPACE_MIGRATION = '''**Portable namespace — before ordinary setup:** After the explicit managed-workspace branch, check whether `graphify-out/.graphify_portable.json` has a directory entry, including a dangling symlink, before ordinary bootstrap or checking `graph.json`. Envelope presence reserves the namespace even when malformed or orphaned. For `/graphify query` or a natural-language question, jump to the **Portable query** branch below. Only query is supported; `path`, `explain`, and `affected` are unsupported. Do not reinterpret an explicit build or rebuild as a query: report that the requested ordinary operation is unsupported for this portable output and stop without writes. Skip Step 1 and all ordinary output writes for this namespace. If no envelope entry exists, retain the ordinary flow below.
 
 '''
-_PORTABLE_QUERY_MIGRATION = '''**Portable query — check before ordinary preflight:** Check for a directory entry at `graphify-out/.graphify_portable.json`, including a dangling symlink, even when graph.json is absent or the envelope is malformed or orphaned. When present, only query is supported; report `path`, `explain`, and `affected` as unsupported and stop. Use a compatible trusted installed runtime with cache suppression set before import:
+_PORTABLE_QUERY_MIGRATION = """**Portable query — check before ordinary preflight:** Check for a directory entry at `graphify-out/.graphify_portable.json`, including a dangling symlink, even when graph.json is absent or the envelope is malformed or orphaned. When present, only query is supported; report `path`, `explain`, and `affected` as unsupported and stop. Use a compatible trusted installed runtime with cache suppression set before import:
 
 ```@@GRAPHIFY_SHELL@@
 @@GRAPHIFY_GUARD@@
-@@GRAPHIFY_CMD@@ query "QUESTION" --portable --output graphify-out --revision HEAD
+@@GRAPHIFY_CMD@@ query 'QUESTION' --portable --output graphify-out --revision HEAD
 ```
 
-Replace `QUESTION` with the user's original question; preserve requested `--dfs` and `--budget` options. The public portable CLI owns envelope, committed-tree, source, and byte validation. If no compatible trusted installed runtime is available, report it as a prerequisite and stop without installation or output writes. Do not run Step 1, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, or memory writes. A refusal never permits these operations. Answer only from admitted CLI output and cite its source locations. Stop after reporting the answer or refusal; preserve the three-file portable closure.
+Replace the complete `'QUESTION'` placeholder argument with one shell-safe literal for the user's original question, not raw text between quotes. For POSIX shells, use `shlex.quote(question)`; for PowerShell, use a single-quoted literal and double each embedded apostrophe. Never paste question text into double-quoted command source. Preserve requested `--dfs` and `--budget` options. The public portable CLI owns envelope, committed-tree, source, and byte validation. If no compatible trusted installed runtime is available, report it as a prerequisite and stop without installation or output writes. Do not run Step 1, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, or memory writes. A refusal never permits these operations. Answer only from admitted CLI output and cite its source locations. Stop after reporting the answer or refusal; preserve the three-file portable closure.
 
 **Ordinary graph — only when no portable envelope entry exists:** Continue with the existing flow below.
 
-'''
+"""
 
 
 def _normalise_portable_monolith_routing(

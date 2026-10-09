@@ -4941,7 +4941,10 @@ def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
         assert "save-result" in portable_branch
         assert "Stop after" in portable_branch
         block = _block_containing(portable_branch, '--portable --output graphify-out --revision HEAD')
-        assert '-E -P -B -m graphify query "QUESTION" --portable' in block
+        assert "-E -P -B -m graphify query 'QUESTION' --portable" in block
+        assert "Replace the complete" in portable_branch
+        assert "shlex.quote(question)" in portable_branch
+        assert "double each embedded apostrophe" in portable_branch
         assert "No trusted Graphify Python" in block
         assert "interpreter_pointer write" not in block
         assert "write_text" not in block
@@ -4954,8 +4957,15 @@ def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
 @pytest.mark.parametrize("platform_key", ("claude", "aider", "devin"))
-@pytest.mark.parametrize("envelope", ("valid", "malformed", "orphan"))
-def test_generated_portable_query_preserves_bundle(tmp_path, platform_key, envelope):
+@pytest.mark.parametrize(("envelope", "question"), (
+    ("valid", "hello"), ("malformed", "hello"), ("orphan", "hello"),
+    ("valid", 'hello $(printf injected > graphify-out/question-sentinel)'),
+    ("valid", 'hello `printf injected > graphify-out/question-sentinel`'),
+    ("valid", "hello '; printf injected > graphify-out/question-sentinel; #"),
+    ("valid", 'hello "; printf injected > graphify-out/question-sentinel; #'),
+    ("valid", "hello\nsecond line 'with quotes' and \"double quotes\""),
+))
+def test_generated_portable_query_preserves_bundle(tmp_path, platform_key, envelope, question):
     from graphify.portable import make_bundle, source_records_from_tree
 
     def git(*args):
@@ -4991,7 +5001,7 @@ def test_generated_portable_query_preserves_bundle(tmp_path, platform_key, envel
     artifact = gen.render(gen.load_platforms()[platform_key])[0]
     block = _block_containing(
         artifact.content, '--portable --output graphify-out --revision HEAD'
-    ).replace('query "QUESTION"', 'query "hello"')
+    ).replace("'QUESTION'", shlex.quote(question))
     before = {str(p.relative_to(tmp_path)): p.read_bytes()
               for p in tmp_path.rglob("*") if p.is_file()}
     result = subprocess.run(
@@ -5011,6 +5021,52 @@ def test_generated_portable_query_preserves_bundle(tmp_path, platform_key, envel
              for p in tmp_path.rglob("*") if p.is_file()}
     assert after == before
     assert not list(tmp_path.rglob("__pycache__"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+@pytest.mark.parametrize("platform_key", ("claude", "aider", "devin"))
+@pytest.mark.parametrize("question", (
+    'hello $(printf injected > graphify-out/question-sentinel)',
+    'hello `printf injected > graphify-out/question-sentinel`',
+    "hello '; printf injected > graphify-out/question-sentinel; #",
+    'hello "; printf injected > graphify-out/question-sentinel; #',
+    "hello\nsecond line 'with quotes' and \"double quotes\"",
+))
+def test_generated_portable_query_passes_question_as_literal_argument(
+    tmp_path, platform_key, question
+):
+    python, _ = _disposable_graphify_python(tmp_path, "portable-question-runtime")
+    site_packages = Path(subprocess.check_output(
+        [str(python), "-E", "-P", "-B", "-S", "-c",
+         "import sysconfig; print(sysconfig.get_path('purelib'))"], text=True,
+    ).strip())
+    (site_packages / "graphify/__main__.py").write_text(
+        "import json, sys\nprint(json.dumps(sys.argv[1:]))\n", encoding="utf-8"
+    )
+    corpus = tmp_path / "corpus"
+    output = corpus / "graphify-out"
+    output.mkdir(parents=True)
+    (output / ".graphify_portable.json").write_text("orphan envelope")
+    body = gen.render(gen.load_platforms()[platform_key])[0].content
+    block = _block_containing(body, '--portable --output graphify-out --revision HEAD')
+    assert "query 'QUESTION'" in block
+    assert "shlex.quote" in body
+    script = block.replace("'QUESTION'", shlex.quote(question))
+    before = {str(p.relative_to(corpus)): p.read_bytes()
+              for p in corpus.rglob("*") if p.is_file()}
+    result = subprocess.run(
+        ["/bin/bash", "-c", script], cwd=corpus,
+        env={**os.environ, "VIRTUAL_ENV": str(python.parent.parent)},
+        capture_output=True, text=True, check=False,
+    )
+    after = {str(p.relative_to(corpus)): p.read_bytes()
+             for p in corpus.rglob("*") if p.is_file()}
+    assert after == before
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "query", question, "--portable", "--output", "graphify-out", "--revision", "HEAD"
+    ]
+    assert not list(corpus.rglob("__pycache__"))
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")

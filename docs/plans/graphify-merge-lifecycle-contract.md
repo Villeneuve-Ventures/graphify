@@ -214,15 +214,22 @@ optional absent or nonexecutable posthooks do not launch rebuilding.
 Hook inputs are rechecked before publication. Finalization rebuilds from frozen
 Python blobs through the existing strict Python AST extractor, stages exact
 prepared blobs without filters, and preserves unrelated index entries.
+Extraction stdout is bounded before JSON decoding by the smaller of the
+configured graph limit and the portable 256 MiB limit. Diagnostics and execution
+time are also bounded; an exceeded limit refuses before index publication.
 The manual commit guard rechecks installed hooks, cached and working-tree output
-conversion attributes, current v1-origin merge admission, and the private
+conversion attributes (including Git `ident` expansion), current v1-origin merge admission, and the private
 preparation record. The staged artifact objects and content ID must match that
 record. A self-consistent bundle alone does not authorize this merge transition.
 Case-aliased portable envelopes refuse at the ordinary merge guard boundary.
 
 Publication is index-only. No local graph, receipt or coordination is rewritten.
 Post-events verify committed portable output and suppress the legacy rebuild
-route for that operation. The producing checkout may therefore retain pending
+route for that operation while continuing preserved user hook commands.
+Ordinary pre-commit checks with staged portable authority require a valid bundle
+for the staged Python projection and unchanged output conversion rules. A source
+change without a matching bundle refuses; this adds no portable refresh route.
+The producing checkout may therefore retain pending
 or conflicting local authority; report that condition separately and use a fresh
 clone for portable reading. Reconciliation failure cannot undo a recorded commit.
 Identical-input retries must accept the complete staged portable representation;
@@ -232,7 +239,9 @@ An explicit `graphify merge-finalize --output graphify-out --cancel` restores
 only the saved output index entries, preserving unrelated current staging and
 working-tree content. A bounded preparation record under Git's per-worktree
 administrative directory binds those entries to the selected merge and prepared
-bundle. It grants no local graph authority. The operator can then use ordinary
+bundle. The complete record is flushed and published atomically without replacing
+an existing record; an interrupted partial write cannot become retry authority.
+It grants no local graph authority. The operator can then use ordinary
 `git merge --abort`; unrelated worktree changes may still require resolution.
 Plain Git abort may refuse
 while the portable index and pending working copy differ; there is no automatic

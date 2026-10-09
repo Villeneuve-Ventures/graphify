@@ -8,10 +8,10 @@ For an explicit managed-workspace request, use `graphify workspace query --reque
 
 ```@@GRAPHIFY_SHELL@@
 @@GRAPHIFY_GUARD@@
-@@GRAPHIFY_CMD@@ query "QUESTION" --portable --output graphify-out --revision HEAD
+@@GRAPHIFY_CMD@@ query 'QUESTION' --portable --output graphify-out --revision HEAD
 ```
 
-Replace `QUESTION` with the user's original question; preserve requested `--dfs` and `--budget` options. The public portable CLI owns envelope, committed-tree, source, and byte validation. If no compatible trusted installed runtime is available, report it as a prerequisite and stop without installation or output writes. Do not run Step 1, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, or memory writes. A refusal never permits these operations. Answer only from admitted CLI output and cite its source locations. Stop after reporting the answer or refusal; preserve the three-file portable closure.
+Replace the complete `'QUESTION'` placeholder argument with one shell-safe literal for the user's original question, not raw text between quotes. For POSIX shells, use `shlex.quote(question)`; for PowerShell, use a single-quoted literal and double each embedded apostrophe. Never paste question text into double-quoted command source. Preserve requested `--dfs` and `--budget` options. The public portable CLI owns envelope, committed-tree, source, and byte validation. If no compatible trusted installed runtime is available, report it as a prerequisite and stop without installation or output writes. Do not run Step 1, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, or memory writes. A refusal never permits these operations. Answer only from admitted CLI output and cite its source locations. Stop after reporting the answer or refusal; preserve the three-file portable closure.
 
 **Ordinary graph — only when no portable envelope entry exists:** Continue with the existing flow below.
 

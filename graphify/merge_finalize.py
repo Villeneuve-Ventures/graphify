@@ -5,10 +5,12 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import selectors
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 
 from graphify import transaction
@@ -73,12 +75,13 @@ def _output_attributes(root: Path, output: str):
     from graphify.portable import PORTABLE_FILE
 
     paths = [f"{output}/{name}" for name in ("graph.json", "manifest.json", PORTABLE_FILE)]
+    attributes = ("filter", "text", "eol", "working-tree-encoding", "ident")
     observed = []
     for cached in (True, False):
         args = ("--cached",) if cached else ()
-        raw = _git(root, "check-attr", *args, "-z", "filter", "text", "eol", "working-tree-encoding", "--", *paths)
+        raw = _git(root, "check-attr", *args, "-z", *attributes, "--", *paths)
         values = raw.split(b"\0")
-        if len(values) != len(paths) * 12 + 1:
+        if len(values) != len(paths) * len(attributes) * 3 + 1:
             raise MergeFinalizeError("cannot classify exact output conversion attributes")
         if any(values[i] not in (b"unspecified", b"unset") for i in range(2, len(values) - 1, 3)):
             raise MergeFinalizeError("output filters, text conversion, and encodings are unsupported")
@@ -389,6 +392,8 @@ json.dump({"directed": True, "multigraph": False, "graph": {},
 
 
 def _extract(root: Path, blobs):
+    from graphify.portable import _MAX_TOTAL
+
     with tempfile.TemporaryDirectory(prefix="graphify-finalize-", dir=_git_path(root, "index").parent) as directory:
         scratch = Path(directory)
         for name, (_mode, payload) in blobs.items():
@@ -398,12 +403,47 @@ def _extract(root: Path, blobs):
         environment = {name: value for name, value in os.environ.items()
                        if not name.startswith(("GRAPHIFY_", "GIT_"))}
         environment["PYTHONHASHSEED"] = "0"
-        result = subprocess.run([sys.executable, "-E", "-P", "-B", "-c", _EXTRACT_SCRIPT],
-                                cwd=scratch, input=json.dumps(sorted(blobs)).encode(),
-                                capture_output=True, timeout=300, check=False, env=environment)
-        if result.returncode:
-            raise MergeFinalizeError("frozen Python extraction refused: " + result.stderr.decode(errors="replace"))
-        return json.loads(result.stdout)
+        # Retain at most one bounded output before JSON decoding. A regular
+        # input file also avoids blocking on stdin while the child emits output.
+        with tempfile.TemporaryFile(dir=scratch) as source_list:
+            source_list.write(json.dumps(sorted(blobs)).encode())
+            source_list.seek(0)
+            with subprocess.Popen(  # nosec B603 - fixed interpreter and script, no shell
+                [sys.executable, "-E", "-P", "-B", "-c", _EXTRACT_SCRIPT],
+                cwd=scratch, stdin=source_list, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=environment,
+            ) as process:
+                try:
+                    if process.stdout is None or process.stderr is None:
+                        raise MergeFinalizeError("frozen Python extraction pipes are unavailable")
+                    output, errors = bytearray(), bytearray()
+                    deadline = time.monotonic() + 300
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(process.stdout, selectors.EVENT_READ,
+                                          (output, min(_max_graph_file_bytes(), _MAX_TOTAL), "output"))
+                        selector.register(process.stderr, selectors.EVENT_READ,
+                                          (errors, 65536, "diagnostics"))
+                        while selector.get_map():
+                            remaining = deadline - time.monotonic()
+                            ready = selector.select(max(0, remaining))
+                            if remaining <= 0 or not ready:
+                                raise MergeFinalizeError("frozen Python extraction timed out")
+                            for key, _event in ready:
+                                buffer, limit, label = key.data
+                                chunk = os.read(key.fd, min(65536, limit + 1 - len(buffer)))
+                                if not chunk:
+                                    selector.unregister(key.fd)
+                                    continue
+                                buffer.extend(chunk)
+                                if len(buffer) > limit:
+                                    raise MergeFinalizeError(f"frozen Python extraction {label} exceeds bounds")
+                    if process.wait(timeout=max(0.1, deadline - time.monotonic())):
+                        raise MergeFinalizeError("frozen Python extraction refused: " + errors.decode(errors="replace"))
+                    return json.loads(output)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait()
 
 
 def _candidate_git(root: Path, candidate: Path, *args: str, input: bytes | None = None):
@@ -501,16 +541,28 @@ def _replace_index(root, output, index, info, frozen, state, admission, candidat
 
 
 def _write_record(path: Path, record):
+    from graphify.hook_installation import _rename
     from graphify.portable import canonical_json
 
     payload = canonical_json(record)
     if len(payload) > 65536:
         raise MergeFinalizeError("private finalization record exceeds bounds")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(fd, "wb") as stream:
-        stream.write(payload)
-        stream.flush()
-        os.fsync(stream.fileno())
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            # Use the existing exclusive rename primitive: a concurrent or
+            # foreign record must never be overwritten by this preparation.
+            _rename(directory, Path(temporary).name, directory, path.name)
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def _same_record(path, captured):
