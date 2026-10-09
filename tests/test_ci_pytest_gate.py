@@ -68,7 +68,7 @@ def test_matrix_and_gate_preserve_execution_and_environment():
     assert "continue-on-error" not in gate
     gate_steps = {step.get("name"): step for step in gate["steps"]}
     download = gate_steps["Download individual shard execution outcomes"]
-    assert download["uses"] == "actions/download-artifact@v4"
+    assert download["uses"] == "actions/download-artifact@v8.0.2"
     assert download["with"] == {
         "pattern": "pytest-result-${{ github.run_id }}-${{ github.run_attempt }}-shard-*",
         "path": "${{ runner.temp }}/pytest-results", "merge-multiple": "false"}
@@ -235,13 +235,24 @@ def test_workflow_gate_command_executes_fail_closed(receipts, success):
     assert ("All four pytest shard executions succeeded" in result.stdout) == success
 
 
-def test_unrelated_job_policies_match_baseline():
+def test_non_shard_job_policies_preserve_baseline_except_action_updates():
     baseline = subprocess.check_output([
         "git", "show", "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984:.github/workflows/ci.yml"
     ], cwd=ROOT, text=True)
     old = yaml.load(baseline, Loader=yaml.BaseLoader)
     current = workflow()
+    action_updates = {
+        "actions/checkout@v6": "actions/checkout@v7.0.1",
+        "astral-sh/setup-uv@v8.1.0": "astral-sh/setup-uv@v10.2.0",
+        "actions/upload-artifact@v4": "actions/upload-artifact@v7.0.2",
+    }
     for name in ("skillgen-check", "security-scan", "leiden-binary-smoke"):
+        for step in old["jobs"][name]["steps"]:
+            previous_action = step.get("uses")
+            if previous_action in action_updates:
+                step["uses"] = action_updates[previous_action]
+            if previous_action == "astral-sh/setup-uv@v8.1.0":
+                step["with"]["prune-cache"] = "true"
         assert current["jobs"][name] == old["jobs"][name]
     for field in ("name", "on", "concurrency"):
         assert current[field] == old[field]
