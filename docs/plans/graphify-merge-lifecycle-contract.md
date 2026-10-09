@@ -202,14 +202,23 @@ All three merge-operand trees must satisfy the tracked sibling restriction;
 staging a deletion does not remove that admission requirement.
 
 Only the default full index on POSIX is admitted initially. Alternate, sparse,
-split and unresolved indexes refuse. `GIT_OBJECT_DIRECTORY` and
+split and unresolved indexes refuse. Output entries marked `assume-unchanged`
+or `skip-worktree` refuse preparation and cancellation without clearing their
+flags; unrelated index flags remain unchanged. `GIT_OBJECT_DIRECTORY` and
 `GIT_ALTERNATE_OBJECT_DIRECTORIES` also refuse, so normal index entries cannot
-depend on temporary object-storage environment settings. Only standalone Graphify prehooks are
-supported; foreign user prehooks refuse. Finalization rebuilds from frozen
+depend on temporary object-storage environment settings. Both current executable
+standalone Graphify merge-guard prehooks are required; install them with
+`graphify hook install --merge-guard`. Foreign user prehooks refuse. Executable
+managed posthook sections must match the current portable-aware implementation;
+optional absent or nonexecutable posthooks do not launch rebuilding.
+Hook inputs are rechecked before publication. Finalization rebuilds from frozen
 Python blobs through the existing strict Python AST extractor, stages exact
 prepared blobs without filters, and preserves unrelated index entries.
-The manual commit guard rechecks cached and working-tree output conversion
-attributes, including changes made after preparation.
+The manual commit guard rechecks installed hooks, cached and working-tree output
+conversion attributes, current v1-origin merge admission, and the private
+preparation record. The staged artifact objects and content ID must match that
+record. A self-consistent bundle alone does not authorize this merge transition.
+Case-aliased portable envelopes refuse at the ordinary merge guard boundary.
 
 Publication is index-only. No local graph, receipt or coordination is rewritten.
 Post-events verify committed portable output and suppress the legacy rebuild

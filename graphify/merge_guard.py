@@ -81,19 +81,31 @@ not qualified here; passing this guard does not establish clone readability.
         raise MergeGuardError("merge guard requires a repository-relative output")
     graph = (relative / "graph.json").as_posix()
     from graphify.portable import PORTABLE_FILE
-    from graphify.merge_finalize import MergeFinalizeError, _output_attributes, validate_index_bundle
+    from graphify.merge_finalize import MergeFinalizeError, validate_prepared_merge
 
-    portable_entry = _git(root, "ls-files", "--stage", "-z", "--",
-                          f":(top,literal){relative.as_posix()}/{PORTABLE_FILE}")
-    if portable_entry:
+    output_entries = _git(root, "ls-files", "--stage", "-z", "--",
+                          f":(top,literal,icase){relative.as_posix()}")
+    expected_path = os.fsencode(f"{relative.as_posix()}/{PORTABLE_FILE}")
+    portable_paths = []
+    for record in output_entries.split(b"\0"):
+        if not record:
+            continue
+        raw_path = record.rsplit(b"\t", 1)[-1]
+        if os.fsdecode(raw_path).casefold() == os.fsdecode(expected_path).casefold():
+            portable_paths.append(raw_path)
+    if any(path != expected_path for path in portable_paths):
+        raise MergeGuardError("case-aliased portable envelope is unsupported; merge commit refused")
+    if portable_paths:
         if event == "pre-merge-commit":
             raise MergeGuardError("automatic portable finalization is unsupported; use a manual merge")
         try:
-            _output_attributes(root, relative.as_posix())
-            validate_index_bundle(root, relative.as_posix())
-        except (MergeFinalizeError, ValueError, RuntimeError) as exc:
+            validate_prepared_merge(root, relative.as_posix())
+        except (MergeFinalizeError, OSError, ValueError, RuntimeError) as exc:
             raise MergeGuardError(f"portable staged bundle refused: {exc}") from exc
         return
+    if entry_header == "":
+        # The shell reached this classifier for output siblings without a graph.
+        entry_header = None
     # ls-files exposes intent-to-add placeholders as empty blobs, although Git
     # omits them from the committed tree. Compare only the effective index with
     # the empty tree, including unchanged tracked files without reading HEAD or

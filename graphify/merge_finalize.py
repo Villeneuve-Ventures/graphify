@@ -540,6 +540,68 @@ def _require_full_index(root: Path) -> None:
         raise MergeFinalizeError("split indexes are unsupported")
 
 
+def _require_plain_output_entries(root: Path, output: str) -> None:
+    records = _git(root, "ls-files", "-v", "-z", "--", f":(top,literal){output}")
+    if any(record[:1].islower() or record[:1] == b"S" for record in records.split(b"\0") if record):
+        raise MergeFinalizeError("assume-unchanged and skip-worktree output index flags are unsupported")
+
+
+def _publication_hooks(root: Path, output: str):
+    from graphify import hooks
+
+    directory = _git_path(root, "hooks")
+    post_scripts = hooks._post_event_scripts(output, output, sys.executable)
+    markers = {
+        "post-commit": (hooks._HOOK_MARKER, hooks._HOOK_MARKER_END),
+        "post-checkout": (hooks._CHECKOUT_MARKER, hooks._CHECKOUT_MARKER_END),
+        "post-merge": (hooks._POST_MERGE_MARKER, hooks._POST_MERGE_MARKER_END),
+    }
+    captured = {}
+    for name in ("pre-commit", "pre-merge-commit", *post_scripts):
+        hook = directory / name
+        snapshot = None
+        if os.path.lexists(hook):
+            if hook.is_symlink() or not hook.is_file():
+                raise MergeFinalizeError(f"unsupported {name} hook object")
+            snapshot = hook.stat().st_mode, hook.read_bytes()
+        captured[name] = snapshot
+        if name not in post_scripts:
+            expected = ("#!/bin/sh\n" + hooks._merge_guard_script(name, output, sys.executable)).encode()
+            if snapshot is None or not os.access(hook, os.X_OK) or snapshot[1] != expected:
+                raise MergeFinalizeError(
+                    "current executable standalone merge-guard hooks are required; "
+                    "run graphify hook install --merge-guard"
+                )
+        elif snapshot is not None and os.access(hook, os.X_OK):
+            try:
+                owned = hooks._owned_hook_span(snapshot[1], *markers[name], f"{name} hook")
+            except RuntimeError as exc:
+                raise MergeFinalizeError(str(exc)) from exc
+            if owned is not None and snapshot[1][owned[0]:owned[1]] != post_scripts[name].encode():
+                raise MergeFinalizeError(
+                    f"stale managed {name} hook; run graphify hook install --merge-guard"
+                )
+    return captured
+
+
+def validate_prepared_merge(root: Path, output: str) -> None:
+    """Bind the current portable candidate to this merge's explicit preparation."""
+    _publication_hooks(root, output)
+    _output_attributes(root, output)
+    snapshot = validate_index_bundle(root, output)
+    state = _merge_state(root)
+    _payload, admission = _admit(root, output, state)
+    captured = _read_record(_record_path(root, output))
+    if captured is None:
+        raise MergeFinalizeError("portable staged bundle lacks its private finalization record")
+    record = captured[0]
+    _check_record(root, record, output, state, admission)
+    selected = {p[len(output) + 1:]: list(value) for p, value in _entries(root).items()
+                if p.startswith(output + "/")}
+    if selected != record["prepared_entries"] or snapshot.content_id != record["content_id"]:
+        raise MergeFinalizeError("staged bundle differs from the prepared finalization record")
+
+
 def finalize_merge(root: Path, output: str) -> str:
     """Stage a validated portable closure; do not commit or rewrite local output."""
     from graphify.portable import PORTABLE_FILE, make_bundle, source_records_from_blobs, validate_bundle
@@ -548,22 +610,9 @@ def finalize_merge(root: Path, output: str) -> str:
     output = _output_selector(output)
     try:
         _require_full_index(root)
-        from graphify.hooks import _merge_guard_script
-        hooks_path = _git_path(root, "hooks")
-        hook_inputs = {}
-        for name in ("pre-commit", "pre-merge-commit"):
-            hook = hooks_path / name
-            if os.path.lexists(hook):
-                if hook.is_symlink() or not hook.is_file():
-                    raise MergeFinalizeError("unsupported prehook object")
-                content = hook.read_bytes()
-                hook_inputs[name] = (hook.stat().st_mode, content)
-                if os.access(hook, os.X_OK):
-                    expected = ("#!/bin/sh\n" + _merge_guard_script(name, output, sys.executable)).encode()
-                    if content != expected:
-                        raise MergeFinalizeError("user prehooks are unsupported by this manual slice")
-            else:
-                hook_inputs[name] = None
+        _output_root(root, output)
+        _require_plain_output_entries(root, output)
+        hook_inputs = _publication_hooks(root, output)
         git_identity = _git_identity(root)
         attributes = _output_attributes(root, output)
         index = _git_path(root, "index")
@@ -626,15 +675,8 @@ def finalize_merge(root: Path, output: str) -> str:
             def before_publish():
                 if _output_attributes(root, output) != attributes:
                     raise MergeFinalizeError("output conversion attributes changed")
-                for name, expected_hook in hook_inputs.items():
-                    hook = hooks_path / name
-                    actual_hook = None
-                    if os.path.lexists(hook):
-                        if hook.is_symlink() or not hook.is_file():
-                            raise MergeFinalizeError("prehook identity changed")
-                        actual_hook = (hook.stat().st_mode, hook.read_bytes())
-                    if actual_hook != expected_hook:
-                        raise MergeFinalizeError("prehook inputs changed before publication")
+                if _publication_hooks(root, output) != hook_inputs:
+                    raise MergeFinalizeError("hook inputs changed before publication")
                 if captured_record is None:
                     _write_record(record_path, record)
                 elif not _same_record(record_path, captured_record):
@@ -652,6 +694,7 @@ def cancel_merge(root: Path, output: str) -> None:
     output = _output_selector(output)
     try:
         _require_full_index(root)
+        _require_plain_output_entries(root, output)
         state = _merge_state(root)
         _payload, admission = _admit(root, output, state)
         path = _record_path(root, output)

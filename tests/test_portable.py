@@ -250,6 +250,79 @@ def test_source_selector_preserves_original_unicode_path_bytes():
     assert records[0]["path"].encode("utf-8") == b"e\xcc\x81.py"
 
 
+@pytest.mark.parametrize("entry_point", ["selector", "bundle"])
+@pytest.mark.parametrize("output,path", [
+    ("graphify-out", "Graphify-Out/a.py"),
+    ("\u00e9-out", "e\u0301-out/a.py"),
+    ("docs/graphify-out", "Docs/Graphify-Out/a.py"),
+    ("docs/graphify-out", "docs/Graphify-Out/a.py"),
+    ("docs/graphify-out", "Docs/other.py"),
+    ("package.py/output", "Package.py"),
+    ("bundle.py", "Bundle.py"),
+    ("package.py/output", "package.py"),
+])
+def test_source_paths_cannot_collide_with_output_directories(output, path, entry_point):
+    payload = b"pass\n"
+    records = [{"path": path, "mode": "100644", "sha256": hashlib.sha256(payload).hexdigest()}]
+    with pytest.raises(PendingTransactionError, match="colli"):
+        if entry_point == "selector":
+            portable.source_records_from_blobs({path: ("100644", payload)}, output)
+        else:
+            portable.make_bundle(graph(), records, output)
+
+
+@pytest.mark.parametrize("path", ["docs/other.py", "docs/graphify-outside/a.py"])
+def test_output_collision_check_preserves_exact_shared_parents_and_component_boundaries(path):
+    output = "docs/graphify-out"
+    records = portable.source_records_from_blobs({path: ("100644", b"pass\n")}, output)
+    assert records[0]["path"] == path
+    portable.make_bundle(graph(), records, output)
+    assert portable.source_records_from_blobs(
+        {f"{output}/ignored.py": ("100644", b"ignored")}, output) == ()
+
+
+@pytest.mark.parametrize("output,path", [
+    ("graphify-out", "Graphify-Out/a.py"),
+    ("\u00e9-out", "e\u0301-out/a.py"),
+    ("docs/graphify-out", "Docs/Graphify-Out/a.py"),
+])
+def test_output_alias_in_real_git_objects_refuses_before_clone_admission(tmp_path, output, path):
+    from graphify.merge_finalize import validate_index_bundle
+
+    root = tmp_path / "repo"
+    root.mkdir()
+    git(root, "init", "-q")
+    git(root, "config", "core.ignorecase", "false")
+    git(root, "config", "core.precomposeunicode", "false")
+    payload = b"def selected(): pass\n"
+    records = portable.source_records_from_blobs({"main.py": ("100644", payload)}, output)
+    bundle = portable.make_bundle(graph(), records, output)
+    manifest = portable.parse_json(bundle["manifest.json"])
+    manifest["sources"][0]["path"] = path
+    bundle["manifest.json"] = portable.canonical_json(manifest)
+    refresh_envelope(bundle)
+    # Immutable objects retain distinct Git spellings even on a host whose
+    # filesystem combines case or Unicode aliases during checkout.
+    entries = {path: payload, **{f"{output}/{name}": data for name, data in bundle.items()}}
+    for entry, data in entries.items():
+        oid = subprocess.check_output(
+            ["git", "-C", str(root), "hash-object", "-w", "--stdin"], input=data).decode().strip()
+        git(root, "update-index", "--add", "--cacheinfo", "100644", oid, entry)
+    with pytest.raises(PendingTransactionError, match="colli"):
+        validate_index_bundle(root, output)
+    git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "-m", "fixture")
+    with pytest.raises(PendingTransactionError, match="colli"):
+        portable.source_records_from_tree(root, output)
+    clone = tmp_path / "clone"
+    git(root, "clone", "-q", "--no-local", str(root), str(clone))
+    before, index = state(clone), (clone / ".git/index").read_bytes()
+    with pytest.raises(PendingTransactionError, match="colli"):
+        portable.open_portable_graph_snapshot(clone, output)
+    assert state(clone) == before
+    assert (clone / ".git/index").read_bytes() == index
+
+
 def test_new_coordination_during_admission_refuses(repository, monkeypatch):
     original = portable.validate_bundle
     def add_authority(*args, **kwargs):

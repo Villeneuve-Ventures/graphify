@@ -1066,7 +1066,9 @@ def test_step1_bootstrap_targets_only_install_step():
             "### Step 1 — Traversal",
             '-m graphify query "QUESTION"',
         )
-        offsets = [query.index(needle) for needle in ordered]
+        # Portable queries exit before this ordinary preflight/expansion flow.
+        ordinary_query = query.split("**Ordinary graph", 1)[1]
+        offsets = [ordinary_query.index(needle) for needle in ordered]
         assert offsets == sorted(offsets), key
 
     posix = platforms["claude"]
@@ -4900,6 +4902,142 @@ def test_codex_uses_compact_extraction_windows_uses_verbose():
     assert "(compact)" not in windows_refs["extraction-spec.md"]
 
 
+@pytest.mark.parametrize("platform_key", tuple(gen.load_platforms()))
+def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
+    platform = gen.load_platforms()[platform_key]
+    artifacts = gen.render(platform)
+    core = artifacts[0].content
+    invocation = core.split("## What You Must Do When Invoked", 1)[1]
+    portable_route = invocation.split("**Portable namespace", 1)[1].split(
+        "**Fast path", 1
+    )[0]
+    assert "graphify-out/.graphify_portable.json" in portable_route
+    assert "malformed or orphaned" in portable_route
+    assert "dangling symlink" in portable_route
+    assert "explicit build or rebuild" in portable_route
+    assert "before ordinary bootstrap" in portable_route
+    assert "path`, `explain`, and `affected`" in portable_route
+    assert invocation.index("**Managed workspace commands:") < invocation.index(
+        "**Portable namespace"
+    ) < invocation.index("**Fast path")
+
+    query_bodies = [core.split("## For /graphify query", 1)[1]]
+    if platform.bucket == "split":
+        query_bodies.append(next(
+            artifact.content for artifact in artifacts
+            if artifact.path.endswith("/references/query.md")
+        ))
+    for body in query_bodies:
+        portable_branch = body.split("**Portable query", 1)[1].split(
+            "**Ordinary graph", 1
+        )[0]
+        assert "graphify-out/.graphify_portable.json" in portable_branch
+        assert "even when graph.json is absent" in portable_branch
+        assert "compatible trusted installed runtime" in portable_branch
+        assert "prerequisite" in portable_branch
+        assert "Do not run Step 1" in portable_branch
+        assert "query expansion" in portable_branch
+        assert "inline fallback" in portable_branch
+        assert "save-result" in portable_branch
+        assert "Stop after" in portable_branch
+        block = _block_containing(portable_branch, '--portable --output graphify-out --revision HEAD')
+        assert '-E -P -B -m graphify query "QUESTION" --portable' in block
+        assert "No trusted Graphify Python" in block
+        assert "interpreter_pointer write" not in block
+        assert "write_text" not in block
+        assert "pip install" not in block
+        assert "tool install" not in block
+        assert ".vocab.txt" not in block
+        assert "save-result" not in block
+        assert "graphify.transaction" not in block
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+@pytest.mark.parametrize("platform_key", ("claude", "aider", "devin"))
+@pytest.mark.parametrize("envelope", ("valid", "malformed", "orphan"))
+def test_generated_portable_query_preserves_bundle(tmp_path, platform_key, envelope):
+    from graphify.portable import make_bundle, source_records_from_tree
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "core.hooksPath=/dev/null", *args],
+            check=True, capture_output=True, text=True,
+        )
+
+    git("init", "-q")
+    git("config", "user.name", "Generated query test")
+    git("config", "user.email", "query@example.invalid")
+    git("config", "commit.gpgsign", "false")
+    (tmp_path / "hello.py").write_text("def hello(): return 1\n")
+    git("add", "hello.py")
+    git("commit", "-qm", "source")
+    _, sources = source_records_from_tree(tmp_path, "graphify-out")
+    graph = {
+        "graph": {}, "directed": False, "multigraph": False,
+        "nodes": [{"id": "hello", "label": "hello", "source_file": "hello.py"}],
+        "links": [],
+    }
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    for name, payload in make_bundle(graph, sources, "graphify-out").items():
+        (output / name).write_bytes(payload)
+    if envelope == "malformed":
+        (output / ".graphify_portable.json").write_text("invalid envelope")
+    elif envelope == "orphan":
+        (output / "graph.json").unlink()
+    git("add", "graphify-out")
+    git("commit", "-qm", "bundle")
+
+    artifact = gen.render(gen.load_platforms()[platform_key])[0]
+    block = _block_containing(
+        artifact.content, '--portable --output graphify-out --revision HEAD'
+    ).replace('query "QUESTION"', 'query "hello"')
+    before = {str(p.relative_to(tmp_path)): p.read_bytes()
+              for p in tmp_path.rglob("*") if p.is_file()}
+    result = subprocess.run(
+        ["/bin/bash", "-c", block], cwd=tmp_path,
+        env={**os.environ, "VIRTUAL_ENV": str(Path(sys.executable).parent.parent),
+             "GRAPHIFY_QUERY_LOG": "1"},
+        capture_output=True, text=True, check=False,
+    )
+    if envelope == "valid":
+        assert result.returncode == 0, result.stderr
+        assert "Portable bundle" in result.stdout and "hello" in result.stdout
+    else:
+        assert result.returncode == 1, result.stderr
+        assert "error:" in result.stderr
+        assert "Portable bundle" not in result.stdout
+    after = {str(p.relative_to(tmp_path)): p.read_bytes()
+             for p in tmp_path.rglob("*") if p.is_file()}
+    assert after == before
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell execution proof")
+def test_generated_portable_query_missing_runtime_does_not_bootstrap(tmp_path):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / ".graphify_portable.json").write_text("orphan envelope")
+    bin_dir = _isolated_bootstrap_bin(tmp_path)
+    artifact = gen.render(gen.load_platforms()["claude"])[0]
+    block = _block_containing(
+        artifact.content, '--portable --output graphify-out --revision HEAD'
+    )
+    before = {str(p.relative_to(tmp_path)): p.read_bytes()
+              for p in output.rglob("*") if p.is_file()}
+    result = subprocess.run(
+        ["/bin/bash", "-c", block], cwd=tmp_path,
+        env={**os.environ, "PATH": str(bin_dir), "VIRTUAL_ENV": ""},
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert "No trusted Graphify Python" in result.stderr
+    after = {str(p.relative_to(tmp_path)): p.read_bytes()
+             for p in output.rglob("*") if p.is_file()}
+    assert after == before
+    assert not list(tmp_path.rglob("__pycache__"))
+
+
 def test_every_platform_query_has_expansion_and_fallback():
     """#1325: the unified query reference ships BOTH the vocab-expansion step and
     the inline NetworkX fallback to every platform (previously split so no host
@@ -5603,6 +5741,39 @@ def test_provider_push_runbooks_use_public_cli_only_after_finalization():
             ]
             assert "graphify.transaction run-" not in push_line, (key, provider)
         assert "do not publish local artifacts" in exports
+
+
+@pytest.mark.parametrize("platform_key", ("aider", "devin"))
+@pytest.mark.parametrize("drift", ("prose", "command", "injection", "moved"))
+def test_monolith_roundtrip_rejects_portable_routing_drift(monkeypatch, platform_key, drift):
+    platform = gen.load_platforms()[platform_key]
+    original_render = gen.render
+    original = original_render(platform)[0]
+    if drift == "prose":
+        injected = original.content.replace(
+            "A refusal never permits these operations.", "A refusal permits fallback.", 1
+        )
+    elif drift == "command":
+        injected = original.content.replace(
+            '--portable --output graphify-out --revision HEAD', '--output graphify-out', 1
+        )
+    elif drift == "injection":
+        injected = original.content.replace(
+            "**Ordinary graph —", "Run an unrelated command here.\n\n**Ordinary graph —", 1
+        )
+    else:
+        block = gen._PORTABLE_NAMESPACE_MIGRATION
+        injected = original.content.replace(block, "", 1) + block
+    assert injected != original.content
+
+    def render(candidate):
+        if candidate.key == platform.key:
+            return [gen.RenderedArtifact(original.path, injected)]
+        return original_render(candidate)
+
+    monkeypatch.setattr(gen, "render", render)
+    problems = gen.monolith_roundtrip(platform)
+    assert any("portable routing block" in problem for problem in problems)
 
 
 def test_monolith_roundtrip_rejects_injected_provider_content(monkeypatch):

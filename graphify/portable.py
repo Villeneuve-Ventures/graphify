@@ -154,7 +154,8 @@ def _source_records(sources: Sequence[Mapping[str, Any]], output: str) -> tuple[
     if len(set(paths)) != len(paths):
         _fail("portable source paths collide")
     prefixes: dict[str, str] = {}
-    for path in paths:
+    output_prefixes: set[str] = set()
+    for path in [output, *paths]:
         parts = path.split("/")
         for depth in range(1, len(parts) + 1):
             prefix = "/".join(parts[:depth])
@@ -162,6 +163,10 @@ def _source_records(sources: Sequence[Mapping[str, Any]], output: str) -> tuple[
             # byte sorting retain the original, unnormalized Git path.
             key = unicodedata.normalize("NFC", prefix).casefold()
             key = unicodedata.normalize("NFC", key)
+            if path == output:
+                output_prefixes.add(key)
+            elif depth == len(parts) and key in output_prefixes:
+                _fail("portable source file collides with an output directory")
             previous = prefixes.setdefault(key, prefix)
             if previous != prefix:
                 _fail("portable source paths collide by case or Unicode normalization")

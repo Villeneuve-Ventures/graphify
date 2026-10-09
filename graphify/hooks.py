@@ -1285,7 +1285,9 @@ if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
     script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
 _GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --raw --no-abbrev -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
 if [ -z "$_GFY_TRACKED" ]; then
-    _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal)$GRAPHIFY_OUT/.graphify_portable.json") || exit 1
+    # Long s is the fixed envelope basename's only non-ASCII casefold alias.
+    # Keep unrelated siblings and intent-to-add graphs outside runtime discovery.
+    _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
     [ -n "$_GFY_ENVELOPE" ] || exit 0
 fi
 # The raw header before Git's tab separator binds the observed mode and OID.
@@ -1297,6 +1299,20 @@ _GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
     entry_option = ' --entry-header "$_GFY_ENTRY_HEADER"' if name == "pre-merge-commit" else ""
     script += f'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_guard --event {shlex.quote(name)} --output "$GRAPHIFY_OUT"{entry_option}\nexit $?\n{end}\n'
     return script
+
+
+def _post_event_scripts(output: str, repo_output: str, pinned: str) -> dict[str, str]:
+    """Render the managed posthooks for installation and publication admission."""
+    exclusion = (_POST_COMMIT_OUTPUT_EXCLUSION.replace(
+        "__GRAPHIFY_REPO_OUTPUT__", shlex.quote(repo_output)) if repo_output else "")
+    return {
+        name: script.replace("__PINNED_PYTHON__", shlex.quote(pinned)).replace(
+            "__GRAPHIFY_OUTPUT__", shlex.quote(output)
+        ).replace("__GRAPHIFY_OUTPUT_EXCLUSION__", exclusion)
+        for name, script in (("post-commit", _HOOK_SCRIPT),
+                             ("post-checkout", _CHECKOUT_SCRIPT),
+                             ("post-merge", _POST_MERGE_SCRIPT))
+    }
 
 
 def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
@@ -1334,26 +1350,11 @@ def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     # than rejecting valid path punctuation; import verification catches a stale
     # pin so it safely falls through to dynamic detection.
     pinned = _pinned_python()
-    quoted_pinned = shlex.quote(pinned)
     output_path = _hook_output_path()
     repo_output_path = _hook_repo_output_path(root)
-    quoted_output = shlex.quote(output_path)
-    output_exclusion = ""
-    if repo_output_path:
-        output_exclusion = _POST_COMMIT_OUTPUT_EXCLUSION.replace(
-            "__GRAPHIFY_REPO_OUTPUT__", shlex.quote(repo_output_path)
-        )
-    hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned).replace(
-        "__GRAPHIFY_OUTPUT__", quoted_output
-    ).replace(
-        "__GRAPHIFY_OUTPUT_EXCLUSION__", output_exclusion
-    )
-    checkout = _CHECKOUT_SCRIPT.replace(
-        "__PINNED_PYTHON__", quoted_pinned
-    ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
-    post_merge = _POST_MERGE_SCRIPT.replace(
-        "__PINNED_PYTHON__", quoted_pinned
-    ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
+    post_scripts = _post_event_scripts(output_path, repo_output_path, pinned)
+    hook, checkout, post_merge = (post_scripts[name] for name in (
+        "post-commit", "post-checkout", "post-merge"))
 
     if _atomic_hooks_supported():
         from graphify.hook_installation import NAMES, MERGE_GUARD_NAMES, run

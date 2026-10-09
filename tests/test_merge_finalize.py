@@ -15,6 +15,8 @@ def pending_repo():
     assert result.returncode != 0
     (repo / "conflict.txt").write_text("resolved\n")
     git(repo, "add", "conflict.txt")
+    from graphify import hooks
+    hooks.install(repo, merge_guard=True)
     return repo
 
 
@@ -66,9 +68,11 @@ def test_relocated_objects_refuse_without_changing_index(monkeypatch, operation)
 
 @pytest.mark.parametrize("sibling", [".graphify_root", "notes.md"])
 def test_staged_deletion_cannot_hide_tracked_output_sibling(sibling):
+    from graphify import hooks
     from graphify.merge_finalize import MergeFinalizeError, finalize_merge
 
     repo = graph_repo(Path.home(), manual=True)
+    hooks.install(repo, merge_guard=True)
     target = repo / "graphify-out" / sibling
     if sibling == "notes.md":
         target.write_text("tracked note\n")
