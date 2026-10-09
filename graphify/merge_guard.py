@@ -1,7 +1,7 @@
 """Read-only containment for tracked pending graphs at ordinary merge commits.
 
-This is not a finalizer or a portable-receipt validator. Git supplies the
-effective index through its environment; no working-tree graph is opened.
+Git supplies the effective index through its environment; no working-tree
+graph is opened. Explicit portable manual publication validates its closure.
 """
 from __future__ import annotations
 
@@ -80,6 +80,19 @@ not qualified here; passing this guard does not establish clone readability.
             or "\\" in output or "\x00" in output or relative == PurePosixPath(".")):
         raise MergeGuardError("merge guard requires a repository-relative output")
     graph = (relative / "graph.json").as_posix()
+    from graphify.portable import PORTABLE_FILE
+    from graphify.merge_finalize import MergeFinalizeError, validate_index_bundle
+
+    portable_entry = _git(root, "ls-files", "--stage", "-z", "--",
+                          f":(top,literal){relative.as_posix()}/{PORTABLE_FILE}")
+    if portable_entry:
+        if event == "pre-merge-commit":
+            raise MergeGuardError("automatic portable finalization is unsupported; use a manual merge")
+        try:
+            validate_index_bundle(root, relative.as_posix())
+        except (MergeFinalizeError, ValueError, RuntimeError) as exc:
+            raise MergeGuardError(f"portable staged bundle refused: {exc}") from exc
+        return
     # ls-files exposes intent-to-add placeholders as empty blobs, although Git
     # omits them from the committed tree. Compare only the effective index with
     # the empty tree, including unchanged tracked files without reading HEAD or

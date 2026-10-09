@@ -88,6 +88,7 @@ if sys.platform.startswith("linux"):
 
 
 GRAPH_WATERMARK_KEY = "_graphify_protocol"
+PORTABLE_ENVELOPE_FILE = ".graphify_portable.json"
 MANAGED_PUBLICATION_PATHS = (
     "graph.json",
     "GRAPH_REPORT.md",
@@ -652,6 +653,7 @@ def pin_output(
     """
     path = Path(output)
     if mutation or create:
+        _reject_portable_path(path)
         try:
             require_ordinary_output(path)
         except ManagedWorkspaceOutputError as exc:
@@ -688,6 +690,12 @@ def pin_output(
             capability.close()
             raise ManagedAuthorityError(str(exc)) from exc
     capability.validate()
+    if mutation or create:
+        try:
+            _reject_portable_authority(capability)
+        except BaseException:
+            capability.close()
+            raise
     return capability
 
 
@@ -4323,8 +4331,11 @@ def begin_transaction(
     transition_failpoint: Callable[[str], None] | None = None,
     expected_snapshot: GraphSnapshot | None = None,
 ) -> Transaction:
+    if expected_snapshot is not None and not isinstance(expected_snapshot, GraphSnapshot):
+        raise TypeError("local publication requires a GraphSnapshot")
     root_path = _canonical_directory(Path(root))
     output_path = Path(output).expanduser().absolute()
+    _reject_portable_path(output_path)
     try:
         require_ordinary_output(output_path)
     except ManagedWorkspaceOutputError as exc:
@@ -6368,6 +6379,7 @@ def _validate_authority(
     *,
     allow_complete: bool = False,
 ) -> Transaction:
+    _reject_portable_authority(capability)
     _fence_pending_enqueue_locked(capability)
     token_transition = _read_token_transition(capability)
     if token_transition is not None:
@@ -7253,6 +7265,32 @@ def _validate_receipt_locked(
     return receipt, digest, inventory
 
 
+def _portable_authority_present(capability: OutputCapability) -> bool:
+    """Presence reserves the namespace, even for malformed or orphaned envelopes."""
+    return any(name.casefold() == PORTABLE_ENVELOPE_FILE for name in _list_entries(capability))
+
+
+def _reject_portable_authority(capability: OutputCapability) -> None:
+    if _portable_authority_present(capability):
+        raise ManagedAuthorityError(
+            "portable output requires explicit portable reading; local mutation/adoption is unsupported"
+        )
+
+
+def _reject_portable_path(path: Path) -> None:
+    """Refuse nested bootstrap before creating any directory below a portable output."""
+    requested = path.expanduser().absolute().resolve(strict=False)
+    for candidate in (requested, *requested.parents):
+        try:
+            with os.scandir(candidate) as entries:
+                if any(entry.name.casefold() == PORTABLE_ENVELOPE_FILE for entry in entries):
+                    raise ManagedAuthorityError(
+                        "portable output requires explicit portable reading; local mutation/adoption is unsupported"
+                    )
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+
+
 def _coordination_present(
     capability: OutputCapability, *, ignored_names: frozenset[str] = frozenset()
 ) -> bool:
@@ -7276,6 +7314,8 @@ def _coordination_present(
 def _managed_authority_present(
     capability: OutputCapability, *, ignored_names: frozenset[str] = frozenset()
 ) -> bool:
+    if _portable_authority_present(capability):
+        return True
     if _coordination_present(capability, ignored_names=ignored_names):
         return True
     graph_entries = [
@@ -9574,6 +9614,7 @@ def open_graph_snapshot(
 ) -> GraphSnapshot:
     requested = Path(path).expanduser()
     requested_output = requested.parent.absolute()
+    _reject_portable_path(requested_output)
     if allow_absent and not requested_output.exists():
         existing_parent = requested_output
         missing_parts: list[str] = []
@@ -9610,6 +9651,7 @@ def open_graph_snapshot(
     output = requested_output.resolve(strict=True)
     graph_path = output / requested.name
     with pin_output(output, mutation=False) as capability, _locked(capability):
+        _reject_portable_authority(capability)
         if _entry_stat(capability, graph_path.name) is None:
             protocol = _read_protocol(capability)
             if protocol is not None:
@@ -10091,6 +10133,7 @@ def open_external_graph_snapshot(
 ) -> GraphSnapshot:
     """Read an explicit unmanaged graph and explicitly selected sibling leaves."""
     requested = Path(path).expanduser()
+    _reject_portable_path(requested.parent)
     output = requested.parent.resolve(strict=True)
     graph_name = _validated_shallow_name(requested.name)
     retain = tuple(_validated_shallow_name(name) for name in retain_artifacts)
@@ -10106,6 +10149,7 @@ def open_external_graph_snapshot(
     _reject_casefold_collisions((graph_name, *retain))
     graph_path = output / graph_name
     with pin_output(output, mutation=False) as capability:
+        _reject_portable_authority(capability)
         if _coordination_present(capability):
             raise ManagedAuthorityError(
                 "explicit graph has managed coordination authority"
@@ -15291,6 +15335,7 @@ def _load_detached_merge_snapshot_with_identity(
     if role not in {"ancestor", "current", "other"}:
         raise PendingTransactionError("invalid detached merge snapshot role")
     target = Path(path).absolute()
+    _reject_portable_path(target.parent)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(target, flags)
@@ -15312,6 +15357,7 @@ def _load_detached_merge_snapshot_with_identity(
         finally:
             os.close(fd)
         raw_payload = bytes(payload)
+        _reject_portable_path(target.parent)
         data = json.loads(raw_payload.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("malformed detached merge snapshot") from exc

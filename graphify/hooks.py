@@ -474,6 +474,20 @@ fi
 """
 
 
+_PORTABLE_POST_EVENT_GUARD = """\
+# A committed portable output is authoritative only through its recorded tree.
+# Postevents observe that tree and leave pending local reconciliation explicit.
+"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_finalize --observe --output "$GRAPHIFY_OUT"
+_GFY_PORTABLE_STATUS=$?
+if [ "$_GFY_PORTABLE_STATUS" != "0" ]; then
+    if [ "$_GFY_PORTABLE_STATUS" != "10" ]; then
+        echo "[graphify hook] portable observation failed; rebuild suppressed" >&2
+    fi
+    exit 0
+fi
+"""
+
+
 _HOOK_SCRIPT = """\
 # graphify-hook-start
 # Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
@@ -519,7 +533,7 @@ fi
 # shared absolute outputs are outside the repository and omit this block.
 __GRAPHIFY_OUTPUT_EXCLUSION__
 
-""" + _PYTHON_DETECT + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + """
 export GRAPHIFY_CHANGED="$CHANGED"
 
 # Run the rebuild detached so git commit returns immediately. Full-repo rebuilds
@@ -586,7 +600,7 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 _GFY_REBUILD_CURRENT_ROOT=0
 export _GFY_REBUILD_CURRENT_ROOT
 
-""" + _WORKTREE_GUARD + _PYTHON_DETECT + """
+""" + _WORKTREE_GUARD + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
@@ -626,7 +640,7 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 _GFY_REBUILD_CURRENT_ROOT=1
 export _GFY_REBUILD_CURRENT_ROOT
 
-""" + _PYTHON_DETECT + _POST_MERGE_WORKTREE_GUARD + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + _POST_MERGE_WORKTREE_GUARD + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
@@ -1270,7 +1284,10 @@ if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
 """
     script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
 _GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --raw --no-abbrev -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
-[ -n "$_GFY_TRACKED" ] || exit 0
+if [ -z "$_GFY_TRACKED" ]; then
+    _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal)$GRAPHIFY_OUT/.graphify_portable.json") || exit 1
+    [ -n "$_GFY_ENVELOPE" ] || exit 0
+fi
 # The raw header before Git's tab separator binds the observed mode and OID.
 _GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
 """
