@@ -36,6 +36,28 @@ jobs:
       - name: Run upstream PR-Agent command
         # v0.47.0, source 8e5a9295973b24af4b70cafd0b660a230811ef9e.
         uses: docker://pragent/pr-agent@sha256:31b9aac6ab067bada9a0c1b001d30ebc500ea4487e00a93c18c59b9ef5fa66db
+        # Route inside the container: GitHub recreates event.json for each step.
+        with:
+          entrypoint: python
+          args: |
+            -c "
+            import json
+            import os
+            import re
+            import sys
+            from pathlib import Path
+
+            event_path = Path(os.environ['GITHUB_EVENT_PATH'])
+            event = json.loads(event_path.read_text(encoding='utf-8'))
+            body = event.get('comment', {}).get('body', '')
+            if re.match(r'^/review(?=\s|$)', body, re.IGNORECASE):
+                sys.exit(0)
+            match = re.match(r'^/prreview(?=\s|$)', body, re.IGNORECASE)
+            if match:
+                event['comment']['body'] = '/review' + body[match.end():]
+                event_path.write_text(json.dumps(event), encoding='utf-8')
+            os.execv('/entrypoint.sh', ['/entrypoint.sh'])
+            "
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
