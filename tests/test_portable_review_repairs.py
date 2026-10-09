@@ -1,6 +1,5 @@
 """Review regressions: refuse unreadable publication before changing the index."""
 import os
-from pathlib import Path
 import subprocess
 import sys
 

@@ -1,5 +1,4 @@
 """The explicit portable query must remain read-only even with query logging enabled."""
-import json
 import subprocess
 
 import pytest
