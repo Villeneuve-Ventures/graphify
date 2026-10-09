@@ -1693,9 +1693,9 @@ def test_posix_missing_package_install_uses_trusted_pip_under_shadows(tmp_path, 
     saved = (tmp_path / "graphify-out" / ".graphify_python").read_text(encoding="utf-8")
     assert Path(saved).resolve() == python.resolve()
 
-    core, _ = _platform_artifacts("claude")
+    _, refs = _platform_artifacts("claude")
     query = subprocess.run(
-        ["/bin/bash", "-c", _block_containing(core, '-m graphify query "<question>"')],
+        ["/bin/bash", "-c", _block_containing(refs["query.md"], '-m graphify query "QUESTION"')],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -1972,7 +1972,7 @@ def test_posix_path_shadow_flows_use_fresh_interpreter_and_ignore_pointer(tmp_pa
 
     core, refs = _platform_artifacts("claude")
     read_flows = [
-        _block_containing(core, '-m graphify query "<question>"'),
+        _block_containing(refs["query.md"], '-m graphify query "QUESTION"'),
         _block_containing(refs["query.md"], '-m graphify path "NODE_A"'),
         _block_containing(refs["query.md"], '-m graphify explain "NODE_NAME"'),
     ]
@@ -2032,9 +2032,9 @@ def test_posix_path_shadow_flows_use_fresh_interpreter_and_ignore_pointer(tmp_pa
 
 
 def _query_block_as_help() -> str:
-    core, _ = _platform_artifacts("claude")
-    block = _block_containing(core, '-m graphify query "<question>"')
-    replaced = block.replace('-m graphify query "<question>"', "-m graphify --help")
+    _, refs = _platform_artifacts("claude")
+    block = _block_containing(refs["query.md"], '-m graphify query "QUESTION"')
+    replaced = block.replace('-m graphify query "QUESTION"', "-m graphify --help")
     assert replaced != block
     return replaced
 
@@ -4658,10 +4658,10 @@ def test_powershell_missing_package_install_uses_trusted_pip_under_shadows(tmp_p
     assert not (tmp_path / "graphify-out" / ".graphify_python").exists()
     assert b"cannot safely publish" in (bootstrap.stdout + bootstrap.stderr).lower()
 
-    core, _ = _platform_artifacts("windows")
+    _, refs = _platform_artifacts("windows")
     query = _run_powershell_script(
         executable,
-        _block_containing(core, '-m graphify query "<question>"'),
+        _block_containing(refs["query.md"], '-m graphify query "QUESTION"'),
         tmp_path,
         cwd=tmp_path,
         env=env,
@@ -4834,7 +4834,7 @@ def test_powershell_path_shadow_flows_use_fresh_interpreter_not_pointer(tmp_path
     env["PYTHONPATH"] = str(pythonpath_root)
     core, refs = _platform_artifacts("windows")
     flows = [
-        _block_containing(core, '-m graphify query "<question>"'),
+        _block_containing(refs["query.md"], '-m graphify query "QUESTION"'),
         _block_containing(refs["query.md"], '-m graphify path "NODE_A"'),
         _block_containing(refs["query.md"], '-m graphify explain "NODE_NAME"'),
         _block_containing(refs["update.md"], "-m graphify update INPUT_PATH"),
@@ -4921,12 +4921,23 @@ def test_generated_portable_query_routes_before_ordinary_writes(platform_key):
         "**Portable namespace"
     ) < invocation.index("**Fast path")
 
-    query_bodies = [core.split("## For /graphify query", 1)[1]]
+    query_stub = core.split("\n## For /graphify query\n", 1)[1].split("\n## ", 1)[0]
     if platform.bucket == "split":
-        query_bodies.append(next(
+        assert "references/query.md" in query_stub
+        assert "before any bootstrap or ordinary action" in query_stub
+        assert "Only query is supported" in query_stub
+        assert "`path`, `explain`, and `affected` are unsupported and must stop" in query_stub
+        assert "malformed or orphaned" in query_stub and "dangling symlink" in query_stub
+        assert "Do not run Step 1" in query_stub
+        assert "output writes" in query_stub
+        assert "Stop after reporting its answer or refusal" in query_stub
+        assert _executable_blocks(query_stub) == []
+        query_bodies = [next(
             artifact.content for artifact in artifacts
             if artifact.path.endswith("/references/query.md")
-        ))
+        )]
+    else:
+        query_bodies = [query_stub]
     for body in query_bodies:
         portable_branch = body.split("**Portable query", 1)[1].split(
             "**Ordinary graph", 1
@@ -4998,9 +5009,10 @@ def test_generated_portable_query_preserves_bundle(tmp_path, platform_key, envel
     git("add", "graphify-out")
     git("commit", "-qm", "bundle")
 
-    artifact = gen.render(gen.load_platforms()[platform_key])[0]
+    core, refs = _platform_artifacts(platform_key)
+    query_body = refs.get("query.md", core)
     block = _block_containing(
-        artifact.content, '--portable --output graphify-out --revision HEAD'
+        query_body, '--portable --output graphify-out --revision HEAD'
     ).replace("'QUESTION'", shlex.quote(question))
     before = {str(p.relative_to(tmp_path)): p.read_bytes()
               for p in tmp_path.rglob("*") if p.is_file()}
@@ -5047,7 +5059,8 @@ def test_generated_portable_query_passes_question_as_literal_argument(
     output = corpus / "graphify-out"
     output.mkdir(parents=True)
     (output / ".graphify_portable.json").write_text("orphan envelope")
-    body = gen.render(gen.load_platforms()[platform_key])[0].content
+    core, refs = _platform_artifacts(platform_key)
+    body = refs.get("query.md", core)
     block = _block_containing(body, '--portable --output graphify-out --revision HEAD')
     assert "query 'QUESTION'" in block
     assert "shlex.quote" in body
@@ -5075,9 +5088,9 @@ def test_generated_portable_query_missing_runtime_does_not_bootstrap(tmp_path):
     output.mkdir()
     (output / ".graphify_portable.json").write_text("orphan envelope")
     bin_dir = _isolated_bootstrap_bin(tmp_path)
-    artifact = gen.render(gen.load_platforms()["claude"])[0]
+    _, refs = _platform_artifacts("claude")
     block = _block_containing(
-        artifact.content, '--portable --output graphify-out --revision HEAD'
+        refs["query.md"], '--portable --output graphify-out --revision HEAD'
     )
     before = {str(p.relative_to(tmp_path)): p.read_bytes()
               for p in output.rglob("*") if p.is_file()}

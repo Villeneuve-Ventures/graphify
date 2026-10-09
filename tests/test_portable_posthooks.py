@@ -55,12 +55,20 @@ def test_portable_suffix(event, tmp_path, errexit):
 
 
 @pytest.mark.parametrize("operation", ["add", "modify", "delete"])
-def test_ordinary_portable_source_commit(operation):
+def test_ordinary_portable_source_commit(operation, monkeypatch):
     repo = pending_repo()
     finalize_merge(repo, "graphify-out")
     git(repo, "commit", "--no-edit", skip_hooks=False)
     clone = Path.home() / "clone"
     git(Path.home(), "clone", "--no-local", str(repo), str(clone))
+    # Fresh clones do not inherit the source repository's local identity.
+    # Do not let ambient identity or OS-derived defaults mask this on CI.
+    for name in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                 "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(name, raising=False)
+    git(clone, "config", "user.useConfigOnly", "true")
+    git(clone, "config", "user.email", "merge-lifecycle@example.invalid")
+    git(clone, "config", "user.name", "Merge Lifecycle Tests")
     hooks.install(clone, merge_guard=True)
     open_portable_graph_snapshot(clone, "graphify-out")
     before = git(clone, "rev-parse", "HEAD").stdout
