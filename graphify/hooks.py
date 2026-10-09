@@ -16,6 +16,11 @@ _CHECKOUT_MARKER = "# graphify-checkout-hook-start"
 _CHECKOUT_MARKER_END = "# graphify-checkout-hook-end"
 _POST_MERGE_MARKER = "# graphify-post-merge-hook-start"
 _POST_MERGE_MARKER_END = "# graphify-post-merge-hook-end"
+_MERGE_GUARD_HOOKS = ("pre-merge-commit", "pre-commit")
+
+
+def _merge_guard_markers(name: str) -> tuple[str, str]:
+    return f"# graphify-{name}-guard-start", f"# graphify-{name}-guard-end"
 
 # __PINNED_PYTHON__ is replaced at install time with the absolute path of the
 # Python interpreter that ran `graphify hook install`.  For uv-tool and pipx
@@ -744,6 +749,12 @@ def _owned_hook_span(
     return starts[0][0], ends[0][1]
 
 
+def _is_standalone_merge_guard(raw: bytes, owned: tuple[int, int] | None) -> bool:
+    """Require the supported shell interpreter and no foreign hook content."""
+    return (owned is not None and raw[:owned[0]] == b"#!/bin/sh\n"
+            and not raw[owned[1]:].strip())
+
+
 def _prepare_hook_install(
     hooks_dir: Path,
     name: str,
@@ -777,6 +788,11 @@ def _prepare_hook_install(
         original_mode = stat.S_IMODE(metadata.st_mode)
         raw = hook_path.read_bytes() if snapshot is ... else snapshot[1]
         owned = _owned_hook_span(raw, marker, marker_end, f"{name} hook at {hook_path}")
+        if name in _MERGE_GUARD_HOOKS and not _is_standalone_merge_guard(raw, owned):
+            raise RuntimeError(
+                f"Cannot compose merge guard with existing {name}; leave the user hook unchanged. "
+                "Only an absent hook or standalone Graphify guard is supported."
+            )
         if owned is None:
             # Preserve the established append behavior, including UTF-8
             # validation, trailing-whitespace trimming, and LF output.
@@ -1140,7 +1156,35 @@ def _atomic_hooks_supported() -> bool:
     return os.name != "nt" and (sys.platform == "darwin" or sys.platform.startswith("linux"))
 
 
-def _hook_request(root: Path) -> dict:
+def _has_merge_guards(root: Path) -> bool:
+    """Select optional cleanup from pending recovery or a regular owned prehook.
+
+    Do not follow unrelated symlinks or apply mutation-time hard-link checks.
+    The atomic remover still validates every selected hook and refuses malformed
+    owned sections. This observation does not confer recovery authority.
+    """
+    hooks_dir = _user_hooks_dir(_hooks_dir(root))
+    from graphify.hook_installation import pending_merge_guard_uninstall
+    if pending_merge_guard_uninstall(hooks_dir):
+        return True
+    for name in _MERGE_GUARD_HOOKS:
+        path = hooks_dir / name
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                continue
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            continue
+        with os.fdopen(fd, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise RuntimeError(f"Hook changed during merge guard detection: {path}")
+            raw = stream.read()
+        if any(_standalone_marker_spans(raw, marker) for marker in _merge_guard_markers(name)):
+            return True
+    return False
+
+
+def _hook_request(root: Path, *, merge_guard: bool = False) -> dict:
     """Bind a retry to the originating Git/configuration and interpreter context.
 
     Return directory identities, interpreter/output paths, and hashes of local
@@ -1173,12 +1217,72 @@ def _hook_request(root: Path) -> dict:
                "interpreter": _pinned_python(), "output": _hook_output_path(), "repo_output": _hook_repo_output_path(root),
                "registration_config": hashlib.sha256(config).hexdigest(),
                "registration_attributes": hashlib.sha256(attrs.read_bytes()).hexdigest() if attrs.exists() else None}
+    if merge_guard:
+        from graphify.hook_installation import MERGE_GUARD_NAMES
+        request["merge_guard_hooks"] = list(MERGE_GUARD_NAMES)
     if identities() != origin:
         raise RuntimeError("Repository identity changed while preparing the hook request")
     return request
 
 
-def install(path: Path = Path(".")) -> str:
+def _merge_guard_output(root: Path) -> str:
+    """Admit the opt-in guard's exact in-repository output selector."""
+    configured = _hook_output_path()
+    # The existing driver falls back to graphify-out for absolute selectors and
+    # emits an unquoted attributes pattern. Do not claim coupled guard/driver
+    # coverage for selectors that those existing paths cannot express exactly.
+    if Path(configured).is_absolute():
+        raise RuntimeError("Merge guards require a repository-relative output; absolute outputs are unsupported")
+    output = _hook_repo_output_path(root)
+    if (not output or Path(output).is_absolute() or ".." in Path(output).parts
+            or "\\" in output or "\x00" in output or Path(output) == Path(".")):
+        raise RuntimeError("Merge guards require an output inside the repository")
+    if output != Path(output).as_posix():
+        raise RuntimeError("Merge guards require a canonical repository-relative output selector")
+    if (output.startswith(("#", "!", '"'))
+            or any(c.isspace() or ord(c) < 32 or c in '*?[]"' for c in output)):
+        raise RuntimeError("Merge guards require a literal output selector without whitespace or Git attribute patterns")
+    try:
+        (root / output).resolve().relative_to(root.resolve())
+    except ValueError as exc:
+        raise RuntimeError("Merge guards require an output inside the repository") from exc
+    return output
+
+
+def _merge_guard_script(name: str, output: str, pinned: str) -> str:
+    """Render a standalone refusal-only hook; no user program is relocated."""
+    start, end = _merge_guard_markers(name)
+    script = f"""{start}
+# Opt-in containment only. This hook never rebuilds or stages output.
+[ "${{GRAPHIFY_SKIP_HOOK:-0}}" = "1" ] && exit 0
+# Git's inherited pathspec switches must not hide the exact enrolled path.
+unset GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS
+GRAPHIFY_OUT={shlex.quote(output)}
+export GRAPHIFY_OUT
+for _GFY_STATE in rebase-merge rebase-apply sequencer CHERRY_PICK_HEAD REVERT_HEAD; do
+    _GFY_STATE_PATH=$(git rev-parse --git-path "$_GFY_STATE") || exit 1
+    if [ -e "$_GFY_STATE_PATH" ] || [ -L "$_GFY_STATE_PATH" ]; then exit 0; fi
+done
+"""
+    if name == "pre-commit":
+        script += """_GFY_MERGE_HEAD=$(git rev-parse --git-path MERGE_HEAD) || exit 1
+if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
+"""
+    script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
+_GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --raw --no-abbrev -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
+[ -n "$_GFY_TRACKED" ] || exit 0
+# The raw header before Git's tab separator binds the observed mode and OID.
+_GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
+"""
+    # Existing post-event discovery deliberately fails open. A selected tracked
+    # merge graph must instead refuse if its trusted runtime cannot be found.
+    script += _PYTHON_DETECT.replace("__PINNED_PYTHON__", shlex.quote(pinned)).replace("exit 0", "exit 1")
+    entry_option = ' --entry-header "$_GFY_ENTRY_HEADER"' if name == "pre-merge-commit" else ""
+    script += f'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_guard --event {shlex.quote(name)} --output "$GRAPHIFY_OUT"{entry_option}\nexit $?\n{end}\n'
+    return script
+
+
+def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     """Install Graphify lifecycle hooks in the nearest git repository.
 
     Return per-hook and merge-driver status lines. Prepare post-commit,
@@ -1196,6 +1300,12 @@ def install(path: Path = Path(".")) -> str:
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
+
+    guard_output = None
+    if merge_guard:
+        if not _atomic_hooks_supported():
+            raise RuntimeError("Merge guard installation is supported on macOS and Linux only")
+        guard_output = _merge_guard_output(root)
 
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
 
@@ -1229,13 +1339,18 @@ def install(path: Path = Path(".")) -> str:
     ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
 
     if _atomic_hooks_supported():
-        from graphify.hook_installation import run
+        from graphify.hook_installation import NAMES, MERGE_GUARD_NAMES, run
         specs = (("post-commit", hook, _HOOK_MARKER, _HOOK_MARKER_END),
                  ("post-checkout", checkout, _CHECKOUT_MARKER, _CHECKOUT_MARKER_END),
                  ("post-merge", post_merge, _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
-        messages = run(root, hooks_dir, "install", _hook_request(root),
+        if merge_guard:
+            assert guard_output is not None
+            specs += tuple((name, _merge_guard_script(name, guard_output, pinned), *_merge_guard_markers(name))
+                           for name in _MERGE_GUARD_HOOKS)
+        messages = run(root, hooks_dir, "install", (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
                        lambda snapshots: [_prepare_hook_install(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs],
-                       recapture_request=lambda: _hook_request(root))
+                       recapture_request=lambda: (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
+                       names=MERGE_GUARD_NAMES if merge_guard else NAMES)
         merge_msg = _register_merge_driver(root)
         if merge_msg.startswith("not registered"):
             raise RuntimeError(f"Hooks installed; merge driver {merge_msg}")
@@ -1273,7 +1388,7 @@ def install(path: Path = Path(".")) -> str:
     )
 
 
-def uninstall(path: Path = Path(".")) -> str:
+def uninstall(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     """Remove Graphify lifecycle hooks from the nearest git repository.
 
     Preserve content outside owned marker intervals, deleting hooks whose
@@ -1291,16 +1406,21 @@ def uninstall(path: Path = Path(".")) -> str:
     root = _git_root(path)
     if root is None:
         raise RuntimeError(f"No git repository found at or above {path.resolve()}")
+    if merge_guard and not _atomic_hooks_supported():
+        raise RuntimeError("Merge guard removal is supported on macOS and Linux only")
 
     hooks_dir = _user_hooks_dir(_hooks_dir(root))
     if _atomic_hooks_supported():
-        from graphify.hook_installation import run
+        from graphify.hook_installation import NAMES, MERGE_GUARD_NAMES, run
         specs = (("post-commit", _HOOK_MARKER, _HOOK_MARKER_END),
                  ("post-checkout", _CHECKOUT_MARKER, _CHECKOUT_MARKER_END),
                  ("post-merge", _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
-        messages = run(root, hooks_dir, "uninstall", _hook_request(root),
+        if merge_guard:
+            specs += tuple((name, *_merge_guard_markers(name)) for name in _MERGE_GUARD_HOOKS)
+        messages = run(root, hooks_dir, "uninstall", (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
                        lambda snapshots: [_prepare_hook_uninstall(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs],
-                       recapture_request=lambda: _hook_request(root))
+                       recapture_request=lambda: (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
+                       names=MERGE_GUARD_NAMES if merge_guard else NAMES)
         merge_msg = _unregister_merge_driver(root, strict=True)
         return "\n".join(f"{spec[0]}: {message}" for spec, message in zip(specs, messages, strict=True)) + f"\nmerge driver: {merge_msg}"
     commit_plan = _prepare_hook_uninstall(
@@ -1331,7 +1451,7 @@ def uninstall(path: Path = Path(".")) -> str:
     )
 
 
-def status(path: Path = Path(".")) -> str:
+def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     """Return hook, merge-driver, and macOS/Linux recovery status text.
 
     Return 'Not in a git repository.' when no repository is found. Pending or
@@ -1363,12 +1483,17 @@ def status(path: Path = Path(".")) -> str:
         if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
             return "not installed (unsafe non-regular hook)"
         try:
+            raw = p.read_bytes()
             owned = _owned_hook_span(
-                p.read_bytes(), marker, marker_end, f"{name} hook at {p}"
+                raw, marker, marker_end, f"{name} hook at {p}"
             )
         except RuntimeError:
             return "not installed (malformed Graphify markers)"
         if owned is not None:
+            if name in _MERGE_GUARD_HOOKS and not _is_standalone_merge_guard(raw, owned):
+                return "not installed (unsupported standalone guard)"
+            if name in _MERGE_GUARD_HOOKS and not os.access(p, os.X_OK):
+                return "not installed (hook is not executable)"
             return "installed"
         return "not installed (hook exists but graphify not found)"
 
@@ -1378,10 +1503,14 @@ def status(path: Path = Path(".")) -> str:
         "post-merge", _POST_MERGE_MARKER, _POST_MERGE_MARKER_END
     )
     merge = _merge_driver_status(root)
+    guards = "".join(f"\n{name}: {_check(name, *_merge_guard_markers(name))}"
+                     for name in _MERGE_GUARD_HOOKS)
     return (
         warning +
         f"post-commit: {commit}\n"
         f"post-checkout: {checkout}\n"
         f"post-merge: {post_merge}\n"
-        f"merge driver: {merge}"
+        f"merge driver: {merge}" + guards +
+        ("\nmerge guards: ordinary merge containment only; no finalization or clone qualification"
+         if merge_guard else "")
     )

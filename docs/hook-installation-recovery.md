@@ -1,5 +1,94 @@
 # Hook installation and recovery
 
+## Optional ordinary merge guards
+
+`graphify hook install --merge-guard` opts into two additional prehooks on
+macOS/Linux. They read the effective Git index and refuse a configured, tracked
+`graph.json` containing `merge_pending` at an ordinary automatic or manual merge
+commit boundary. An unreadable, malformed, oversized, unresolved, or non-regular
+selected graph also refuses. Graph JSON must use UTF-8 without a byte-order mark,
+matching ordinary graph readers. Valid active and legacy graphs are not required to
+have a new receipt format. Passing the guard is not receipt, source-freshness,
+or fresh-clone qualification.
+The guard shares the readers' 512 MiB default size cap and the
+`GRAPHIFY_MAX_GRAPH_BYTES` override (plain bytes or `MB`/`GB` suffixes).
+A graph exactly at the effective limit is allowed; a larger graph is refused
+before its blob is loaded.
+
+Inspection uses literal index paths and object IDs, ignoring replacement refs
+and inherited pathspec switches. It refuses missing local objects without
+fetching them. The qualified runtime is Git 2.55.0; a Git version that lacks the
+required inspection switches refuses the selected merge instead of weakening
+the check.
+
+This is containment for issue #105, not a finalizer. Refusal does not rebuild,
+stage, write receipts, or change Graphify transaction state. The merge stays
+uncommitted. Repeating `git commit` alone does not repair a pending graph; retain
+the merge for an explicit repair or use normal Git merge cancellation. Git's own
+merge changes can already be present when the hook refuses.
+
+The automatic guard runs at hook entry without requiring `MERGE_HEAD`. The
+qualified Git 2.55.0 implementation selects its automatic commit tree before the
+pre-merge hook; staging different output in that hook does not repair that tree.
+The hook captures the selected graph's mode and object ID before interpreter
+discovery and validates that captured object. Later index replacement or removal
+cannot hide a pending captured graph. Git does not expose its already-selected
+tree to this hook: index changes before the first capture remain outside this
+guarantee. Do not run concurrent index writers during a merge. Reinstall opted-in
+hooks after upgrading to receive the current generated guard script.
+The manual guard requires ordinary merge state. Rebase, cherry-pick, revert,
+sequencers, ordinary non-merge commits, fast-forwards, and commits after
+`git merge --quit` are outside this guard's coverage. An untracked graph is not
+staged or inspected. Intent-to-add entries are also omitted, as they are from
+Git's candidate commit tree; a genuinely staged empty graph still refuses.
+The output path is bound at installation. This first opt-in
+requires a canonical repository-relative literal selector without whitespace or
+Git attribute pattern characters. Spellings such as `./graphify-out`,
+`out//nested`, and `out/./nested` are refused because the emitted attribute
+pattern would not match the canonical graph path. Absolute selectors (including in-repository
+absolute paths) are refused because the existing driver would select a different
+path. Shared absolute output behavior in the original post-hooks is unchanged.
+
+`--no-verify`, disabled hooks, and `GRAPHIFY_SKIP_HOOK=1` bypass protection. They
+can record a pending graph that readers still reject. If a selected tracked
+merge graph needs checking but no trusted interpreter can be found, the hook
+fails rather than silently permitting the commit. Missing hooks in a fresh
+clone supply no protection.
+
+Installation admits only absent prehooks or standalone Graphify-owned shell
+guards. Existing user prehooks, other interpreters, and added content outside
+Graphify's guard interval are refused before live hook publication. Graphify
+does not move those programs or change their interpreter or `$0`. Existing
+post-hook composition retains its current behavior.
+
+Use `graphify hook status --merge-guard` to inspect the optional guards and
+`graphify hook uninstall --merge-guard` to remove all five Graphify hooks.
+Status applies the same standalone-hook shape check as installation; foreign
+content outside the markers or a different interpreter is reported as
+unsupported. It does not attest the owned script body or runtime availability.
+Guards without execute permission are reported as not installed.
+Default `graphify hook install` and `graphify hook uninstall` still manage only
+the original three post-hooks; default hook uninstall leaves opted-in guards in
+place, which status displays. On macOS/Linux, the broader `graphify uninstall`
+selects all five hooks when a regular prehook contains either Graphify guard
+marker, including a malformed owned section. Otherwise it removes only the
+original three hooks, preserving unrelated prehooks such as user symlinks and
+hard links. An authenticated pending five-hook uninstall retains that selection
+on retry even after the live guards have been removed. Cleanup failures are
+reported before advising package removal.
+The five-hook batch has the same individually atomic file publication and
+retained recovery limits described below, not a whole-batch atomic guarantee.
+
+Finish an interrupted original three-hook operation with its original default
+command before opting in. A different five-hook request cannot resume it.
+Interrupted opt-in operations require the same `--merge-guard` request and
+context. Completed original history remains usable; no recovery history is
+converted or deleted.
+
+The [merge lifecycle contract](plans/graphify-merge-lifecycle-contract.md) keeps
+portable reading, successful commit finalization, sibling admission, and
+sequencer deliveries separate.
+
 On macOS and Linux, `graphify hook install` and `graphify hook uninstall`
 prepare the complete three-hook batch before changing live hooks. Each published
 file has its complete content and final executable mode. Existing user-hook
