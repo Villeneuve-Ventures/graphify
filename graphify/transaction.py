@@ -7287,6 +7287,8 @@ def _reject_portable_path(path: Path) -> None:
                     raise ManagedAuthorityError(
                         "portable output requires explicit portable reading; local mutation/adoption is unsupported"
                     )
+        except PermissionError as exc:
+            raise ManagedAuthorityError("cannot inspect path for portable authority") from exc
         except (FileNotFoundError, NotADirectoryError):
             continue
 

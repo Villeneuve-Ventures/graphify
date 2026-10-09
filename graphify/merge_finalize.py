@@ -20,6 +20,13 @@ class MergeFinalizeError(transaction.PendingTransactionError):
     """The bounded manual transition cannot be safely prepared."""
 
 
+def _require_local_object_storage() -> None:
+    if any(name in os.environ for name in (
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    )):
+        raise MergeFinalizeError("relocated Git object storage is unsupported")
+
+
 def _output_selector(output: str) -> str:
     path = PurePosixPath(output)
     if (not output or path == PurePosixPath(".") or path.is_absolute() or path.as_posix() != output
@@ -193,6 +200,7 @@ def validate_index_bundle(root: Path, output: str, *, revision: str | None = Non
     """Validate portable closure against exact index or committed-tree objects."""
     from graphify.portable import PORTABLE_FILE, source_records_from_blobs, validate_bundle
 
+    _require_local_object_storage()
     output = _output_selector(output)
     entries = _entries(root, revision)
     selected = {p[len(output) + 1:]: value for p, value in entries.items()
@@ -205,18 +213,61 @@ def validate_index_bundle(root: Path, output: str, *, revision: str | None = Non
                            modes={p: mode for p, (mode, _oid) in selected.items()})
 
 
+def _observer_commit(root: Path) -> str | None:
+    """Distinguish an unborn branch from an unreadable committed authority."""
+    try:
+        return _git(root, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
+    except MergeGuardError as exc:
+        ref = _git(root, "symbolic-ref", "--quiet", "HEAD").strip()
+        result = subprocess.run(
+            ["git", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-c",
+             "core.fsmonitor=false", "-C", str(root), "show-ref", "--verify", "--quiet", os.fsdecode(ref)],
+            capture_output=True, check=False, timeout=30,
+        )
+        if result.returncode == 1:
+            return None
+        raise exc
+
+
+def _observer_entries(root: Path, commit: str, output: str) -> dict[str, tuple[str, str]]:
+    """Probe only literal committed envelope/graph paths before profile validation."""
+    from graphify.portable import PORTABLE_FILE
+
+    paths = (f"{output}/{PORTABLE_FILE}", f"{output}/graph.json")
+    expected = {os.fsencode(path): path for path in paths}
+    raw = _git(root, "--literal-pathspecs", "ls-tree", "-z", commit, "--", *paths)
+    entries = {}
+    for record in raw.split(b"\0"):
+        if not record:
+            continue
+        header, path = record.split(b"\t", 1)
+        if path not in expected or expected[path] in entries:
+            raise MergeFinalizeError("cannot classify exact committed output paths")
+        mode, _kind, oid = header.decode("ascii").split()
+        entries[expected[path]] = mode, oid
+    return entries
+
+
 def observe_committed_portable(root: Path, output: str) -> bool:
     """Suppress legacy rebuilds on portable authority, including invalid bundles.
 
     No working-tree artifact, index, or local authority is changed. An invalid
     committed portable signal also suppresses rebuild: postevents cannot repair
     recorded bytes and must never turn portable content into local generations.
+    Ordinary legacy outputs do not acquire portable source/path restrictions.
     """
     from graphify.portable import PORTABLE_FILE
 
-    output = _output_selector(output)
-    commit = _git(root, "rev-parse", "--verify", "HEAD").decode("ascii").strip()
-    entries = _entries(root, commit)
+    # Normal legacy hooks accept spellings such as ./graphify-out. Normalize
+    # only their observer selector; producer enrollment remains strict.
+    relative = PurePosixPath(output)
+    if relative.is_absolute() or ".." in relative.parts:
+        return False  # No in-repository committed selector exists for this path.
+    output = relative.as_posix()
+    commit = _observer_commit(root)
+    if commit is None:
+        return False  # An unborn branch has no committed portable authority.
+    entries = _observer_entries(root, commit, output)
     present = output + "/" + PORTABLE_FILE in entries
     graph_entry = entries.get(output + "/graph.json")
     if graph_entry is not None and not present:
@@ -272,7 +323,12 @@ def _admit(root: Path, output: str, state):
     operand_payloads = []
     graph_path = output + "/graph.json"
     for operand in operands:
-        entry = _entries(root, operand).get(graph_path)
+        operand_entries = _entries(root, operand)
+        if any(path.startswith(output + "/") and path not in (
+            graph_path, output + "/manifest.json",
+        ) for path in operand_entries):
+            raise MergeFinalizeError("merge operand contains an unsupported tracked output sibling")
+        entry = operand_entries.get(graph_path)
         if entry is None or entry[0] != "100644":
             raise MergeFinalizeError("all merge operands require regular tracked v1 graphs")
         blob = _blob(root, entry[1])
@@ -470,6 +526,7 @@ def _remove_record(path, captured):
 
 
 def _require_full_index(root: Path) -> None:
+    _require_local_object_storage()
     if os.name != "posix" or any(name in os.environ for name in ("GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")):
         raise MergeFinalizeError("only the default full POSIX index is supported")
     for option in ("core.sparseCheckout", "core.splitIndex", "index.sparse"):

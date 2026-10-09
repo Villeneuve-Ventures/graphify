@@ -18,6 +18,74 @@ def pending_repo():
     return repo
 
 
+@pytest.mark.parametrize("staged", [False, True])
+def test_commit_refuses_output_conversion_added_after_finalization(staged):
+    from graphify import hooks
+    from graphify.merge_finalize import finalize_merge
+
+    repo = pending_repo()
+    hooks.install(repo, merge_guard=True)
+    finalize_merge(repo, "graphify-out")
+    with (repo / ".gitattributes").open("a") as stream:
+        stream.write("\ngraphify-out/*.json working-tree-encoding=UTF-16LE-BOM\n")
+    if staged:
+        git(repo, "add", ".gitattributes")
+    before_tree = git(repo, "write-tree").stdout
+    before_head = git(repo, "rev-parse", "HEAD").stdout
+    result = git(repo, "commit", "--no-edit", skip_hooks=False, check=False)
+    assert result.returncode != 0
+    assert "output filters, text conversion, and encodings" in result.stderr
+    assert git(repo, "rev-parse", "HEAD").stdout == before_head
+    assert git(repo, "write-tree").stdout == before_tree
+    assert (repo / ".git/MERGE_HEAD").exists()
+
+
+@pytest.mark.parametrize("operation", ["finalize", "cancel", "guard"])
+def test_relocated_objects_refuse_without_changing_index(monkeypatch, operation):
+    from graphify.merge_finalize import MergeFinalizeError, cancel_merge, finalize_merge
+    from graphify.merge_guard import MergeGuardError, check_merge_commit
+
+    repo = pending_repo()
+    if operation != "finalize":
+        finalize_merge(repo, "graphify-out")
+    external = Path.home() / "external-objects"
+    external.mkdir()
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(external))
+    monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(repo / ".git/objects"))
+    before = (repo / ".git/index").read_bytes()
+    with pytest.raises((MergeFinalizeError, MergeGuardError), match="object storage"):
+        if operation == "guard":
+            check_merge_commit("graphify-out", "pre-commit", root=repo)
+        elif operation == "cancel":
+            cancel_merge(repo, "graphify-out")
+        else:
+            finalize_merge(repo, "graphify-out")
+    assert (repo / ".git/index").read_bytes() == before
+    assert list(external.iterdir()) == []
+
+
+@pytest.mark.parametrize("sibling", [".graphify_root", "notes.md"])
+def test_staged_deletion_cannot_hide_tracked_output_sibling(sibling):
+    from graphify.merge_finalize import MergeFinalizeError, finalize_merge
+
+    repo = graph_repo(Path.home(), manual=True)
+    target = repo / "graphify-out" / sibling
+    if sibling == "notes.md":
+        target.write_text("tracked note\n")
+    git(repo, "add", f"graphify-out/{sibling}")
+    git(repo, "commit", "--amend", "--no-edit")
+    if sibling == "notes.md":
+        target.unlink()
+    assert git(repo, "merge", "--no-edit", "side", check=False).returncode != 0
+    (repo / "conflict.txt").write_text("resolved\n")
+    git(repo, "add", "conflict.txt")
+    git(repo, "update-index", "--force-remove", f"graphify-out/{sibling}")
+    before = (repo / ".git/index").read_bytes()
+    with pytest.raises(MergeFinalizeError, match="tracked output sibling"):
+        finalize_merge(repo, "graphify-out")
+    assert (repo / ".git/index").read_bytes() == before
+
+
 def test_manual_finalization_records_readable_clone_and_preserves_worktree():
     from graphify.merge_finalize import finalize_merge
     from graphify.portable import open_portable_graph_snapshot

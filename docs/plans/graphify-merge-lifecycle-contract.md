@@ -198,12 +198,18 @@ payload or extraction input. A tracked root marker or any other tracked output
 sibling refuses; no broad removal or silent conversion occurs. Other local
 managed siblings also refuse. This profile is suitable for a narrow no-cluster
 producer, not general clustered/semantic output.
+All three merge-operand trees must satisfy the tracked sibling restriction;
+staging a deletion does not remove that admission requirement.
 
 Only the default full index on POSIX is admitted initially. Alternate, sparse,
-split and unresolved indexes refuse. Only standalone Graphify prehooks are
+split and unresolved indexes refuse. `GIT_OBJECT_DIRECTORY` and
+`GIT_ALTERNATE_OBJECT_DIRECTORIES` also refuse, so normal index entries cannot
+depend on temporary object-storage environment settings. Only standalone Graphify prehooks are
 supported; foreign user prehooks refuse. Finalization rebuilds from frozen
 Python blobs through the existing strict Python AST extractor, stages exact
 prepared blobs without filters, and preserves unrelated index entries.
+The manual commit guard rechecks cached and working-tree output conversion
+attributes, including changes made after preparation.
 
 Publication is index-only. No local graph, receipt or coordination is rewritten.
 Post-events verify committed portable output and suppress the legacy rebuild
@@ -378,7 +384,7 @@ No test result qualifies another host or stronger writer-isolation assumption.
 
 ### Local implementation evidence
 
-The local candidate was checked on macOS with Python 3.14.3 and Git 2.55.0,
+The initial candidate, published as `055699eb`, was checked on macOS with Python 3.14.3 and Git 2.55.0,
 against source baseline `3cecae9bed3f9cb02caa70788fae8faa583f8828`.
 These are local receipts, not a release qualification or hosted CI result.
 

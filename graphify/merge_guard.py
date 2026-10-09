@@ -81,7 +81,7 @@ not qualified here; passing this guard does not establish clone readability.
         raise MergeGuardError("merge guard requires a repository-relative output")
     graph = (relative / "graph.json").as_posix()
     from graphify.portable import PORTABLE_FILE
-    from graphify.merge_finalize import MergeFinalizeError, validate_index_bundle
+    from graphify.merge_finalize import MergeFinalizeError, _output_attributes, validate_index_bundle
 
     portable_entry = _git(root, "ls-files", "--stage", "-z", "--",
                           f":(top,literal){relative.as_posix()}/{PORTABLE_FILE}")
@@ -89,6 +89,7 @@ not qualified here; passing this guard does not establish clone readability.
         if event == "pre-merge-commit":
             raise MergeGuardError("automatic portable finalization is unsupported; use a manual merge")
         try:
+            _output_attributes(root, relative.as_posix())
             validate_index_bundle(root, relative.as_posix())
         except (MergeFinalizeError, ValueError, RuntimeError) as exc:
             raise MergeGuardError(f"portable staged bundle refused: {exc}") from exc
