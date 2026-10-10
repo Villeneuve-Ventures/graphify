@@ -47,7 +47,10 @@ all expected coordinates, exact `last_good`, complete receipt/payload verificati
 and certified journal authority. Missing, corrupt, incompatible, or wrong-target
 state refuses. Pending registry/lease/journal/pointer/staged/GC recovery, retained
 semantic recovery state, or an occupied lease also refuses. Admission does not
-repair those records. Lease acquisition repeats the existing registry/epoch,
+repair those records. The stable semantic queue is read under the workspace lock;
+retained items, semantic-required reconciliation even after item compaction, and
+unreadable or pending queue records refuse before lease allocation and replay.
+Lease acquisition repeats the existing registry/epoch,
 source, recovery, and contention checks. Pointer movement repeats the existing
 CAS, lease, fence, compatibility, journal, and generation checks.
 When the current generation is verifiable, its receipt must agree with the visible
@@ -70,6 +73,14 @@ authority, no intervening operation/fence advance, and no active lease or recove
 intent. Request ID and authorization prose are transport metadata; replay identity
 is the complete movement tuple. A changed target or stale tuple cannot toggle the
 pointer. A later deliberate rollback needs a new current tuple.
+The retained pointer's current generation reference, operation epoch, and fence
+must match its own durable pointer journal event. Its active-source revision and
+source epoch must match its fully verified receipt. These are the prior generation's
+coordinates, which can differ from the rollback target's source epoch and from the
+request's later lease high watermarks. If rollback quarantined a corrupt prior
+generation, the move can succeed, but completed retry refuses when that prior
+receipt can no longer establish the complete retained evidence. It preserves the
+completed pointer and recovery records for separately authorized inspection.
 
 ## Uncertainty and preservation
 
@@ -102,8 +113,10 @@ Portable injected fixtures do not establish native execution or power-loss proof
 
 ## Local validation
 
+The prior repair candidate `32c590a8` has complete saved receipts. This section
+records that candidate; later repair validation is recorded separately below.
 Frozen all-extra setup (`uv sync --all-extras --frozen`) checked 171 packages.
-The final aggregate used the repository's four serial pytest shard entry points:
+The aggregate used the repository's four serial pytest shard entry points:
 `PYTHONDONTWRITEBYTECODE=1 uv run --frozen python -m pytest
 -p tools.pytest_partition -p tools.pytest_timings --ci-shard=N
 --ci-timing-json RECEIPT tests/ -q --tb=short --basetemp=FIXTURE_ROOT/N`.
@@ -112,19 +125,20 @@ a directory named `worktrees`. Each shard completed with exit status zero.
 
 | Shard | Passed | Skipped | Passed subtests | Observed duration |
 | --- | ---: | ---: | ---: | ---: |
-| 1 | 2,387 | 7 | 104 | 1,974.41 s |
-| 2 | 1,707 | 0 | 47 | 1,652.52 s |
-| 3 | 2,350 | 38 | 63 | 1,082.98 s |
-| 4 | 2,648 | 2 | 21 | 1,208.27 s |
-| Total | **9,092** | **47** | **235** | |
+| 1 | 2,393 | 7 | 104 | 2,340.75 s |
+| 2 | 1,707 | 0 | 47 | 1,708.67 s |
+| 3 | 2,350 | 38 | 63 | 1,136.72 s |
+| 4 | 2,648 | 2 | 21 | 1,222.78 s |
+| Total | **9,098** | **47** | **235** | |
 
-The four timing receipts have the same 9,139-test inventory and allocation hash.
+The four timing receipts have the same 9,145-test inventory and allocation hash.
 Their selected inventories are disjoint and cover that complete inventory.
-The parallel aggregate took about 32 minutes 55 seconds. The largest observed
-modules were `test_workspace_structural_s4.py` (724.59 s) and
-`test_workspace_s6_rollback.py` (519.89 s), including setup and teardown.
+The parallel aggregate took about 39 minutes. The largest observed
+modules were `test_workspace_structural_s4.py` (821.74 s) and
+`test_workspace_s6_rollback.py` (819.45 s), including setup and teardown.
 
-The final run includes canonical/schema agreement, stale authority and target
+That run includes the six pointer-source/post-acquisition regressions,
+canonical/schema agreement, stale authority and target
 refusals, complete exact retry, recovery/GC barriers, occupied leases, interruption,
 ambiguous worker output, and preserved source/generation/unrelated content.
 The cold installed S6 test uses real candidate admission and the bounded console
@@ -167,3 +181,39 @@ outside the repository and do not establish gate passage.
 S7 exact release qualification, native power-loss and hostile concurrent-rename
 proof, D3, real adoption, and hosted CI remain outside this delivery.
 CI not awaited.
+
+## Replay and semantic queue repair validation
+
+The subsequent repair binds the retained pointer's complete authority and reads
+the stable semantic queue before fresh admission or replay. Eleven focused
+refusal cases failed against `32c590a8` before these changes; all 16 selected
+behavior checks passed after repair. A separate two-case check passed with and
+without a released lease advancing the pre-rollback high watermarks. The cold
+installed worker and README policy checks passed (138 tests), including pending
+queue and altered retained-fence refusals with preserved state.
+
+New complete receipts validate the repaired code and tests through the same
+four-shard entry points and private fixture parent contract:
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,404 | 7 | 104 | 2,821.94 s |
+| 2 | 1,707 | 0 | 47 | 1,760.32 s |
+| 3 | 2,350 | 38 | 63 | 1,188.09 s |
+| 4 | 2,648 | 2 | 21 | 1,285.63 s |
+| Total | **9,109** | **47** | **235** | |
+
+The four complete receipts share the 9,156-test inventory and allocation hash.
+Their disjoint selections cover the full inventory with exit status zero.
+The aggregate took about 47 minutes. The largest modules were
+`test_workspace_s6_rollback.py` (1,249.18 s) and
+`test_workspace_structural_s4.py` (819.01 s), including setup and teardown.
+
+Frozen all-extra setup, Ruff, focused Pyright, all five generated-skill validators,
+80 optimized verifier tests, CLI/install smoke, native Leiden smoke, and the
+required AST-only graph update passed. Code/test and workflow/lock/configuration
+hashes stayed unchanged through validation. Existing docstrings stayed unchanged.
+Both new security receipts completed: Bandit reported the same 11 findings in
+unchanged paths; the frozen default/dev dependency audit reported zero findings.
+The historical receipt correction above reused the valid `32c590a8` evidence;
+these new shards qualify the code repairs. CI and bot reviews not awaited.

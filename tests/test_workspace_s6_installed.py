@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from graphify.workspace.lifecycle_contracts import PointerSet, decode_journal_frame
+from graphify.workspace.lifecycle_contracts import PointerSet, PriorPointerRecord, decode_journal_frame
 from tests.test_workspace_s5_installed import installed_candidate, PublicClient, authorization  # noqa: F401
 from tests.workspace_s3_helpers import REPO_UUID, create_repo, tree_snapshot
 
@@ -62,6 +62,14 @@ def test_installed_native_public_rollback_and_authority(installed_candidate):  #
     assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
     assert client.snapshots(source) == damaged
     pointer.write_bytes(original_pointer)
+    queue_pending = workspace / "queue/semantic.pending.jsonl"
+    assert not queue_pending.exists()
+    queue_pending.write_bytes(b"unresolved semantic intent")
+    queue_pending.chmod(0o600)
+    damaged = client.snapshots(source)
+    assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
+    assert client.snapshots(source) == damaged
+    queue_pending.unlink()
     # Content snapshots of the immutable generations and source cover success.
     generations = tree_snapshot(workspace / "generations")
     source_before = tree_snapshot(source)
@@ -77,6 +85,15 @@ def test_installed_native_public_rollback_and_authority(installed_candidate):  #
         for path in sorted((workspace / "journal/segments").glob("*.gwf"))]
     assert events[-1]["transition"] == "ROLLED_BACK"
     assert events[-1]["receipt_sha256"] == synced[0]["receipt_sha256"]
+    prior = workspace / "pointers.previous.json"
+    original_prior = prior.read_bytes()
+    value = json.loads(original_prior)
+    value["pointer_set"]["fence_token"] += 1
+    prior.write_bytes(PriorPointerRecord.from_mapping(value).canonical)
+    damaged = client.snapshots(source)
+    assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
+    assert client.snapshots(source) == damaged
+    prior.write_bytes(original_prior)
     before = client.snapshots(source)
     assert client.run("rollback", params, module=True)["pointer"] == result
     assert client.snapshots(source) == before

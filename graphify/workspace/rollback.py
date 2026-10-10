@@ -7,7 +7,8 @@ from .generations import GenerationError
 from .leases import LeaseBusy
 from .persistence import CommitUnknown, require_before_deadline
 from .pointers import PointerCAS, PointerConflict, PointerCorrupt, PointerError
-from .sync import _entry, _semantic_barriers
+from .semantic_queue import SemanticQueueError
+from .sync import _entry, _queue_barrier, _semantic_barriers
 
 
 def _matches_prior(pointer, parameters, target):
@@ -28,6 +29,11 @@ def _inspect(runtime, p, *, deadline_ns):
         entry = _entry(registry, repo_uuid)
         with stores.leases.read_only_workspace_lock(repo_uuid, deadline_ns=deadline_ns):
             _semantic_barriers(stores, repo_uuid)
+            try:
+                queue = stores.queue.read_only_snapshot_locked(repo_uuid, deadline_ns=deadline_ns)
+            except SemanticQueueError as exc:
+                raise PointerConflict("rollback requires stable semantic queue authority") from exc
+            _queue_barrier(queue)
             lease = stores.leases.read_only_snapshot_locked(registry, repo_uuid, deadline_ns=deadline_ns)
             stores.leases._assert_recovery_barriers_locked(
                 repo_uuid, "ROLLBACK", recover=False, deadline_ns=deadline_ns)
@@ -82,11 +88,23 @@ def _inspect(runtime, p, *, deadline_ns):
                         from .lifecycle_contracts import PointerSet
                         previous = PointerSet.from_mapping(prior.to_dict()["pointer_set"])
                         replay = (_matches_prior(previous, p, target)
+                            and previous.to_dict()["operation_epoch"] <= p["expected_operation_epoch"]
+                            and previous.to_dict()["fence_token"] <= p["expected_fence_high_watermark"]
+                            and any(pointers._journal_records_pointer(journal, previous,
+                                transition=transition, deadline_ns=deadline_ns)
+                                for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED"))
                             and pointers._journal_records_pointer(journal, current,
                                 transition="ROLLED_BACK", deadline_ns=deadline_ns)
                             and not any(event.to_dict()["pointer_revision"] is not None
                                 and event.to_dict()["pointer_revision"] > value["pointer_revision"]
                                 for event in journal.events))
+                        if replay:
+                            previous_value = previous.to_dict()
+                            previous_receipt = pointers._verify_ref(repo_uuid, previous_value["current"],
+                                deadline_ns=deadline_ns).to_dict()
+                            if (previous_value["active_source_revision"] != previous_receipt["active_source_revision"]
+                                    or previous_value["source_epoch"] != previous_receipt["source_epoch"]):
+                                raise PointerCorrupt("retained pointer source authority differs from its receipt")
                 if not fresh and not replay:
                     raise PointerConflict("rollback pointer/epoch/fence/target coordinates are stale")
                 runtime.validate_authority(deadline_ns=deadline_ns)
