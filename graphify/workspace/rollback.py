@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 import time
 
 from .cli_contracts import rollback_parameters
+from .generations import GenerationError
 from .leases import LeaseBusy
-from .persistence import require_before_deadline
-from .pointers import PointerCAS, PointerConflict
+from .persistence import CommitUnknown, require_before_deadline
+from .pointers import PointerCAS, PointerConflict, PointerCorrupt, PointerError
 from .sync import _entry, _semantic_barriers
 
 
@@ -54,6 +55,16 @@ def _inspect(runtime, p, *, deadline_ns):
                         allow_superseded=True):
                     raise PointerConflict("rollback target has no certified journal authority")
                 value = current.to_dict()
+                try:
+                    current_receipt = pointers._verify_ref(repo_uuid, value["current"], deadline_ns=deadline_ns)
+                except (GenerationError, PointerError):
+                    # The core rollback may quarantine an unverifiable current generation.
+                    pass
+                else:
+                    current_value = current_receipt.to_dict()
+                    if (value["active_source_revision"] != current_value["active_source_revision"]
+                            or value["source_epoch"] != current_value["source_epoch"]):
+                        raise PointerCorrupt("pointer source authority does not match its current receipt")
                 fresh = (lease.operation_epoch == p["expected_operation_epoch"]
                     and lease.fence_high_watermark == p["expected_fence_high_watermark"]
                     and _matches_prior(current, p, target))
@@ -99,16 +110,18 @@ def rollback_structural(runtime, parameters, *, deadline_ns):
             "expected_operation_epoch", "expected_migration_epoch")},
         acquired_at=datetime.now(timezone.utc), monotonic_ns=now,
         ttl_ns=deadline_ns - now, deadline_ns=deadline_ns)
-    cas = PointerCAS(p["expected_pointer_revision"], p["expected_active_source_revision"],
-        p["expected_source_epoch"], grant.operation_epoch, grant.migration_epoch,
-        2, grant.lease.to_dict()["fence_token"], p["target_generation_id"],
-        p["target_receipt_sha256"], p["expected_current_receipt_sha256"])
-    runtime.validate_authority(deadline_ns=deadline_ns)
-    result = stores.pointers.rollback(grant, cas, occurred_at=datetime.now(timezone.utc),
-        monotonic_ns=time.monotonic_ns(), deadline_ns=deadline_ns)
-    # Exceptions leave their durable lease/intent for the existing recovery path.
-    # Killing a worker, or failing to acknowledge release, cannot prove no effects.
-    stores.leases.release(grant, deadline_ns=deadline_ns)
-    runtime.validate_authority(deadline_ns=deadline_ns)
-    require_before_deadline(deadline_ns, "rollback completion expired")
-    return result
+    try:
+        cas = PointerCAS(p["expected_pointer_revision"], p["expected_active_source_revision"],
+            p["expected_source_epoch"], grant.operation_epoch, grant.migration_epoch,
+            2, grant.lease.to_dict()["fence_token"], p["target_generation_id"],
+            p["target_receipt_sha256"], p["expected_current_receipt_sha256"])
+        runtime.validate_authority(deadline_ns=deadline_ns)
+        result = stores.pointers.rollback(grant, cas, occurred_at=datetime.now(timezone.utc),
+            monotonic_ns=time.monotonic_ns(), deadline_ns=deadline_ns)
+        stores.leases.release(grant, deadline_ns=deadline_ns)
+        runtime.validate_authority(deadline_ns=deadline_ns)
+        require_before_deadline(deadline_ns, "rollback completion expired")
+        return result
+    except Exception as exc:
+        # Acquisition already advanced durable authority; preserve recovery evidence.
+        raise CommitUnknown("rollback completion could not be acknowledged") from exc

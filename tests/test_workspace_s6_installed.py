@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from graphify.workspace.lifecycle_contracts import decode_journal_frame
+from graphify.workspace.lifecycle_contracts import PointerSet, decode_journal_frame
 from tests.test_workspace_s5_installed import installed_candidate, PublicClient, authorization  # noqa: F401
 from tests.workspace_s3_helpers import REPO_UUID, create_repo, tree_snapshot
 
@@ -24,9 +24,9 @@ def test_installed_native_public_rollback_and_authority(installed_candidate):  #
     enrolled = client.run("register", {"operation": "enroll", "source_root": str(source),
         "authorization": authorization("ENROLL"), "expected_registry_revision": 0})
     synced = []
-    for generation, attempt in (("gen-s6-first", "a"), ("gen-s6-second", "b")):
+    for epoch, (generation, attempt) in enumerate((("gen-s6-first", "a"), ("gen-s6-second", "b")), 1):
         prepared = client.run("sync", {"operation": "prepare", "repo_uuid": REPO_UUID,
-            "generation_id": generation, "source_epoch": 1, "desired_watermark": 1,
+            "generation_id": generation, "source_epoch": epoch, "desired_watermark": epoch,
             "expected_payload_bytes": 1024 * 1024})
         synced.append(client.run("sync", {"operation": "execute", "sync_request": prepared["sync_request"],
             "attempt_sha256": attempt * 64}, module=True))
@@ -53,11 +53,21 @@ def test_installed_native_public_rollback_and_authority(installed_candidate):  #
     assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
     assert client.snapshots(source) == damaged
     authority.write_bytes(original_authority)
+    pointer = workspace / "pointers.json"
+    original_pointer = pointer.read_bytes()
+    value = json.loads(original_pointer)
+    assert value["source_epoch"] == 2
+    pointer.write_bytes(PointerSet.from_mapping(dict(value, source_epoch=3)).canonical)
+    damaged = client.snapshots(source)
+    assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
+    assert client.snapshots(source) == damaged
+    pointer.write_bytes(original_pointer)
     # Content snapshots of the immutable generations and source cover success.
     generations = tree_snapshot(workspace / "generations")
     source_before = tree_snapshot(source)
     result = client.run("rollback", params, file=True)["pointer"]
     assert result["pointer_revision"] == synced[1]["pointer_revision"] + 1
+    assert result["source_epoch"] == 1
     assert result == json.loads((workspace / "pointers.json").read_bytes())
     assert result["current"] == {"generation_id": "gen-s6-first",
         "receipt_sha256": synced[0]["receipt_sha256"]}

@@ -105,10 +105,13 @@ def public_runtime(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from graphify.workspace import composition
     from tests.test_workspace_structural_s4 import runtime_fixture, request_for
-    from graphify.workspace.sync import synchronize_structural
+    from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
     runtime, repo = runtime_fixture(tmp_path, monkeypatch)
     first = synchronize_structural(runtime, request_for(runtime, "gen-first"), attempt_sha256="a" * 64)
-    second = synchronize_structural(runtime, request_for(runtime, "gen-second"), attempt_sha256="b" * 64)
+    second_request = prepare_structural_sync(runtime, repo_uuid=REPO_UUID,
+        generation_id="gen-second", source_epoch=2, desired_watermark=2,
+        expected_payload_bytes=1024 * 1024)
+    second = synchronize_structural(runtime, second_request, attempt_sha256="b" * 64)
     assert (first.pointer_revision, second.pointer_revision) == (1, 2)
     p = parameters_for(runtime)
     monkeypatch.setattr(composition, "compose_workspace_runtime",
@@ -147,6 +150,7 @@ def test_public_rollback_and_exact_retry_preserve_payloads(public_runtime, capsy
     assert result["pointer_revision"] == 3
     assert result["current"] == {"generation_id": p["target_generation_id"],
         "receipt_sha256": p["target_receipt_sha256"]}
+    assert result["source_epoch"] == p["expected_source_epoch"] == 1
     events = [decode_journal_frame(path.read_bytes()).to_dict()
               for path in sorted((workspace / "journal/segments").glob("*.gwf"))]
     assert events[-1]["transition"] == "ROLLED_BACK" and events[-1]["pointer_revision"] == 3
@@ -157,6 +161,101 @@ def test_public_rollback_and_exact_retry_preserve_payloads(public_runtime, capsy
     before = tree_snapshot(runtime.inputs.state_root)
     run()
     assert json.loads(capsys.readouterr().out)["result"]["pointer"] == result
+    assert tree_snapshot(runtime.inputs.state_root) == before
+
+
+def test_corrupt_current_pointer_epoch_refuses_before_mutation(public_runtime, capsys):
+    from graphify.workspace.lifecycle_contracts import PointerSet
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, p, run = public_runtime
+    pointer = runtime.inputs.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    original = json.loads(pointer.read_bytes())
+    assert original["source_epoch"] == 2 and p["expected_source_epoch"] == 1
+    pointer.write_bytes(PointerSet.from_mapping(dict(original, source_epoch=3)).canonical)
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+
+
+def test_corrupt_current_generation_keeps_core_rollback_behavior(public_runtime, capsys):
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, p, run = public_runtime
+    workspace = runtime.inputs.state_root / "workspaces" / REPO_UUID
+    current = workspace / "generations" / "gen-second"
+    receipt = current / "receipt.json"
+    receipt.chmod(0o600)
+    receipt.write_bytes(b"corrupt previous current receipt")
+    damaged = tree_snapshot(current)
+    target = tree_snapshot(workspace / "generations" / p["target_generation_id"])
+    source = tree_snapshot(repo)
+    run()
+    result = json.loads(capsys.readouterr().out)["result"]["pointer"]
+    assert result["current"] == {"generation_id": p["target_generation_id"],
+        "receipt_sha256": p["target_receipt_sha256"]}
+    assert result["source_epoch"] == p["expected_source_epoch"] == 1
+    assert not current.exists()
+    assert tree_snapshot(workspace / "quarantine/corrupt/gen-second.3") == damaged
+    assert tree_snapshot(workspace / "generations" / p["target_generation_id"]) == target
+    assert tree_snapshot(repo) == source
+    before = tree_snapshot(runtime.inputs.state_root)
+    run()
+    assert json.loads(capsys.readouterr().out)["result"]["pointer"] == result
+    assert tree_snapshot(runtime.inputs.state_root) == before
+
+
+@pytest.mark.parametrize("boundary", ["after_acquire", "move", "release", "after_release"])
+def test_post_acquisition_failures_are_unknown(public_runtime, monkeypatch, capsys, boundary):
+    from graphify.workspace.leases import LeaseError
+    from graphify.workspace.pointers import PointerConflict
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, p, run = public_runtime
+    workspace = runtime.inputs.state_root / "workspaces" / REPO_UUID
+    authority = runtime.inputs.state_root / "runtime-manifest.json"
+    original_authority = authority.read_bytes()
+    payload = tree_snapshot(workspace / "generations")
+    source = tree_snapshot(repo)
+    original_acquire = runtime.stores.leases.acquire
+    original_release = runtime.stores.leases.release
+    def acquire(*args, **kwargs):
+        grant = original_acquire(*args, **kwargs)
+        if boundary == "after_acquire":
+            authority.write_bytes(b"private invalid authority")
+        return grant
+    def move(*args, **kwargs):
+        raise PointerConflict("private pointer failure")
+    def release(*args, **kwargs):
+        if boundary == "release":
+            raise LeaseError("private release failure")
+        result = original_release(*args, **kwargs)
+        if boundary == "after_release":
+            authority.write_bytes(b"private invalid authority")
+        return result
+    monkeypatch.setattr(runtime.stores.leases, "acquire", acquire)
+    monkeypatch.setattr(runtime.stores.leases, "release", release)
+    if boundary == "move":
+        monkeypatch.setattr(runtime.stores.pointers, "rollback", move)
+    run(expected=5)
+    output = capsys.readouterr()
+    assert output.out == "" and "private" not in output.err
+    assert json.loads(output.err)["error_code"] == "execution_unknown"
+    lease = json.loads((workspace / "workspace.json").read_bytes())
+    pointer = json.loads((workspace / "pointers.json").read_bytes())
+    moved = boundary in {"release", "after_release"}
+    assert lease["operation_epoch"] == p["expected_operation_epoch"] + 1
+    assert lease["fence_high_watermark"] == p["expected_fence_high_watermark"] + 1
+    assert bool(lease["leases"]) == (boundary != "after_release")
+    assert pointer["pointer_revision"] == p["expected_pointer_revision"] + moved
+    if moved:
+        assert pointer["current"] == {"generation_id": p["target_generation_id"],
+            "receipt_sha256": p["target_receipt_sha256"]}
+    assert tree_snapshot(workspace / "generations") == payload
+    assert tree_snapshot(repo) == source
+    authority.write_bytes(original_authority)
+    before = tree_snapshot(runtime.inputs.state_root)
+    run(expected=0 if boundary == "after_release" else 4)
+    capsys.readouterr()
     assert tree_snapshot(runtime.inputs.state_root) == before
 
 

@@ -418,13 +418,13 @@ missing required language extra such as `graphifyy[sql]` for SQL. Genuine option
 metadata absence and working documented backend fallbacks remain supported.
 The separate `graphify update` command retains its own AST update behavior.
 
-### Managed structural workspace (S5)
+### Managed structural workspace (S5 and S6 rollback)
 
 `graphify workspace` exposes explicit registration, source activation, structural
-sync, query, status, and doctor commands. Each command accepts a bounded canonical
-JSON request from a file or stdin. All workspace operations, including query,
-status, and doctor, require non-elevated macOS on local APFS. Windows and Linux
-support workspace help only. On the qualified macOS runtime:
+sync, bounded rollback, query, status, and doctor commands. Each command accepts
+a bounded canonical JSON request from a file or stdin. All workspace operations,
+including query, status, and doctor, require non-elevated macOS on local APFS.
+Windows and Linux support workspace help only. On the qualified macOS runtime:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 graphify workspace status --request status.json
@@ -445,8 +445,12 @@ atomic snapshot, and structural sync does not establish semantic completion.
 
 See the [S5 request contract and lifecycle guide](docs/plans/graphify-v8-s5-result.md)
 for request fields, registration/CAS rules, retries, response codes, and limits.
-This surface adds no maintenance, migration, worker, service, or semantic-sync
-transport.
+The [S6 rollback contract](docs/plans/graphify-v8-s6-rollback-result.md) defines
+the exact compatible `last_good` target, expected revisions, source epoch,
+lease/fence coordinates, completed retries, and `execution_unknown` responses.
+Rollback selects only the fully verified exact `last_good`; it does not refresh
+source content or establish semantic completion. Public repair and GC, migration,
+worker, service, and semantic-sync transports remain unavailable.
 
 ## Ignoring files
 

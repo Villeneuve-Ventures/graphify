@@ -50,6 +50,10 @@ semantic recovery state, or an occupied lease also refuses. Admission does not
 repair those records. Lease acquisition repeats the existing registry/epoch,
 source, recovery, and contention checks. Pointer movement repeats the existing
 CAS, lease, fence, compatibility, journal, and generation checks.
+When the current generation is verifiable, its receipt must agree with the visible
+pointer's active-source revision and source epoch before lease allocation. A
+metadata mismatch refuses without repair. This does not require the current
+generation's source epoch to equal the target generation's source epoch.
 
 Success returns `result={"pointer": <complete PointerSet>}`. The pointer revision
 advances once; the current reference is the requested exact `last_good`, and the
@@ -72,7 +76,10 @@ pointer. A later deliberate rollback needs a new current tuple.
 Request acquisition limits, the command deadline, isolated worker imports,
 response size limits, redacted errors, and exit codes remain the S5 contract.
 An interrupted mutation, timeout, malformed worker response, or failed completion
-acknowledgment reports `execution_unknown`. Worker termination cannot prove that
+acknowledgment reports `execution_unknown`. Every failure after lease
+acquisition reports `execution_unknown`, including pointer movement, lease release,
+and final authority checks; acquisition already advances durable operation and
+fence authority. Worker termination cannot prove that
 rollback completed or that no prior effects occurred. Preserve the request and
 durable lease/intent evidence. Pending recovery refuses exact retry until the
 existing separately authorized lifecycle recovery resolves it; this command does
