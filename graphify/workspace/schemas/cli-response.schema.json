@@ -25,6 +25,7 @@
         "register",
         "activate",
         "sync",
+        "rollback",
         "query",
         "status",
         "doctor",
@@ -93,6 +94,128 @@
           },
           "error_code": {
             "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "rollback"
+          },
+          "outcome": {
+            "const": "ok"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pointer"
+            ],
+            "properties": {
+              "pointer": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "contract",
+                  "schema_version",
+                  "state_schema_version",
+                  "repo_uuid",
+                  "pointer_revision",
+                  "active_source_revision",
+                  "source_epoch",
+                  "operation_epoch",
+                  "fence_token",
+                  "current",
+                  "last_good"
+                ],
+                "properties": {
+                  "contract": {
+                    "const": "graphify.workspace.pointer_set"
+                  },
+                  "schema_version": {
+                    "type": "integer",
+                    "const": 2
+                  },
+                  "state_schema_version": {
+                    "type": "integer",
+                    "const": 2
+                  },
+                  "repo_uuid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  "pointer_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "active_source_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "source_epoch": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "operation_epoch": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "fence_token": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "current": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "generation_id",
+                      "receipt_sha256"
+                    ],
+                    "properties": {
+                      "generation_id": {
+                        "type": "string",
+                        "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+                      },
+                      "receipt_sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      }
+                    }
+                  },
+                  "last_good": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "generation_id",
+                          "receipt_sha256"
+                        ],
+                        "properties": {
+                          "generation_id": {
+                            "type": "string",
+                            "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+                          },
+                          "receipt_sha256": {
+                            "type": "string",
+                            "pattern": "^[0-9a-f]{64}$"
+                          }
+                        }
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
           }
         }
       }

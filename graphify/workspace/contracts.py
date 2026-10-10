@@ -392,7 +392,8 @@ class CompatibilityManifest(Document):
                     "graphify/workspace/contracts.py", "graphify/workspace/composition.py",
                     "graphify/workspace/__init__.py", "graphify/workspace/adapters/base.py",
                     "graphify/workspace/adapters/__init__.py", "graphify/workspace/cli.py",
-                    "graphify/workspace/cli_contracts.py", "graphify/workspace/status.py"}
+                    "graphify/workspace/cli_contracts.py", "graphify/workspace/status.py",
+                    "graphify/workspace/rollback.py"}
         required.update("graphify/workspace/schemas/" + name for name in SCHEMA_FILES)
         if not required <= set(members):
             raise ContractError("missing structural package members")
