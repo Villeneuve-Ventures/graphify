@@ -910,8 +910,11 @@ reproducing those checks.
 ### Manual PR-Agent commands
 
 PR-Agent runs only after a repository writer comments on a PR with a leading
-slash command such as `/review`, `/describe`, `/improve`, `/ask`, or `/help`;
-inline review comments also support `/ask`. PR opens and pushes do not run
+slash command such as `/prreview`, `/describe`, `/improve`, `/ask`, or `/help`;
+inline review comments also support `/ask`. `/prreview` accepts upstream review
+arguments (for example, `/prreview -i`); direct `/review` comments do not run
+PR-Agent. The workflow changes only the local event payload for the upstream
+review command, leaving the original GitHub comment unchanged. PR opens and pushes do not run
 PR-Agent. The [workflow](.github/workflows/pr-agent.yml) pins the upstream
 Action image and passes the Gemini secret. [`.pr_agent.toml`](.pr_agent.toml)
 selects Gemini 3.8 Flash with Gemini 3.5 Flash Lite as fallback.
