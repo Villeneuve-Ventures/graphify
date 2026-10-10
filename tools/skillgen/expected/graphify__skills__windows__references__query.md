@@ -1,8 +1,12 @@
 # graphify reference: query, path, explain
 
-Load this when the user asks a question against an existing graph, or runs `/graphify path` or `/graphify explain`. The core's query stub points here for the full traversal flow. These flows use the `graphify query` CLI when it is available and fall back to an inline NetworkX traversal otherwise.
+Load this when the user asks a question against an existing graph, or runs `/graphify path` or `/graphify explain`. The core's query stub points here for the full traversal flow. Ordinary graph flows use the `graphify query` CLI when it is available and fall back to an inline NetworkX traversal otherwise; managed-workspace and portable branches below bypass that flow.
 
 For an explicit managed-workspace request, use `graphify workspace query --request <request.json>` with the operator's exact compatible candidate, state root, repository UUID, and bounded query request. All workspace operations, including query, status, and doctor, require non-elevated macOS on local APFS; Windows and Linux support workspace help only. On the qualified macOS runtime, launch with `PYTHONDONTWRITEBYTECODE=1 graphify workspace ...` or an already trusted Python with `-E -P -B -m graphify workspace ...`; suppression must be set before import because bare cold console/module startup cannot guarantee zero writes. Skip this reference's ordinary bootstrap, graph checks, query expansion, inline fallback, save-result, and memory writes. The public workspace path owns validation and buffers the answer until its freshness checks pass. If output is withheld, report the refusal; do not print partial text or run ordinary traversal. `graphify workspace status` and `doctor` inspect existing state without repair. Source freshness is observed-current, not an atomic snapshot. Workspace sync is structural-only, and its receipt does not establish semantic completion.
+
+**Portable query — check before ordinary preflight:** Check for a directory entry at `graphify-out/.graphify_portable.json`, including a dangling symlink, even when graph.json is absent or the envelope is malformed or orphaned. Portable queries are unsupported on native Windows; the portable reader requires the qualified POSIX host profile. `path`, `explain`, and `affected` are also unsupported. Do not run Step 1, runtime discovery, portable CLI commands, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, memory writes, or output writes. Stop after reporting the platform refusal; preserve the three-file portable closure.
+
+**Ordinary graph — only when no portable envelope entry exists:** Continue with the existing flow below.
 
 Two traversal modes - choose based on the question:
 

@@ -474,8 +474,27 @@ fi
 """
 
 
+_PORTABLE_POST_EVENT_GUARD = """\
+# A committed portable output is authoritative only through its recorded tree.
+# Postevents observe that tree and leave pending local reconciliation explicit.
+if "$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_finalize --observe --output "$GRAPHIFY_OUT"; then
+    _GFY_PORTABLE_STATUS=0
+else
+    _GFY_PORTABLE_STATUS=$?
+fi
+if [ "$_GFY_PORTABLE_STATUS" != "0" ]; then
+    if [ "$_GFY_PORTABLE_STATUS" != "10" ]; then
+        echo "[graphify hook] portable observation failed; rebuild suppressed" >&2
+    fi
+    exit 0
+fi
+"""
+
+
 _HOOK_SCRIPT = """\
 # graphify-hook-start
+# Keep managed exit paths inside this section, preserving composed user hooks.
+(
 # Auto-rebuilds the knowledge graph after each commit (code files only, no LLM needed).
 # Installed by: graphify hook install
 
@@ -508,7 +527,6 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 
 [ "${GRAPHIFY_SKIP_HOOK:-0}" = "1" ] && exit 0
 
-""" + _WORKTREE_GUARD + """
 CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || git diff --name-only HEAD 2>/dev/null)
 if [ -z "$CHANGED" ]; then
     exit 0
@@ -519,7 +537,7 @@ fi
 # shared absolute outputs are outside the repository and omit this block.
 __GRAPHIFY_OUTPUT_EXCLUSION__
 
-""" + _PYTHON_DETECT + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + _WORKTREE_GUARD + """
 export GRAPHIFY_CHANGED="$CHANGED"
 
 # Run the rebuild detached so git commit returns immediately. Full-repo rebuilds
@@ -530,12 +548,15 @@ _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify hook] launching background rebuild (log: $_GRAPHIFY_LOG)"
-""" + _detached_launch(_REBUILD_BODY_COMMIT) + """# graphify-hook-end
+""" + _detached_launch(_REBUILD_BODY_COMMIT) + """\n)
+# graphify-hook-end
 """
 
 
 _CHECKOUT_SCRIPT = """\
 # graphify-checkout-hook-start
+# Keep managed exit paths inside this section, preserving composed user hooks.
+(
 # Auto-rebuilds the knowledge graph (code only) when switching branches.
 # Installed by: graphify hook install
 
@@ -586,17 +607,20 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 _GFY_REBUILD_CURRENT_ROOT=0
 export _GFY_REBUILD_CURRENT_ROOT
 
-""" + _WORKTREE_GUARD + _PYTHON_DETECT + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + _WORKTREE_GUARD + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify] Branch switched - launching background rebuild (log: $_GRAPHIFY_LOG)"
-""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """# graphify-checkout-hook-end
+""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """\n)
+# graphify-checkout-hook-end
 """
 
 
 _POST_MERGE_SCRIPT = """\
 # graphify-post-merge-hook-start
+# Keep managed exit paths inside this section, preserving composed user hooks.
+(
 # Finalizes a merge-driver union after Git creates a merge commit.
 # Installed by: graphify hook install
 
@@ -626,12 +650,13 @@ GIT_DIR=${GIT_DIR:-$(git rev-parse --git-dir 2>/dev/null)}
 _GFY_REBUILD_CURRENT_ROOT=1
 export _GFY_REBUILD_CURRENT_ROOT
 
-""" + _PYTHON_DETECT + _POST_MERGE_WORKTREE_GUARD + """
+""" + _PYTHON_DETECT + _PORTABLE_POST_EVENT_GUARD + _POST_MERGE_WORKTREE_GUARD + """
 _GRAPHIFY_LOG="${HOME}/.cache/graphify-rebuild.log"
 mkdir -p "$(dirname "$_GRAPHIFY_LOG")"
 export GRAPHIFY_REBUILD_LOG="$_GRAPHIFY_LOG"
 echo "[graphify] Merge completed - launching background rebuild (log: $_GRAPHIFY_LOG)"
-""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """# graphify-post-merge-hook-end
+""" + _detached_launch(_REBUILD_BODY_CHECKOUT) + """\n)
+# graphify-post-merge-hook-end
 """
 
 
@@ -1263,14 +1288,31 @@ for _GFY_STATE in rebase-merge rebase-apply sequencer CHERRY_PICK_HEAD REVERT_HE
     _GFY_STATE_PATH=$(git rev-parse --git-path "$_GFY_STATE") || exit 1
     if [ -e "$_GFY_STATE_PATH" ] || [ -L "$_GFY_STATE_PATH" ]; then exit 0; fi
 done
+_GFY_REMOVED_ENVELOPE=
 """
     if name == "pre-commit":
         script += """_GFY_MERGE_HEAD=$(git rev-parse --git-path MERGE_HEAD) || exit 1
-if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then exit 0; fi
+if [ ! -e "$_GFY_MERGE_HEAD" ] && [ ! -L "$_GFY_MERGE_HEAD" ]; then
+    # Ordinary legacy commits need no runtime. Removing a portable envelope
+    # must not turn its remaining staged payloads into a legacy output.
+    _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
+    if [ -z "$_GFY_ENVELOPE" ]; then
+        _GFY_REMOVED_ENVELOPE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff --cached --diff-filter=D --name-only --no-ext-diff --no-textconv --no-renames --no-relative -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
+        [ -n "$_GFY_REMOVED_ENVELOPE" ] || exit 0
+        # Complete output removal leaves no portable closure to validate.
+        _GFY_REMAINING_OUTPUT=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT") || exit 1
+        [ -n "$_GFY_REMAINING_OUTPUT" ] || exit 0
+    fi
+fi
 """
     script += """_GFY_EMPTY_TREE=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false hash-object -t tree --stdin </dev/null) || exit 1
 _GFY_TRACKED=$(git --no-replace-objects --no-lazy-fetch --no-optional-locks -c core.fsmonitor=false diff-index --cached --ita-invisible-in-index --raw --no-abbrev -r --no-ext-diff --no-textconv --no-renames --no-relative "$_GFY_EMPTY_TREE" -- ":(top,literal)$GRAPHIFY_OUT/graph.json") || exit 1
-[ -n "$_GFY_TRACKED" ] || exit 0
+if [ -z "$_GFY_TRACKED" ]; then
+    # Long s is the fixed envelope basename's only non-ASCII casefold alias.
+    # Keep unrelated siblings and intent-to-add graphs outside runtime discovery.
+    _GFY_ENVELOPE=$(git ls-files --stage -- ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.json" ":(top,literal,icase)$GRAPHIFY_OUT/.graphify_portable.jſon") || exit 1
+    [ -n "$_GFY_ENVELOPE" ] || [ -n "$_GFY_REMOVED_ENVELOPE" ] || exit 0
+fi
 # The raw header before Git's tab separator binds the observed mode and OID.
 _GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
 """
@@ -1280,6 +1322,20 @@ _GFY_ENTRY_HEADER=${_GFY_TRACKED%%	*}
     entry_option = ' --entry-header "$_GFY_ENTRY_HEADER"' if name == "pre-merge-commit" else ""
     script += f'"$GRAPHIFY_PYTHON" -E -P -B -m graphify.merge_guard --event {shlex.quote(name)} --output "$GRAPHIFY_OUT"{entry_option}\nexit $?\n{end}\n'
     return script
+
+
+def _post_event_scripts(output: str, repo_output: str, pinned: str) -> dict[str, str]:
+    """Render the managed posthooks for installation and publication admission."""
+    exclusion = (_POST_COMMIT_OUTPUT_EXCLUSION.replace(
+        "__GRAPHIFY_REPO_OUTPUT__", shlex.quote(repo_output)) if repo_output else "")
+    return {
+        name: script.replace("__PINNED_PYTHON__", shlex.quote(pinned)).replace(
+            "__GRAPHIFY_OUTPUT__", shlex.quote(output)
+        ).replace("__GRAPHIFY_OUTPUT_EXCLUSION__", exclusion)
+        for name, script in (("post-commit", _HOOK_SCRIPT),
+                             ("post-checkout", _CHECKOUT_SCRIPT),
+                             ("post-merge", _POST_MERGE_SCRIPT))
+    }
 
 
 def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
@@ -1317,26 +1373,13 @@ def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     # than rejecting valid path punctuation; import verification catches a stale
     # pin so it safely falls through to dynamic detection.
     pinned = _pinned_python()
-    quoted_pinned = shlex.quote(pinned)
-    output_path = _hook_output_path()
-    repo_output_path = _hook_repo_output_path(root)
-    quoted_output = shlex.quote(output_path)
-    output_exclusion = ""
-    if repo_output_path:
-        output_exclusion = _POST_COMMIT_OUTPUT_EXCLUSION.replace(
-            "__GRAPHIFY_REPO_OUTPUT__", shlex.quote(repo_output_path)
-        )
-    hook = _HOOK_SCRIPT.replace("__PINNED_PYTHON__", quoted_pinned).replace(
-        "__GRAPHIFY_OUTPUT__", quoted_output
-    ).replace(
-        "__GRAPHIFY_OUTPUT_EXCLUSION__", output_exclusion
-    )
-    checkout = _CHECKOUT_SCRIPT.replace(
-        "__PINNED_PYTHON__", quoted_pinned
-    ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
-    post_merge = _POST_MERGE_SCRIPT.replace(
-        "__PINNED_PYTHON__", quoted_pinned
-    ).replace("__GRAPHIFY_OUTPUT__", quoted_output)
+    # Guard admission normalizes trailing slashes. Render every coupled hook
+    # with that same selector so publication's exact-byte checks can admit it.
+    output_path = guard_output if guard_output is not None else _hook_output_path()
+    repo_output_path = guard_output if guard_output is not None else _hook_repo_output_path(root)
+    post_scripts = _post_event_scripts(output_path, repo_output_path, pinned)
+    hook, checkout, post_merge = (post_scripts[name] for name in (
+        "post-commit", "post-checkout", "post-merge"))
 
     if _atomic_hooks_supported():
         from graphify.hook_installation import NAMES, MERGE_GUARD_NAMES, run

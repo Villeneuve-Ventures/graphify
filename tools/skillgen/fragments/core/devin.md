@@ -64,6 +64,8 @@ Use it for:
 If the user invoked `/graphify --help` or `/graphify -h` (with no other arguments), print the contents of the `## Usage` section above verbatim and stop. Do not run any commands, do not detect files, do not default the path to `.`. Just print the Usage block and return.
 **Managed workspace commands:** If the user explicitly requests `graphify workspace`, use the public workspace transport with their explicit request and existing candidate authority. All workspace operations, including query, status, and doctor, require non-elevated macOS on local APFS; Windows and Linux support workspace help only. On the qualified macOS runtime, launch with `PYTHONDONTWRITEBYTECODE=1 graphify workspace ...` or an already trusted Python with `-E -P -B -m graphify workspace ...` so cache suppression is set before import; bare cold console/module startup cannot guarantee zero writes. Skip ordinary Step 1, scan-root persistence, and all `graphify-out` writes. `workspace query`, `status`, and `doctor` are read-only: a refusal is not permission to enroll, activate, sync, repair, or fall back to ordinary traversal. Registration and activation require explicit user intent. Structural sync does not claim semantic completion. Stop after reporting the transport result.
 
+**Portable namespace — before ordinary setup:** After the explicit managed-workspace branch, check whether `graphify-out/.graphify_portable.json` has a directory entry, including a dangling symlink, before ordinary bootstrap or checking `graph.json`. Envelope presence reserves the namespace even when malformed or orphaned. For `/graphify query` or a natural-language question, jump to the **Portable query** branch below. Only query is supported; `path`, `explain`, and `affected` are unsupported. Do not reinterpret an explicit build or rebuild as a query: report that the requested ordinary operation is unsupported for this portable output and stop without writes. Skip Step 1 and all ordinary output writes for this namespace. If no envelope entry exists, retain the ordinary flow below.
+
 **Fast path — existing graph:** If `graphify-out/graph.json` exists and the user asks a natural-language question rather than requesting a rebuild, run Step 1 first so `.graphify_python` is overwritten with a supported Python 3.14.2 through 3.14.x interpreter that imports graphify. Then jump directly to `## For /graphify query`; skip detection and rebuilding. Execute all operational commands through the saved interpreter.
 
 If no path was given, use `.` (current directory). Do not ask the user for a path.
@@ -1054,6 +1056,17 @@ Then run Steps 5-9 as normal (label communities, generate viz, benchmark, clean 
 ---
 
 ## For /graphify query
+
+**Portable query — check before ordinary preflight:** Check for a directory entry at `graphify-out/.graphify_portable.json`, including a dangling symlink, even when graph.json is absent or the envelope is malformed or orphaned. When present, only query is supported; report `path`, `explain`, and `affected` as unsupported and stop. Use a compatible trusted installed runtime with cache suppression set before import:
+
+```@@GRAPHIFY_SHELL@@
+@@GRAPHIFY_GUARD@@
+@@GRAPHIFY_CMD@@ query 'QUESTION' --portable --output graphify-out --revision HEAD
+```
+
+Replace the complete `'QUESTION'` placeholder argument with one shell-safe literal for the user's original question, not raw text between quotes. For POSIX shells, use `shlex.quote(question)`; for PowerShell, use a single-quoted literal and double each embedded apostrophe. Never paste question text into double-quoted command source. Preserve requested `--dfs` and `--budget` options. The public portable CLI owns envelope, committed-tree, source, and byte validation. If no compatible trusted installed runtime is available, report it as a prerequisite and stop without installation or output writes. Do not run Step 1, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, or memory writes. A refusal never permits these operations. Answer only from admitted CLI output and cite its source locations. Stop after reporting the answer or refusal; preserve the three-file portable closure.
+
+**Ordinary graph — only when no portable envelope entry exists:** Continue with the existing flow below.
 
 Two traversal modes - choose based on the question:
 

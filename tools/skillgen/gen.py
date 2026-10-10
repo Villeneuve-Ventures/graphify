@@ -1296,6 +1296,12 @@ def _render_core(platform: Platform) -> str:
     install = _read_fragment(f"shell/{platform.shell}.md").rstrip("\n")
     dispatch = _read_fragment(f"dispatch/{platform.dispatch}.md").rstrip("\n")
     query_stub = _read_fragment(_QUERY_STUB).rstrip("\n")
+    if platform.key == "windows":
+        _, ordinary_stub = query_stub.split("\n\n", 1)
+        query_stub = (
+            _read_fragment("query-stub/windows.md").rstrip("\n")
+            + "\n\n" + ordinary_stub
+        )
 
     if platform.extra_sections:
         extra = "".join(
@@ -1313,6 +1319,14 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    if platform.key == "windows":
+        if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
+            raise ValueError("Windows core must have exactly one portable namespace target")
+        body = body.replace(
+            _PORTABLE_NAMESPACE_MIGRATION,
+            _read_fragment("core/windows-portable.md") + "\n",
+            1,
+        )
     body = _render_saved_interpreter_commands(body, platform, artifact_role="core")
     if "@@" in body:
         leftover = sorted(set(re.findall(r"@@\w+@@", body)))
@@ -1382,6 +1396,14 @@ def render(platform: Platform) -> list[RenderedArtifact]:
             body = _render_agents_md_hooks(platform)
         else:
             body = _read_fragment(references[name])
+        if platform.key == "windows" and name == "query":
+            if body.count(_PORTABLE_QUERY_MIGRATION) != 1:
+                raise ValueError("Windows query must have exactly one portable branch target")
+            body = body.replace(
+                _PORTABLE_QUERY_MIGRATION,
+                _read_fragment("references/query/windows-portable.md") + "\n",
+                1,
+            )
         body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))
@@ -2338,6 +2360,51 @@ def _validate_provider_push_order(text: str) -> str | None:
     return None
 
 
+# Exact portable-routing additions are the only new v8 migration allowed here.
+# Keep the complete text and executable template pinned so arbitrary changes in
+# these blocks still fail the frozen-monolith audit.
+_PORTABLE_NAMESPACE_MIGRATION = '''**Portable namespace — before ordinary setup:** After the explicit managed-workspace branch, check whether `graphify-out/.graphify_portable.json` has a directory entry, including a dangling symlink, before ordinary bootstrap or checking `graph.json`. Envelope presence reserves the namespace even when malformed or orphaned. For `/graphify query` or a natural-language question, jump to the **Portable query** branch below. Only query is supported; `path`, `explain`, and `affected` are unsupported. Do not reinterpret an explicit build or rebuild as a query: report that the requested ordinary operation is unsupported for this portable output and stop without writes. Skip Step 1 and all ordinary output writes for this namespace. If no envelope entry exists, retain the ordinary flow below.
+
+'''
+_PORTABLE_QUERY_MIGRATION = """**Portable query — check before ordinary preflight:** Check for a directory entry at `graphify-out/.graphify_portable.json`, including a dangling symlink, even when graph.json is absent or the envelope is malformed or orphaned. When present, only query is supported; report `path`, `explain`, and `affected` as unsupported and stop. Use a compatible trusted installed runtime with cache suppression set before import:
+
+```@@GRAPHIFY_SHELL@@
+@@GRAPHIFY_GUARD@@
+@@GRAPHIFY_CMD@@ query 'QUESTION' --portable --output graphify-out --revision HEAD
+```
+
+Replace the complete `'QUESTION'` placeholder argument with one shell-safe literal for the user's original question, not raw text between quotes. For POSIX shells, use `shlex.quote(question)`; for PowerShell, use a single-quoted literal and double each embedded apostrophe. Never paste question text into double-quoted command source. Preserve requested `--dfs` and `--budget` options. The public portable CLI owns envelope, committed-tree, source, and byte validation. If no compatible trusted installed runtime is available, report it as a prerequisite and stop without installation or output writes. Do not run Step 1, scan-root persistence, ordinary preflight, query expansion, inline fallback, rebuild, query logging, save-result, or memory writes. A refusal never permits these operations. Answer only from admitted CLI output and cite its source locations. Stop after reporting the answer or refusal; preserve the three-file portable closure.
+
+**Ordinary graph — only when no portable envelope entry exists:** Continue with the existing flow below.
+
+"""
+
+
+def _normalise_portable_monolith_routing(
+    text: str, platform: Platform
+) -> tuple[str, str | None]:
+    query = _render_saved_interpreter_commands(
+        _PORTABLE_QUERY_MIGRATION, platform, artifact_role="reference"
+    )
+    for block in (_PORTABLE_NAMESPACE_MIGRATION, query):
+        if text.count(block) != 1:
+            return text, "portable routing block drifted from the reviewed migration"
+    namespace = text.index(_PORTABLE_NAMESPACE_MIGRATION)
+    query_start = text.index(query)
+    boundaries = (
+        text.find("**Managed workspace commands:"),
+        text.find("**Fast path — existing graph:"),
+        text.find("## For /graphify query"),
+        text.find("First check the graph exists:", query_start),
+    )
+    workspace, fast_path, query_heading, preflight = boundaries
+    if min(boundaries) < 0 or not (
+        workspace < namespace < fast_path and query_heading < query_start < preflight
+    ):
+        return text, "portable routing block moved outside its reviewed boundary"
+    return text.replace(_PORTABLE_NAMESPACE_MIGRATION, "", 1).replace(query, "", 1), None
+
+
 def monolith_roundtrip(platform: Platform) -> list[str]:
     """Assert a monolith renders diff-clean vs its v8 blob modulo allowed changes.
 
@@ -2362,6 +2429,11 @@ def monolith_roundtrip(platform: Platform) -> list[str]:
         return [f"[{platform.key}] monolith is missing roundtrip_ref"]
 
     rendered_text = render(platform)[0].content
+    rendered_text, portable_error = _normalise_portable_monolith_routing(
+        rendered_text, platform
+    )
+    if portable_error:
+        return [f"[{platform.key}] {portable_error}"]
     provider_error = _validate_provider_push_order(rendered_text)
     if provider_error:
         return [f"[{platform.key}] {provider_error}"]

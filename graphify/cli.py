@@ -1566,6 +1566,29 @@ def _transactional_export() -> None:
 
 
 def dispatch_command(cmd: str) -> None:
+    if cmd == "query" and "--portable" in sys.argv[2:]:
+        _portable_query_command()
+        return
+    if cmd == "merge-finalize":
+        import argparse
+        from graphify.merge_finalize import cancel_merge, finalize_merge
+        from graphify.transaction import PendingTransactionError
+
+        parser = argparse.ArgumentParser(prog="graphify merge-finalize")
+        parser.add_argument("--output", required=True, help="literal repository-relative output")
+        parser.add_argument("--cancel", action="store_true", help="restore saved output staging")
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            if args.cancel:
+                cancel_merge(Path.cwd(), args.output)
+                print("Restored pending output staging; use git merge --abort to cancel the merge.")
+                return
+            content_id = finalize_merge(Path.cwd(), args.output)
+        except (PendingTransactionError, OSError, ValueError) as exc:
+            parser.exit(1, f"error: {exc}\n")
+        print(f"Prepared portable merge bundle {content_id}; staged only, no commit created.")
+        print("Local reconciliation is deferred; use an isolated clone for portable reading.")
+        return
     if cmd == "transaction":
         _transaction_command()
         return
@@ -1594,6 +1617,38 @@ def dispatch_command(cmd: str) -> None:
             raise SystemExit(1) from exc
         return
     _dispatch_command(cmd)
+
+
+def _portable_query_command() -> None:
+    """Explicit immutable bundle read, with no query-log or publication side effects."""
+    import argparse
+    from networkx.readwrite import json_graph
+    from graphify.portable import open_portable_graph_snapshot
+    from graphify.serve import _query_graph_text
+    from graphify.transaction import PendingTransactionError
+
+    parser = argparse.ArgumentParser(prog="graphify query --portable")
+    parser.add_argument("question")
+    parser.add_argument("--portable", action="store_true", required=True)
+    parser.add_argument("--output", default="graphify-out", help="literal repository-relative output")
+    parser.add_argument("--revision", default="HEAD", help="commit whose source projection is verified")
+    parser.add_argument("--budget", type=int, default=2000)
+    parser.add_argument("--dfs", action="store_true")
+    parser.add_argument("--context", action="append", default=[])
+    args = parser.parse_args(sys.argv[2:])
+    if args.budget < 1:
+        parser.error("--budget must be positive")
+    try:
+        snapshot = open_portable_graph_snapshot(Path.cwd(), args.output, args.revision)
+        graph = json_graph.node_link_graph(snapshot.data, edges="links")
+        result = _query_graph_text(
+            graph, args.question, mode="dfs" if args.dfs else "bfs", depth=2,
+            token_budget=args.budget, context_filters=args.context,
+        )
+    except (PendingTransactionError, OSError, ValueError, KeyError, TypeError) as exc:
+        parser.exit(1, f"error: {exc}\n")
+    print(f"Portable bundle {snapshot.content_id}; source commit {snapshot.revision}")
+    print(result)
 
 
 def _transaction_command() -> None:

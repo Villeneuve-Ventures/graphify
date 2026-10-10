@@ -1,8 +1,5 @@
-When `graphify-out/graph.json` already exists and the user asks a question about the corpus, answer from the graph rather than rebuilding it:
+**Portable query — before ordinary preflight:** For a directory entry at `graphify-out/.graphify_portable.json`, including a dangling symlink or malformed or orphaned envelope, load `references/query.md` before any bootstrap or ordinary action and follow only its **Portable query** branch. Only query is supported; `path`, `explain`, and `affected` are unsupported and must stop. Do not run Step 1, ordinary preflight, query expansion, inline fallback, rebuild, logging, save-result, or output writes. The reference supplies the trusted runtime prerequisite and safe shell-literal command. Stop after reporting its answer or refusal.
 
-```@@GRAPHIFY_SHELL@@
-@@GRAPHIFY_GUARD@@
-@@GRAPHIFY_CMD@@ query "<question>"
-```
+When `graphify-out/graph.json` already exists and the user asks a question about the corpus, answer from the graph rather than rebuilding it:
 
 Before traversal, expand the question against the graph's own vocabulary so a wording mismatch does not collapse the answer to noise. If the `graphify query` CLI is unavailable, fall back to an inline NetworkX traversal of `graphify-out/graph.json`. Answer using only what the graph output contains, and quote `source_location` when citing a specific fact. For that vocab-expansion step, the BFS/DFS traversal modes, the `--budget` cap, the NetworkX fallback, `save-result` feedback, and the `/graphify path` and `/graphify explain` flows, see `references/query.md`.
