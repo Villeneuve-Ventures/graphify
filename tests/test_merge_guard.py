@@ -500,7 +500,7 @@ def test_module_cli_unknown_or_duplicate_option_has_no_repository_effect(tmp_pat
     assert not (repo / ".gitattributes").exists()
 
 
-@pytest.mark.parametrize("case", ["selected", "ordinary", "untracked", "absent", "intent"])
+@pytest.mark.parametrize("case", ["selected", "ordinary", "untracked", "absent", "intent", "siblings"])
 def test_missing_runtime_is_required_only_for_selected_merge_graph(tmp_path, monkeypatch, case):
     repo, graph = staged_repo(tmp_path)
     # A failed pinned-runtime probe is observable. PATH offers Git but no Python
@@ -518,12 +518,16 @@ def test_missing_runtime_is_required_only_for_selected_merge_graph(tmp_path, mon
     hooks.install(repo, merge_guard=True)
     if case == "ordinary":
         (repo / ".git/MERGE_HEAD").unlink()
-    elif case in {"untracked", "absent", "intent"}:
+    elif case in {"untracked", "absent", "intent", "siblings"}:
         git(repo, "rm", "--cached", "graphify-out/graph.json")
         if case == "absent":
             graph.unlink()
         elif case == "intent":
             git(repo, "add", "--intent-to-add", "graphify-out/graph.json")
+        elif case == "siblings":
+            for name in ("notes.md", ".graphify_portable.txt"):
+                (graph.parent / name).write_text("ordinary output sibling\n")
+                git(repo, "add", f"graphify-out/{name}")
     before_index = (repo / ".git/index").read_bytes()
     before_graph = graph.read_bytes() if graph.exists() else None
     event = "pre-commit" if case == "ordinary" else "pre-merge-commit"

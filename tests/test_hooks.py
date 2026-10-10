@@ -1302,8 +1302,10 @@ def _run_installed_post_commit_guard(repo: Path) -> subprocess.CompletedProcess[
         "# Detect a trusted Python interpreter"
     )
     assert separator
+    # The installed managed section is a subshell. Keep the truncated probe
+    # syntactically complete while replacing runtime discovery and launch.
     return subprocess.run(
-        ["/bin/sh", "-c", guard + "printf 'REACHED_LAUNCH_BOUNDARY\\n'\n"],
+        ["/bin/sh", "-c", guard + "printf 'REACHED_LAUNCH_BOUNDARY\\n'\n)\n"],
         cwd=repo,
         env={
             name: value

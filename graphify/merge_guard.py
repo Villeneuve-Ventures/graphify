@@ -1,7 +1,7 @@
-"""Read-only containment for tracked pending graphs at ordinary merge commits.
+"""Read-only containment for tracked merge graphs and staged portable commits.
 
-This is not a finalizer or a portable-receipt validator. Git supplies the
-effective index through its environment; no working-tree graph is opened.
+Git supplies the effective index through its environment; no working-tree
+graph is opened. Explicit portable manual publication validates its closure.
 """
 from __future__ import annotations
 
@@ -18,20 +18,41 @@ _EVENTS = ("pre-commit", "pre-merge-commit")
 
 
 class MergeGuardError(RuntimeError):
-    """The selected staged graph cannot safely pass ordinary merge containment."""
+    """The selected staged graph cannot safely pass commit containment."""
 
 
-def _git(root: Path, *args: str, input: bytes | None = None) -> bytes:
+def _git_invocation(root: Path, *args: str) -> tuple[list[str], dict[str, str]]:
     # Inspect the literal committed object and exact path, while retaining Git's
     # effective repository/index selection (including GIT_INDEX_FILE).
     env = os.environ.copy()
     for name in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
                  "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
         env.pop(name, None)
+    return (["git", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-c",
+             "core.fsmonitor=false", "-C", str(root), *args], env)
+
+
+def _git_chunks(root: Path, *args: str, limit: int):
+    """Stream read-only Git output while retaining the effective index context."""
+    from graphify._git_io import GitReadError, git_stdout
+
+    command, env = _git_invocation(root, *args)
+    try:
+        yield from git_stdout(command, env, limit)
+    except (GitReadError, OSError, subprocess.SubprocessError) as exc:
+        raise MergeGuardError(f"cannot inspect the effective Git index: {exc}") from exc
+
+
+def _git(root: Path, *args: str, input: bytes | None = None,
+         max_bytes: int | None = None) -> bytes:
+    if max_bytes is not None:
+        if input is not None:
+            raise ValueError("bounded Git inspection does not accept input")
+        return b"".join(_git_chunks(root, *args, limit=max_bytes))
+    command, env = _git_invocation(root, *args)
     try:
         result = subprocess.run(
-            ["git", "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "-c",
-             "core.fsmonitor=false", "-C", str(root), *args],
+            command,
             capture_output=True, check=True, timeout=30, env=env, input=input,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -60,9 +81,10 @@ def check_merge_commit(output: str, event: str, *, root: Path = Path("."),
                        entry_header: str | None = None) -> None:
     """Reject a pending staged graph without changing Git or Graphify state.
 
-Only ordinary merge boundaries are covered. Valid legacy/active graphs are
-not qualified here; passing this guard does not establish clone readability.
-"""
+    Ordinary merges and commits with staged or removed portable envelopes are covered.
+    Valid legacy/active graphs are not qualified here; passing this guard does
+    not establish clone readability.
+    """
     if event not in _EVENTS:
         raise MergeGuardError("unsupported merge guard event")
     if entry_header is not None and event != "pre-merge-commit":
@@ -73,13 +95,55 @@ not qualified here; passing this guard does not establish clone readability.
     for name in ("rebase-merge", "rebase-apply", "sequencer", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
         if os.path.lexists(_git_path(root, name)):
             return
-    if event == "pre-commit" and not os.path.lexists(_git_path(root, "MERGE_HEAD")):
-        return
+    ordinary_commit = event == "pre-commit" and not os.path.lexists(_git_path(root, "MERGE_HEAD"))
     relative = PurePosixPath(output)
     if (not output or relative.is_absolute() or ".." in relative.parts
             or "\\" in output or "\x00" in output or relative == PurePosixPath(".")):
         raise MergeGuardError("merge guard requires a repository-relative output")
     graph = (relative / "graph.json").as_posix()
+    from graphify.portable import PORTABLE_FILE
+    from graphify.merge_finalize import (MergeFinalizeError, _output_attributes,
+                                        validate_index_bundle, validate_prepared_merge)
+
+    output_entries = _git(root, "ls-files", "--stage", "-z", "--",
+                          f":(top,literal,icase){relative.as_posix()}")
+    expected_path = os.fsencode(f"{relative.as_posix()}/{PORTABLE_FILE}")
+    portable_paths = []
+    for record in output_entries.split(b"\0"):
+        if not record:
+            continue
+        raw_path = record.rsplit(b"\t", 1)[-1]
+        if os.fsdecode(raw_path).casefold() == os.fsdecode(expected_path).casefold():
+            portable_paths.append(raw_path)
+    if any(path != expected_path for path in portable_paths):
+        raise MergeGuardError("case-aliased portable envelope is unsupported; commit refused")
+    removed_portable = b""
+    if ordinary_commit and not portable_paths and output_entries:
+        # Check removals against Git's implicit HEAD (or its empty-tree baseline
+        # for an unborn branch). Complete output removal has no staged closure.
+        removed_portable = _git(
+            root, "diff", "--cached", "--diff-filter=D", "--name-only", "-z",
+            "--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative", "--",
+            f":(top,literal,icase){relative.as_posix()}/{PORTABLE_FILE}",
+            f":(top,literal,icase){relative.as_posix()}/.graphify_portable.jſon",
+        )
+    if portable_paths or removed_portable:
+        if event == "pre-merge-commit":
+            raise MergeGuardError("automatic portable finalization is unsupported; use a manual merge")
+        try:
+            if ordinary_commit:
+                _output_attributes(root, relative.as_posix())
+                validate_index_bundle(root, relative.as_posix())
+            else:
+                validate_prepared_merge(root, relative.as_posix())
+        except (MergeFinalizeError, OSError, ValueError, RuntimeError) as exc:
+            raise MergeGuardError(f"portable staged bundle refused: {exc}") from exc
+        return
+    if ordinary_commit:
+        return
+    if entry_header == "":
+        # The shell reached this classifier for output siblings without a graph.
+        entry_header = None
     # ls-files exposes intent-to-add placeholders as empty blobs, although Git
     # omits them from the committed tree. Compare only the effective index with
     # the empty tree, including unchanged tracked files without reading HEAD or
