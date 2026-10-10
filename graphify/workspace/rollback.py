@@ -73,6 +73,7 @@ def _inspect(runtime, p, *, deadline_ns):
                         raise PointerCorrupt("pointer source authority does not match its current receipt")
                 fresh = (lease.operation_epoch == p["expected_operation_epoch"]
                     and lease.fence_high_watermark == p["expected_fence_high_watermark"]
+                    and value["current"] != target
                     and _matches_prior(current, p, target))
                 replay = False
                 if (lease.operation_epoch == p["expected_operation_epoch"] + 1
@@ -88,6 +89,7 @@ def _inspect(runtime, p, *, deadline_ns):
                         from .lifecycle_contracts import PointerSet
                         previous = PointerSet.from_mapping(prior.to_dict()["pointer_set"])
                         replay = (_matches_prior(previous, p, target)
+                            and value["last_good"] == previous.to_dict()["current"]
                             and previous.to_dict()["operation_epoch"] <= p["expected_operation_epoch"]
                             and previous.to_dict()["fence_token"] <= p["expected_fence_high_watermark"]
                             and any(pointers._journal_records_pointer(journal, previous,

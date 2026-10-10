@@ -85,6 +85,13 @@ def test_installed_native_public_rollback_and_authority(installed_candidate):  #
         for path in sorted((workspace / "journal/segments").glob("*.gwf"))]
     assert events[-1]["transition"] == "ROLLED_BACK"
     assert events[-1]["receipt_sha256"] == synced[0]["receipt_sha256"]
+    original_pointer = pointer.read_bytes()
+    for last_good in (None, result["current"]):
+        pointer.write_bytes(PointerSet.from_mapping(dict(result, last_good=last_good)).canonical)
+        damaged = client.snapshots(source)
+        assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
+        assert client.snapshots(source) == damaged
+        pointer.write_bytes(original_pointer)
     prior = workspace / "pointers.previous.json"
     original_prior = prior.read_bytes()
     value = json.loads(original_prior)

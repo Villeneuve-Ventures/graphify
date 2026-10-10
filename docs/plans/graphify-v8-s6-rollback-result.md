@@ -50,6 +50,8 @@ semantic recovery state, or an occupied lease also refuses. Admission does not
 repair those records. The stable semantic queue is read under the workspace lock;
 retained items, semantic-required reconciliation even after item compaction, and
 unreadable or pending queue records refuse before lease allocation and replay.
+Fresh admission also refuses when the exact `last_good` target is already current;
+it does not allocate a lease for a move that cannot advance the pointer.
 Lease acquisition repeats the existing registry/epoch,
 source, recovery, and contention checks. Pointer movement repeats the existing
 CAS, lease, fence, compatibility, journal, and generation checks.
@@ -75,9 +77,10 @@ is the complete movement tuple. A changed target or stale tuple cannot toggle th
 pointer. A later deliberate rollback needs a new current tuple.
 The retained pointer's current generation reference, operation epoch, and fence
 must match its own durable pointer journal event. Its active-source revision and
-source epoch must match its fully verified receipt. These are the prior generation's
-coordinates, which can differ from the rollback target's source epoch and from the
-request's later lease high watermarks. If rollback quarantined a corrupt prior
+source epoch must match its fully verified receipt. The completed visible pointer's
+`last_good` must equal that verified retained current reference. The prior generation's
+coordinates can differ from the rollback target's source epoch and the request's
+later lease high watermarks. If rollback quarantined a corrupt prior
 generation, the move can succeed, but completed retry refuses when that prior
 receipt can no longer establish the complete retained evidence. It preserves the
 completed pointer and recovery records for separately authorized inspection.
@@ -184,8 +187,8 @@ CI not awaited.
 
 ## Replay and semantic queue repair validation
 
-The subsequent repair binds the retained pointer's complete authority and reads
-the stable semantic queue before fresh admission or replay. Eleven focused
+The repair candidate `0b51a245` binds the retained pointer's complete authority
+and reads the stable semantic queue before fresh admission or replay. Eleven focused
 refusal cases failed against `32c590a8` before these changes; all 16 selected
 behavior checks passed after repair. A separate two-case check passed with and
 without a released lease advancing the pre-rollback high watermarks. The cold
@@ -217,3 +220,40 @@ Both new security receipts completed: Bandit reported the same 11 findings in
 unchanged paths; the frozen default/dev dependency audit reported zero findings.
 The historical receipt correction above reused the valid `32c590a8` evidence;
 these new shards qualify the code repairs. CI and bot reviews not awaited.
+
+## Pointer admission repair validation
+
+The pointer admission repair against `0b51a245` binds the completed pointer's `last_good` to
+the verified retained current reference and refuses a fresh already-current
+target before lease allocation. Four refusal cases failed before repair with
+success instead of refusal. Ten focused checks passed after repair, covering
+null, wrong-generation, and wrong-receipt visible `last_good`, preserved state,
+valid exact retries, retained-pointer validation, and initial corrupt-current
+recovery followed by refusal of a fresh no-movement request.
+
+The cold installed worker and README policy checks passed (138 tests). Ruff,
+focused Pyright, all five generated-skill validators, and the required AST-only
+graph refresh passed. Bandit completed with the same 11 findings in unchanged
+paths, with all scanned production hashes verified unchanged. A fresh frozen
+CI default/dev dependency audit completed with zero findings. Existing docstrings
+stayed unchanged.
+
+All four repository shards passed before pushing this repair:
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,407 | 7 | 104 | 2,964.55 s |
+| 2 | 1,707 | 0 | 47 | 1,761.01 s |
+| 3 | 2,350 | 38 | 63 | 1,181.90 s |
+| 4 | 2,648 | 2 | 21 | 1,286.36 s |
+| Total | **9,112** | **47** | **235** | |
+
+The four complete receipts share the 9,159-test inventory and allocation hash.
+Their disjoint selections cover the full inventory with exit status zero.
+The aggregate took about 49 minutes. The largest modules were
+`test_workspace_s6_rollback.py` (1,376.78 s) and
+`test_workspace_structural_s4.py` (828.23 s), including setup and teardown.
+Code/test and workflow/lock/configuration hashes stayed unchanged through
+validation. Frozen all-extra setup, 80 optimized verifier tests, CLI/install
+smoke, and native Leiden smoke also passed. The aggregate records above remain
+pinned to their earlier candidates. CI and bot reviews not awaited.

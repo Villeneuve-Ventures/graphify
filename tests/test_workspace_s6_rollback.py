@@ -189,6 +189,35 @@ def test_corrupt_current_pointer_epoch_refuses_before_mutation(public_runtime, c
     assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
 
 
+@pytest.mark.parametrize("damage", ["missing", "current", "receipt"])
+def test_completed_retry_refuses_corrupt_visible_last_good(public_runtime, capsys, damage):
+    from graphify.workspace.lifecycle_contracts import PointerSet
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, p, run = public_runtime
+    run()
+    result = json.loads(capsys.readouterr().out)["result"]["pointer"]
+    pointer = runtime.inputs.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    original = pointer.read_bytes()
+    value = json.loads(original)
+    if damage == "missing":
+        value["last_good"] = None
+    elif damage == "current":
+        value["last_good"] = dict(value["current"])
+    else:
+        value["last_good"]["receipt_sha256"] = "f" * 64
+    pointer.write_bytes(PointerSet.from_mapping(value).canonical)
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+    pointer.write_bytes(original)
+    before = tree_snapshot(runtime.inputs.state_root)
+    run()
+    assert json.loads(capsys.readouterr().out)["result"]["pointer"] == result
+    assert tree_snapshot(runtime.inputs.state_root) == before
+
+
 @pytest.mark.parametrize("field", ["source_epoch", "operation_epoch", "fence_token", "generation_id"])
 def test_completed_retry_refuses_corrupt_retained_pointer(public_runtime, capsys, field):
     from graphify.workspace.lifecycle_contracts import PriorPointerRecord
@@ -290,6 +319,14 @@ def test_corrupt_current_generation_keeps_core_rollback_behavior(public_runtime,
     output = capsys.readouterr()
     assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
     assert tree_snapshot(runtime.inputs.state_root) == before
+
+    assert result["last_good"] == result["current"]
+    fresh = parameters_for(runtime)
+    run(fresh, expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert tree_snapshot(runtime.inputs.state_root) == before
+    assert tree_snapshot(repo) == source
 
 
 @pytest.mark.parametrize("boundary", ["after_acquire", "move", "release", "after_release"])
