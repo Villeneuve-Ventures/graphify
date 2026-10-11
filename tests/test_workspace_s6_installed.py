@@ -5,7 +5,9 @@ import sys
 
 import pytest
 
-from graphify.workspace.lifecycle_contracts import PointerSet, PriorPointerRecord, decode_journal_frame
+from graphify.workspace.lifecycle_contracts import (
+    PointerSet, PriorPointerRecord, WorkspaceLeaseState, decode_journal_frame,
+)
 from tests.test_workspace_s5_installed import installed_candidate, PublicClient, authorization  # noqa: F401
 from tests.workspace_s3_helpers import REPO_UUID, create_repo, tree_snapshot
 
@@ -70,6 +72,26 @@ def test_installed_native_public_rollback_and_authority(installed_candidate):  #
     assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
     assert client.snapshots(source) == damaged
     queue_pending.unlink()
+    lease_path = workspace / "workspace.json"
+    original_lease = lease_path.read_bytes()
+    for field in ("operation_epoch", "fence_high_watermark"):
+        value = json.loads(original_lease)
+        value[field] = 2
+        lease_path.write_bytes(WorkspaceLeaseState.from_mapping(value).canonical)
+        stale = dict(params)
+        stale["expected_" + field] = 2
+        damaged = client.snapshots(source)
+        assert client.run("rollback", stale, exit_code=4)["error_code"] == "workspace_refused"
+        assert client.snapshots(source) == damaged
+        lease_path.write_bytes(original_lease)
+    prior = workspace / "pointers.previous.json"
+    original_prior = prior.read_bytes()
+    prior.unlink()
+    damaged = client.snapshots(source)
+    assert client.run("rollback", params, exit_code=4)["error_code"] == "workspace_refused"
+    assert client.snapshots(source) == damaged
+    prior.write_bytes(original_prior)
+    prior.chmod(0o600)
     # Content snapshots of the immutable generations and source cover success.
     generations = tree_snapshot(workspace / "generations")
     source_before = tree_snapshot(source)

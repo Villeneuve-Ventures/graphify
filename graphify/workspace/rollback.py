@@ -5,6 +5,7 @@ import time
 from .cli_contracts import rollback_parameters
 from .generations import GenerationError
 from .leases import LeaseBusy
+from .lifecycle_contracts import PointerSet
 from .persistence import CommitUnknown, require_before_deadline
 from .pointers import PointerCAS, PointerConflict, PointerCorrupt, PointerError
 from .semantic_queue import SemanticQueueError
@@ -17,6 +18,43 @@ def _matches_prior(pointer, parameters, target):
         and value["active_source_revision"] == parameters["expected_active_source_revision"]
         and value["current"]["receipt_sha256"] == parameters["expected_current_receipt_sha256"]
         and value["last_good"] == target)
+
+
+def _require_fresh_lineage(pointers, repo_uuid, current, prior, previous, target, journal,
+        *, deadline_ns):
+    if prior is None or previous is None:
+        raise PointerCorrupt("rollback requires retained pointer lineage")
+    value, before = current.to_dict(), previous.to_dict()
+    repaired = pointers._journal_records_pointer(journal, current,
+        transition="REPAIRED", deadline_ns=deadline_ns)
+    replaced = prior.to_dict()["replaced_by_revision"]
+    if (replaced > value["pointer_revision"]
+            or not repaired and replaced != value["pointer_revision"]):
+        raise PointerCorrupt("retained pointer does not precede the visible move")
+    if not repaired and not any(pointers._journal_records_pointer(journal, previous,
+            transition=transition, deadline_ns=deadline_ns)
+            for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")):
+        raise PointerCorrupt("retained pointer has no durable movement authority")
+    expected = before["last_good"]
+    try:
+        receipt = pointers._verify_ref(repo_uuid, before["current"], deadline_ns=deadline_ns)
+    except (GenerationError, PointerError):
+        # Core publication may preserve last_good after quarantining former current.
+        pass
+    else:
+        source = receipt.to_dict()
+        if not repaired:
+            if (before["active_source_revision"] != source["active_source_revision"]
+                    or before["source_epoch"] != source["source_epoch"]):
+                raise PointerCorrupt("retained pointer source authority differs from its receipt")
+            expected = before["current"] if (
+                source["active_source_revision"] == value["active_source_revision"]) else None
+        elif (before["current"] != value["current"]
+                and pointers._repair_last_good_eligible(journal, receipt,
+                    active_source_revision=value["active_source_revision"])):
+            expected = before["current"]
+    if target != expected:
+        raise PointerCorrupt("last_good differs from retained pointer lineage")
 
 
 def _inspect(runtime, p, *, deadline_ns):
@@ -47,9 +85,14 @@ def _inspect(runtime, p, *, deadline_ns):
             current = pointers._preliminary_pointer(repo_uuid, deadline_ns=deadline_ns)
             if current is None:
                 raise PointerConflict("rollback requires an existing last_good")
+            prior = pointers.retained_prior(repo_uuid, deadline_ns=deadline_ns)
+            previous = None if prior is None else PointerSet.from_mapping(prior.to_dict()["pointer_set"])
+            locks = pointers._lock_set(repo_uuid, p["target_generation_id"], current)
+            if previous is not None:
+                generation_id = previous.to_dict()["current"]["generation_id"]
+                locks = sorted(set(locks + [(generation_id, stores.generations._lock(repo_uuid, generation_id))]))
             with pointers.state.existing_generation_locks(
-                    pointers._lock_set(repo_uuid, p["target_generation_id"], current),
-                    exclusive=False, deadline_ns=deadline_ns):
+                    locks, exclusive=False, deadline_ns=deadline_ns):
                 pointers._verify_visible_pointer_journal(repo_uuid, current, deadline_ns=deadline_ns)
                 candidate = pointers._verify_ref(repo_uuid, target, deadline_ns=deadline_ns)
                 if (candidate.to_dict()["active_source_revision"] != p["expected_active_source_revision"]
@@ -61,6 +104,12 @@ def _inspect(runtime, p, *, deadline_ns):
                         allow_superseded=True):
                     raise PointerConflict("rollback target has no certified journal authority")
                 value = current.to_dict()
+                if (lease.operation_epoch < value["operation_epoch"]
+                        or lease.fence_high_watermark < value["fence_token"]
+                        or any(event.to_dict()["operation_epoch"] > lease.operation_epoch
+                            or event.to_dict()["fence_token"] > lease.fence_high_watermark
+                            for event in journal.events)):
+                    raise PointerCorrupt("lease high watermarks precede durable history")
                 try:
                     current_receipt = pointers._verify_ref(repo_uuid, value["current"], deadline_ns=deadline_ns)
                 except (GenerationError, PointerError):
@@ -75,6 +124,16 @@ def _inspect(runtime, p, *, deadline_ns):
                     and lease.fence_high_watermark == p["expected_fence_high_watermark"]
                     and value["current"] != target
                     and _matches_prior(current, p, target))
+                if fresh:
+                    if any(p[key] == 2**63 - 1 for key in ("expected_pointer_revision",
+                            "expected_operation_epoch", "expected_fence_high_watermark")):
+                        raise PointerConflict("rollback counters have no increment headroom")
+                    _require_fresh_lineage(pointers, repo_uuid, current, prior, previous, target,
+                        journal, deadline_ns=deadline_ns)
+                    if pointers._journal_records_pointer(journal, current,
+                            transition="REPAIRED", deadline_ns=deadline_ns) and not (
+                            pointers._receipt_has_pointer_lineage(journal, candidate)):
+                        raise PointerCorrupt("repaired last_good has no durable pointer lineage")
                 replay = False
                 if (lease.operation_epoch == p["expected_operation_epoch"] + 1
                         and lease.fence_high_watermark == p["expected_fence_high_watermark"] + 1
@@ -84,10 +143,8 @@ def _inspect(runtime, p, *, deadline_ns):
                         and value["active_source_revision"] == p["expected_active_source_revision"]
                         and value["source_epoch"] == p["expected_source_epoch"]
                         and value["current"] == target):
-                    prior = pointers.retained_prior(repo_uuid, deadline_ns=deadline_ns)
-                    if prior is not None and prior.to_dict()["replaced_by_revision"] == value["pointer_revision"]:
-                        from .lifecycle_contracts import PointerSet
-                        previous = PointerSet.from_mapping(prior.to_dict()["pointer_set"])
+                    if (prior is not None and previous is not None
+                            and prior.to_dict()["replaced_by_revision"] == value["pointer_revision"]):
                         replay = (_matches_prior(previous, p, target)
                             and value["last_good"] == previous.to_dict()["current"]
                             and previous.to_dict()["operation_epoch"] <= p["expected_operation_epoch"]

@@ -52,6 +52,14 @@ retained items, semantic-required reconciliation even after item compaction, and
 unreadable or pending queue records refuse before lease allocation and replay.
 Fresh admission also refuses when the exact `last_good` target is already current;
 it does not allocate a lease for a move that cannot advance the pointer.
+Fresh admission requires retained pointer lineage that establishes the visible
+`last_good`. It follows the core publication and repair rules, including the
+fallback retained when an unverifiable former current generation is quarantined.
+A repaired target also requires durable pointer movement authority. Lease high
+watermarks must cover the visible pointer and every durable journal event.
+The pointer revision, operation epoch, and fence must each have increment
+headroom below `2^63 - 1`. A move from one below that limit and its completed
+exact retry remain valid; another fresh increment at the limit refuses.
 Lease acquisition repeats the existing registry/epoch,
 source, recovery, and contention checks. Pointer movement repeats the existing
 CAS, lease, fence, compatibility, journal, and generation checks.
@@ -223,7 +231,7 @@ these new shards qualify the code repairs. CI and bot reviews not awaited.
 
 ## Pointer admission repair validation
 
-The pointer admission repair against `0b51a245` binds the completed pointer's `last_good` to
+The repair candidate `226f5ddd` against `0b51a245` binds the completed pointer's `last_good` to
 the verified retained current reference and refuses a fresh already-current
 target before lease allocation. Four refusal cases failed before repair with
 success instead of refusal. Ten focused checks passed after repair, covering
@@ -257,3 +265,61 @@ Code/test and workflow/lock/configuration hashes stayed unchanged through
 validation. Frozen all-extra setup, 80 optimized verifier tests, CLI/install
 smoke, and native Leiden smoke also passed. The aggregate records above remain
 pinned to their earlier candidates. CI and bot reviews not awaited.
+
+## Fresh admission repair validation
+
+The local repair against `226f5ddd` binds fresh `last_good` selection to retained
+pointer lineage, refuses lease counters below the visible pointer or any durable
+journal event, and requires increment headroom for pointer revision, operation
+epoch, and fence. Ten regression cases failed before repair with success instead
+of refusal. All 24 selected rollback checks passed after repair in 737.55 seconds.
+They include 14 new cases covering older certified targets, regressed counters,
+missing lineage, nonlatest journal high watermarks, repaired lineage, and each
+counter's limit. Moves from one below the limit and their write-free exact retries
+pass; another fresh increment at the limit refuses. Existing complete-retry
+refusals and corrupt-current quarantine behavior also pass.
+
+The cold installed native worker and README policy checks passed (138 tests),
+including regressed-counter and missing-prior refusals without state writes.
+Frozen all-extra setup checked 171 packages. Ruff, expanded focused F/E9 checks,
+focused Pyright, all five generated-skill validators, 80 optimized verifier tests,
+CLI/install smoke, native Leiden smoke, and the required AST-only graph refresh
+passed. Existing docstrings and workflow/lock/configuration inputs stayed
+unchanged. Both final security receipts completed: zero findings for the frozen
+default/dev dependency inventory and the same 11 Bandit findings in unchanged
+paths.
+
+This proof covers the local repair diff. The four-shard aggregate above remains
+pinned to `226f5ddd`; it was not rerun for this local-diff stage and does not
+qualify these new changes for push. No commit, push, CI wait, or bot-review wait
+was part of this repair stage.
+
+## Fresh admission repair push validation
+
+The subsequent authorized push stage ran all four repository pytest shards for
+the fresh admission repair against `226f5ddd`, after frozen all-extra setup checked
+171 packages. Each shard completed with exit status zero in a separate private,
+user-owned fixture root outside `worktrees`.
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,421 | 7 | 104 | 3,346.47 s |
+| 2 | 1,707 | 0 | 47 | 1,620.65 s |
+| 3 | 2,350 | 38 | 63 | 1,067.58 s |
+| 4 | 2,648 | 2 | 21 | 1,166.01 s |
+| Total | **9,126** | **47** | **235** | |
+
+The four complete timing receipts share the 9,173-test inventory and allocation
+hash. Their disjoint selections cover the entire inventory. The parallel
+aggregate took about 56 minutes. The largest modules were
+`test_workspace_s6_rollback.py` (1,867.63 s) and
+`test_workspace_structural_s4.py` (810.03 s). Rollback fixture setup accounted for
+1,758.37 s of that module's duration.
+
+The focused, installed, lint/type, generated-skill, optimized-verifier, smoke,
+Leiden, graph-refresh, and final security receipts from the local repair stage
+remain valid: their relevant code, gate inputs, and environment stayed unchanged.
+The full aggregate now qualifies the repaired code for this push. Existing
+docstrings and workflow/lock/configuration inputs remain unchanged. The earlier
+aggregate records retain their original candidate bindings. CI and bot reviews
+not awaited.

@@ -189,6 +189,197 @@ def test_corrupt_current_pointer_epoch_refuses_before_mutation(public_runtime, c
     assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
 
 
+def set_pointer_coordinates(workspace, pointers, **coordinates):
+    import hashlib
+    from graphify.workspace.lifecycle_contracts import (
+        JournalEvent, JournalHeadState, PointerSet, decode_journal_frame, encode_journal_frame,
+    )
+    pointer = workspace / "pointers.json"
+    value = json.loads(pointer.read_bytes())
+    value.update(coordinates)
+    pointer.write_bytes(PointerSet.from_mapping(value).canonical)
+    journal = pointers.journal
+    head_path = journal.state.path(journal._head_paths(REPO_UUID)[0])
+    head = json.loads(head_path.read_bytes())
+    segment = workspace / "journal/segments" / head["segment_name"]
+    value = decode_journal_frame(segment.read_bytes()).to_dict()
+    value.update(coordinates)
+    logical = {key: value[key] for key in ("transition", "generation_id", "receipt_sha256",
+        "pointer_revision", "operation_epoch", "fence_token", "occurred_at")}
+    value["event_id"] = journal._event_id(REPO_UUID, logical)
+    event = JournalEvent.from_mapping(value)
+    frame = encode_journal_frame(event)
+    segment.write_bytes(frame)
+    head.update(event_id=event.to_dict()["event_id"], event_sha256=event.sha256,
+        segment_sha256=hashlib.sha256(frame).hexdigest())
+    head_path.write_bytes(JournalHeadState.from_mapping(head).canonical)
+
+
+def test_fresh_rollback_refuses_older_certified_last_good(public_runtime, capsys):
+    from graphify.workspace.lifecycle_contracts import PointerSet
+    from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, _, run = public_runtime
+    workspace = runtime.inputs.state_root / "workspaces" / REPO_UUID
+    pointer = workspace / "pointers.json"
+    first = json.loads(pointer.read_bytes())["last_good"]
+    third = prepare_structural_sync(runtime, repo_uuid=REPO_UUID, generation_id="gen-third",
+        source_epoch=3, desired_watermark=3, expected_payload_bytes=1024 * 1024)
+    synchronize_structural(runtime, third, attempt_sha256="c" * 64)
+    original = pointer.read_bytes()
+    value = json.loads(original)
+    assert value["last_good"]["generation_id"] == "gen-second"
+    pointer.write_bytes(PointerSet.from_mapping(dict(value, last_good=first)).canonical)
+    p = parameters_for(runtime)
+    p["expected_source_epoch"] = 1
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(p, expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+    pointer.write_bytes(original)
+    p = parameters_for(runtime)
+    p["expected_source_epoch"] = 2
+    run(p)
+    assert json.loads(capsys.readouterr().out)["result"]["pointer"]["current"] == value["last_good"]
+
+
+@pytest.mark.parametrize("field", ["operation_epoch", "fence_high_watermark", "both"])
+def test_fresh_rollback_refuses_regressed_lease_counters(public_runtime, capsys, field):
+    from graphify.workspace.lifecycle_contracts import WorkspaceLeaseState
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, _, run = public_runtime
+    workspace = runtime.inputs.state_root / "workspaces" / REPO_UUID
+    path = workspace / "workspace.json"
+    value = json.loads(path.read_bytes())
+    floor = runtime.stores.registry.load().to_dict()["workspaces"][0]["active_source_evidence"]
+    for key in ("operation_epoch", "fence_high_watermark"):
+        if field in {key, "both"}:
+            value[key] = floor["operation_epoch" if key == "operation_epoch" else "fence_token"] + 1
+    path.write_bytes(WorkspaceLeaseState.from_mapping(value).canonical)
+    p = parameters_for(runtime)
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(p, expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+
+
+@pytest.mark.parametrize("field", ["pointer_revision", "operation_epoch", "fence_high_watermark"])
+@pytest.mark.parametrize("headroom", [0, 1])
+def test_fresh_rollback_counter_headroom(public_runtime, capsys, field, headroom):
+    from graphify.workspace.lifecycle_contracts import WorkspaceLeaseState
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, _, run = public_runtime
+    source = tree_snapshot(repo)
+    workspace = runtime.inputs.state_root / "workspaces" / REPO_UUID
+    maximum = 2**63 - 1
+    if field == "pointer_revision":
+        set_pointer_coordinates(workspace, runtime.stores.pointers,
+            pointer_revision=maximum - headroom)
+        from graphify.workspace.lifecycle_contracts import PriorPointerRecord
+        prior = workspace / "pointers.previous.json"
+        value = json.loads(prior.read_bytes())
+        value["replaced_by_revision"] = maximum - headroom
+        prior.write_bytes(PriorPointerRecord.from_mapping(value).canonical)
+    else:
+        lease = workspace / "workspace.json"
+        value = json.loads(lease.read_bytes())
+        value[field] = maximum - headroom
+        lease.write_bytes(WorkspaceLeaseState.from_mapping(value).canonical)
+    p = parameters_for(runtime)
+    request = command(runtime.inputs.state_root, p)
+    WorkspaceCommandRequest.from_json(canonical_json_bytes(request))
+    schema_validator("cli-request.schema.json").validate(request)
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(p, expected=0 if headroom else 4)
+    output = capsys.readouterr()
+    if not headroom:
+        assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+        assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+    else:
+        result = json.loads(output.out)["result"]["pointer"]
+        assert result["fence_token" if field == "fence_high_watermark" else field] == maximum
+        before = tree_snapshot(runtime.inputs.state_root)
+        run(p)
+        assert json.loads(capsys.readouterr().out)["result"]["pointer"] == result
+        assert tree_snapshot(runtime.inputs.state_root) == before
+        fresh = parameters_for(runtime)
+        fresh["expected_source_epoch"] = 2
+        run(fresh, expected=4)
+        output = capsys.readouterr()
+        assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+        assert tree_snapshot(runtime.inputs.state_root) == before
+        assert tree_snapshot(repo) == source
+
+
+def test_fresh_rollback_requires_retained_lineage(public_runtime, capsys):
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, p, run = public_runtime
+    prior = runtime.inputs.state_root / "workspaces" / REPO_UUID / "pointers.previous.json"
+    prior.unlink()
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(p, expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+
+
+def test_fresh_rollback_checks_nonlatest_journal_watermarks(public_runtime, capsys):
+    from graphify.workspace.lifecycle_contracts import WorkspaceLeaseState
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, _, run = public_runtime
+    workspace = runtime.inputs.state_root / "workspaces" / REPO_UUID
+    set_pointer_coordinates(workspace, runtime.stores.pointers, operation_epoch=3, fence_token=3)
+    lease = workspace / "workspace.json"
+    value = json.loads(lease.read_bytes())
+    value.update(operation_epoch=3, fence_high_watermark=3)
+    lease.write_bytes(WorkspaceLeaseState.from_mapping(value).canonical)
+    p = parameters_for(runtime)
+    assert p["expected_operation_epoch"] == p["expected_fence_high_watermark"] == 3
+    before = (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo))
+    run(p, expected=4)
+    output = capsys.readouterr()
+    assert output.out == "" and json.loads(output.err)["error_code"] == "workspace_refused"
+    assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
+
+
+@pytest.mark.parametrize("after_rollback", [False, True])
+def test_fresh_rollback_preserves_repaired_lineage(public_runtime, capsys, after_rollback):
+    from datetime import datetime, timezone
+    from graphify.workspace.lifecycle_contracts import PointerSet
+    from tests.workspace_s3_helpers import tree_snapshot
+    runtime, repo, p, run = public_runtime
+    if after_rollback:
+        run(p)
+        capsys.readouterr()
+    pointer = runtime.inputs.state_root / "workspaces" / REPO_UUID / "pointers.json"
+    value = json.loads(pointer.read_bytes())
+    target = value["last_good"]
+    pointer.write_bytes(PointerSet.from_mapping(dict(value, source_epoch=99)).canonical)
+    p = parameters_for(runtime)
+    leases = runtime.stores.leases
+    grant = leases.acquire(REPO_UUID, "POINTER_RECOVERY", leases.current_owner(),
+        **{key: p[key] for key in ("expected_registry_revision", "expected_active_source_revision",
+            "expected_operation_epoch", "expected_migration_epoch")},
+        acquired_at=datetime.now(timezone.utc), monotonic_ns=time.monotonic_ns(), ttl_ns=10**12)
+    recovered = runtime.stores.pointers.recover(grant, occurred_at=datetime.now(timezone.utc),
+        monotonic_ns=time.monotonic_ns())
+    leases.release(grant)
+    assert recovered.to_dict()["last_good"] == target
+    p = parameters_for(runtime)
+    p["expected_source_epoch"] = 2 if after_rollback else 1
+    source = tree_snapshot(repo)
+    run(p)
+    result = json.loads(capsys.readouterr().out)["result"]["pointer"]
+    assert result["current"] == target
+    before = tree_snapshot(runtime.inputs.state_root)
+    run(p)
+    assert json.loads(capsys.readouterr().out)["result"]["pointer"] == result
+    assert tree_snapshot(runtime.inputs.state_root) == before
+    assert tree_snapshot(repo) == source
+
+
 @pytest.mark.parametrize("damage", ["missing", "current", "receipt"])
 def test_completed_retry_refuses_corrupt_visible_last_good(public_runtime, capsys, damage):
     from graphify.workspace.lifecycle_contracts import PointerSet
