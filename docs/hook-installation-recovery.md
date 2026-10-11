@@ -157,8 +157,31 @@ pending recovery evidence; it does not roll them back.
 
 These observations are not an atomic transaction with non-cooperating editors.
 An edit between checks can still race publication. Merge-driver registration
-remains a separate step after the hooks lock is released; this does not add
-registration locking or a whole-operation atomicity guarantee.
+runs after hook completion while the public operation still holds nonblocking
+locks on the physical hooks directory and the common Git directory. The locks
+cover both default three-hook and opt-in five-hook operations, including hook
+no-ops, through driver registration or removal. A competing operation that
+shares either directory refuses without changing hooks, registration, or
+recovery evidence; retry it after the active operation finishes. Directory
+identity, rather than a config file inode or pathname spelling, coordinates
+shared hooks paths and linked worktrees. Registration writes and removal use
+local Git configuration in the common directory, even when linked worktrees
+select different hooks through worktree configuration.
+
+Successful cooperating operations therefore run in lock-acquisition order
+through hook publication, local driver configuration, and the invoking
+worktree's `.gitattributes`. This serializes operations; it does not reconcile
+registrations or attributes in other repositories or worktrees that share
+hooks. Their last requested state can differ, just as with sequential commands.
+External Git config writers, hook editors, and older Graphify installers do
+not participate in this whole-operation coordination. The locks do not make
+read-only status observations atomic or prevent non-cooperating edits.
+
+Registration is still outside the hook recovery journal. An interruption or
+registration failure can leave complete hooks with incomplete configuration
+or attributes. This is not a crash-atomic transaction across the three
+resources and does not change the per-file durability contract or exact-request
+recovery requirements.
 
 An `unverified authority` warning means Graphify could not safely inspect the
 private store. It does not prove that an installation was attempted. Any hook
