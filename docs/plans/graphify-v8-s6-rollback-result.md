@@ -1,0 +1,407 @@
+# S6 public rollback transport
+
+This slice adds `graphify workspace rollback --request FILE` to the bounded
+workspace transport. It calls the existing `PointerStore.rollback` and does
+not expose repair, GC, arbitrary historical selection, or a legacy reader.
+S6 repair/GC and S7 remain incomplete. This record does not authorize real-state
+maintenance, migration, release, installation, or successor implementation.
+
+## Request and result
+
+Use the exact installed candidate, explicit external state root, and the
+[S5 canonical request envelope](graphify-v8-s5-result.md#command-and-request-contract).
+The request/response format stays at version 1. Candidate content identity changes;
+old authority does not authorize the new helper. Start the console with
+`PYTHONDONTWRITEBYTECODE=1`, or a trusted interpreter with
+`-E -P -B -m graphify workspace rollback --request FILE`.
+All workspace operations require non-elevated macOS on local APFS.
+
+Set `command` to `rollback`. `parameters` contains exactly these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `repo_uuid` | Canonical UUID of the explicitly enrolled workspace |
+| `authorization` | Exact S5 authorization mapping, with action `ROLLBACK` |
+| `expected_registry_revision` | Current registry revision, positive integer |
+| `expected_active_source_revision` | Current selected-source revision, positive integer |
+| `expected_operation_epoch` | Current lease operation epoch, nonnegative integer |
+| `expected_migration_epoch` | Current migration epoch, nonnegative integer |
+| `expected_fence_high_watermark` | Current lease fence high watermark, nonnegative integer |
+| `expected_pointer_revision` | Current pointer revision, positive integer |
+| `expected_current_receipt_sha256` | Current pointer's lowercase SHA-256 receipt identity |
+| `expected_source_epoch` | Exact target receipt's source epoch, positive integer |
+| `target_generation_id` | Exact `last_good` generation ID |
+| `target_receipt_sha256` | Exact `last_good` receipt's lowercase SHA-256 identity |
+
+Request counters are JSON integers through `2^63 - 1`; booleans, strings, and floats are
+not coerced. Generation IDs follow `gen-[a-z0-9][a-z0-9._-]{0,62}`.
+Authorization follows the existing operator assertion contract: it is not a new
+credential, signature, or permission system. Do not invent revisions from this
+record. Bind a request to current verified pointer, receipt, registry, and lease
+records. The target source epoch names the target receipt, which may differ from
+the current generation's source epoch.
+
+Before lease allocation, admission reads existing records under registry,
+workspace, and generation locks. It checks source identity, candidate authority,
+all expected coordinates, exact `last_good`, complete receipt/payload verification,
+and certified journal authority. Missing, corrupt, incompatible, or wrong-target
+state refuses. Pending registry/lease/journal/pointer/staged/GC recovery, retained
+semantic recovery state, or an occupied lease also refuses. Admission does not
+repair those records. The stable semantic queue is read under the workspace lock;
+retained items, semantic-required reconciliation even after item compaction, and
+unreadable or pending queue records refuse before lease allocation and replay.
+Fresh admission also refuses when the exact `last_good` target is already current;
+it does not allocate a lease for a move that cannot advance the pointer.
+Fresh admission requires retained pointer lineage that establishes the visible
+`last_good`. It follows the core publication and repair rules, including the
+fallback retained when an unverifiable former current generation is quarantined.
+A repaired target also requires durable pointer movement authority. Lease high
+watermarks must cover the visible pointer and every durable journal event.
+The retained record's `replaced_by_revision` must equal the visible revision,
+including after repair. Its current reference, pointer revision, operation epoch,
+and fence must match a durable pointer movement. A repair can retain an older
+rollback root, but that root must name the repair's exact replacement revision.
+Journal history after that root must contain only the first move to the visible
+current reference and subsequent repairs of that same reference.
+If recovery of a missing visible pointer leaves an older replacement record,
+public rollback refuses without changing state; historical certification alone
+does not establish the repaired predecessor.
+The pointer revision, operation epoch, and fence must each have increment
+headroom below `2^63 - 1`. A move from one below that limit and its completed
+exact retry remain valid; another fresh increment at the limit refuses.
+Lease acquisition repeats the existing registry/epoch,
+source, recovery, and contention checks. Pointer movement repeats the existing
+CAS, lease, fence, compatibility, journal, and generation checks.
+When the current generation is verifiable, its receipt must agree with the visible
+pointer's active-source revision and source epoch before lease allocation. A
+metadata mismatch refuses without repair. This does not require the current
+generation's source epoch to equal the target generation's source epoch.
+
+Success returns `result={"pointer": <complete PointerSet>}`. The pointer revision
+advances once; the current reference is the requested exact `last_good`, and the
+journal records `ROLLED_BACK`. The lease operation epoch and fence advance by one.
+Valid generation payloads and source content remain unchanged. The core store's
+existing handling of a corrupt previous current generation remains in force.
+Rollback does not assert current source freshness or semantic completion; query,
+status, and doctor retain their existing read-only freshness checks.
+
+A completed exact retry returns the recorded pointer without durable writes.
+It requires the original movement coordinates, verified target, retained prior
+pointer, matching `ROLLED_BACK` journal event, unchanged registry/source/migration
+authority, no intervening operation/fence advance, and no active lease or recovery
+intent. Request ID and authorization prose are transport metadata; replay identity
+is the complete movement tuple. A changed target or stale tuple cannot toggle the
+pointer. A later deliberate rollback needs a new current tuple.
+The retained pointer's current generation reference, operation epoch, and fence
+must match its own durable pointer journal event. Its active-source revision and
+source epoch must match its fully verified receipt. The completed visible pointer's
+`last_good` must equal that verified retained current reference. The prior generation's
+coordinates can differ from the rollback target's source epoch and the request's
+later lease high watermarks. If rollback quarantined a corrupt prior
+generation, the move can succeed, but completed retry refuses when that prior
+receipt can no longer establish the complete retained evidence. It preserves the
+completed pointer and recovery records for separately authorized inspection.
+
+## Uncertainty and preservation
+
+Request acquisition limits, the command deadline, isolated worker imports,
+response size limits, redacted errors, and exit codes remain the S5 contract.
+An interrupted mutation, timeout, malformed worker response, or failed completion
+acknowledgment reports `execution_unknown`. Every failure after lease
+acquisition reports `execution_unknown`, including pointer movement, lease release,
+and final authority checks; acquisition already advances durable operation and
+fence authority. Worker termination cannot prove that
+rollback completed or that no prior effects occurred. Preserve the request and
+durable lease/intent evidence. Pending recovery refuses exact retry until the
+existing separately authorized lifecycle recovery resolves it; this command does
+not acquire successor recovery authority or clear an uncertain lease.
+
+## Validation boundary
+
+The task-owned worktree starts from fetched `origin/v8` at
+`a13c9057f5c8b17d7b7f80bffcb4e38848e9ff84`. Selection baseline
+`85f8ab4a1ea87a19e31156483426949962169906` advanced through PR #203 only
+(README and PR-Agent routing). The three selection fingerprints still matched.
+Those merged paths stay outside this slice. The reference checkout's untracked
+`.codex/` and all occupied worktrees remain untouched.
+
+Host inspection: macOS **27.0**, build **26A428**, Darwin **27.0.0**, arm64,
+UID **501**, CPython **3.14.3** built with Clang **22.1.1**, Git **2.55.0**,
+and uv **0.11.30**. Native capability detection reports local **APFS** with
+`elevated=False`. Tests mutate only task-owned disposable source/state roots.
+Portable injected fixtures do not establish native execution or power-loss proof.
+
+## Local validation
+
+The prior repair candidate `32c590a8` has complete saved receipts. This section
+records that candidate; later repair validation is recorded separately below.
+Frozen all-extra setup (`uv sync --all-extras --frozen`) checked 171 packages.
+The aggregate used the repository's four serial pytest shard entry points:
+`PYTHONDONTWRITEBYTECODE=1 uv run --frozen python -m pytest
+-p tools.pytest_partition -p tools.pytest_timings --ci-shard=N
+--ci-timing-json RECEIPT tests/ -q --tb=short --basetemp=FIXTURE_ROOT/N`.
+The disposable fixture parent was private, owned by UID 501/group 20, and outside
+a directory named `worktrees`. Each shard completed with exit status zero.
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,393 | 7 | 104 | 2,340.75 s |
+| 2 | 1,707 | 0 | 47 | 1,708.67 s |
+| 3 | 2,350 | 38 | 63 | 1,136.72 s |
+| 4 | 2,648 | 2 | 21 | 1,222.78 s |
+| Total | **9,098** | **47** | **235** | |
+
+The four timing receipts have the same 9,145-test inventory and allocation hash.
+Their selected inventories are disjoint and cover that complete inventory.
+The parallel aggregate took about 39 minutes. The largest observed
+modules were `test_workspace_structural_s4.py` (821.74 s) and
+`test_workspace_s6_rollback.py` (819.45 s), including setup and teardown.
+
+That run includes the six pointer-source/post-acquisition regressions,
+canonical/schema agreement, stale authority and target
+refusals, complete exact retry, recovery/GC barriers, occupied leases, interruption,
+ambiguous worker output, and preserved source/generation/unrelated content.
+The cold installed S6 test uses real candidate admission and the bounded console
+and module workers on native macOS/APFS. It covers helper membership and tamper
+refusal, rollback/journal output, write-free completed retry, and audited read-only
+query/status/doctor behavior after rollback.
+
+Additional passing checks:
+
+- Ruff over `graphify` and `tests`, expanded focused F/E9 checks, and focused
+  Pyright on the rollback helper (zero errors and warnings).
+- All five generated-skill validators: `--check` (134 artifacts),
+  `--audit-coverage`, `--schema-singleton`, `--monolith-roundtrip`, and
+  `--always-on-roundtrip`. Existing managed-command routing needs no regenerated
+  skill changes.
+- Optimized protected-verifier tests: 80 passed; the expected Python `-O`
+  assertion warning remains. The disposable CLI/install smoke check passed.
+- Native Leiden smoke checks, including an isolated binary-only installation of
+  the published Leiden extra.
+- Required `graphify update .` through the supported runtime, after the final
+  code/test edit: AST-only graph refresh completed. The six zero-node source
+  warnings and the large-graph HTML skip remain diagnostic output.
+- `git diff --check`; workflow, lockfile, and package-configuration hashes stayed
+  unchanged during validation.
+
+Both repository security receipts completed. Bandit reported **11 findings** in
+unchanged paths; every scanned production hash still matches. This is an advisory
+findings result. The dependency audit reported **zero findings** for the frozen
+CI default/dev inventory. The first all-extra dependency audit could not satisfy
+that scanner's default/dev inventory contract; the complete receipt comes from a
+separate disposable environment with that exact scope.
+
+Earlier aggregate attempts exposed a missing helper in the shared synthetic
+fixture, direct-interpreter bootstrap context, and temporary-root path/group
+assumptions. The fixture now includes the required helper. Focused reproductions
+passed before the complete final run through `uv run --frozen` in a private
+user-group fixture root. Earlier logs and incomplete receipts remain preserved
+outside the repository and do not establish gate passage.
+
+S7 exact release qualification, native power-loss and hostile concurrent-rename
+proof, D3, real adoption, and hosted CI remain outside this delivery.
+CI not awaited.
+
+## Replay and semantic queue repair validation
+
+The repair candidate `0b51a245` binds the retained pointer's complete authority
+and reads the stable semantic queue before fresh admission or replay. Eleven focused
+refusal cases failed against `32c590a8` before these changes; all 16 selected
+behavior checks passed after repair. A separate two-case check passed with and
+without a released lease advancing the pre-rollback high watermarks. The cold
+installed worker and README policy checks passed (138 tests), including pending
+queue and altered retained-fence refusals with preserved state.
+
+New complete receipts validate the repaired code and tests through the same
+four-shard entry points and private fixture parent contract:
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,404 | 7 | 104 | 2,821.94 s |
+| 2 | 1,707 | 0 | 47 | 1,760.32 s |
+| 3 | 2,350 | 38 | 63 | 1,188.09 s |
+| 4 | 2,648 | 2 | 21 | 1,285.63 s |
+| Total | **9,109** | **47** | **235** | |
+
+The four complete receipts share the 9,156-test inventory and allocation hash.
+Their disjoint selections cover the full inventory with exit status zero.
+The aggregate took about 47 minutes. The largest modules were
+`test_workspace_s6_rollback.py` (1,249.18 s) and
+`test_workspace_structural_s4.py` (819.01 s), including setup and teardown.
+
+Frozen all-extra setup, Ruff, focused Pyright, all five generated-skill validators,
+80 optimized verifier tests, CLI/install smoke, native Leiden smoke, and the
+required AST-only graph update passed. Code/test and workflow/lock/configuration
+hashes stayed unchanged through validation. Existing docstrings stayed unchanged.
+Both new security receipts completed: Bandit reported the same 11 findings in
+unchanged paths; the frozen default/dev dependency audit reported zero findings.
+The historical receipt correction above reused the valid `32c590a8` evidence;
+these new shards qualify the code repairs. CI and bot reviews not awaited.
+
+## Pointer admission repair validation
+
+The repair candidate `226f5ddd` against `0b51a245` binds the completed pointer's `last_good` to
+the verified retained current reference and refuses a fresh already-current
+target before lease allocation. Four refusal cases failed before repair with
+success instead of refusal. Ten focused checks passed after repair, covering
+null, wrong-generation, and wrong-receipt visible `last_good`, preserved state,
+valid exact retries, retained-pointer validation, and initial corrupt-current
+recovery followed by refusal of a fresh no-movement request.
+
+The cold installed worker and README policy checks passed (138 tests). Ruff,
+focused Pyright, all five generated-skill validators, and the required AST-only
+graph refresh passed. Bandit completed with the same 11 findings in unchanged
+paths, with all scanned production hashes verified unchanged. A fresh frozen
+CI default/dev dependency audit completed with zero findings. Existing docstrings
+stayed unchanged.
+
+All four repository shards passed before pushing this repair:
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,407 | 7 | 104 | 2,964.55 s |
+| 2 | 1,707 | 0 | 47 | 1,761.01 s |
+| 3 | 2,350 | 38 | 63 | 1,181.90 s |
+| 4 | 2,648 | 2 | 21 | 1,286.36 s |
+| Total | **9,112** | **47** | **235** | |
+
+The four complete receipts share the 9,159-test inventory and allocation hash.
+Their disjoint selections cover the full inventory with exit status zero.
+The aggregate took about 49 minutes. The largest modules were
+`test_workspace_s6_rollback.py` (1,376.78 s) and
+`test_workspace_structural_s4.py` (828.23 s), including setup and teardown.
+Code/test and workflow/lock/configuration hashes stayed unchanged through
+validation. Frozen all-extra setup, 80 optimized verifier tests, CLI/install
+smoke, and native Leiden smoke also passed. The aggregate records above remain
+pinned to their earlier candidates. CI and bot reviews not awaited.
+
+## Fresh admission repair validation
+
+The local repair against `226f5ddd` binds fresh `last_good` selection to retained
+pointer lineage, refuses lease counters below the visible pointer or any durable
+journal event, and requires increment headroom for pointer revision, operation
+epoch, and fence. Ten regression cases failed before repair with success instead
+of refusal. All 24 selected rollback checks passed after repair in 737.55 seconds.
+They include 14 new cases covering older certified targets, regressed counters,
+missing lineage, nonlatest journal high watermarks, repaired lineage, and each
+counter's limit. Moves from one below the limit and their write-free exact retries
+pass; another fresh increment at the limit refuses. Existing complete-retry
+refusals and corrupt-current quarantine behavior also pass.
+
+The cold installed native worker and README policy checks passed (138 tests),
+including regressed-counter and missing-prior refusals without state writes.
+Frozen all-extra setup checked 171 packages. Ruff, expanded focused F/E9 checks,
+focused Pyright, all five generated-skill validators, 80 optimized verifier tests,
+CLI/install smoke, native Leiden smoke, and the required AST-only graph refresh
+passed. Existing docstrings and workflow/lock/configuration inputs stayed
+unchanged. Both final security receipts completed: zero findings for the frozen
+default/dev dependency inventory and the same 11 Bandit findings in unchanged
+paths.
+
+This proof covers the local repair diff. The four-shard aggregate above remains
+pinned to `226f5ddd`; it was not rerun for this local-diff stage and does not
+qualify these new changes for push. No commit, push, CI wait, or bot-review wait
+was part of this repair stage.
+
+## Fresh admission repair push validation
+
+The subsequent authorized push stage delivered candidate `0db208b5` and ran all
+four repository pytest shards for the fresh admission repair against `226f5ddd`,
+after frozen all-extra setup checked 171 packages. Each shard completed with
+exit status zero in a separate private,
+user-owned fixture root outside `worktrees`.
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2,421 | 7 | 104 | 3,346.47 s |
+| 2 | 1,707 | 0 | 47 | 1,620.65 s |
+| 3 | 2,350 | 38 | 63 | 1,067.58 s |
+| 4 | 2,648 | 2 | 21 | 1,166.01 s |
+| Total | **9,126** | **47** | **235** | |
+
+The four complete timing receipts share the 9,173-test inventory and allocation
+hash. Their disjoint selections cover the entire inventory. The parallel
+aggregate took about 56 minutes. The largest modules were
+`test_workspace_s6_rollback.py` (1,867.63 s) and
+`test_workspace_structural_s4.py` (810.03 s). Rollback fixture setup accounted for
+1,758.37 s of that module's duration.
+
+The focused, installed, lint/type, generated-skill, optimized-verifier, smoke,
+Leiden, graph-refresh, and final security receipts from the local repair stage
+remain valid: their relevant code, gate inputs, and environment stayed unchanged.
+The full aggregate now qualifies the repaired code for this push. Existing
+docstrings and workflow/lock/configuration inputs remain unchanged. The earlier
+aggregate records retain their original candidate bindings. CI and bot reviews
+not awaited.
+
+## Repaired-lineage admission validation
+
+The local repair against `0db208b5` requires the retained record to name the
+visible replacement revision and match a durable pointer movement. For a
+repaired pointer, history after the retained root must contain only the first
+move to the visible current reference and subsequent repairs of that reference.
+An older certified prior cannot establish this relationship by changing its
+replacement revision alone.
+
+Four corrupt-state cases failed before repair with success instead of refusal:
+restored stale priors after damaged-source and missing-visible recovery, and
+retained operation-epoch and fence mismatches. The cold installed native worker
+also reproduced the stale-prior defect. Two relabeled-prior cases failed after
+the initial revision/journal guards, establishing the need for movement history.
+
+All 11 final focused checks passed in 457.27 seconds. They cover stale and
+relabeled priors, mismatched movement counters, repeated missing-visible recovery
+with unbound retained records, and valid retained rollback and pending roots.
+Valid rollback and exact retry preserve source and generation payloads; corrupt
+lineage refuses without durable writes. The final cold installed native worker
+and README policy checks passed (139 tests) in 152.05 seconds, including genuine
+installed core recovery followed by the bounded rollback worker.
+
+Frozen all-extra setup checked 171 packages. Ruff, expanded focused F/E9 checks,
+focused Pyright, all five generated-skill validators, and the required final
+AST-only graph refresh passed. Existing docstrings and workflow/lock/configuration
+inputs stayed unchanged. Final security receipts completed with the same 11
+Bandit findings in unchanged paths and zero frozen default/dev dependency
+findings. An intermediate run with changing code inputs is excluded from this
+proof; final code/test hashes stayed fixed during the reported checks.
+
+This proof covers the local diff. The prior four-shard aggregate remains pinned
+to `0db208b5`; it was not rerun for this local-diff stage and does not qualify
+these new changes for push. No commit, push, CI wait, or bot-review wait was part
+of this repair stage.
+
+## Repaired-lineage push validation
+
+The subsequent authorized push stage ran all four repository pytest shards for
+the repaired-lineage candidate against `0db208b5`, after frozen all-extra setup
+checked 171 packages. Each shard completed with exit status zero in a separate
+private, user-owned fixture root outside `worktrees`.
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2430 | 7 | 104 | 4086.02 s |
+| 2 | 1707 | 0 | 47 | 1794.38 s |
+| 3 | 2350 | 38 | 63 | 1217.85 s |
+| 4 | 2649 | 2 | 21 | 1395.82 s |
+
+The complete, disjoint selections cover all 9183 collected items: 9136 passed,
+47 skipped, and 235 passed subtests. All four timing receipts report complete
+execution with the same full inventory and allocation identity. Code, tests,
+workflow, lock, and configuration inputs stayed fixed through the run and the
+subsequent quality checks. The aggregate took 4087.79 seconds (68 minutes).
+Rollback tests accounted for 2451.52 seconds, including 2192.31 seconds of fixture
+setup; structural S4 tests accounted for 856.89 seconds.
+
+The optimized verifier checks passed (80 tests, 10.04 seconds), and the disposable
+CLI/install smoke and native Leiden binary partition passed. Passing focused,
+cold installed-worker, README policy, Ruff, focused Pyright, five generated-skill
+validators, and final AST-refresh receipts were reused on unchanged inputs.
+Complete security receipts also matched the current candidate: the same 11
+Bandit findings in unchanged paths and zero findings across 90 frozen default/dev
+third-party dependencies, without extras. Advisory completion does not establish
+a clean Bandit scan or optional-extra coverage.
+
+This aggregate qualifies the repaired code for the authorized push. Existing
+docstrings remain unchanged. The historical doc correction uses verified saved
+receipts bound to delivered candidate `0db208b5`; earlier aggregate records keep
+their original candidate bindings. CI and bot reviews not awaited.

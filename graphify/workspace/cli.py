@@ -1,4 +1,4 @@
-"""S5 public dispatch: bounded transport over the delivered structural library."""
+"""Public dispatch: bounded transport over the delivered structural library."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -223,6 +223,9 @@ def _execute(value, deadline_ns):
             return {"sync_request": frozen.to_dict()}
         frozen = StructuralSyncRequest.from_json(canonical_json_bytes(p["sync_request"]))
         return asdict(synchronize_structural(runtime, frozen, attempt_sha256=p["attempt_sha256"]))
+    if command == "rollback":
+        from .rollback import rollback_structural
+        return {"pointer": rollback_structural(runtime, p, deadline_ns=deadline_ns).to_dict()}
     if command == "query":
         from .adapters.base import QueryRequest
         from .query import query_structural
@@ -288,7 +291,7 @@ def _command_child(deadline_ns):
 
 def run_workspace_cli(arguments):
     if not arguments or arguments == ["--help"] or arguments == ["-h"]:
-        print("Usage: graphify workspace <register|activate|sync|query|status|doctor> --request FILE")
+        print("Usage: graphify workspace <register|activate|sync|rollback|query|status|doctor> --request FILE")
         print("Use '-' for bounded stdin. Requests must be canonical JSON and carry explicit candidate authority.")
         print("Launch with PYTHONDONTWRITEBYTECODE=1 or python -B before importing Graphify.")
         return 0

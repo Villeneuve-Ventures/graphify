@@ -1,4 +1,4 @@
-"""Canonical, bounded S5 requests. No runtime or source inspection here."""
+"""Canonical, bounded workspace requests. No runtime or source inspection here."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,7 +11,7 @@ from .contracts import CompatibilityManifest, ContractError, Document, exact, in
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_TIMEOUT_MS = 300_000
-COMMANDS = frozenset({"register", "activate", "sync", "query", "status", "doctor"})
+COMMANDS = frozenset({"register", "activate", "sync", "rollback", "query", "status", "doctor"})
 READ_COMMANDS = frozenset({"query", "status", "doctor"})
 
 
@@ -41,6 +41,25 @@ def authorization(value, action):
     if value["action"] != action.upper():
         raise ContractError("authorization action differs")
     return OperatorAuthorization(**{**value, "action": IdentityAction(value["action"])})
+
+
+def rollback_parameters(value):
+    exact(value, {"repo_uuid", "authorization", "expected_registry_revision",
+        "expected_active_source_revision", "expected_operation_epoch", "expected_migration_epoch",
+        "expected_fence_high_watermark", "expected_pointer_revision", "expected_source_epoch",
+        "expected_current_receipt_sha256", "target_generation_id", "target_receipt_sha256"})
+    repo_uuid(value["repo_uuid"])
+    authorization(value["authorization"], "rollback")
+    for key in ("expected_registry_revision", "expected_active_source_revision",
+                "expected_pointer_revision", "expected_source_epoch"):
+        integer(value[key], minimum=1)
+    for key in ("expected_operation_epoch", "expected_migration_epoch", "expected_fence_high_watermark"):
+        integer(value[key])
+    if (not isinstance(value["target_generation_id"], str)
+            or re.fullmatch(r"gen-[a-z0-9][a-z0-9._-]{0,62}", value["target_generation_id"]) is None):
+        raise ContractError("bounded rollback target required")
+    digest(value["expected_current_receipt_sha256"])
+    digest(value["target_receipt_sha256"])
 
 
 class WorkspaceCommandRequest(Document):
@@ -98,6 +117,8 @@ class WorkspaceCommandRequest(Document):
                 digest(p["attempt_sha256"])
             else:
                 raise ContractError("unsupported sync operation")
+        elif command == "rollback":
+            rollback_parameters(p)
         elif command == "query":
             exact(p, {"repo_uuid", "question", "mode", "depth", "token_budget", "context_filters"})
             repo_uuid(p["repo_uuid"])
@@ -129,6 +150,10 @@ class WorkspaceCommandResponse(Document):
         if value["outcome"] == "ok":
             if not isinstance(value["result"], dict) or value["error_code"] is not None:
                 raise ContractError("success response required")
+            if value["command"] == "rollback":
+                from .lifecycle_contracts import PointerSet
+                exact(value["result"], {"pointer"})
+                PointerSet.from_mapping(value["result"]["pointer"])
         elif value["outcome"] == "refused":
             if value["result"] is not None or value["error_code"] not in ERROR_CODES:
                 raise ContractError("redacted refusal response required")
