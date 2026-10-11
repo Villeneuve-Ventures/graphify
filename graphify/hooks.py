@@ -1054,7 +1054,7 @@ def _register_merge_driver(root: Path) -> str:
             ("merge.graphify.recursive", "binary"),
         ):
             _sp.run(
-                ["git", "-C", str(root), "config", key, value],
+                ["git", "-C", str(root), "config", "--local", key, value],
                 check=True, capture_output=True, text=True,
             )
     except (OSError, _sp.CalledProcessError) as exc:
@@ -1390,13 +1390,17 @@ def install(path: Path = Path("."), *, merge_guard: bool = False) -> str:
             assert guard_output is not None
             specs += tuple((name, _merge_guard_script(name, guard_output, pinned), *_merge_guard_markers(name))
                            for name in _MERGE_GUARD_HOOKS)
-        messages = run(root, hooks_dir, "install", (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
+
+        def register():
+            merge_msg = _register_merge_driver(root)
+            if merge_msg.startswith("not registered"):
+                raise RuntimeError(f"Hooks installed; merge driver {merge_msg}")
+            return merge_msg
+
+        messages, merge_msg = run(root, hooks_dir, "install", (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
                        lambda snapshots: [_prepare_hook_install(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs],
                        recapture_request=lambda: (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
-                       names=MERGE_GUARD_NAMES if merge_guard else NAMES)
-        merge_msg = _register_merge_driver(root)
-        if merge_msg.startswith("not registered"):
-            raise RuntimeError(f"Hooks installed; merge driver {merge_msg}")
+                       finalize=register, names=MERGE_GUARD_NAMES if merge_guard else NAMES)
         return "\n".join(f"{spec[0]}: {message}" for spec, message in zip(specs, messages, strict=True)) + f"\nmerge driver: {merge_msg}"
 
     # Prepare both hooks before applying either so deterministic malformed
@@ -1460,11 +1464,11 @@ def uninstall(path: Path = Path("."), *, merge_guard: bool = False) -> str:
                  ("post-merge", _POST_MERGE_MARKER, _POST_MERGE_MARKER_END))
         if merge_guard:
             specs += tuple((name, *_merge_guard_markers(name)) for name in _MERGE_GUARD_HOOKS)
-        messages = run(root, hooks_dir, "uninstall", (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
+        messages, merge_msg = run(root, hooks_dir, "uninstall", (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
                        lambda snapshots: [_prepare_hook_uninstall(hooks_dir, *spec, snapshot=snapshots[spec[0]]) for spec in specs],
                        recapture_request=lambda: (_hook_request(root, merge_guard=True) if merge_guard else _hook_request(root)),
+                       finalize=lambda: _unregister_merge_driver(root, strict=True),
                        names=MERGE_GUARD_NAMES if merge_guard else NAMES)
-        merge_msg = _unregister_merge_driver(root, strict=True)
         return "\n".join(f"{spec[0]}: {message}" for spec, message in zip(specs, messages, strict=True)) + f"\nmerge driver: {merge_msg}"
     commit_plan = _prepare_hook_uninstall(
         hooks_dir, "post-commit", _HOOK_MARKER, _HOOK_MARKER_END

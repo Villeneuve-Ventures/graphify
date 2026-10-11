@@ -673,22 +673,26 @@ def _apply(fd, stage_fd, entry, publish=True):
         raise RuntimeError(f"Concurrent replacement of {name}; displaced object and preimage retained for manual reconciliation")
 
 
-def run(root, hooks_dir, operation, request, prepare, *, recapture_request, names=NAMES):
-    """Publish a complete prepared batch; callers register the driver afterward.
+def run(root, hooks_dir, operation, request, prepare, *, recapture_request, finalize, names=NAMES):
+    """Publish a prepared batch and finalize registration under lifecycle locks.
 
     operation is 'install' or 'uninstall'. prepare receives a mapping from names
     to snapshots returned by _read and returns plans in that order. Return the
-    per-hook messages, reusing saved messages when resuming a matching request.
+    per-hook messages and finalize result, reusing saved hook messages on retry.
     recapture_request observes context under the lock; it must match the original
     request at admission and later checks. Changed or unreadable context refuses.
 
-    Lock out concurrent installers without waiting, prepare all three hooks,
-    and publish atomically per file, not across the batch. Retain staging and
+    Lock the physical hooks and common Git directories without waiting, prepare
+    all selected hooks, and publish atomically per file, not across the batch.
+    Retain staging and
     authenticated recovery records; retries must match the original request,
-    operation, and rendered result. This does not update driver registration.
+    operation, and rendered result. Call finalize after hook completion (including
+    no-ops), holding both locks through driver registration/removal. Registration
+    is not part of the hook recovery journal or a crash-atomic transaction.
 
     Opening or closing hooks_dir can raise OSError. During batch processing,
-    OSError, ValueError, KeyError, TypeError, and RuntimeError are wrapped in
+    OSError, ValueError, KeyError, TypeError, CalledProcessError and RuntimeError
+    are wrapped in
     RuntimeError with recovery guidance. Failure may leave partial publication.
     """
     if names not in (NAMES, MERGE_GUARD_NAMES):
@@ -704,8 +708,20 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, name
             raise RuntimeError("Hook request context changed; retry the original request and retain all recovery files")
 
     fd = os.open(hooks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    common_fd = None
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Linked worktrees may select different hooks but git config --local
+        # writes their common config. Lock the stable directory, not config's
+        # inode, which git replaces on every write.
+        common_raw = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        common_dir = (root / common_raw).resolve()
+        common_fd = os.open(common_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        common_identity = _identity(os.fstat(common_fd))
+        if common_identity != _identity(os.fstat(fd)):
+            fcntl.flock(common_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         check_request()
         hooks_identity = _identity(os.fstat(fd))
         bound_request = {**request, "root": str(root), "hooks_path": str(hooks_dir)}
@@ -730,6 +746,8 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, name
                     """Recheck request, authority and hook identities before proceeding."""
                     check_request()
                     authority_check()
+                    if _identity(os.stat(common_dir, follow_symlinks=False)) != common_identity:
+                        raise RuntimeError("Common Git directory changed; retain all recovery files")
                     _admit(state_fd, private=True)
                     if (_identity(os.stat(name, dir_fd=authority_fd, follow_symlinks=False)) != state_identity
                             or _identity(os.stat(hooks_dir, follow_symlinks=False)) != hooks_identity):
@@ -745,7 +763,7 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, name
                     if any(_signature(_read(fd, name)) != _signature(snapshots[name]) for name in names):
                         raise RuntimeError("Hook set changed during no-op installation")
                     check()
-                    return [plan.message for plan in plans]
+                    return [plan.message for plan in plans], finalize()
                 stage_fd = os.open(batch["stage"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                 try:
                     if _identity(_admit(stage_fd, private=True)) != batch["identity"]:
@@ -779,15 +797,18 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, name
                     os.fsync(stage_fd)
                     os.fsync(fd)
                     store.finish(completed)
-                    return batch["messages"]
+                    check()
+                    return batch["messages"], finalize()
                 finally:
                     os.close(stage_fd)
             finally:
                 os.close(state_fd)
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"Hook installation incomplete: {exc}. Recovery files: {hooks_dir}. "
                            "Retry the exact original command after resolving the reported cause; do not delete unverified staging.") from exc
     finally:
+        if common_fd is not None:
+            os.close(common_fd)
         os.close(fd)
 
 

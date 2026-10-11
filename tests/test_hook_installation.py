@@ -1788,3 +1788,136 @@ def test_stage_permission_diagnostic_does_not_relabel_other_errors(repo, monkeyp
         assert os.strerror(errno.EACCES) in message
     assert before == _snapshot(repo)
     assert hooks.install(repo)
+
+
+@pytest.mark.parametrize("merge_guard", [False, True])
+@pytest.mark.parametrize("first", ["install", "uninstall"])
+@pytest.mark.parametrize("topology", ["same", "shared-alias", "linked-shared", "linked-distinct"])
+@pytest.mark.parametrize("noop", [False, True])
+def test_public_lifecycle_serializes_through_driver(repo, monkeypatch, tmp_path, merge_guard, first, topology, noop):
+    """Pause the public operation at registration, then attempt its inverse."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    def git(root, *args):
+        return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    other = repo
+    if topology == "shared-alias":
+        other = tmp_path / "other"
+        git(tmp_path, "init", str(other))
+        alias = tmp_path / "hooks-alias"
+        alias.symlink_to(_hooks(repo), target_is_directory=True)
+        git(other, "config", "core.hooksPath", str(alias))
+    elif topology.startswith("linked"):
+        git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "initial")
+        other = tmp_path / "linked"
+        git(repo, "worktree", "add", "-b", "fixture-linked", str(other))
+        if topology == "linked-distinct":
+            git(repo, "config", "extensions.worktreeConfig", "true")
+            git(other, "config", "--worktree", "core.hooksPath", str(other / "own-hooks"))
+            assert hooks._hooks_dir(other) != hooks._hooks_dir(repo)
+    attrs = repo / ".gitattributes"
+    attrs.write_text("*.user text\n")
+    if other != repo:
+        (other / ".gitattributes").write_text("*.other binary\n")
+    git(repo, "config", "merge.other.driver", "keep this driver")
+    if topology == "shared-alias":
+        git(other, "config", "merge.other.driver", "keep this driver")
+    unrelated = _hooks(repo) / "pre-push"
+    unrelated.write_bytes(b"#!/bin/sh\nprintf unrelated\n")
+    unrelated_before = _snapshot(_hooks(repo))["pre-push"]
+    global_config = Path.home() / ".gitconfig"
+    global_config.write_text('[merge "other"]\n driver = inherited user driver\n')
+    global_before = global_config.read_bytes()
+    if (first == "uninstall") != noop:
+        hooks.install(repo, merge_guard=merge_guard)
+    second = "uninstall" if first == "install" else "install"
+    paused, release = Event(), Event()
+    driver_name = "_register_merge_driver" if first == "install" else "_unregister_merge_driver"
+    driver = getattr(hooks, driver_name)
+
+    def pause(root, **kwargs):
+        paused.set()
+        assert release.wait(20), "test did not release registration"
+        return driver(root, **kwargs)
+
+    with monkeypatch.context() as patch, ThreadPoolExecutor(max_workers=1) as pool:
+        patch.setattr(hooks, driver_name, pause)
+        running = pool.submit(getattr(hooks, first), repo, merge_guard=merge_guard)
+        try:
+            assert paused.wait(20), "public operation did not reach registration"
+            before = (_snapshot(repo), _snapshot(other), _snapshot(publication._state_root()))
+            with pytest.raises(RuntimeError, match="incomplete"):
+                getattr(hooks, second)(other, merge_guard=merge_guard)
+            assert before == (_snapshot(repo), _snapshot(other), _snapshot(publication._state_root()))
+        finally:
+            release.set()
+        result = running.result(timeout=20)
+    names = publication.MERGE_GUARD_NAMES if merge_guard else publication.NAMES
+    assert all(f"{name}:" in result for name in names)
+    assert "merge driver:" in result
+    retained = _snapshot(publication._state_root())
+    stages = {str(stage): _snapshot(stage) for stage in _hooks(repo).glob(publication._PREFIX + "*")}
+    result = getattr(hooks, second)(other, merge_guard=merge_guard)
+    assert all(f"{name}:" in result for name in names)
+    directory = hooks._user_hooks_dir(hooks._hooks_dir(other))
+    for name in names:
+        target = directory / name
+        raw = target.read_bytes() if target.exists() else b""
+        assert (b"graphify-" in raw) == (second == "install")
+        if topology != "linked-distinct" and name in publication.NAMES:
+            assert b"printf 'user hook\\n'" in raw
+    for key in ("name", "driver", "recursive"):
+        value = subprocess.run(["git", "-C", str(other), "config", "--local", "--get-all", f"merge.graphify.{key}"], capture_output=True, text=True)
+        assert value.returncode == (0 if second == "install" else 1)
+        if second == "install":
+            assert value.stdout.strip()
+            if key == "name":
+                assert value.stdout.strip() == "graphify graph.json union merge"
+            elif key == "recursive":
+                assert value.stdout.strip() == "binary"
+            else:
+                assert "graphify merge-driver" in value.stdout
+    assert hooks._merge_driver_status(other) == ("registered" if second == "install" else "not registered")
+    assert _snapshot(_hooks(repo))["pre-push"] == unrelated_before
+    assert global_config.read_bytes() == global_before
+    assert git(other, "config", "--get", "merge.other.driver") == "keep this driver"
+    content = (other / ".gitattributes").read_text()
+    assert ("merge=graphify" in content) == (second == "install")
+    assert ("*.user text" if other == repo else "*.other binary") in content
+    after = _snapshot(publication._state_root())
+    # Retained stages and completion records remain intact; the journal advances.
+    for path, value in retained.items():
+        if "/completed-" in path:
+            assert after[path] == value
+    assert all(_snapshot(Path(path)) == value for path, value in stages.items())
+
+
+def test_lifecycle_deduplicates_identical_hooks_and_common_directory(repo):
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(repo / ".git")], check=True)
+    assert "merge driver: registered" in hooks.install(repo)
+    assert "merge driver: removed" in hooks.uninstall(repo)
+    assert all(not (repo / ".git" / name).exists() for name in publication.NAMES)
+
+
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_registration_error_releases_both_lifecycle_locks(repo, monkeypatch, operation):
+    if operation == "uninstall":
+        hooks.install(repo)
+    name = "_register_merge_driver" if operation == "install" else "_unregister_merge_driver"
+
+    def fail(root, **kwargs):
+        if operation == "install":
+            return "not registered (injected registration failure)"
+        raise RuntimeError("Hooks removed; injected registration failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hooks, name, fail)
+        with pytest.raises(RuntimeError, match="injected registration failure"):
+            getattr(hooks, operation)(repo)
+    assert "pending" not in hooks.status(repo)
+    for data in _live(repo).values():
+        assert (b"graphify-" in data) == (operation == "install")
+    assert getattr(hooks, operation)(repo)
+    assert hooks._merge_driver_status(repo) == ("registered" if operation == "install" else "not registered")
