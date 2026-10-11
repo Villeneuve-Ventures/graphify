@@ -28,13 +28,26 @@ def _require_fresh_lineage(pointers, repo_uuid, current, prior, previous, target
     repaired = pointers._journal_records_pointer(journal, current,
         transition="REPAIRED", deadline_ns=deadline_ns)
     replaced = prior.to_dict()["replaced_by_revision"]
-    if (replaced > value["pointer_revision"]
-            or not repaired and replaced != value["pointer_revision"]):
+    if replaced != value["pointer_revision"]:
         raise PointerCorrupt("retained pointer does not precede the visible move")
-    if not repaired and not any(pointers._journal_records_pointer(journal, previous,
+    if not any(pointers._journal_records_pointer(journal, previous,
             transition=transition, deadline_ns=deadline_ns)
             for transition in ("PROMOTED", "ROLLED_BACK", "REPAIRED")):
         raise PointerCorrupt("retained pointer has no durable movement authority")
+    if repaired:
+        # A rollback or pending root can precede the first move to current.
+        # Further same-target repairs can preserve it; intervening moves cannot.
+        successor = False
+        for event in journal.events:
+            require_before_deadline(deadline_ns, "rollback lineage inspection expired")
+            movement = event.to_dict()
+            if (movement["transition"] in {"PROMOTED", "ROLLED_BACK", "REPAIRED"}
+                    and movement["pointer_revision"] > before["pointer_revision"]):
+                if (movement["generation_id"] != value["current"]["generation_id"]
+                        or movement["receipt_sha256"] != value["current"]["receipt_sha256"]
+                        or successor and movement["transition"] != "REPAIRED"):
+                    raise PointerCorrupt("retained pointer does not establish the repaired lineage")
+                successor = True
     expected = before["last_good"]
     try:
         receipt = pointers._verify_ref(repo_uuid, before["current"], deadline_ns=deadline_ns)

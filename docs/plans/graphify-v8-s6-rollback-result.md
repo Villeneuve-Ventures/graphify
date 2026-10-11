@@ -57,6 +57,15 @@ Fresh admission requires retained pointer lineage that establishes the visible
 fallback retained when an unverifiable former current generation is quarantined.
 A repaired target also requires durable pointer movement authority. Lease high
 watermarks must cover the visible pointer and every durable journal event.
+The retained record's `replaced_by_revision` must equal the visible revision,
+including after repair. Its current reference, pointer revision, operation epoch,
+and fence must match a durable pointer movement. A repair can retain an older
+rollback root, but that root must name the repair's exact replacement revision.
+Journal history after that root must contain only the first move to the visible
+current reference and subsequent repairs of that same reference.
+If recovery of a missing visible pointer leaves an older replacement record,
+public rollback refuses without changing state; historical certification alone
+does not establish the repaired predecessor.
 The pointer revision, operation epoch, and fence must each have increment
 headroom below `2^63 - 1`. A move from one below that limit and its completed
 exact retry remain valid; another fresh increment at the limit refuses.
@@ -296,9 +305,10 @@ was part of this repair stage.
 
 ## Fresh admission repair push validation
 
-The subsequent authorized push stage ran all four repository pytest shards for
-the fresh admission repair against `226f5ddd`, after frozen all-extra setup checked
-171 packages. Each shard completed with exit status zero in a separate private,
+The subsequent authorized push stage delivered candidate `0db208b5` and ran all
+four repository pytest shards for the fresh admission repair against `226f5ddd`,
+after frozen all-extra setup checked 171 packages. Each shard completed with
+exit status zero in a separate private,
 user-owned fixture root outside `worktrees`.
 
 | Shard | Passed | Skipped | Passed subtests | Observed duration |
@@ -323,3 +333,75 @@ The full aggregate now qualifies the repaired code for this push. Existing
 docstrings and workflow/lock/configuration inputs remain unchanged. The earlier
 aggregate records retain their original candidate bindings. CI and bot reviews
 not awaited.
+
+## Repaired-lineage admission validation
+
+The local repair against `0db208b5` requires the retained record to name the
+visible replacement revision and match a durable pointer movement. For a
+repaired pointer, history after the retained root must contain only the first
+move to the visible current reference and subsequent repairs of that reference.
+An older certified prior cannot establish this relationship by changing its
+replacement revision alone.
+
+Four corrupt-state cases failed before repair with success instead of refusal:
+restored stale priors after damaged-source and missing-visible recovery, and
+retained operation-epoch and fence mismatches. The cold installed native worker
+also reproduced the stale-prior defect. Two relabeled-prior cases failed after
+the initial revision/journal guards, establishing the need for movement history.
+
+All 11 final focused checks passed in 457.27 seconds. They cover stale and
+relabeled priors, mismatched movement counters, repeated missing-visible recovery
+with unbound retained records, and valid retained rollback and pending roots.
+Valid rollback and exact retry preserve source and generation payloads; corrupt
+lineage refuses without durable writes. The final cold installed native worker
+and README policy checks passed (139 tests) in 152.05 seconds, including genuine
+installed core recovery followed by the bounded rollback worker.
+
+Frozen all-extra setup checked 171 packages. Ruff, expanded focused F/E9 checks,
+focused Pyright, all five generated-skill validators, and the required final
+AST-only graph refresh passed. Existing docstrings and workflow/lock/configuration
+inputs stayed unchanged. Final security receipts completed with the same 11
+Bandit findings in unchanged paths and zero frozen default/dev dependency
+findings. An intermediate run with changing code inputs is excluded from this
+proof; final code/test hashes stayed fixed during the reported checks.
+
+This proof covers the local diff. The prior four-shard aggregate remains pinned
+to `0db208b5`; it was not rerun for this local-diff stage and does not qualify
+these new changes for push. No commit, push, CI wait, or bot-review wait was part
+of this repair stage.
+
+## Repaired-lineage push validation
+
+The subsequent authorized push stage ran all four repository pytest shards for
+the repaired-lineage candidate against `0db208b5`, after frozen all-extra setup
+checked 171 packages. Each shard completed with exit status zero in a separate
+private, user-owned fixture root outside `worktrees`.
+
+| Shard | Passed | Skipped | Passed subtests | Observed duration |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2430 | 7 | 104 | 4086.02 s |
+| 2 | 1707 | 0 | 47 | 1794.38 s |
+| 3 | 2350 | 38 | 63 | 1217.85 s |
+| 4 | 2649 | 2 | 21 | 1395.82 s |
+
+The complete, disjoint selections cover all 9183 collected items: 9136 passed,
+47 skipped, and 235 passed subtests. All four timing receipts report complete
+execution with the same full inventory and allocation identity. Code, tests,
+workflow, lock, and configuration inputs stayed fixed through the run and the
+subsequent quality checks. The aggregate took 4087.79 seconds (68 minutes).
+Rollback tests accounted for 2451.52 seconds, including 2192.31 seconds of fixture
+setup; structural S4 tests accounted for 856.89 seconds.
+
+The optimized verifier checks passed (80 tests, 10.04 seconds), and the disposable
+CLI/install smoke and native Leiden binary partition passed. Passing focused,
+cold installed-worker, README policy, Ruff, focused Pyright, five generated-skill
+validators, and final AST-refresh receipts were reused on unchanged inputs.
+Complete security receipts also matched the current candidate: the same 11
+Bandit findings in unchanged paths and zero findings across 90 frozen default/dev
+third-party dependencies, without extras. Advisory completion does not establish
+a clean Bandit scan or optional-extra coverage.
+
+This aggregate qualifies the repaired code for the authorized push. Existing
+docstrings remain unchanged. The historical doc correction uses verified saved
+receipts bound to delivered candidate `0db208b5`; earlier aggregate records keep
+their original candidate bindings. CI and bot reviews not awaited.
