@@ -107,6 +107,7 @@ class PointerRepairPlan:
         return self._decision_sha256
 
     def to_dict(self) -> dict[str, Any]:
+        """Expose bounded repair actions and their exact decision digest."""
         return {
             "classification": self.classification,
             "candidate": dict(self.candidate),
@@ -2170,9 +2171,11 @@ class PointerStore:
         occurred_at: datetime,
         monotonic_ns: int,
         expected_plan: PointerRepairPlan | None = None,
+        require_semantic_idle: bool = False,
         deadline_ns: int | None = None,
     ) -> PointerSet:
         # Pending resumption can publish without passing through _persist_move.
+        """Recover pointer and journal state under fenced, approved-plan authority."""
         self._admit_write()
         _timestamp(occurred_at)
         operation_name = str(grant.lease.to_dict()["operation"])
@@ -2203,10 +2206,17 @@ class PointerStore:
                 semantic_queue = self.generations.semantic_queue
                 if semantic_queue is None:
                     raise SemanticQueueError("semantic-queue authority is unavailable")
-                semantic_queue.read_only_snapshot_locked(
+                queue = semantic_queue.read_only_snapshot_locked(
                     operation.repo_uuid,
                     deadline_ns=deadline_ns,
                 )
+                # Public structural repair cannot carry semantic work to an
+                # older candidate. Retain the existing internal recovery policy.
+                if require_semantic_idle and (
+                    queue.items
+                    or (queue.reconciliation is not None and queue.reconciliation.semantic_required)
+                ):
+                    raise PointerConflict("existing semantic work blocks structural repair")
             with self._repair_analysis_locked(
                 operation.repo_uuid,
                 active_source_revision=operation.grant.active_source_revision,

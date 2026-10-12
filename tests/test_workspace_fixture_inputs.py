@@ -19,6 +19,7 @@ from tests.test_workspace_fixture_capture_identity import FakeGitProcess
 
 class FixtureInputReviewTests(unittest.TestCase):
     def setUp(self):
+        """Build a disposable source inventory with every required runtime member."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()

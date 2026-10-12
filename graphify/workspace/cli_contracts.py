@@ -67,6 +67,7 @@ _REPAIR_COORDINATES = frozenset({"registry_revision", "active_source_revision", 
 
 
 def repair_plan(value):
+    """Validate bounded repair selection, actions, and exact decision identity."""
     exact(value, {"classification", "candidate", "last_good", "next_pointer_revision",
         "selected_from", "pointer_action", "journal_actions", "quarantine", "decision_sha256"})
     if value["classification"] not in ("no_op", "repairable"):
@@ -99,11 +100,13 @@ def repair_plan(value):
 
 
 def generation_id(value):
+    """Require a bounded generation identifier without path syntax."""
     if not isinstance(value, str) or re.fullmatch(r"gen-[a-z0-9][a-z0-9._-]{0,62}", value) is None:
         raise ContractError("bounded generation identifier required")
 
 
 def repair_approval(value):
+    """Validate workspace bindings, lifecycle coordinates, and repair evidence."""
     exact(value, {"repo_uuid", "state_root_sha256", "compatibility_sha256", "active_source_sha256",
                   "coordinates", "plan"})
     repo_uuid(value["repo_uuid"])
@@ -118,10 +121,12 @@ def repair_approval(value):
 class RepairApproval(Document):
     @staticmethod
     def validate(value):
+        """Require a complete approval record with no extra fields."""
         repair_approval(value)
 
 
 def repair_parameters(value):
+    """Validate preview parameters or an explicitly authorized exact approval."""
     if not isinstance(value, dict):
         raise ContractError("repair parameters required")
     if value.get("operation") == "preview":
@@ -139,6 +144,7 @@ def repair_parameters(value):
 
 
 def read_only_request(value):
+    """Identify requests that must run under the supervisor's no-write audit."""
     return value["command"] in READ_COMMANDS or (
         value["command"] == "sync" and value["parameters"]["operation"] == "prepare") or (
         value["command"] == "repair" and value["parameters"]["operation"] == "preview")
@@ -147,6 +153,7 @@ def read_only_request(value):
 class WorkspaceCommandRequest(Document):
     @staticmethod
     def validate(value):
+        """Validate the bounded canonical envelope and command-specific parameters."""
         exact(value, {"contract", "format_version", "command", "request_id", "state_root",
                       "compatibility_manifest", "timeout_ms", "parameters"})
         if (value["contract"] != "graphify.workspace.cli.request"
@@ -220,6 +227,7 @@ class WorkspaceCommandRequest(Document):
 class WorkspaceCommandResponse(Document):
     @staticmethod
     def validate(value):
+        """Validate a canonical success result or redacted failure outcome."""
         exact(value, {"contract", "format_version", "command", "request_id", "outcome",
                       "result", "error_code"})
         if (value["contract"] != "graphify.workspace.cli.response"

@@ -360,6 +360,7 @@ class CompatibilityManifest(Document):
     """S2 local fixture identity, never a committed or certified candidate."""
     @staticmethod
     def validate(value):
+        """Validate the candidate tuple and required installed member digests."""
         constants = {
             "contract": "graphify.workspace.compatibility", "schema_version": 2,
             "distribution": "graphifyy", "distribution_version": DISTRIBUTION_VERSION,

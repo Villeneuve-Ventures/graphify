@@ -113,6 +113,7 @@ _command_child(deadline_ns)
 
 
 def _run_bounded(request, deadline_ns):
+    """Run an isolated worker within the deadline and validate its response."""
     from ._readonly import _worker_import_paths
     from .persistence import LockTimeout, require_before_deadline
     import json
@@ -207,6 +208,7 @@ def _run_bounded(request, deadline_ns):
 
 
 def _execute(value, deadline_ns):
+    """Dispatch a validated request through the admitted workspace runtime."""
     from .composition import load_workspace_runtime_inputs, compose_workspace_runtime
     from .identity import discover_source
     from .persistence import require_before_deadline
@@ -295,6 +297,7 @@ def _exit_code(code):
 
 
 def _command_child(deadline_ns):
+    """Execute one supervised request and redact failures into protocol outcomes."""
     from . import _readonly
     if os.getpgrp() != os.getpid():
         raise RuntimeError("command supervisor group required")
@@ -314,6 +317,7 @@ def _command_child(deadline_ns):
 
 
 def run_workspace_cli(arguments):
+    """Validate CLI input, supervise execution, and emit one canonical response."""
     if not arguments or arguments == ["--help"] or arguments == ["-h"]:
         print("Usage: graphify workspace <register|activate|sync|rollback|repair|query|status|doctor> --request FILE")
         print("Use '-' for bounded stdin. Requests must be canonical JSON and carry explicit candidate authority.")

@@ -16,6 +16,7 @@ from tests.workspace_s3_helpers import REPO_UUID, tree_snapshot
 
 
 def approval_fixture():
+    """Return a bounded approval record for wire-contract tests."""
     return {"repo_uuid": REPO_UUID, "state_root_sha256": "a" * 64,
         "compatibility_sha256": "b" * 64, "active_source_sha256": "c" * 64,
         "coordinates": {"registry_revision": 1, "active_source_revision": 1,
@@ -28,12 +29,14 @@ def approval_fixture():
 
 
 def execute_parameters(approval):
+    """Copy approval into an explicit disposable repair execution request."""
     return {"operation": "execute", "repo_uuid": REPO_UUID, "approval": copy.deepcopy(approval),
         "authorization": {"action": "REPAIR_EXECUTE", "operator_id": "fixture",
             "reason": "disposable repair", "issued_at": "2026-10-12T00:00:00Z", "nonce": "repair-fixture"}}
 
 
 def request(state, parameters):
+    """Wrap repair parameters in the canonical public command envelope."""
     return {"contract": "graphify.workspace.cli.request", "format_version": 1,
         "command": "repair", "request_id": "s6-repair", "state_root": str(state),
         "compatibility_manifest": compatibility().to_dict(), "timeout_ms": 60000,
@@ -43,6 +46,7 @@ def request(state, parameters):
 @pytest.mark.parametrize("change", ["authorization", "digest", "extra", "counter", "candidate", "actions",
     "missing_approval", "workspace", "preview_approval"])
 def test_malformed_request_refuses_at_public_entry(tmp_path, monkeypatch, capsys, change):
+    """Reject malformed approval before dispatch and redact private input."""
     p = execute_parameters(approval_fixture())
     if change == "authorization": p["authorization"]["action"] = "ROLLBACK"
     elif change == "digest": p["approval"]["plan"]["decision_sha256"] = "A" * 64
@@ -67,6 +71,7 @@ def test_malformed_request_refuses_at_public_entry(tmp_path, monkeypatch, capsys
 
 @pytest.fixture
 def repair_runtime(tmp_path, monkeypatch, capsys):
+    """Create a disposable corrupt pointer and a public-entry repair client."""
     from graphify.workspace import composition
     from graphify.workspace.sync import synchronize_structural
     from tests.test_workspace_structural_s4 import runtime_fixture, request_for
@@ -80,10 +85,12 @@ def repair_runtime(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
 
     def run(p=None, expected=0):
+        """Invoke the CLI and check its exit, output channel, and response schema."""
         p = {"operation": "preview", "repo_uuid": REPO_UUID} if p is None else p
         value = request(runtime.inputs.state_root, p)
         monkeypatch.setattr(cli, "_read_request", lambda _: canonical_json_bytes(value))
         def dispatch(req, deadline):
+            """Use the fixture runtime while preserving command error classification."""
             try:
                 result = cli._execute(req.to_dict(), deadline)
                 reply = response("repair", "s6-repair", result=result)
@@ -103,12 +110,14 @@ def repair_runtime(tmp_path, monkeypatch, capsys):
 
 
 def identities(root):
+    """Capture retained filesystem identities and metadata without following symlinks."""
     return {str(p.relative_to(root)): (p.lstat().st_dev, p.lstat().st_ino, p.lstat().st_mode,
         p.lstat().st_uid, p.lstat().st_gid, p.lstat().st_nlink, p.lstat().st_mtime_ns,
         p.lstat().st_ctime_ns) for p in (root, *root.rglob("*"))}
 
 
 def test_preview_exact_approval_monotonic_repair_and_preservation(repair_runtime, monkeypatch):
+    """Prove write-free preview, exact monotonic repair, and stale-approval refusal."""
     runtime, repo, pointer, original, run = repair_runtime
     state = runtime.inputs.state_root
     before = tree_snapshot(state), tree_snapshot(repo), identities(state), identities(repo)
@@ -118,6 +127,7 @@ def test_preview_exact_approval_monotonic_repair_and_preservation(repair_runtime
         real_open = os.open
         attempted = []
         def readonly_open(path, flags, *args, **kwargs):
+            """Reject write-capable opens during preview, including temporary files."""
             if flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND):
                 attempted.append((path, flags))
                 raise AssertionError(attempted)
@@ -125,6 +135,7 @@ def test_preview_exact_approval_monotonic_repair_and_preservation(repair_runtime
         guard.setattr(os, "open", readonly_open)
         guard.setattr(os, "supports_dir_fd", os.supports_dir_fd | {readonly_open})
         def forbidden(*args, **kwargs):
+            """Fail on any intercepted durable mutation during preview."""
             pytest.fail("preview attempted a durable write")
         for method in ("write", "replace", "replace_at", "rename_exclusive_at", "truncate",
                        "unlink", "unlink_at", "rmdir", "rmdir_at", "mkdir", "mkdir_at"):
@@ -167,6 +178,7 @@ def test_preview_exact_approval_monotonic_repair_and_preservation(repair_runtime
 
 
 def test_tampered_approval_and_stale_raw_evidence_refuse_without_writes(repair_runtime):
+    """Refuse changed approval fields or raw pointer evidence without writes."""
     runtime, repo, pointer, original, run = repair_runtime
     approved = run()["approval"]
     before = tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)
@@ -185,10 +197,12 @@ def test_tampered_approval_and_stale_raw_evidence_refuse_without_writes(repair_r
 
 
 def test_changed_evidence_after_acquisition_is_unknown_and_retains_lease(repair_runtime, monkeypatch):
+    """Retain uncertain lease evidence when pointer authority changes after admission."""
     runtime, repo, pointer, original, run = repair_runtime
     approved = run()["approval"]
     acquire = runtime.stores.leases.acquire
     def changed(*a, **kw):
+        """Change pointer evidence after the real repair lease is allocated."""
         grant = acquire(*a, **kw)
         pointer.write_bytes(PointerSet.from_mapping(dict(original, source_epoch=98)).canonical)
         return grant
@@ -203,10 +217,13 @@ def test_changed_evidence_after_acquisition_is_unknown_and_retains_lease(repair_
 
 @pytest.mark.parametrize("operation", ["preview", "execute"])
 def test_uncertain_worker_protocol_obeys_operation(tmp_path, monkeypatch, capsys, operation):
+    """Distinguish preview failure from uncertain execution on malformed worker output."""
     p = {"operation": "preview", "repo_uuid": REPO_UUID} if operation == "preview" else execute_parameters(approval_fixture())
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
     monkeypatch.setattr(cli, "_read_request", lambda _: canonical_json_bytes(request(tmp_path.resolve(), p)))
-    def fail(*args): raise cli._ProtocolError("private secret")
+    def fail(*args):
+        """Simulate a worker protocol error containing private diagnostic text."""
+        raise cli._ProtocolError("private secret")
     monkeypatch.setattr(cli, "_run_bounded", fail)
     assert cli.run_workspace_cli(["repair", "--request", "-"]) == (4 if operation == "preview" else 5)
     output = capsys.readouterr()
@@ -215,9 +232,12 @@ def test_uncertain_worker_protocol_obeys_operation(tmp_path, monkeypatch, capsys
 
 
 def test_failed_completion_is_unknown_even_after_pointer_move(repair_runtime, monkeypatch):
+    """Report uncertainty when release fails after a visible pointer repair."""
     runtime, repo, pointer, original, run = repair_runtime
     approved = run()["approval"]
-    def release(*a, **kw): raise OSError("private completion acknowledgment failure")
+    def release(*a, **kw):
+        """Simulate failure to acknowledge repair lease release."""
+        raise OSError("private completion acknowledgment failure")
     monkeypatch.setattr(runtime.stores.leases, "release", release)
     assert run(execute_parameters(approved), expected=5)["error_code"] == "execution_unknown"
     moved = json.loads(pointer.read_bytes())
@@ -231,11 +251,14 @@ def test_failed_completion_is_unknown_even_after_pointer_move(repair_runtime, mo
 
 @pytest.mark.parametrize("operation", ["preview", "execute"])
 def test_preview_and_execute_keep_platform_refusal(tmp_path, monkeypatch, capsys, operation):
+    """Preserve unsupported-runtime refusal and redaction for both operations."""
     from graphify.workspace.persistence import UnsupportedRuntime
     p = {"operation": "preview", "repo_uuid": REPO_UUID} if operation == "preview" else execute_parameters(approval_fixture())
     monkeypatch.setattr(sys, "dont_write_bytecode", True)
     monkeypatch.setattr(cli, "_read_request", lambda _: canonical_json_bytes(request(tmp_path.resolve(), p)))
-    def refused(*a): raise UnsupportedRuntime("private host restriction")
+    def refused(*a):
+        """Simulate an unsupported host with a private diagnostic."""
+        raise UnsupportedRuntime("private host restriction")
     monkeypatch.setattr(cli, "_run_bounded", refused)
     assert cli.run_workspace_cli(["repair", "--request", "-"]) == 3
     output = capsys.readouterr()
@@ -244,6 +267,7 @@ def test_preview_and_execute_keep_platform_refusal(tmp_path, monkeypatch, capsys
 
 
 def test_repair_helper_and_schema_are_required_candidate_members():
+    """Reject candidate manifests that omit either new repair runtime member."""
     from graphify.workspace.contracts import CompatibilityManifest, ContractError
     for member in ("graphify/workspace/repair.py", "graphify/workspace/schemas/repair-approval.schema.json"):
         candidate = compatibility().to_dict()
@@ -255,6 +279,7 @@ def test_repair_helper_and_schema_are_required_candidate_members():
 
 @pytest.mark.parametrize("operation", ["preview", "execute"])
 def test_supervisor_refuses_wrong_success_binding(tmp_path, monkeypatch, operation):
+    """Reject structurally valid worker results bound to different repair evidence."""
     import subprocess
     from graphify.workspace.cli_contracts import WorkspaceCommandRequest
     p = {"operation": "preview", "repo_uuid": REPO_UUID} if operation == "preview" else execute_parameters(approval_fixture())
@@ -270,6 +295,7 @@ def test_supervisor_refuses_wrong_success_binding(tmp_path, monkeypatch, operati
     real_popen = subprocess.Popen
     def worker(*args, **kwargs):
         # A real bounded worker writes canonical, structurally valid wrong evidence.
+        """Launch a real bounded child that returns deliberately mismatched evidence."""
         return real_popen([sys.executable, "-I", "-S", "-B", "-c",
             "import sys; sys.stdin.buffer.read(); sys.stdout.buffer.write(" + repr(raw) + ")"], **kwargs)
     monkeypatch.setattr(subprocess, "Popen", worker)
@@ -278,6 +304,7 @@ def test_supervisor_refuses_wrong_success_binding(tmp_path, monkeypatch, operati
 
 
 def test_public_repair_retains_last_good_fallback_and_corrupt_content(repair_runtime):
+    """Preserve source, lock identities, and corrupt bytes during last-good fallback."""
     from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
     runtime, repo, pointer, original, run = repair_runtime
     pointer.write_bytes(PointerSet.from_mapping(original).canonical)
@@ -304,3 +331,67 @@ def test_public_repair_retains_last_good_fallback_and_corrupt_content(repair_run
     assert (lock.stat().st_dev, lock.stat().st_ino) == lock_identity
     quarantined = list((workspace / "quarantine").rglob("graph.json"))
     assert len(quarantined) == 1 and quarantined[0].read_bytes() == b"damaged graph content retained for inspection\n"
+
+
+def install_semantic_work(queue_path, queue_state):
+    """Install valid queued work or an empty semantic-required reconciliation."""
+    import hashlib
+    from graphify.workspace.semantic_queue import SemanticDesiredWork, SemanticQueueItem, SemanticQueueSnapshot
+    value = json.loads(queue_path.read_bytes())
+    reconciliation = value["reconciliation"]
+    work = SemanticDesiredWork(reconciliation["source_epoch"], reconciliation["policy_sha256"],
+        "UPSERT", "main.py", "c" * 64, value["desired_watermark"] + 1)
+    value["revision"] += 1
+    value["desired_watermark"] = work.desired_revision
+    if queue_state == "queued":
+        value["reconciliation"] = None
+        value["items"] = [SemanticQueueItem(work, "pending", 0, None, None).to_dict()]
+    else:
+        reconciliation.update(desired_watermark=work.desired_revision, semantic_required=True,
+            desired=[work.to_dict()],
+            desired_set_sha256=hashlib.sha256(canonical_json_bytes([work.to_dict()])).hexdigest())
+        value["completed_watermark"] = work.desired_revision
+        value["items"] = []
+    queue_path.write_bytes(SemanticQueueSnapshot.from_mapping(value).canonical)
+
+
+@pytest.mark.parametrize("queue_state", ["queued", "required_empty"])
+@pytest.mark.parametrize("timing", ["before_preview", "before_execute", "after_acquire"])
+def test_semantic_work_blocks_public_repair(repair_runtime, monkeypatch, queue_state, timing):
+    """Block fallback across semantic work at preview, execution, and locked recheck."""
+    from graphify.workspace.sync import prepare_structural_sync, synchronize_structural
+    runtime, repo, pointer, original, run = repair_runtime
+    pointer.write_bytes(PointerSet.from_mapping(original).canonical)
+    prepared = prepare_structural_sync(runtime, repo_uuid=REPO_UUID, generation_id="gen-damaged",
+        source_epoch=2, desired_watermark=2, expected_payload_bytes=1024 * 1024)
+    synchronize_structural(runtime, prepared, attempt_sha256="b" * 64)
+    payload = runtime.inputs.state_root / "workspaces" / REPO_UUID / "generations/gen-damaged/graphify-out/graph.json"
+    payload.write_bytes(b"damaged newer generation retained for inspection\n")
+    approval = run()["approval"]
+    assert approval["plan"]["selected_from"] == "last_good"
+    assert approval["coordinates"]["source_epoch"] == 1
+    state = runtime.inputs.state_root
+    queue = runtime.stores.queue
+    current, _, _ = queue._paths(REPO_UUID)
+    queue_path = queue.state.path(current)
+    if timing == "after_acquire":
+        acquire = runtime.stores.leases.acquire
+        held = []
+        def changed(*args, **kwargs):
+            """Install semantic work after acquisition and record the held recovery evidence."""
+            grant = acquire(*args, **kwargs)
+            install_semantic_work(queue_path, queue_state)
+            held.append((tree_snapshot(state), tree_snapshot(repo), identities(state), identities(repo)))
+            return grant
+        monkeypatch.setattr(runtime.stores.leases, "acquire", changed)
+        assert run(execute_parameters(approval), expected=5)["error_code"] == "execution_unknown"
+        assert (tree_snapshot(state), tree_snapshot(repo), identities(state), identities(repo)) == held[0]
+        assert runtime.stores.leases.inspect(REPO_UUID).leases
+    else:
+        install_semantic_work(queue_path, queue_state)
+        before = tree_snapshot(state), tree_snapshot(repo), identities(state), identities(repo)
+        if timing == "before_preview":
+            assert run(expected=4)["error_code"] == "workspace_refused"
+            assert (tree_snapshot(state), tree_snapshot(repo), identities(state), identities(repo)) == before
+        assert run(execute_parameters(approval), expected=4)["error_code"] == "workspace_refused"
+        assert (tree_snapshot(state), tree_snapshot(repo), identities(state), identities(repo)) == before

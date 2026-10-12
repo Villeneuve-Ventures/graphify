@@ -254,6 +254,7 @@ def test_canonicalization_bounds_and_normalized_collision():
 
 
 def test_schemas_positive_and_negative_wire_fixtures(tmp_path):
+    """Check every packaged schema against valid records and malformed variants."""
     from jsonschema import Draft202012Validator
     from referencing import Registry, Resource
     from graphify.workspace.composition import WorkspaceRuntimeAuthority, StructuralPolicy

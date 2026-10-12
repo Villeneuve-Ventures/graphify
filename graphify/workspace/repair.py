@@ -9,16 +9,18 @@ from .leases import LeaseBusy
 from .persistence import CommitUnknown, require_before_deadline
 from .pointers import PointerConflict, PointerCorrupt
 from .semantic_queue import SemanticQueueError
-from .sync import _entry, _semantic_barriers
+from .sync import _entry, _queue_barrier, _semantic_barriers
 
 
 def _preview(runtime, repo_uuid, *, deadline_ns):
+    """Freeze repair evidence under retained read-only locks without allocating a lease."""
     stores = runtime.stores
     with stores.registry.read_only_snapshot(deadline_ns=deadline_ns) as registry:
         entry = _entry(registry, repo_uuid)
         with stores.leases.read_only_workspace_lock(repo_uuid, deadline_ns=deadline_ns):
             _semantic_barriers(stores, repo_uuid)
-            stores.queue.read_only_snapshot_locked(repo_uuid, deadline_ns=deadline_ns)
+            queue = stores.queue.read_only_snapshot_locked(repo_uuid, deadline_ns=deadline_ns)
+            _queue_barrier(queue)
             lease = stores.leases.read_only_snapshot_locked(registry, repo_uuid, deadline_ns=deadline_ns)
             stores.leases._assert_recovery_barriers_locked(
                 repo_uuid, "REPAIR", recover=False, deadline_ns=deadline_ns)
@@ -69,6 +71,7 @@ def _preview(runtime, repo_uuid, *, deadline_ns):
 
 
 def repair_structural(runtime, parameters, *, deadline_ns):
+    """Preview repair or execute exact approval with fenced, uncertainty-safe recovery."""
     repair_parameters(parameters)
     require_before_deadline(deadline_ns, "repair deadline expired")
     runtime.validate_authority(deadline_ns=deadline_ns)
@@ -95,7 +98,7 @@ def repair_structural(runtime, parameters, *, deadline_ns):
         runtime.validate_authority(deadline_ns=deadline_ns)
         # recover re-analyzes with registry/workspace/exclusive generation locks,
         # compares the complete plan and private decision binding, then mutates.
-        result = stores.pointers.recover(grant, expected_plan=plan,
+        result = stores.pointers.recover(grant, expected_plan=plan, require_semantic_idle=True,
             occurred_at=datetime.now(timezone.utc), monotonic_ns=time.monotonic_ns(),
             deadline_ns=deadline_ns)
         stores.leases.release(grant, deadline_ns=deadline_ns)

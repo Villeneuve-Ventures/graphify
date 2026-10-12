@@ -31,6 +31,9 @@ installed before command imports. Missing lock identities, unresolved lease,
 registry, semantic, staged-build, GC, or atomic temporary recovery state refuses;
 preview does not recover such state. Existing pointer/journal evidence that the
 core can repair remains eligible. Occupied leases refuse.
+Queued semantic work and semantic-required reconciliation also refuse, including
+completed reconciliation with no remaining items. Execution repeats that check
+under the core registry and workspace locks before pointer or journal mutation.
 
 The approval object contains exactly these fields:
 

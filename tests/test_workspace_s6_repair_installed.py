@@ -8,12 +8,13 @@ import pytest
 
 from graphify.workspace.lifecycle_contracts import PointerSet
 from tests.test_workspace_s5_installed import installed_candidate, PublicClient, authorization  # noqa: F401
-from tests.test_workspace_s6_repair import identities
+from tests.test_workspace_s6_repair import identities, install_semantic_work
 from tests.workspace_s3_helpers import create_repo, REPO_UUID, tree_snapshot
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="native repair requires non-elevated macOS/APFS")
 def test_installed_native_preview_approved_repair_and_identity(installed_candidate):  # noqa: F811
+    """Prove native installed repair admission, no-write preview, and exact execution."""
     root, _, _, _, bundle, _ = installed_candidate
     source = create_repo(root / "repair-source")
     (source / "main.py").write_text("def leaf(): return 42\ndef caller(): return leaf()\n")
@@ -43,6 +44,17 @@ def test_installed_native_preview_approved_repair_and_identity(installed_candida
     assert str(source) not in json.dumps(approved) and str(state) not in json.dumps(approved)
     execute = {"operation": "execute", "repo_uuid": REPO_UUID,
         "authorization": authorization("REPAIR_EXECUTE"), "approval": approved}
+    queue = workspace / "queue/semantic.jsonl"
+    original_queue = queue.read_bytes()
+    for queue_state in ("queued", "required_empty"):
+        install_semantic_work(queue, queue_state)
+        blocked = client.snapshots(source), identities(state), identities(source)
+        assert client.run("repair", preview, audit=True, exit_code=4)["error_code"] == "workspace_refused"
+        assert (client.snapshots(source), identities(state), identities(source)) == blocked
+        assert client.run("repair", execute, exit_code=4)["error_code"] == "workspace_refused"
+        assert (client.snapshots(source), identities(state), identities(source)) == blocked
+        queue.write_bytes(original_queue)
+    before = client.snapshots(source), identities(state), identities(source)
     for key in ("state_root_sha256", "compatibility_sha256", "active_source_sha256"):
         changed = copy.deepcopy(execute); changed["approval"][key] = "f" * 64
         assert client.run("repair", changed, exit_code=4)["error_code"] == "workspace_refused"
