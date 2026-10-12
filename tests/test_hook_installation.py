@@ -2144,7 +2144,8 @@ def test_completed_older_ownership_evidence_is_retained_without_adoption(repo):
             data = publication._canonical({"body": body, "seal": hmac.new(store.key, publication._canonical(body), hashlib.sha256).hexdigest()})
             target = os.open(name, os.O_WRONLY | os.O_TRUNC, dir_fd=slot)
             try:
-                assert os.write(target, data) == len(data)
+                written = os.write(target, data)
+                assert written == len(data)
                 os.fsync(target)
             finally:
                 os.close(target)
