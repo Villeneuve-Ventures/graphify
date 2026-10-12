@@ -492,9 +492,11 @@ def test_cancel_does_not_read_unrelated_filter_sources():
     git(repo, "config", "filter.probe.clean", str(script))
     with (repo / ".gitattributes").open("a") as stream:
         stream.write("main.py filter=probe\n")
-    git(repo, "add", ".gitattributes")
+    # Avoid a racy-clean index refresh invoking the filter during fixture setup.
     (repo / "main.py").write_text("def dirty_unrelated():\n    return 77\n")
+    git(repo, "add", ".gitattributes")
     before = git(repo, "ls-files", "--stage", "--", "main.py", ".gitattributes").stdout
+    assert not marker.exists()
     finalizer.cancel_merge(repo, "graphify-out")
     assert git(repo, "ls-files", "--stage", "--", "main.py", ".gitattributes").stdout == before
     assert not marker.exists()
