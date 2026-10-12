@@ -11,7 +11,7 @@ from .contracts import CompatibilityManifest, ContractError, Document, exact, in
 MAX_REQUEST_BYTES = 1024 * 1024
 MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_TIMEOUT_MS = 300_000
-COMMANDS = frozenset({"register", "activate", "sync", "rollback", "query", "status", "doctor"})
+COMMANDS = frozenset({"register", "activate", "sync", "rollback", "repair", "query", "status", "doctor"})
 READ_COMMANDS = frozenset({"query", "status", "doctor"})
 
 
@@ -62,9 +62,98 @@ def rollback_parameters(value):
     digest(value["target_receipt_sha256"])
 
 
+_REPAIR_COORDINATES = frozenset({"registry_revision", "active_source_revision", "operation_epoch",
+    "migration_epoch", "fence_high_watermark", "source_epoch", "result_operation_epoch", "result_fence_token"})
+
+
+def repair_plan(value):
+    """Validate bounded repair selection, actions, and exact decision identity."""
+    exact(value, {"classification", "candidate", "last_good", "next_pointer_revision",
+        "selected_from", "pointer_action", "journal_actions", "quarantine", "decision_sha256"})
+    if value["classification"] not in ("no_op", "repairable"):
+        raise ContractError("unsupported repair classification")
+    if value["selected_from"] not in ("current", "pending", "prior", "journal", "last_good"):
+        raise ContractError("unsupported repair source")
+    if value["pointer_action"] not in ("none", "replace", "resume_pending", "finalize_pending"):
+        raise ContractError("unsupported repair action")
+    integer(value["next_pointer_revision"], minimum=1)
+    digest(value["decision_sha256"])
+    for index, ref in enumerate((value["candidate"], value["last_good"])):
+        if ref is None:
+            if index == 1:
+                continue
+            raise ContractError("repair candidate required")
+        exact(ref, {"generation_id", "receipt_sha256"})
+        generation_id(ref["generation_id"])
+        digest(ref["receipt_sha256"])
+    for field, allowed in (("journal_actions", {"recover_head", "discard_torn_tail", "adopt_tail", "append_repair"}),
+                           ("quarantine", None)):
+        items = value[field]
+        if (not isinstance(items, list) or len(items) > 10000
+                or any(not isinstance(item, str) for item in items) or len(set(items)) != len(items)):
+            raise ContractError("bounded unique repair actions required")
+        for item in items:
+            if allowed is None:
+                generation_id(item)
+            elif item not in allowed:
+                raise ContractError("unsupported repair journal action")
+
+
+def generation_id(value):
+    """Require a bounded generation identifier without path syntax."""
+    if not isinstance(value, str) or re.fullmatch(r"gen-[a-z0-9][a-z0-9._-]{0,62}", value) is None:
+        raise ContractError("bounded generation identifier required")
+
+
+def repair_approval(value):
+    """Validate workspace bindings, lifecycle coordinates, and repair evidence."""
+    exact(value, {"repo_uuid", "state_root_sha256", "compatibility_sha256", "active_source_sha256",
+                  "coordinates", "plan"})
+    repo_uuid(value["repo_uuid"])
+    for key in ("state_root_sha256", "compatibility_sha256", "active_source_sha256"):
+        digest(value[key])
+    exact(value["coordinates"], _REPAIR_COORDINATES)
+    for key, item in value["coordinates"].items():
+        integer(item, minimum=1 if key in {"registry_revision", "active_source_revision", "source_epoch", "result_operation_epoch", "result_fence_token"} else 0)
+    repair_plan(value["plan"])
+
+
+class RepairApproval(Document):
+    @staticmethod
+    def validate(value):
+        """Require a complete approval record with no extra fields."""
+        repair_approval(value)
+
+
+def repair_parameters(value):
+    """Validate preview parameters or an explicitly authorized exact approval."""
+    if not isinstance(value, dict):
+        raise ContractError("repair parameters required")
+    if value.get("operation") == "preview":
+        exact(value, {"operation", "repo_uuid"})
+        repo_uuid(value["repo_uuid"])
+    elif value.get("operation") == "execute":
+        exact(value, {"operation", "repo_uuid", "authorization", "approval"})
+        repo_uuid(value["repo_uuid"])
+        authorization(value["authorization"], "REPAIR_EXECUTE")
+        repair_approval(value["approval"])
+        if value["repo_uuid"] != value["approval"]["repo_uuid"]:
+            raise ContractError("repair workspace differs from approval")
+    else:
+        raise ContractError("unsupported repair operation")
+
+
+def read_only_request(value):
+    """Identify requests that must run under the supervisor's no-write audit."""
+    return value["command"] in READ_COMMANDS or (
+        value["command"] == "sync" and value["parameters"]["operation"] == "prepare") or (
+        value["command"] == "repair" and value["parameters"]["operation"] == "preview")
+
+
 class WorkspaceCommandRequest(Document):
     @staticmethod
     def validate(value):
+        """Validate the bounded canonical envelope and command-specific parameters."""
         exact(value, {"contract", "format_version", "command", "request_id", "state_root",
                       "compatibility_manifest", "timeout_ms", "parameters"})
         if (value["contract"] != "graphify.workspace.cli.request"
@@ -119,6 +208,8 @@ class WorkspaceCommandRequest(Document):
                 raise ContractError("unsupported sync operation")
         elif command == "rollback":
             rollback_parameters(p)
+        elif command == "repair":
+            repair_parameters(p)
         elif command == "query":
             exact(p, {"repo_uuid", "question", "mode", "depth", "token_budget", "context_filters"})
             repo_uuid(p["repo_uuid"])
@@ -136,6 +227,7 @@ class WorkspaceCommandRequest(Document):
 class WorkspaceCommandResponse(Document):
     @staticmethod
     def validate(value):
+        """Validate a canonical success result or redacted failure outcome."""
         exact(value, {"contract", "format_version", "command", "request_id", "outcome",
                       "result", "error_code"})
         if (value["contract"] != "graphify.workspace.cli.response"
@@ -150,6 +242,13 @@ class WorkspaceCommandResponse(Document):
         if value["outcome"] == "ok":
             if not isinstance(value["result"], dict) or value["error_code"] is not None:
                 raise ContractError("success response required")
+            if value["command"] == "repair":
+                exact(value["result"], {"approval"} if "approval" in value["result"] else {"pointer"})
+                if "approval" in value["result"]:
+                    repair_approval(value["result"]["approval"])
+                else:
+                    from .lifecycle_contracts import PointerSet
+                    PointerSet.from_mapping(value["result"]["pointer"])
             if value["command"] == "rollback":
                 from .lifecycle_contracts import PointerSet
                 exact(value["result"], {"pointer"})

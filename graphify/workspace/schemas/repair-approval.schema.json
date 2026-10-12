@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://graphify.local/workspace/s2/repair-approval.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "repo_uuid",
+    "state_root_sha256",
+    "compatibility_sha256",
+    "active_source_sha256",
+    "coordinates",
+    "plan"
+  ],
+  "properties": {
+    "repo_uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "state_root_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "compatibility_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "active_source_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "coordinates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_revision",
+        "active_source_revision",
+        "operation_epoch",
+        "migration_epoch",
+        "fence_high_watermark",
+        "source_epoch",
+        "result_operation_epoch",
+        "result_fence_token"
+      ],
+      "properties": {
+        "registry_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "active_source_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "operation_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "migration_epoch": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "fence_high_watermark": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "source_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "result_operation_epoch": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "result_fence_token": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "classification",
+        "candidate",
+        "last_good",
+        "next_pointer_revision",
+        "selected_from",
+        "pointer_action",
+        "journal_actions",
+        "quarantine",
+        "decision_sha256"
+      ],
+      "properties": {
+        "classification": {
+          "enum": [
+            "no_op",
+            "repairable"
+          ]
+        },
+        "candidate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "generation_id",
+            "receipt_sha256"
+          ],
+          "properties": {
+            "generation_id": {
+              "type": "string",
+              "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+            },
+            "receipt_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        "last_good": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "generation_id",
+                "receipt_sha256"
+              ],
+              "properties": {
+                "generation_id": {
+                  "type": "string",
+                  "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+                },
+                "receipt_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_pointer_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "selected_from": {
+          "enum": [
+            "current",
+            "pending",
+            "prior",
+            "journal",
+            "last_good"
+          ]
+        },
+        "pointer_action": {
+          "enum": [
+            "none",
+            "replace",
+            "resume_pending",
+            "finalize_pending"
+          ]
+        },
+        "journal_actions": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "recover_head",
+              "discard_torn_tail",
+              "adopt_tail",
+              "append_repair"
+            ]
+          }
+        },
+        "quarantine": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^gen-[a-z0-9][a-z0-9._-]{0,62}$"
+          }
+        },
+        "decision_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

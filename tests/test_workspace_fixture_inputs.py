@@ -19,6 +19,7 @@ from tests.test_workspace_fixture_capture_identity import FakeGitProcess
 
 class FixtureInputReviewTests(unittest.TestCase):
     def setUp(self):
+        """Build a disposable source inventory with every required runtime member."""
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
@@ -28,7 +29,7 @@ class FixtureInputReviewTests(unittest.TestCase):
                    "workspace/composition.py", "workspace/__init__.py",
                    "workspace/adapters/base.py", "workspace/adapters/__init__.py",
                    "workspace/cli.py", "workspace/cli_contracts.py", "workspace/status.py",
-                   "workspace/rollback.py")
+                   "workspace/rollback.py", "workspace/repair.py")
         for name in modules:
             path = self.repo / "graphify" / name
             path.parent.mkdir(parents=True, exist_ok=True)

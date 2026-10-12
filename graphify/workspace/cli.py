@@ -13,10 +13,10 @@ import sys
 import time
 
 from .cli_contracts import (
-    COMMANDS, READ_COMMANDS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
-    WorkspaceCommandRequest, WorkspaceCommandResponse, authorization, response,
+    COMMANDS, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES,
+    WorkspaceCommandRequest, WorkspaceCommandResponse, authorization, response, read_only_request,
 )
-from .contracts import CompatibilityManifest, ContractError, canonical_json_bytes
+from .contracts import CompatibilityManifest, ContractError, canonical_json_bytes, canonical_sha256
 
 
 class _ProtocolError(RuntimeError):
@@ -113,13 +113,13 @@ _command_child(deadline_ns)
 
 
 def _run_bounded(request, deadline_ns):
+    """Run an isolated worker within the deadline and validate its response."""
     from ._readonly import _worker_import_paths
     from .persistence import LockTimeout, require_before_deadline
     import json
 
     value = request.to_dict()
-    readonly = value["command"] in READ_COMMANDS or (
-        value["command"] == "sync" and value["parameters"]["operation"] == "prepare")
+    readonly = read_only_request(value)
     # Prepare uses the same no-write observer path, but host qualification uses
     # df/diskutil. The outer audit permits those bounded read-only helpers.
     startup = json.dumps([_worker_import_paths(deadline_ns), sys.pycache_prefix,
@@ -181,10 +181,34 @@ def _run_bounded(request, deadline_ns):
         if (process.returncode != expected_exit or fields["command"] != value["command"]
                 or fields["request_id"] != value["request_id"]):
             raise _ProtocolError("command response differs")
+        if fields["outcome"] == "ok" and value["command"] == "repair":
+            expected_key = "approval" if readonly else "pointer"
+            if set(fields["result"]) != {expected_key}:
+                raise _ProtocolError("repair response operation differs")
+            if readonly:
+                approved = fields["result"]["approval"]
+                if (approved["repo_uuid"] != value["parameters"]["repo_uuid"]
+                        or approved["state_root_sha256"] != canonical_sha256(value["state_root"])
+                        or approved["compatibility_sha256"] != canonical_sha256(value["compatibility_manifest"])):
+                    raise _ProtocolError("repair preview binding differs")
+            else:
+                approved = value["parameters"]["approval"]
+                coordinates, plan = approved["coordinates"], approved["plan"]
+                pointer = fields["result"]["pointer"]
+                if (pointer["repo_uuid"] != approved["repo_uuid"]
+                        or pointer["current"] != plan["candidate"]
+                        or pointer["last_good"] != plan["last_good"]
+                        or pointer["pointer_revision"] != plan["next_pointer_revision"]
+                        or pointer["active_source_revision"] != coordinates["active_source_revision"]
+                        or pointer["source_epoch"] != coordinates["source_epoch"]
+                        or pointer["operation_epoch"] != coordinates["result_operation_epoch"]
+                        or pointer["fence_token"] != coordinates["result_fence_token"]):
+                    raise _ProtocolError("repair acknowledgment differs")
         return result, process.returncode
 
 
 def _execute(value, deadline_ns):
+    """Dispatch a validated request through the admitted workspace runtime."""
     from .composition import load_workspace_runtime_inputs, compose_workspace_runtime
     from .identity import discover_source
     from .persistence import require_before_deadline
@@ -223,6 +247,9 @@ def _execute(value, deadline_ns):
             return {"sync_request": frozen.to_dict()}
         frozen = StructuralSyncRequest.from_json(canonical_json_bytes(p["sync_request"]))
         return asdict(synchronize_structural(runtime, frozen, attempt_sha256=p["attempt_sha256"]))
+    if command == "repair":
+        from .repair import repair_structural
+        return repair_structural(runtime, p, deadline_ns=deadline_ns)
     if command == "rollback":
         from .rollback import rollback_structural
         return {"pointer": rollback_structural(runtime, p, deadline_ns=deadline_ns).to_dict()}
@@ -270,13 +297,13 @@ def _exit_code(code):
 
 
 def _command_child(deadline_ns):
+    """Execute one supervised request and redact failures into protocol outcomes."""
     from . import _readonly
     if os.getpgrp() != os.getpid():
         raise RuntimeError("command supervisor group required")
     _readonly._SUPERVISED_GROUP = os.getpgrp()
     value = WorkspaceCommandRequest.from_json(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)).to_dict()
-    mutation = value["command"] not in READ_COMMANDS and not (
-        value["command"] == "sync" and value["parameters"]["operation"] == "prepare")
+    mutation = not read_only_request(value)
     try:
         result = _execute(value, deadline_ns)
         # A mutation can have succeeded after its budget. Do not claim success.
@@ -290,8 +317,9 @@ def _command_child(deadline_ns):
 
 
 def run_workspace_cli(arguments):
+    """Validate CLI input, supervise execution, and emit one canonical response."""
     if not arguments or arguments == ["--help"] or arguments == ["-h"]:
-        print("Usage: graphify workspace <register|activate|sync|rollback|query|status|doctor> --request FILE")
+        print("Usage: graphify workspace <register|activate|sync|rollback|repair|query|status|doctor> --request FILE")
         print("Use '-' for bounded stdin. Requests must be canonical JSON and carry explicit candidate authority.")
         print("Launch with PYTHONDONTWRITEBYTECODE=1 or python -B before importing Graphify.")
         return 0
@@ -313,8 +341,7 @@ def run_workspace_cli(arguments):
     except Exception:
         _emit(response(error_code="bad_request"), sys.stderr)
         return 2
-    mutation = value["command"] not in READ_COMMANDS and not (
-        value["command"] == "sync" and value["parameters"]["operation"] == "prepare")
+    mutation = not read_only_request(value)
     deadline_ns = time.monotonic_ns() + value["timeout_ms"] * 1_000_000
     try:
         reply, code = _run_bounded(request, deadline_ns)

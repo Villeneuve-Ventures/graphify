@@ -29,7 +29,8 @@
         "rollback",
         "query",
         "status",
-        "doctor"
+        "doctor",
+        "repair"
       ]
     },
     "request_id": {
@@ -689,6 +690,76 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "repair"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parameters": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation",
+                  "repo_uuid"
+                ],
+                "properties": {
+                  "operation": {
+                    "const": "preview"
+                  },
+                  "repo_uuid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "operation",
+                  "repo_uuid",
+                  "authorization",
+                  "approval"
+                ],
+                "properties": {
+                  "operation": {
+                    "const": "execute"
+                  },
+                  "repo_uuid": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+                  },
+                  "authorization": {
+                    "allOf": [
+                      {
+                        "$ref": "#/$defs/authorization"
+                      },
+                      {
+                        "properties": {
+                          "action": {
+                            "const": "REPAIR_EXECUTE"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "approval": {
+                    "$ref": "https://graphify.local/workspace/s2/repair-approval.schema.json"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -710,7 +781,8 @@
             "REBIND",
             "ROTATE",
             "ACTIVATE",
-            "ROLLBACK"
+            "ROLLBACK",
+            "REPAIR_EXECUTE"
           ]
         },
         "operator_id": {

@@ -254,6 +254,7 @@ def test_canonicalization_bounds_and_normalized_collision():
 
 
 def test_schemas_positive_and_negative_wire_fixtures(tmp_path):
+    """Check every packaged schema against valid records and malformed variants."""
     from jsonschema import Draft202012Validator
     from referencing import Registry, Resource
     from graphify.workspace.composition import WorkspaceRuntimeAuthority, StructuralPolicy
@@ -279,6 +280,9 @@ def test_schemas_positive_and_negative_wire_fixtures(tmp_path):
     })
     documents.update({"cli-request.schema.json": command,
                       "cli-response.schema.json": response("status", "schema-fixture", result={})})
+    from graphify.workspace.cli_contracts import RepairApproval
+    from tests.test_workspace_s6_repair import approval_fixture
+    documents["repair-approval.schema.json"] = RepairApproval.from_mapping(approval_fixture())
     assert set(documents) == set(SCHEMA_FILES)
     for name, schema in zip(SCHEMA_FILES, schemas):
         document = documents[name]

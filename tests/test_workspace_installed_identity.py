@@ -31,7 +31,7 @@ def installed_manifest(root):
                 "workspace/composition.py", "workspace/__init__.py",
                 "workspace/adapters/base.py", "workspace/adapters/__init__.py",
                 "workspace/cli.py", "workspace/cli_contracts.py", "workspace/status.py",
-                "workspace/rollback.py"}
+                "workspace/rollback.py", "workspace/repair.py"}
     required.update("workspace/schemas/" + name for name in SCHEMA_FILES)
     for name in required:
         path = root / "graphify" / name

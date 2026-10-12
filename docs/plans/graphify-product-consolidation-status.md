@@ -1,8 +1,8 @@
 # Graphify consolidation delivery status
 
-Status reconciled on 2026-10-09 against v8
-`a13c9057f5c8b17d7b7f80bffcb4e38848e9ff84`, with S1–S5 merged and the
-S6 public rollback slice implemented in this candidate.
+Status reconciled on 2026-10-12 against v8
+`da5df679dab18d2b8c150c01ebdfcaa55817ec7a`, with S1–S5 and S6 public rollback
+merged. The bounded S6 public repair transport is implemented in this candidate.
 The [original consolidation plan](graphify-product-consolidation-2026-09-18.md)
 and [structural design](graphify-v8-structural-workspace-design.md) retain their
 historical planning claims. This status record does not authorize successor
@@ -17,6 +17,7 @@ implementation, release, migration, installation, or consumer adoption.
 | S3 — lifecycle stores and storage separation | Delivered through the integration stack ending in [PR #164](https://github.com/Villeneuve-Ventures/graphify/pull/164) | `d7f6972be1ce62674bbb96c77e8c2d626952fe4b` |
 | S4 — v8 adapter and structural library round trip | Delivered through [PR #167](https://github.com/Villeneuve-Ventures/graphify/pull/167) | `45c7529811006e6fe8dc6d3d3137a59ad8b589de` |
 | S5 — public structural commands and diagnostics | Delivered through [PR #175](https://github.com/Villeneuve-Ventures/graphify/pull/175) | `153fa8360488745e9633b3b54a25497e3500f1fd` |
+| S6 — public exact-last-good rollback | Delivered through [PR #204](https://github.com/Villeneuve-Ventures/graphify/pull/204) | `63323a63e78b827c0b10a67539f2b60975be204a` |
 
 S3 provides lifecycle stores, pointer transitions and recovery, internal GC,
 structural-policy enforcement, and ordinary-write refusal for managed state.
@@ -36,14 +37,16 @@ The batch and capability IDs retain their meanings from the original plan.
 | B1 / T3f, T2a; preserve T6–T10 | S1 and S2 merged | Later exact-candidate and aggregate qualification belongs to S7; these merges do not establish release certification. |
 | B2 / T3a–c, T3f, T3j | S3 and S4 merged | B2 implementation delivered; later exact-candidate and aggregate release qualification belongs to S7. |
 | B3 / T3d–f, T2a | S5 merged; S7 incomplete | S7 exact-candidate aggregate proof and release compatibility statement. |
-| B4 / T3g–i, T11f | S3 core recovery and GC safety dependencies merged; S6 rollback implemented in this candidate; repair/GC incomplete | Public repair and offline GC transports; an optional legacy reader only if D3 selects that option. |
+| B4 / T3g–i, T11f | S3 core recovery and GC safety dependencies merged; S6 rollback merged; bounded public repair implemented in this candidate; offline GC incomplete | Public repair delivery and offline GC transport; an optional legacy reader only if D3 selects that option. |
 
 The [S4 result](graphify-v8-s4-result.md) and [S5 result](graphify-v8-s5-result.md)
 retain separate implementation and historical validation records.
 The [S6 rollback result](graphify-v8-s6-rollback-result.md) describes this
-candidate's bounded exact-last-good transport and its validation limits.
-It reuses S3 pointer/lease/journal machinery and S5 dispatch. Public repair and
-offline GC remain incomplete and are not activated by this delivery.
+merged bounded exact-last-good transport and its historical validation limits.
+PR #204 merged on 2026-10-11 UTC. The [S6 repair result](graphify-v8-s6-repair-result.md)
+records this candidate's preview/approval transport and validation boundary.
+Both reuse S3 pointer/lease/journal machinery and S5 dispatch. Offline GC remains
+incomplete and is not activated by this delivery.
 D3 governs only the optional legacy reader within S6; it does not block
 the core maintenance transports. S7 follows S5 and the selected maintenance
 delivery, with D3 required for its final release compatibility statement, as
@@ -104,7 +107,7 @@ D3 old certified-state access remains unresolved: it governs the optional S6
 legacy reader and S7 release compatibility promise, and does not block S4
 new-format work in disposable roots.
 
-S6 repair/GC transports, S7 aggregate candidate proof, and overall
+S6 public repair delivery and offline GC transport, S7 aggregate candidate proof, and overall
 consolidation remain incomplete. Native power-loss and hostile
 concurrent-rename proof remain unestablished. Aletheia first-use acceptance,
 other repository enrollment, global installation changes, migration, and
