@@ -116,6 +116,7 @@ class PointerRepairPlan:
             "pointer_action": self.pointer_action,
             "journal_actions": list(self.journal_actions),
             "quarantine": list(self.quarantine),
+            "decision_sha256": self.decision_sha256,
         }
 
 

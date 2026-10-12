@@ -36,7 +36,8 @@ OUTCOME_STATUSES = frozenset({
 })
 SCHEMA_FILES = ("compatibility.schema.json", "input-manifest.schema.json",
                 "completion-binding.schema.json", "runtime-authority.schema.json",
-                "state-root.schema.json", "cli-request.schema.json", "cli-response.schema.json")
+                "state-root.schema.json", "cli-request.schema.json", "cli-response.schema.json",
+                "repair-approval.schema.json")
 INSTALLATION_METADATA = ("METADATA", "WHEEL", "entry_points.txt", "top_level.txt", "licenses/LICENSE")
 SUPPORTED_CONSOLE_SCRIPTS = frozenset({"graphify", "graphify-mcp"})
 
@@ -393,7 +394,7 @@ class CompatibilityManifest(Document):
                     "graphify/workspace/__init__.py", "graphify/workspace/adapters/base.py",
                     "graphify/workspace/adapters/__init__.py", "graphify/workspace/cli.py",
                     "graphify/workspace/cli_contracts.py", "graphify/workspace/status.py",
-                    "graphify/workspace/rollback.py"}
+                    "graphify/workspace/rollback.py", "graphify/workspace/repair.py"}
         required.update("graphify/workspace/schemas/" + name for name in SCHEMA_FILES)
         if not required <= set(members):
             raise ContractError("missing structural package members")

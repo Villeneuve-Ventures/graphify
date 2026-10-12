@@ -418,10 +418,10 @@ missing required language extra such as `graphifyy[sql]` for SQL. Genuine option
 metadata absence and working documented backend fallbacks remain supported.
 The separate `graphify update` command retains its own AST update behavior.
 
-### Managed structural workspace (S5 and S6 rollback)
+### Managed structural workspace (S5 and S6 maintenance)
 
 `graphify workspace` exposes explicit registration, source activation, structural
-sync, bounded rollback, query, status, and doctor commands. Each command accepts
+sync, bounded rollback and repair, query, status, and doctor commands. Each command accepts
 a bounded canonical JSON request from a file or stdin. All workspace operations,
 including query, status, and doctor, require non-elevated macOS on local APFS.
 Windows and Linux support workspace help only. On the qualified macOS runtime:
@@ -449,8 +449,11 @@ The [S6 rollback contract](docs/plans/graphify-v8-s6-rollback-result.md) defines
 the exact compatible `last_good` target, expected revisions, source epoch,
 lease/fence coordinates, completed retries, and `execution_unknown` responses.
 Rollback selects only the fully verified exact `last_good`; it does not refresh
-source content or establish semantic completion. Public repair and GC, migration,
-worker, service, and semantic-sync transports remain unavailable.
+source content or establish semantic completion. The [S6 repair contract](docs/plans/graphify-v8-s6-repair-result.md)
+defines write-free preview and exact approval with `REPAIR_EXECUTE`, a REPAIR lease,
+and the complete plan/decision binding. Changed evidence refuses; uncertain
+execution preserves recovery evidence. Public offline GC, migration, worker,
+service, and semantic-sync transports remain unavailable.
 
 ## Ignoring files
 
