@@ -38,7 +38,7 @@ def _hooks(root):
 
 
 def _snapshot(root):
-    return {str(p.relative_to(root)): (p.lstat().st_mode, p.lstat().st_ino,
+    return {str(p.relative_to(root)): (p.lstat().st_mode, p.lstat().st_ino, p.lstat().st_uid, p.lstat().st_gid,
             hashlib.sha256(p.read_bytes()).hexdigest())
             for p in root.rglob("*") if p.is_file() and not p.is_symlink()}
 
@@ -90,10 +90,10 @@ def test_prepublication_failure_preserves_all_live_hooks(repo, monkeypatch, fail
     write = publication._write
     save = publication._Store.save
 
-    def fail_write(fd, name, data, mode, metadata=None):
+    def fail_write(fd, name, data, mode, metadata=None, ownership=None):
         if name == "1":
             raise OSError("stage write failed")
-        return write(fd, name, data, mode, metadata)
+        return write(fd, name, data, mode, metadata, ownership)
 
     def fail_mode(fd, mode):
         if mode == 0o751:
@@ -880,10 +880,10 @@ def test_stage_exclusion_write_failure_precedes_payload_and_live_publication(rep
     before = _live(repo)
     payloads = []
 
-    def record_write(fd, name, data, mode, metadata=None):
+    def record_write(fd, name, data, mode, metadata=None, ownership=None):
         if name.isdigit() or name.startswith("pre-"):
             payloads.append(name)
-        return real_write(fd, name, data, mode, metadata)
+        return real_write(fd, name, data, mode, metadata, ownership)
 
     def fail(fd):
         if stat.S_ISDIR(os.fstat(fd).st_mode) and os.listdir(fd) == [".gitignore"]:
@@ -1140,15 +1140,19 @@ def _assert_extended_metadata(path, kind):
 
 @pytest.mark.parametrize("kind", ["xattr", "acl", "flags"])
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
-def test_public_replacement_preserves_extended_metadata(repo, kind, operation):
+@pytest.mark.parametrize("different_group", [False, True])
+def test_public_replacement_preserves_extended_metadata(repo, kind, operation, different_group):
     if operation == "uninstall":
         hooks.install(repo)
     target = _hooks(repo) / "post-commit"
+    group = _different_permitted_group() if different_group else target.stat().st_gid
+    os.chown(target, -1, group)
     _set_extended_metadata(target, kind)
     _assert_extended_metadata(target, kind)
     old_inode = target.stat().st_ino
     getattr(hooks, operation)(repo)
     assert target.stat().st_ino != old_inode
+    assert (target.stat().st_uid, target.stat().st_gid) == (os.getuid(), group)
     _assert_extended_metadata(target, kind)
     assert b"printf 'user hook\\n'" in target.read_bytes()
     assert stat.S_IMODE(target.stat().st_mode) == 0o751
@@ -1921,3 +1925,264 @@ def test_registration_error_releases_both_lifecycle_locks(repo, monkeypatch, ope
         assert (b"graphify-" in data) == (operation == "install")
     assert getattr(hooks, operation)(repo)
     assert hooks._merge_driver_status(repo) == ("registered" if operation == "install" else "not registered")
+
+
+def _different_permitted_group():
+    groups = sorted(set(os.getgroups()) - {os.getgid()})
+    if not groups:
+        pytest.skip("native ownership proof requires a differing permitted group")
+    return groups[0]
+
+
+def test_native_content_replacement_preserves_existing_group(repo):
+    target = _hooks(repo) / "post-commit"
+    group = _different_permitted_group()
+    os.chown(target, -1, group)
+    before = target.stat()
+    hooks.install(repo)
+    after = target.stat()
+    assert after.st_ino != before.st_ino
+    assert (after.st_uid, after.st_gid) == (before.st_uid, group)
+    assert b"printf 'user hook\\n'" in target.read_bytes()
+
+
+def _ownership_batch(repo, merge_guard, shared, tmp_path):
+    """Prepare disposable existing hooks, including standalone opt-in guards."""
+    directory = _hooks(repo)
+    if shared:
+        directory = tmp_path / "shared-hooks"
+        _hooks(repo).rename(directory)
+        for root in (repo, tmp_path / "other-repo"):
+            if root != repo:
+                subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "config", "core.hooksPath", str(directory)], check=True)
+    hooks.install(repo, merge_guard=merge_guard)
+    names = publication.MERGE_GUARD_NAMES if merge_guard else publication.NAMES
+    groups = sorted(set(os.getgroups()) - {os.getgid()})
+    if not groups:
+        pytest.skip("native ownership proof requires differing permitted groups")
+    for index, name in enumerate(names):
+        os.chown(directory / name, -1, groups[index % len(groups)])
+    return directory, names
+
+
+@pytest.mark.parametrize("merge_guard", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("change", ["content", "mode", "uninstall"])
+def test_native_ownership_survives_batch_replacements(repo, tmp_path, merge_guard, shared, change):
+    directory, names = _ownership_batch(repo, merge_guard, shared, tmp_path)
+    if change == "content":
+        for name in names:
+            target = directory / name
+            raw = target.read_bytes()
+            start = raw.index(b"# graphify-")
+            end = raw.index(b"\n", start) + 1
+            target.write_bytes(raw[:end] + b"# stale owned body\n" + raw[end:])
+    elif change == "mode":
+        for name in names:
+            (directory / name).chmod(0o2640)
+    before = {name: (directory / name).stat() for name in names}
+    content = {name: (directory / name).read_bytes() for name in names}
+    operation = "uninstall" if change == "uninstall" else "install"
+    getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    for name in names:
+        target = directory / name
+        if change == "uninstall" and name not in publication.NAMES:
+            assert not target.exists()  # Standalone guards are removed, not replaced.
+            continue
+        after = target.stat()
+        assert (after.st_uid, after.st_gid) == (before[name].st_uid, before[name].st_gid)
+        assert after.st_ino != before[name].st_ino
+        if change == "mode":
+            assert target.read_bytes() == content[name]
+            assert stat.S_IMODE(after.st_mode) == 0o2751
+        if name in publication.NAMES:
+            assert b"printf 'user hook\\n'" in target.read_bytes()
+    retained = _snapshot(directory)
+    getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    assert _snapshot(directory) == retained  # No-op retains ownership and inode.
+    driver = subprocess.run(["git", "-C", str(repo), "config", "--local", "--get", "merge.graphify.driver"], capture_output=True)
+    assert driver.returncode == (1 if operation == "uninstall" else 0)
+    if shared:
+        assert not (tmp_path / "other-repo/.gitattributes").exists()
+
+
+@pytest.mark.parametrize("merge_guard", [False, True])
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+@pytest.mark.parametrize("failure", ["denied", "ineffective"])
+def test_ownership_preservation_failure_precedes_all_live_changes(repo, tmp_path, monkeypatch, merge_guard, operation, failure):
+    directory, names = _ownership_batch(repo, merge_guard, True, tmp_path)
+    if operation == "install":
+        for name in names:
+            (directory / name).chmod(0o640)
+    before = (_snapshot(repo), _snapshot(directory), _snapshot(tmp_path / "other-repo"))
+    real = os.fchown
+    calls = []
+    last_preimage = sum(2 if operation == "install" or name in publication.NAMES else 1
+                        for name in names[:-1]) + 1
+
+    def fail_last(fd, uid, gid):
+        # Let earlier preimages/successors finish; fail the last hook's preimage.
+        calls.append((uid, gid))
+        if len(calls) == last_preimage:
+            if failure == "denied":
+                raise PermissionError(errno.EPERM, "injected ownership refusal")
+            return None
+        return real(fd, uid, gid)
+
+    monkeypatch.setattr(publication.os, "fchown", fail_last)
+    monkeypatch.setattr(publication, "_rename", lambda *a, **k: pytest.fail("no live publication before ownership proof"))
+    monkeypatch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("no registration after ownership failure"))
+    monkeypatch.setattr(hooks, "_unregister_merge_driver", lambda *a, **k: pytest.fail("no removal after ownership failure"))
+    with pytest.raises(RuntimeError, match="UID/GID"):
+        getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    assert len(calls) == last_preimage
+    after = (_snapshot(repo), _snapshot(directory), _snapshot(tmp_path / "other-repo"))
+    assert after[0] == before[0] and after[2] == before[2]
+    assert {name: after[1][name] for name in before[1]} == before[1]
+    stages = set(directory.glob(publication._PREFIX + "*"))
+    assert len(stages) == 2  # Successful baseline and retained, unsealed failed stage.
+
+
+@pytest.mark.parametrize("merge_guard", [False, True])
+@pytest.mark.parametrize("operation,location", [
+    ("install", location) for location in ("applied", "live", "displaced", "successor", "preimage", "unchanged")
+] + [("uninstall", location) for location in ("applied", "live", "displaced", "preimage")])
+def test_native_ownership_drift_blocks_pending_recovery(repo, tmp_path, monkeypatch, merge_guard, operation, location):
+    directory, names = _ownership_batch(repo, merge_guard, True, tmp_path)
+    if operation == "install":
+        for name in names:
+            if location != "unchanged" or name != names[-1]:
+                (directory / name).chmod(0o640)
+    real = publication._rename
+    count = 0
+
+    def interrupt(*args, **kwargs):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise OSError("injected second publication failure")
+        return real(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_rename", interrupt)
+        with pytest.raises(RuntimeError, match="incomplete"):
+            getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    with publication._authority(publication._state_root(), False) as (fd, _):
+        identity = publication._identity(directory.stat())
+        slot = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            stage = directory / publication._Store(slot, identity, False).body["active"]["stage"]
+        finally:
+            os.close(slot)
+    target = {"applied": directory / names[0], "live": directory / names[1],
+              "displaced": stage / "0", "successor": stage / "1",
+              "preimage": stage / "pre-1", "unchanged": directory / names[-1]}[location]
+    old = target.stat()
+    os.chown(target, -1, os.getgid())
+    assert target.stat().st_gid != old.st_gid
+    before = (_snapshot(repo), _snapshot(directory), _snapshot(publication._state_root()))
+    with monkeypatch.context() as patch:
+        patch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("drift must not register"))
+        patch.setattr(hooks, "_unregister_merge_driver", lambda *a, **k: pytest.fail("drift must not unregister"))
+        with pytest.raises(RuntimeError, match="preimage changed|Foreign or uncertain|Concurrent edit"):
+            getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    assert before == (_snapshot(repo), _snapshot(directory), _snapshot(publication._state_root()))
+    assert f"pending {operation}" in hooks.status(repo, merge_guard=merge_guard)
+    os.chown(target, -1, old.st_gid)  # Restore only the deliberate fixture edit.
+    getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    assert "pending" not in hooks.status(repo, merge_guard=merge_guard)
+
+
+@pytest.mark.parametrize("missing", ["version", "old", "new", "preimage", "invalid"])
+def test_pending_evidence_without_ownership_binding_refuses(repo, monkeypatch, missing):
+    _interrupt(repo, monkeypatch)
+    with publication._authority(publication._state_root(), False) as (fd, _):
+        identity = publication._identity(_hooks(repo).stat())
+        slot = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            store = publication._Store(slot, identity, False)
+            batch = store.body["active"]
+            if missing == "version":
+                batch.pop("ownership_version")
+                for entry in batch["entries"]:
+                    for key in ("old", "new", "preimage"):
+                        if entry[key] is not None:
+                            entry[key].pop("ownership")
+            elif missing == "invalid":
+                batch["entries"][0]["old"]["ownership"] = [True, 20]
+            else:
+                batch["entries"][0][missing].pop("ownership")
+            store.save()
+        finally:
+            os.close(slot)
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    monkeypatch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("missing ownership must not register"))
+    with pytest.raises(RuntimeError, match="lacks hook UID/GID binding"):
+        hooks.install(repo)
+    assert before == (_snapshot(repo), _snapshot(publication._state_root()))
+    assert "pending install" in hooks.status(repo)
+
+
+def test_completed_older_ownership_evidence_is_retained_without_adoption(repo):
+    import hmac
+    hooks.install(repo)
+    with publication._authority(publication._state_root(), False) as (fd, _):
+        identity = publication._identity(_hooks(repo).stat())
+        slot = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            store = publication._Store(slot, identity, False)
+            completed, = store.body["history"]
+            name = completed["retired"]
+            body = store._decode(publication._read(slot, name, private=True)[1])
+            batch = body["active"]
+            batch.pop("ownership_version")
+            for entry in batch["entries"]:
+                for key in ("old", "new", "preimage"):
+                    if entry[key] is not None:
+                        entry[key].pop("ownership")
+            data = publication._canonical({"body": body, "seal": hmac.new(store.key, publication._canonical(body), hashlib.sha256).hexdigest()})
+            target = os.open(name, os.O_WRONLY | os.O_TRUNC, dir_fd=slot)
+            try:
+                assert os.write(target, data) == len(data)
+                os.fsync(target)
+            finally:
+                os.close(target)
+            completed["completion"] = publication._signature(publication._read(slot, name, private=True))
+            store.save()
+            record = publication._read(slot, name, private=True)[1]
+            retained = _snapshot(_hooks(repo))
+        finally:
+            os.close(slot)
+    hooks.uninstall(repo)
+    after = _snapshot(_hooks(repo))
+    assert {name: after[name] for name in retained if name.startswith(publication._PREFIX)} == {name: value for name, value in retained.items() if name.startswith(publication._PREFIX)}
+    assert "pending" not in hooks.status(repo)
+    state = publication._state_root() / publication._slot(identity)
+    assert (state / completed["retired"]).read_bytes() == record
+
+
+def test_observed_uid_drift_refuses_pending_recovery(repo, monkeypatch):
+    """Deterministic UID observation test; this is not native multi-account proof."""
+    _interrupt(repo, monkeypatch)
+    original = publication._read
+    before = (_snapshot(repo), _snapshot(publication._state_root()))
+    observed = []
+
+    def changed_uid(fd, name, private=False):
+        snapshot = original(fd, name, private)
+        if name == "post-checkout" and snapshot is not None:
+            info, data, metadata = snapshot
+            values = list(info)
+            values[4] = info.st_uid + 1
+            observed.append(name)
+            return os.stat_result(values), data, metadata
+        return snapshot
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_read", changed_uid)
+        patch.setattr(hooks, "_register_merge_driver", lambda _: pytest.fail("UID drift must not register"))
+        with pytest.raises(RuntimeError, match="Foreign or uncertain"):
+            hooks.install(repo)
+    assert observed and before == (_snapshot(repo), _snapshot(publication._state_root()))
+    assert hooks.install(repo)

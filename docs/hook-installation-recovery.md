@@ -114,6 +114,16 @@ observed hard link before further publication. A link created after a check can
 still race publication; later detection retains recovery evidence and reports
 failure, without rolling back an already published hook.
 
+Existing hooks' UID/GID are preserved on staged replacements and preimages for
+install and uninstall, including content and executable-mode replacements.
+Ownership is applied and verified before mode and extended metadata, since a
+native ownership change can clear special mode bits or capabilities. If the
+installer cannot preserve ownership, preparation refuses before any live hook
+in the selected three- or five-hook batch changes, and registration does not
+run. This can require privileges even when directory permissions permit
+replacement. Graphify does not fall back to the installer's owner/group. New
+hooks use the filesystem's normal creation ownership.
+
 Replacement hooks preserve extended attributes exposed by the native file APIs
 and access-control lists (ACLs), including macOS deny entries and Linux named-user
 entries. The existing executable-mode update still applies; on Linux this can
@@ -121,6 +131,10 @@ change the ACL mask just as the previous in-place chmod did. Metadata is copied
 and verified on staging files before publication. During preparation, an
 inspection or preservation failure stops the batch before any live hook changes.
 Changed metadata also blocks recovery, just as changed hook bytes or modes do.
+Hook snapshots bind UID/GID as well. Ownership drift on a live hook (including
+an unchanged hook), staged successor, displaced original, or preimage blocks
+pending recovery. Rechecks observe non-cooperating edits; they do not exclude
+an edit between observation and publication.
 
 On macOS, replacements and preimages also preserve the BSD flags `UF_HIDDEN`
 and `UF_NODUMP`. A changed hook with any other flag is refused during preparation,
@@ -199,10 +213,13 @@ exact retry, even though individually complete hooks are already live. Retain
 the staging and authority evidence for manual reconciliation; Graphify does not
 reconstruct completion authority from those hooks.
 
-A pending batch created by an older installer without metadata, macOS BSD flag,
-or physical repository identity binding cannot be resumed by this version. Retain its
+A pending batch created by an older installer without UID/GID, metadata, macOS
+BSD flag, or physical repository identity binding cannot be resumed by this version. Retain its
 staging and authority records for manual reconciliation. Completed older history
-remains usable; it is not migrated or deleted.
+remains usable; it is not migrated or deleted. Private authority signatures keep
+their existing format so older authenticated completion evidence can still be
+checked. Loading that history does not infer the ownership of its hooks or
+upgrade its preservation claim; a new batch captures current hook ownership.
 
 If a pending batch's recorded hooks, staged successors, preimages, or authority
 records changed, Graphify refuses automatic continuation. Keep those files for
@@ -275,3 +292,23 @@ honoring atomic rename operations and acknowledged persistence operations.
 Native qualification used macOS APFS and Linux ext4. Injected I/O failures and
 process-kill tests are not physical power-loss tests. Filesystems without the
 required primitives fail installation rather than falling back to live writes.
+
+The issue #196 ownership repair was reproduced and checked on native macOS
+with Python 3.14.3 and Git 2.55.0. Before the repair, content replacement changed
+an existing hook from UID/GID `501:12` to `501:20`. Disposable fixtures now cover
+differing permitted groups, content and mode replacements, install/uninstall,
+three- and five-hook batches, shared hooks, extended metadata, preparation
+failure, ownership drift during recovery, and older evidence compatibility.
+UID-drift observations and ineffective ownership calls include injected cases.
+A separate task-local Ubuntu 24.04 aarch64 VM checked the same source and test
+hashes on Linux 6.8 with Python 3.14.6 and Git 2.43.0. With umask `022`, the
+installer suite passed 260 tests with 16 platform skips. Native permission
+refusal on a root-owned last hook kept the complete three-hook batch and
+registration unchanged. A root-run five-hook mode replacement and post-hook
+content uninstall preserved UID/GID `501:999`, with read access checked as
+the non-root owner before and after. This Linux check covers hook installation;
+it does not qualify merge-guard execution on Git 2.43.0.
+
+Foreign-owner replacement on macOS and a broader multi-account access matrix
+were not executed. These bounded proofs do not supply those missing checks.
+Issue #196 remains open for qualification.

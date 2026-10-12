@@ -339,6 +339,8 @@ def _read(fd, name, private=False):
 def _signature(snapshot):
     """Summarize snapshot identity, mode, content hash, byte size, and metadata.
 
+    Bind hook UID/GID with extended metadata. Private authority signatures keep
+    their existing format so authenticated older completion records still load.
     Return None for an absent snapshot; omit metadata when it was not captured.
     """
     if snapshot is None:
@@ -348,13 +350,16 @@ def _signature(snapshot):
               "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)}
     if metadata is not None:
         result["metadata"] = metadata
+        result["ownership"] = [info.st_uid, info.st_gid]
     return result
 
 
-def _write(fd, name, data, mode, metadata=None):
+def _write(fd, name, data, mode, metadata=None, ownership=None):
     """Exclusively create and flush a file relative to fd with the requested mode.
 
-    If supplied, copy and verify extended metadata before reapplying mode, which
+    If supplied, preserve and verify ownership before mode and metadata: chown
+    can clear special mode bits or capabilities. Never change a live hook.
+    Copy and verify extended metadata before reapplying mode, which
     may adjust POSIX ACL masks. Raise RuntimeError if metadata cannot be preserved;
     propagate I/O errors. A failure may leave the newly created file in place.
     """
@@ -366,6 +371,16 @@ def _write(fd, name, data, mode, metadata=None):
             if count <= 0:
                 raise OSError("Short installer stage write")
             view = view[count:]
+        if ownership is not None:
+            info = os.fstat(target)
+            if [info.st_uid, info.st_gid] != ownership:
+                try:
+                    os.fchown(target, *ownership)
+                except OSError as exc:
+                    raise RuntimeError("Cannot preserve hook UID/GID; retain the original hooks and staging") from exc
+            info = os.fstat(target)
+            if [info.st_uid, info.st_gid] != ownership:
+                raise RuntimeError("Hook UID/GID could not be preserved; retain staging")
         os.fchmod(target, mode)
         if metadata is not None:
             _copy_metadata(target, metadata)
@@ -373,6 +388,10 @@ def _write(fd, name, data, mode, metadata=None):
                 raise RuntimeError("Hook metadata could not be preserved; retain staging")
             # Preserve the prior installer's chmod effects on POSIX ACL masks.
             os.fchmod(target, mode)
+        if ownership is not None:
+            info = os.fstat(target)
+            if [info.st_uid, info.st_gid] != ownership:
+                raise RuntimeError("Hook UID/GID changed during preparation; retain staging")
         os.fsync(target)
         if sys.platform == "darwin":
             fcntl.fcntl(target, 51)  # F_FULLFSYNC; errors are not success.
@@ -610,21 +629,24 @@ def _prepare(fd, store, snapshots, plans, request, operation, names=NAMES):
         for index, (name, (data, mode)) in enumerate(zip(names, desired, strict=True)):
             snapshot = snapshots[name]
             old = _signature(snapshot)
+            ownership = None if snapshot is None else [snapshot[0].st_uid, snapshot[0].st_gid]
             unchanged = snapshot is None and data is None or snapshot is not None and data == snapshot[1] and mode == old["mode"]
             entry = {"name": name, "old": old, "new": old if unchanged else None,
                      "changed": not unchanged, "slot": str(index), "preimage": None}
             if not unchanged:
                 if snapshot is not None:
-                    _write(stage_fd, "pre-" + str(index), snapshot[1], old["mode"], snapshot[2])
+                    _write(stage_fd, "pre-" + str(index), snapshot[1], old["mode"], snapshot[2], ownership)
                     entry["preimage"] = _signature(_read(stage_fd, "pre-" + str(index)))
                 if data is not None:
-                    _write(stage_fd, str(index), data, mode, None if snapshot is None else snapshot[2])
+                    _write(stage_fd, str(index), data, mode, None if snapshot is None else snapshot[2],
+                           ownership)
                     entry["new"] = _signature(_read(stage_fd, str(index)))
             entries.append(entry)
         os.fsync(stage_fd)
         os.fsync(fd)
         batch = {"stage": stage, "identity": _identity(os.fstat(stage_fd)), "binding": binding,
-                 "entries": entries, "messages": [p.message for p in plans], "phase": "PREPARED", "metadata_version": 1}
+                 "entries": entries, "messages": [p.message for p in plans], "phase": "PREPARED", "metadata_version": 1,
+                 "ownership_version": 1}
         store.body["active"] = batch
         store.save()
         return batch
@@ -740,6 +762,15 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
                 store = _Store(state_fd, hooks_identity, created)
                 if store.body["active"] is not None and store.body["active"].get("metadata_version") != 1:
                     raise RuntimeError("Legacy pending batch lacks hook metadata binding; retain all evidence for manual reconciliation")
+                if store.body["active"] is not None:
+                    active = store.body["active"]
+                    if (active.get("ownership_version") != 1
+                            or any(not isinstance(signature.get("ownership"), list)
+                                   or len(signature["ownership"]) != 2
+                                   or any(type(value) is not int or value < 0 for value in signature["ownership"])
+                                   for entry in active["entries"] for key in ("old", "new", "preimage")
+                                   if (signature := entry[key]) is not None)):
+                        raise RuntimeError("Pending batch lacks hook UID/GID binding; retain all evidence for manual reconciliation")
                 _check_stages(fd, store)
 
                 def check():
