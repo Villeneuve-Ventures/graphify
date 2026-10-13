@@ -1543,7 +1543,7 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
         recovery = observed["message"] if isinstance(observed, dict) else observed
         if isinstance(observed, dict) and "summary" in observed:
             summary = observed["summary"]
-            retention = (f"\ncompleted stages retained: {len(summary['completed'])}; archived references: {summary['archived']}"
+            retention = (f"\ncompleted stages retained: {summary['retained_stages']}; completed history records: {len(summary['completed'])}; archived references: {summary['archived']}"
                          f"\narchive payload bytes: {summary['archive_payload_bytes']}; retained incomplete evidence: {summary['retained_incomplete']}"
                          f"\nprivate unclaimed artifacts: {summary['unclaimed']}")
             if summary["unclaimed"]:

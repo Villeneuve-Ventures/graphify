@@ -716,6 +716,23 @@ def _active_stage_parent(fd, store):
         os.close(child)
 
 
+def _completed_stage_present(fd, record):
+    """Observe an original's presence after authority and any archive admission.
+
+    Allow absence only for an archived record. A present directory must retain
+    its recorded identity; names and this observation grant no ownership rights.
+    """
+    try:
+        info = os.stat(record["name"], dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError as exc:
+        if "archive" in record:
+            return False
+        raise RuntimeError("Retained staging directory missing; preserve recovery evidence") from exc
+    if not stat.S_ISDIR(info.st_mode) or _identity(info) != record["identity"]:
+        raise RuntimeError("Retained staging directory changed; preserve recovery evidence")
+    return True
+
+
 def _check_stages(fd, store):
     """Check retained identities and v2 completed inventories before admission.
 
@@ -729,14 +746,8 @@ def _check_stages(fd, store):
     for item in store.body["history"]:
         if "archive" in item:
             _validate_archive(store, item)
-        try:
-            info = os.stat(item["name"], dir_fd=fd, follow_symlinks=False)
-        except FileNotFoundError as exc:
-            if "archive" in item:
-                continue
-            raise RuntimeError("Retained staging directory missing; preserve recovery evidence") from exc
-        if not stat.S_ISDIR(info.st_mode) or _identity(info) != item["identity"]:
-            raise RuntimeError("Retained staging directory changed; preserve recovery evidence")
+        if not _completed_stage_present(fd, item):
+            continue
         if store.body["schema"] == _LIFECYCLE_SCHEMA or "archive" in item:
             _stage_inventory(fd, item)
     if store.body["active"]:
@@ -1276,6 +1287,7 @@ def _pending_record(hooks_dir):
                             if result is None and (store.body["history"] or store.body["retained"] or unclaimed or candidates):
                                 result = {"binding": None, "message": None, "summary": {
                                     "completed": [item["name"] for item in store.body["history"]],
+                                    "retained_stages": sum(_completed_stage_present(fd, item) for item in store.body["history"]),
                                     "archived": sum("archive" in item for item in store.body["history"]),
                                     "archive_payload_bytes": sum(item["archive"]["payload_bytes"] for item in store.body["history"] if "archive" in item),
                                     "retained_incomplete": len(store.body["retained"]), "unclaimed": unclaimed + candidates}}
@@ -1568,15 +1580,17 @@ def retire(root, hooks_dir, batch, *, expected=None, recapture_request):
                             raise RuntimeError("Retirement retry belongs to a different request")
                         os.fsync(child)
                     check()
-                    return {"state": "RETIRED_ARCHIVED", "batch": batch, "physical_stage": "retained",
+                    return {"state": "RETIRED_ARCHIVED", "batch": batch,
+                            "physical_stage": "retained" if _completed_stage_present(fd, record) else "absent",
                             "archive": str(_state_root() / name / archive["name"]), "payload_bytes": archive["payload_bytes"]}
                 if maintenance is not None:
+                    if (binding != maintenance["binding"]
+                            or expected is not None and expected != maintenance["token"]):
+                        raise RuntimeError("Pending retirement requires its exact original request")
                     if expected is None:
                         check()
                         return {"state": "RETIREMENT_PENDING", "batch": maintenance["binding"]["batch"],
                                 "token": maintenance["token"], "physical_stage": "retained"}
-                    if binding != maintenance["binding"] or expected != maintenance["token"]:
-                        raise RuntimeError("Pending retirement requires its exact original request")
                 else:
                     snapshots = _stage_inventory(fd, record)
                     closure = _completion_closure(store, record)
@@ -1598,7 +1612,8 @@ def retire(root, hooks_dir, batch, *, expected=None, recapture_request):
                 store.check = check
                 archive = _copy_archive(fd, store, record)
                 check()
-                return {"state": "RETIRED_ARCHIVED", "batch": batch, "physical_stage": "retained",
+                return {"state": "RETIRED_ARCHIVED", "batch": batch,
+                        "physical_stage": "retained" if _completed_stage_present(fd, record) else "absent",
                         "archive": str(_state_root() / name / archive["name"]), "payload_bytes": archive["payload_bytes"]}
             finally:
                 os.close(child)

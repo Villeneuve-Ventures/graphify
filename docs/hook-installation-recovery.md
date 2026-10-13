@@ -81,8 +81,11 @@ records this local contract and its native qualification requirements.
 ## Explicit archival of completed v2 stages
 
 `graphify hook status` lists authenticated completed batch IDs and reports
-archived references, archive payload bytes, retained incomplete evidence and
-unclaimed private artifacts. Those counts do not attest unverified content.
+the original stages still present, total completed history records, archived
+references, archive payload bytes, retained incomplete evidence and unclaimed
+private artifacts. An archived record remains in history if its original stage
+is absent; retirement results then report `physical_stage: absent`.
+Those counts do not attest unverified content or authorize physical cleanup.
 Each admission by this #199 reader validates present completed v2 stages against
 their recorded closed inventories, including read-only status and ordinary
 install/uninstall. Changed or missing preimages, damaged exclusion, unknown
@@ -103,8 +106,9 @@ graphify hook retire --batch .graphify-hook-batch-EXACT_ID --preview
 
 Use the exact ID shown by status, not the placeholder above. Preview returns a
 token bound to the current maintenance request, journal and completed evidence.
-Execute only that preview with `graphify hook retire --batch EXACT_ID --execute
-TOKEN`. A stale token refuses without mutation. Execution holds the physical
+Execute only that preview with `graphify hook retire --batch
+.graphify-hook-batch-EXACT_ID --execute TOKEN`. A stale token refuses without
+mutation. Execution holds the physical
 hooks and Git common-directory locks. Active hook work, a pending completion
 obligation, unsupported old evidence, missing or substituted stages, changed
 exclusion or unknown members block archival.
@@ -126,6 +130,8 @@ or remove them. It preserves their complete reference closure.
 
 Interrupted archival is visible as pending and blocks install/uninstall.
 Repeat its exact original batch and token after resolving the reported cause.
+A pending preview requires that same batch and request context; a different
+selection refuses rather than returning another batch's token.
 An authenticated partial archive is retained before a fresh copy is constructed;
 unrecorded artifacts are preserved without adoption. Changed sources or request
 context refuse. Status and preview never finish this operation automatically.

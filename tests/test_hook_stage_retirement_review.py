@@ -8,7 +8,7 @@ import sys
 
 import pytest
 from graphify import hooks
-from tests.test_hook_installation import repo, _hooks, _snapshot  # noqa: F401
+from tests.test_hook_installation import repo, _hooks  # noqa: F401
 from tests.test_hook_authority_lifecycle import body, slot
 from tests.test_hook_authority_review import _evidence, _interrupt
 
@@ -308,3 +308,117 @@ def test_legacy_history_keeps_original_admission_and_refuses_retirement(repo):
         hooks.retire(repo, batch=batch)
     assert body(repo)["schema"] == publication._SCHEMA
     assert (protected(repo), protected(publication._state_root())) == before
+
+
+@pytest.mark.parametrize("entry", ["api", "cli"])
+@pytest.mark.parametrize("execute", [False, True])
+def test_archived_absent_original_reports_presence_and_preserves_history(repo, entry, execute):
+    """An admitted absent original must not be reported as physical retained evidence."""
+    hooks.install(repo)
+    batch = body(repo)["history"][0]["name"]
+    token = hooks.retire(repo, batch=batch)["token"]
+    hooks.retire(repo, batch=batch, expected=token)
+    (_hooks(repo) / batch).rename(repo / "original-preserved")
+    before = protected(repo), protected(publication._state_root())
+    if entry == "api":
+        result = hooks.retire(repo, batch=batch, expected=token if execute else None)
+        status = hooks.status(repo)
+    else:
+        command = cli(repo, "retire", "--batch", batch, *(["--execute", token] if execute else ["--preview"]))
+        assert command.returncode == 0, command.stderr
+        result = json.loads(command.stdout)
+        observed = cli(repo, "status")
+        assert observed.returncode == 0, observed.stderr
+        status = observed.stdout
+    assert result["state"] == "RETIRED_ARCHIVED" and result["physical_stage"] == "absent"
+    assert "completed stages retained: 0" in status
+    assert "completed history records: 1" in status and "archived references: 1" in status
+    assert f"completed batch: {batch}" in status and "post-commit: installed" in status
+    record = publication.recovery_record(_hooks(repo))
+    assert isinstance(record, dict) and record["summary"]["retained_stages"] == 0
+    assert (protected(repo), protected(publication._state_root())) == before
+
+
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_mixed_completed_presence_counts_only_originals_still_present(repo, entry):
+    """Archived absence changes the physical count without dropping any completed ID."""
+    hooks.install(repo)
+    hooks.uninstall(repo)
+    hooks.install(repo)
+    records = body(repo)["history"]
+    batch = records[1]["name"]
+    token = hooks.retire(repo, batch=batch)["token"]
+    hooks.retire(repo, batch=batch, expected=token)
+    (_hooks(repo) / batch).rename(repo / "original-preserved")
+    before = protected(repo), protected(publication._state_root())
+    if entry == "api":
+        result = hooks.status(repo)
+    else:
+        command = cli(repo, "status")
+        assert command.returncode == 0, command.stderr
+        result = command.stdout
+    assert "completed stages retained: 2" in result and "completed history records: 3" in result
+    assert "archived references: 1" in result
+    assert all(f"completed batch: {item['name']}" in result for item in records)
+    assert hooks.retire(repo, batch=records[0]["name"])["physical_stage"] == "retained"
+    assert (protected(repo), protected(publication._state_root())) == before
+
+
+def interrupt_archive(root, monkeypatch, batch):
+    """Persist one pending maintenance binding and leave its partial archive intact."""
+    token = hooks.retire(root, batch=batch)["token"]
+    write = publication._write
+
+    def interrupted(fd, name, *args, **kwargs):
+        """Stop the first archive payload after recording its directory ownership."""
+        if name == "payloads-0":
+            raise OSError("injected pending preview interruption")
+        return write(fd, name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_write", interrupted)
+        with pytest.raises(RuntimeError, match="preview interruption"):
+            hooks.retire(root, batch=batch, expected=token)
+    return token
+
+
+@pytest.mark.parametrize("entry", ["api", "cli"])
+@pytest.mark.parametrize("mismatch", ["batch", "context"])
+def test_pending_preview_refuses_different_selection_or_context(repo, monkeypatch, entry, mismatch):
+    """A preview must not substitute another pending batch or original request."""
+    hooks.install(repo)
+    hooks.uninstall(repo)
+    records = body(repo)["history"]
+    pending = records[-1]["name"]
+    token = interrupt_archive(repo, monkeypatch, pending)
+    selected = records[0]["name"] if mismatch == "batch" else pending
+    if mismatch == "context":
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Changed preview context"], check=True)
+    before = protected(repo), protected(publication._state_root())
+    if entry == "api":
+        with pytest.raises(RuntimeError, match="exact original request"):
+            hooks.retire(repo, batch=selected)
+    else:
+        command = cli(repo, "retire", "--batch", selected, "--preview")
+        assert command.returncode != 0 and "exact original request" in command.stderr
+        assert token not in command.stdout
+    assert body(repo)["maintenance"]["binding"]["batch"] == pending
+    assert (protected(repo), protected(publication._state_root())) == before
+
+
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_pending_preview_returns_exact_original_batch_and_token(repo, monkeypatch, entry):
+    """An exact read-only preview still reports its own authenticated pending retry."""
+    hooks.install(repo)
+    batch = body(repo)["history"][0]["name"]
+    token = interrupt_archive(repo, monkeypatch, batch)
+    before = protected(repo), protected(publication._state_root())
+    if entry == "api":
+        result = hooks.retire(repo, batch=batch)
+    else:
+        command = cli(repo, "retire", "--batch", batch, "--preview")
+        assert command.returncode == 0, command.stderr
+        result = json.loads(command.stdout)
+    assert result == {"state": "RETIREMENT_PENDING", "batch": batch, "token": token, "physical_stage": "retained"}
+    assert (protected(repo), protected(publication._state_root())) == before
+    assert hooks.retire(repo, batch=batch, expected=token)["state"] == "RETIRED_ARCHIVED"
