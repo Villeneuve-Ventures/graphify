@@ -900,11 +900,17 @@ def _expose_stage(fd, store):
 
 
 def _check_new_hook_acl(fd, creating):
-    """Refuse new hooks when private staging cannot inherit native target ACLs."""
+    """Refuse new hooks when private staging cannot preserve target ACLs or labels."""
     if not creating:
         return
-    unsupported = (sys.platform == "linux" and "system.posix_acl_default" in os.listxattr(fd)
-                   or sys.platform == "darwin" and _darwin_acl(fd) is not None)
+    if sys.platform == "linux":
+        attributes = os.listxattr(fd)
+        if "security.selinux" in attributes:
+            raise RuntimeError("Cannot preserve hooks-directory SELinux creation context for new hooks during private preparation; "
+                               "retain all hooks and evidence")
+        unsupported = "system.posix_acl_default" in attributes
+    else:
+        unsupported = sys.platform == "darwin" and _darwin_acl(fd) is not None
     if unsupported:
         raise RuntimeError("Cannot preserve hooks-directory default or extended ACL for new hooks during private preparation; "
                            "retain all hooks and evidence")
@@ -1183,6 +1189,7 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
                     os.fsync(fd)
                     if store.body["schema"] == _LIFECYCLE_SCHEMA:
                         batch["completed_inventory"] = _completed_inventory(stage_fd, batch)
+                        store.save()
                     store.finish(completed)
                     check()
                     return batch["messages"], finalize()
@@ -1226,9 +1233,6 @@ def _pending_record(hooks_dir):
                     slot_fd = os.open(_slot(identity), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
                 except FileNotFoundError:
                     result = absent()
-                    candidate_prefix = _INITIALIZING + _slot(identity) + "-"
-                    if result is None and any(name.startswith(candidate_prefix) for name in os.listdir(authority_fd)):
-                        result = "unverified authority: unpublished authority candidates retained"
                 else:
                     try:
                         _admit(slot_fd, private=True)
@@ -1248,6 +1252,13 @@ def _pending_record(hooks_dir):
                             result = f"retained incomplete preparation evidence: {len(store.body['retained'])}; no automatic cleanup"
                     finally:
                         os.close(slot_fd)
+                candidate_prefix = _INITIALIZING + _slot(identity) + "-"
+                if any(name.startswith(candidate_prefix) for name in os.listdir(authority_fd)):
+                    warning = "unverified authority: unpublished authority candidates retained"
+                    if isinstance(result, dict):
+                        result["message"] += "; " + warning
+                    else:
+                        result = warning if result is None else result + "; " + warning
             return result
         except FileNotFoundError as exc:
             return f"unverified authority: {exc}" if admitted else absent()

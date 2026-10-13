@@ -217,6 +217,134 @@ def test_unclaimed_private_stage_takes_precedence_over_retained_evidence(repo, m
     assert (_evidence(repo), _evidence(publication._state_root())) == protected
 
 
+@pytest.mark.parametrize("phase", ["completed", "active", "retained"])
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_unpublished_candidate_is_visible_beside_canonical_authority(repo, monkeypatch, phase, entry):
+    """A fresh canonical slot does not hide an earlier unclaimed authority candidate."""
+    write = publication._write
+
+    def interrupted(fd, name, *args, **kwargs):
+        """Retain an unpublished candidate before its capability becomes complete."""
+        if name == "capability":
+            raise OSError("injected unpublished candidate")
+        return write(fd, name, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_write", interrupted)
+        with pytest.raises(RuntimeError, match="unpublished candidate"):
+            hooks.install(repo)
+    if phase != "completed":
+        _interrupt(repo, monkeypatch, "preparing")
+    if phase != "active":
+        hooks.install(repo)
+    assert slot(repo).exists()
+    protected = (_evidence(repo), _evidence(publication._state_root()))
+    if entry == "api":
+        result = hooks.status(repo)
+    else:
+        command = subprocess.run([sys.executable, "-B", "-m", "graphify", "hook", "status"], cwd=repo,
+                                 env={**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent)},
+                                 capture_output=True, text=True)
+        assert command.returncode == 0 and "Traceback" not in command.stderr, command.stderr
+        result = command.stdout
+    assert "unpublished authority candidates retained" in result
+    if phase == "completed":
+        assert "post-commit: installed" in result and "merge driver: registered" in result
+    elif phase == "active":
+        assert "pending install (PREPARING)" in result
+        assert publication._pending_record(_hooks(repo))["binding"] == body(repo)["active"]["binding"]
+    else:
+        assert "retained incomplete preparation evidence" in result
+    assert (_evidence(repo), _evidence(publication._state_root())) == protected
+
+
+@pytest.mark.parametrize("point", ["guard-write", "guard-flush", "completion-check", "terminal-save"])
+@pytest.mark.parametrize("merge_guard", [False, True])
+@pytest.mark.parametrize("operation", ["install", "uninstall"])
+def test_completion_guard_interruption_retains_exact_retry(repo, monkeypatch, point, merge_guard, operation):
+    """A valid completion obligation agrees with its persisted APPLYING predecessor."""
+    if operation == "uninstall":
+        hooks.install(repo, merge_guard=merge_guard)
+    write, finish, save, fsync = publication._write, publication._Store.finish, publication._Store.save, os.fsync
+
+    def written(fd, name, *args, **kwargs):
+        """Fail after the completion file is fully written and flushed."""
+        result = write(fd, name, *args, **kwargs)
+        if point == "guard-write" and name == "completion":
+            raise OSError("injected completion boundary")
+        return result
+
+    def saved(store):
+        """Fail before saving terminal history while the completion guard remains."""
+        if point == "terminal-save" and store.body["active"] is None and getattr(store, "guard", None) is not None:
+            raise OSError("injected completion boundary")
+        return save(store)
+
+    def finished(store, check):
+        """Inject only the selected guard flush or completion validation boundary."""
+        def flushed(fd):
+            """Stop the guard directory flush without changing its evidence."""
+            if point == "guard-flush" and fd == store.fd:
+                raise OSError("injected completion boundary")
+            return fsync(fd)
+
+        def checked():
+            """Stop after verifying the fully published hooks."""
+            check()
+            if point == "completion-check":
+                raise OSError("injected completion boundary")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", flushed)
+            return finish(store, checked)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_write", written)
+        patch.setattr(publication._Store, "save", saved)
+        patch.setattr(publication._Store, "finish", finished)
+        with pytest.raises(RuntimeError, match="completion boundary"):
+            getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    assert (slot(repo) / "completion").is_file()
+    protected = (_evidence(repo), _evidence(publication._state_root()))
+    status = hooks.status(repo, merge_guard=merge_guard)
+    assert f"pending {operation} (APPLYING)" in status and "Conflicting completion obligation" not in status
+    assert (_evidence(repo), _evidence(publication._state_root())) == protected
+    getattr(hooks, operation)(repo, merge_guard=merge_guard)
+    assert body(repo)["active"] is None and not (slot(repo) / "completion").exists()
+    expected = "merge driver: registered" if operation == "install" else "merge driver: not registered"
+    assert expected in hooks.status(repo)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux SELinux label observation")
+@pytest.mark.parametrize("phase", ["new", "preparing", "exposing-private", "exposing-hooks", "applying"])
+def test_selinux_target_label_refuses_new_hook_creation(repo, monkeypatch, phase):
+    """Observed target SELinux labeling blocks private-born hooks without relabeling."""
+    for name in publication.NAMES:
+        (_hooks(repo) / name).unlink()
+    if phase != "new":
+        _interrupt(repo, monkeypatch, phase)
+    listxattr = os.listxattr
+    identity = publication._identity(_hooks(repo).stat())
+
+    def labeled(fd, *args, **kwargs):
+        """Inject a label observation on only the selected hooks descriptor."""
+        result = listxattr(fd, *args, **kwargs)
+        if isinstance(fd, int) and publication._identity(os.fstat(fd)) == identity:
+            return [*result, "security.selinux"]
+        return result
+
+    protected = (_evidence(repo), _evidence(publication._state_root()) if phase != "new" else None)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "listxattr", labeled)
+        with pytest.raises(RuntimeError, match="Cannot preserve.*SELinux"):
+            hooks.install(repo)
+    assert _evidence(repo) == protected[0]
+    if phase == "new":
+        assert body(repo)["active"] is None and not list(slot(repo).glob(publication._PREFIX + "*"))
+    else:
+        assert _evidence(publication._state_root()) == protected[1]
+
+
 def _macos_inheritable_deny_acl(directory):
     """Set a native macOS directory ACL whose denial passes to newly created files."""
     subprocess.run(["/bin/chmod", "+a", "user:nobody deny read,execute,file_inherit,directory_inherit,only_inherit",

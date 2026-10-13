@@ -13,6 +13,10 @@ incomplete or substituted canonical slot still requires manual reconciliation.
 New candidate names include a hooks-slot hint solely to scope diagnostics.
 Names do not establish ownership; older candidates without that hint stay
 preserved and are not attributed to another repository's absent slot.
+Matching unpublished candidates remain visible after a fresh canonical slot is
+published, alongside active or retained diagnostics. With completed authority,
+status shows the candidate warning and visible hook/driver observations. Neither
+the hint nor the warning authenticates or adopts those candidates.
 The canonical journal binds its own filesystem identity as well as the
 authority parent, slot, capability and hooks identities; copying its bytes into
 a replacement file does not restore authority.
@@ -41,6 +45,10 @@ creation owner/group, applied and checked before exposure; inability to preserve
 that ownership refuses preparation. Directory modes and ownership are not
 normalized. Complete v2 history includes a closed final stage inventory,
 including its exclusion file, preimages and displaced originals.
+The inventory is persisted in the APPLYING journal before the completion guard
+is written, so interruption after guard creation leaves a matching authenticated
+predecessor for exact retry. This does not reconcile older conflicting guards or
+add authority to missing, torn or substituted completion evidence.
 On Linux, creating new hooks beneath a hooks directory with a default POSIX ACL
 refuses rather than losing inherited access restrictions. On macOS, creation
 refuses when the hooks directory has an extended ACL; this conservative boundary
@@ -48,6 +56,10 @@ does not distinguish inheritable entries from other entries. The same checks run
 before replacing an interrupted PREPARING attempt, exposure and each publication
 on an exact pending retry. This does not provide ACL-inheritance reconstruction
 or change existing v1 behavior.
+On Linux, creating new hooks also refuses when the target directory exposes a
+`security.selinux` label. Private preparation does not reproduce SELinux
+creation transitions or relabel published hooks; pending retries use the same
+refusal. This conservative limit is not enforcing-policy qualification.
 
 Public status now resolves existing paths only. Missing hooks directories and
 authority paths stay absent. It reports authenticated pending phases, unavailable
