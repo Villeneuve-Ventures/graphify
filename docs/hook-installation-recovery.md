@@ -78,6 +78,92 @@ additional artifacts, and status preserves both.
 The separate [#198 acceptance extension](plans/graphify-hook-authority-198.md)
 records this local contract and its native qualification requirements.
 
+## Explicit archival of completed v2 stages
+
+`graphify hook status` lists authenticated completed batch IDs and reports
+the original stages still present, total completed history records, archived
+references, archive payload bytes, retained incomplete evidence and unclaimed
+private artifacts. An archived record remains in history if its original stage
+is absent; retirement results then report `physical_stage: absent`.
+Those counts do not attest unverified content or authorize physical cleanup.
+Each admission by this #199 reader validates present completed v2 stages against
+their recorded closed inventories, including read-only status and ordinary
+install/uninstall. Changed or missing preimages, damaged exclusion, unknown
+members or changed preservation metadata report unverified evidence and refuse
+mutation. Missing v2 manifests are preserved for manual reconciliation; they
+are not reconstructed. V1 keeps its original checks and remains ineligible for
+retirement. These observations do not freeze files against later editor changes.
+
+Unpublished candidates and unclaimed private artifacts remain visible beside
+retained-history summaries. Authenticated pending requests keep their binding;
+summary warnings confer no publication, adoption or cleanup authority.
+
+Preview a selected completed v2 batch without writes:
+
+```sh
+graphify hook retire --batch .graphify-hook-batch-EXACT_ID --preview
+```
+
+Use the exact ID shown by status, not the placeholder above. Preview returns a
+token bound to the current maintenance request, journal and completed evidence.
+Execute only that preview with `graphify hook retire --batch
+.graphify-hook-batch-EXACT_ID --execute TOKEN`. A stale token refuses without
+mutation. Execution holds the physical
+hooks and Git common-directory locks. Active hook work, a pending completion
+obligation, unsupported old evidence, missing or substituted stages, changed
+exclusion or unknown members block archival.
+
+Archival copies the full stage payload and reachable private completion envelopes
+to authenticated private storage. Original bytes, modes, UID/GID, ACL/xattrs,
+flags and identities are retained as evidence; copies have their own identities
+and private current-user permissions. They are not replacement recovery objects,
+and this operation grants no restoration or hook-publication authority. The
+archive has its own persisted self-ignore file for ordinary Git exclusion.
+
+Completion envelopes retain their legacy authority-signature format. Their
+admitted UID/GID and extended metadata are captured separately for the preview,
+persisted maintenance obligation and archive. A later metadata change invalidates
+the preview or blocks pending/archived admission without altering any evidence.
+New maintenance advances the reader contract to 3 before persisting intent so
+earlier readers refuse it. Older archives or pending obligations without this
+preservation evidence remain unverified and intact; they are not backfilled
+from current metadata or automatically migrated.
+
+Only after the complete archive is verified and flushed does an authenticated
+retirement record end the original stage's presence dependency. Every original
+stage stays untouched. Removing an original beforehand still blocks recovery;
+after verified retirement, its absence is allowed. A substituted or changed
+original or archive refuses further mutation and preserves all evidence.
+Original private completion records remain required; archival does not compact
+or remove them. It preserves their complete reference closure.
+
+Interrupted archival is visible as pending and blocks install/uninstall.
+Status names the authenticated pending batch so its full ID can be used to
+preview the exact retirement request after a restart.
+Repeat its exact original batch and token after resolving the reported cause.
+A pending preview requires that same batch and request context; a different
+selection refuses rather than returning another batch's token.
+Status and preview check each bound partial archive directory's identity and
+private metadata. Missing, substituted or unsafe directories report unverified
+evidence and refuse preview or execution while preserving all artifacts.
+An authenticated partial archive is retained before a fresh copy is constructed;
+unrecorded artifacts are preserved without adoption. Changed sources or request
+context refuse. Status and preview never finish this operation automatically.
+
+V2 issuer UID binding prevents account transfer by changing file ownership.
+Another authority root or account cannot import copied journals or archives.
+Existing v1 history remains usable but is ineligible for this maintenance path;
+no upgrade, migration or transfer is provided. Native multi-account access is
+not inferred from injected UID observations.
+
+Journal and archive-manifest formats have a 16 MiB record limit. This is not a
+total-storage limit. There is no expiration, eviction, preimage purge, stage
+movement or physical cleanup. Archival can increase disk use. Ordinary Git
+exclusion does not protect originals or archives from force-add, already-tracked
+files, removal of ignore files, or `git clean -x`.
+The [#199 acceptance extension](plans/graphify-hook-authority-199.md) records the
+separate maintenance boundary. It does not activate S6 GC or merge finalization.
+
 V2 journal and completion envelopes have a 16 MiB record limit. This is not a total-storage limit.
 Journal capacity is checked before creating a temporary file, reserving the
 maximum native inode width for its identity binding. A capacity-blocked save
@@ -363,7 +449,11 @@ Ignoring files does not protect them from `git clean -x`. Removing or changing
 the identity of a historical staging directory makes later operations refuse;
 no automatic history cleanup or reconstruction is provided. Later operations
 check retained directory identities and private completion records, but do not
-revalidate completed-stage contents. Preserve preimages and the stage's
+revalidate v1 completed-stage contents. This #199 reader additionally validates
+each present v2 completed manifest at admission, including archived originals.
+A valid archive permits an absent original; a foreign replacement still refuses.
+Earlier #198 readers keep their original contract until maintenance advances the
+record contract beyond what they support. Preserve preimages and the stage's
 `.gitignore`: changing or removing the ignore file can expose recovery contents
 to ordinary Git staging. Independently check retained files before using them
 for manual reconciliation.

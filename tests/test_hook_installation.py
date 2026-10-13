@@ -1304,6 +1304,15 @@ def test_changed_staged_bsd_flags_refuse_pending_resume(repo, monkeypatch, name)
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
 def test_completed_history_without_bsd_flag_binding_remains_usable(repo, monkeypatch):
+    """Legacy v1 keeps its admission contract; v2 requires complete manifests."""
+    identity = publication._identity(_hooks(repo).stat())
+    with publication._authority(publication._state_root(), True) as (fd, _):
+        publication._mkdir_private(fd, publication._slot(identity))
+        child = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            publication._Store(child, identity, True)
+        finally:
+            os.close(child)
     original = publication._signature
 
     def legacy(snapshot):

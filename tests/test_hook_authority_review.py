@@ -254,7 +254,7 @@ def test_unpublished_candidate_is_visible_beside_canonical_authority(repo, monke
         assert "pending install (PREPARING)" in result
         assert publication._pending_record(_hooks(repo))["binding"] == body(repo)["active"]["binding"]
     else:
-        assert "retained incomplete preparation evidence" in result
+        assert "retained incomplete" in result
     assert (_evidence(repo), _evidence(publication._state_root())) == protected
 
 
