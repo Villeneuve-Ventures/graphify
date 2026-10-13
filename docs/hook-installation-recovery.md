@@ -129,6 +129,8 @@ Original private completion records remain required; archival does not compact
 or remove them. It preserves their complete reference closure.
 
 Interrupted archival is visible as pending and blocks install/uninstall.
+Status names the authenticated pending batch so its full ID can be used to
+preview the exact retirement request after a restart.
 Repeat its exact original batch and token after resolving the reported cause.
 A pending preview requires that same batch and request context; a different
 selection refuses rather than returning another batch's token.

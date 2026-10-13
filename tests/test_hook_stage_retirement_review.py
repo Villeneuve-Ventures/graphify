@@ -481,3 +481,64 @@ def test_valid_partial_archive_keeps_unknown_contents_and_exact_retry(repo, monk
     partial = protected(archive)
     assert hooks.retire(repo, batch=batch, expected=token)["state"] == "RETIRED_ARCHIVED"
     assert protected(archive) == partial
+
+
+@pytest.mark.parametrize("entry", ["api", "cli"])
+@pytest.mark.parametrize("phase", ["intent", "partial"])
+def test_pending_status_names_exact_retirement_batch_without_writes(repo, monkeypatch, entry, phase):
+    """After restart, status exposes the bound retry selection without changing evidence."""
+    hooks.install(repo)
+    hooks.uninstall(repo)
+    records = body(repo)["history"]
+    batch = records[-1]["name"]
+    if phase == "partial":
+        token = interrupt_archive(repo, monkeypatch, batch)
+    else:
+        token = hooks.retire(repo, batch=batch)["token"]
+
+        def interrupted_copy(*args, **kwargs):
+            """Stop after durable maintenance intent, before an archive directory exists."""
+            raise OSError("injected archival intent interruption")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(publication, "_copy_archive", interrupted_copy)
+            with pytest.raises(RuntimeError, match="intent interruption"):
+                hooks.retire(repo, batch=batch, expected=token)
+    before = protected(repo), protected(publication._state_root())
+
+    def refuse_write(*args, **kwargs):
+        """Any durable mutation during in-process status is a contract failure."""
+        pytest.fail("status attempted to change retained evidence")
+
+    if entry == "api":
+        with monkeypatch.context() as patch:
+            patch.setattr(publication, "_write", refuse_write)
+            patch.setattr(publication, "_mkdir_private", refuse_write)
+            patch.setattr(publication._Store, "save", refuse_write)
+            result = hooks.status(repo)
+    else:
+        command = cli(repo, "status")
+        assert command.returncode == 0, command.stderr
+        result = command.stdout
+    assert "pending stage archival" in result and batch in result
+    assert records[0]["name"] not in result
+    assert (protected(repo), protected(publication._state_root())) == before
+    assert hooks.retire(repo, batch=batch)["token"] == token
+    assert (protected(repo), protected(publication._state_root())) == before
+
+
+@pytest.mark.parametrize("flag", ["-h", "--help", "-?"])
+def test_cli_help_exposes_retirement_preview_and_execution_without_writes(repo, flag):
+    """The help guard's advertised destination must explain the complete retirement flow."""
+    before = protected(repo), publication._state_root().exists()
+    guarded = cli(repo, "retire", flag)
+    assert guarded.returncode == 0, guarded.stderr
+    assert "Run 'graphify --help' for full usage." in guarded.stdout
+    help_result = subprocess.run([sys.executable, "-B", "-m", "graphify", flag], cwd=repo,
+                                env={**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent)},
+                                capture_output=True, text=True)
+    assert help_result.returncode == 0, help_result.stderr
+    retirement_help = "\n".join(line for line in help_result.stdout.splitlines() if "hook retire" in line)
+    assert "--batch" in retirement_help and "--preview" in retirement_help
+    assert "--execute TOKEN" in retirement_help and "original stages" in retirement_help
+    assert (protected(repo), publication._state_root().exists()) == before

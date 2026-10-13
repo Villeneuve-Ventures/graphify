@@ -1292,7 +1292,8 @@ def _pending_record(hooks_dir):
                         maintenance = store.body.get("maintenance")
                         if result is None and maintenance is not None:
                             result = {"binding": maintenance["binding"],
-                                      "message": "pending stage archival; retry the exact retirement request; original stages retained"}
+                                      "message": f"pending stage archival for {maintenance['binding']['batch']}; "
+                                                 "retry the exact retirement request; original stages retained"}
                         if store.body["schema"] == _LIFECYCLE_SCHEMA:
                             known = {item["name"] for item in store.body["retained"]}
                             known.update(item["archive"]["name"] for item in store.body["history"] if "archive" in item)
