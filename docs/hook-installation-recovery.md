@@ -1,5 +1,61 @@
 # Hook installation and recovery
 
+## Installer authority lifecycle
+
+New authority slots use `graphify.hook-installation.v2`. Existing v1 slots are
+not converted: supported pending batches retain their exact-request retry path,
+and completed older history remains usable under its original checks.
+
+V2 constructs a complete unpublished authority slot beneath admitted private
+storage before publishing the canonical slot without replacement. Interrupted
+initialization candidates remain intact and are not adopted. An occupied,
+incomplete or substituted canonical slot still requires manual reconciliation.
+The canonical journal binds its own filesystem identity as well as the
+authority parent, slot, capability and hooks identities; copying its bytes into
+a replacement file does not restore authority.
+
+V2 preparation requires private authority on the same filesystem as hooks.
+It constructs staging inside that trusted storage, records PREPARING ownership,
+then writes exclusion, preimages and successors. Interrupted PREPARING attempts
+are preserved. Exact retry checks all original hook signatures before retaining
+the incomplete attempt and constructing a fresh one; uncertain children are
+never reused or removed. A different request or changed original hooks refuse.
+An unrecorded private preparation directory remains unclaimed and preserved.
+
+Only complete prepared evidence permits EXPOSING. A no-replace rename exposes
+the recorded directory in hooks, both directories are flushed, then PREPARED
+permits existing per-file publication. Interrupted exposure checks both legal
+locations and requires the exact recorded object at one location. Conflicts,
+substitution and missing objects refuse without adoption, copying or cleanup.
+Prepared evidence is checked before exposure. Exclusion and allowed members
+are checked before each live publication, including mixed-state exact retries.
+There is no cross-filesystem fallback. V1 retains its existing support boundary.
+
+New v2 stage directories inherit their private authority parent's native mode
+and group; they do not inherit a hook parent's setgid mode. Existing hooks retain
+their captured UID/GID. New files receive the selected hooks directory's native
+creation owner/group, applied and checked before exposure; inability to preserve
+that ownership refuses preparation. Directory modes and ownership are not
+normalized. Complete v2 history includes a closed final stage inventory,
+including its exclusion file, preimages and displaced originals.
+
+Public status now resolves existing paths only. Missing hooks directories and
+authority paths stay absent. It reports authenticated pending phases, unavailable
+or unverified authority, and retained incomplete evidence without repairing,
+creating, compacting or deleting state. Retained preparation is not pending
+publication, and its diagnostic does not establish ownership of its children.
+
+The separate [#198 acceptance extension](plans/graphify-hook-authority-198.md)
+records this local contract and its native qualification requirements.
+
+V2 journal and completion envelopes have a 16 MiB record limit. This is not a total-storage limit.
+
+The v2 journal serializer also enforces the record limit on completion
+obligations before creating them. Capacity refusal preserves pending authority
+and all hook evidence; it does not write a completion record its reader cannot
+accept. Resolving an actual capacity limit may require a separately reviewed
+operator contract; an exact retry does not evict earlier evidence to make room.
+
 ## Optional ordinary merge guards
 
 `graphify hook install --merge-guard` opts into two additional prehooks on
@@ -202,11 +258,11 @@ private store. It does not prove that an installation was attempted. Any hook
 and driver observations shown below that warning describe visible files and
 configuration only; they do not prove completion or authorize recovery.
 
-Interruption before a sealed batch exists can leave an empty authority slot,
+For v1, interruption before a sealed batch exists can leave an empty authority slot,
 an incomplete authority record, or an unrecognized stage. No live hook has been
 published at that point, but an exact retry cannot establish ownership of that
 state. Retain it for manual reconciliation; automatic initialization recovery
-is not provided.
+is not provided for that existing format.
 
 After hook publication, a missing or torn completion record can also prevent an
 exact retry, even though individually complete hooks are already live. Retain

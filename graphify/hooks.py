@@ -690,7 +690,7 @@ def _reject_windows_path(value: str, source: str) -> None:
         )
 
 
-def _hooks_dir(root: Path) -> Path:
+def _hooks_dir(root: Path, *, create: bool = True) -> Path:
     """Return the git hooks directory, respecting core.hooksPath if set (e.g. Husky).
 
     Asks git itself via ``rev-parse --git-path hooks`` rather than parsing
@@ -718,6 +718,8 @@ def _hooks_dir(root: Path) -> Path:
             # permission flips by another tool). Surface git's own stderr rather
             # than silently falling through to the default hooks directory.
             err = (res.stderr or "").strip()
+            if not create:
+                raise RuntimeError(f"Cannot inspect hooks path: {err or res.returncode}")
             print(
                 f"[graphify hooks] git could not resolve the hooks path for "
                 f"{root}: {err or f'git exited with code {res.returncode}'}",
@@ -730,12 +732,17 @@ def _hooks_dir(root: Path) -> Path:
             if raw and not any(c in raw for c in ("\n", "\r", "\x00")):
                 _reject_windows_path(raw, "git rev-parse --git-path hooks")
                 d = (root / raw).resolve()
-                d.mkdir(parents=True, exist_ok=True)
+                if create:
+                    d.mkdir(parents=True, exist_ok=True)
                 return d
+            if not create:
+                raise RuntimeError("Cannot inspect an invalid Git hooks path")
     except (OSError, FileNotFoundError):
-        pass
+        if not create:
+            raise
     d = root / ".git" / "hooks"
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -1504,17 +1511,17 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     Return 'Not in a git repository.' when no repository is found. Pending or
     unverified recovery normally replaces hook observations; an unverified
     authority instead prefixes them with a warning. Recovery inspection does
-    not repair state, but resolving the hooks directory may create it.
+    not repair state or create missing hooks directories.
     Filesystem and decoding errors outside recovery diagnostics can propagate.
     """
     root = _git_root(path)
     if root is None:
         return "Not in a git repository."
-    hooks_dir = _user_hooks_dir(_hooks_dir(root))
+    hooks_dir = _user_hooks_dir(_hooks_dir(root, create=False))
     warning = ""
     if _atomic_hooks_supported():
         from graphify.hook_installation import pending
-        recovery = pending(hooks_dir)
+        recovery = pending(hooks_dir) if hooks_dir.exists() else "unverified authority: hooks directory absent"
         if recovery:
             if not recovery.startswith("unverified authority:"):
                 return f"hook installation: {recovery}"

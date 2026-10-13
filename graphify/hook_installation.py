@@ -7,6 +7,7 @@ is retained: removing an object after a pathname comparison is not atomic CAS.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Callable
 import ctypes
 import errno
 import fcntl
@@ -24,6 +25,9 @@ NAMES = ("post-commit", "post-checkout", "post-merge")
 MERGE_GUARD_NAMES = (*NAMES, "pre-merge-commit", "pre-commit")
 _PREFIX = ".graphify-hook-batch-"
 _SCHEMA = "graphify.hook-installation.v1"
+_LIFECYCLE_SCHEMA = "graphify.hook-installation.v2"
+_INITIALIZING = ".initializing-hook-authority-"
+_RECORD_LIMIT = 16 * 1024 * 1024
 _MKDIR_CODE = """import os, sys
 try:
     os.mkdir(sys.argv[1], 0o700, dir_fd=int(sys.argv[2]))
@@ -354,7 +358,7 @@ def _signature(snapshot):
     return result
 
 
-def _write(fd, name, data, mode, metadata=None, ownership=None):
+def _write(fd, name, data: bytes | Callable[[list[int]], bytes], mode, metadata=None, ownership=None):
     """Exclusively create and flush a file relative to fd with the requested mode.
 
     If supplied, preserve and verify ownership before mode and metadata: chown
@@ -365,6 +369,8 @@ def _write(fd, name, data, mode, metadata=None, ownership=None):
     """
     target = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
     try:
+        if callable(data):
+            data = data(_identity(os.fstat(target)))
         view = memoryview(data)
         while view:
             count = os.write(target, view)
@@ -418,8 +424,12 @@ def _rename(source_fd, source, target_fd, target, exchange=False):
         raise OSError(error, os.strerror(error), target)
 
 
+# Separate directory-issuance fault seam from live-hook file publication.
+_rename_directory = _rename
+
+
 class _Store:
-    def __init__(self, fd, hooks_identity, create):
+    def __init__(self, fd, hooks_identity, create, *, schema=_SCHEMA):
         """Load authenticated recovery state bound to the hooks directory identity.
 
         If create is true, initialize a missing capability only in an empty store.
@@ -428,7 +438,13 @@ class _Store:
         The caller retains ownership of fd.
         """
         self.fd = fd
+        self.check: Callable[[], None] | None = None
         self.hooks_identity = hooks_identity
+        parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            self.parent_identity = _identity(os.fstat(parent))
+        finally:
+            os.close(parent)
         key = _read(fd, "capability", private=True)
         if key is None:
             if not create or os.listdir(fd):
@@ -438,8 +454,10 @@ class _Store:
             key = _read(fd, "capability", private=True)
             self.key = key[1]
             self.identity = _signature(key)
-            self.body = {"schema": _SCHEMA, "authority": _identity(os.fstat(fd)),
+            self.body = {"schema": schema, "authority": _identity(os.fstat(fd)),
                          "key": self.identity, "hooks": hooks_identity, "history": [], "active": None}
+            if schema == _LIFECYCLE_SCHEMA:
+                self.body.update(authority_parent=self.parent_identity, retained=[], contract=1, issuer_uid=os.getuid())
             self.save()
         else:
             self.key, self.identity = key[1], _signature(key)
@@ -447,6 +465,8 @@ class _Store:
             if len(self.key) != 32 or document is None:
                 raise RuntimeError("Missing or invalid installer journal; retain all recovery files")
             self.body = self._decode(document[1])
+            if self.body["schema"] == _LIFECYCLE_SCHEMA and self.body["journal_identity"] != _identity(document[0]):
+                raise RuntimeError("Copied or replaced installer journal; retain all evidence")
         self.guard = _read(fd, "completion", private=True)
         if self.guard is not None:
             obligation = self._decode(self.guard[1])
@@ -456,7 +476,8 @@ class _Store:
             terminal = {**obligation, "active": None,
                         "history": obligation["history"] + [self._completion_record(batch)]}
             prior = {**obligation, "active": {k: v for k, v in batch.items() if k != "retirement"}}
-            if self.body not in (obligation, prior, terminal):
+            comparable = lambda body: {k: v for k, v in body.items() if k != "journal_identity"}
+            if comparable(self.body) not in tuple(comparable(body) for body in (obligation, prior, terminal)):
                 raise RuntimeError("Conflicting completion obligation; retain installer authority")
             self.body = obligation
         for completed in self.body["history"]:
@@ -476,23 +497,56 @@ class _Store:
             body = envelope["body"]
             signature = hmac.new(self.key, _canonical(body), hashlib.sha256).hexdigest()
             if (not hmac.compare_digest(signature, envelope["seal"])
-                    or body["schema"] != _SCHEMA or body["key"] != self.identity
+                    or body["schema"] not in (_SCHEMA, _LIFECYCLE_SCHEMA) or body["key"] != self.identity
                     or body["authority"] != _identity(os.fstat(self.fd))
                     or body["hooks"] != self.hooks_identity):
                 raise ValueError("authority binding")
+            if body["schema"] == _LIFECYCLE_SCHEMA:
+                if (body["authority_parent"] != self.parent_identity
+                        or type(body["issuer_uid"]) is not int or body["issuer_uid"] != os.getuid()
+                        or type(body["contract"]) is not int or body["contract"] != 1
+                        or len(data) > _RECORD_LIMIT):
+                    raise ValueError("authority parent or record size")
+                if _canonical(envelope) != data:
+                    raise ValueError("noncanonical authority record")
+                for record in [*body["history"], *body["retained"], *([body["active"]] if body["active"] else [])]:
+                    for field in ("name", "stage", "retired"):
+                        if field in record:
+                            _component(record[field])
+                    if "inventory" in record:
+                        for member in record["inventory"]:
+                            if member not in {".gitignore", *(str(i) for i in range(5)), *("pre-" + str(i) for i in range(5))}:
+                                raise ValueError("unsupported stage inventory")
+                active = body["active"]
+                if active is not None:
+                    if active["phase"] not in ("PREPARING", "EXPOSING", "PREPARED", "APPLYING"):
+                        raise ValueError("unsupported batch phase")
+                    names = MERGE_GUARD_NAMES if active["binding"]["request"].get("merge_guard_hooks") else NAMES
+                    entries = active["entries"]
+                    if len(entries) > len(names) or (active["phase"] != "PREPARING" and len(entries) != len(names)):
+                        raise ValueError("invalid batch inventory")
+                    for index, entry in enumerate(entries):
+                        if entry["name"] != names[index] or entry["slot"] != str(index) or type(entry["changed"]) is not bool:
+                            raise ValueError("invalid hook entry")
             return body
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError("Unauthenticated installer journal; retain all recovery files") from exc
 
     def _sealed(self):
         """Return the current journal body and its HMAC seal as canonical JSON bytes."""
-        return _canonical({"body": self.body,
+        data = _canonical({"body": self.body,
                            "seal": hmac.new(self.key, _canonical(self.body), hashlib.sha256).hexdigest()})
+        if self.body["schema"] == _LIFECYCLE_SCHEMA and len(data) > _RECORD_LIMIT:
+            raise RuntimeError("Installer journal capacity exceeded; retain all evidence")
+        return data
 
     def _completion_record(self, batch):
         """Describe the retained stage and completion evidence for a finished batch."""
-        return {"name": batch["stage"], "identity": batch["identity"],
-                "retired": batch["retirement"], "completion": _signature(self.guard)}
+        result = {"name": batch["stage"], "identity": batch["identity"],
+                  "retired": batch["retirement"], "completion": _signature(self.guard)}
+        if self.body["schema"] == _LIFECYCLE_SCHEMA:
+            result["inventory"] = batch["completed_inventory"]
+        return result
 
     def save(self):
         """Replace and flush the sealed journal after rechecking the capability.
@@ -500,12 +554,22 @@ class _Store:
         Changed authority raises RuntimeError; I/O errors propagate and may leave
         a temporary journal file or an unconfirmed replacement.
         """
+        check = getattr(self, "check", None)
+        if check is not None:
+            check()
+        _admit(self.fd, private=True)
         if _signature(_read(self.fd, "capability", private=True)) != self.identity:
             raise RuntimeError("Installer authority changed; retain all recovery files")
         name = "journal-" + secrets.token_hex(16)
-        _write(self.fd, name, self._sealed(), 0o600)
+        def bound(identity):
+            self.body["journal_identity"] = identity
+            return self._sealed()
+
+        _write(self.fd, name, bound if self.body["schema"] == _LIFECYCLE_SCHEMA else self._sealed(), 0o600)
         os.replace(name, "journal", src_dir_fd=self.fd, dst_dir_fd=self.fd)
         os.fsync(self.fd)
+        if check is not None:
+            check()
 
     def finish(self, check):
         """Keep an authenticated obligation until terminal durability is acknowledged.
@@ -555,6 +619,52 @@ def _slot(identity):
     return hashlib.sha256(_canonical(identity)).hexdigest()
 
 
+def _component(name):
+    """Reject record paths that are not one bounded literal directory entry."""
+    if (not isinstance(name, str) or not name or len(os.fsencode(name)) > 255
+            or name in (".", "..") or any(c in name for c in ("/", "\\", "\0"))):
+        raise ValueError("Invalid installer evidence component")
+    return name
+
+
+def _open_store(authority_fd, hooks_identity, hooks_fd):
+    """Open existing authority, or issue a complete v2 slot without replacement.
+
+    Unpublished candidates are preserved on every failure. They are never
+    adopted by scanning names, and a canonical collision is not overwritten.
+    The caller owns the returned descriptor.
+    """
+    name = _slot(hooks_identity)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
+    except FileNotFoundError:
+        if any(name.startswith(_PREFIX) for name in os.listdir(hooks_fd)):
+            raise RuntimeError("Unrecognized hook staging; missing ownership authority. Retain it for manual reconciliation")
+        if os.fstat(authority_fd).st_dev != hooks_identity[0]:
+            raise RuntimeError("V2 hook authority requires the hooks filesystem; retain all existing evidence")
+        candidate = _INITIALIZING + secrets.token_hex(16)
+        _mkdir_private(authority_fd, candidate)
+        os.fsync(authority_fd)
+        fd = os.open(candidate, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
+        try:
+            _admit(fd, private=True)
+            store = _Store(fd, hooks_identity, True, schema=_LIFECYCLE_SCHEMA)
+            if _identity(os.stat(candidate, dir_fd=authority_fd, follow_symlinks=False)) != _identity(os.fstat(fd)):
+                raise RuntimeError("Authority candidate changed; preserve it")
+            _rename_directory(authority_fd, candidate, authority_fd, name)
+            os.fsync(authority_fd)
+            return fd, store
+        except BaseException:
+            os.close(fd)
+            raise
+    try:
+        _admit(fd, private=True)
+        return fd, _Store(fd, hooks_identity, False)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def _check_stages(fd, store):
     """Check retained stage identities and reject unrecognized batch directories.
 
@@ -571,7 +681,24 @@ def _check_stages(fd, store):
         if not stat.S_ISDIR(info.st_mode) or _identity(info) != item["identity"]:
             raise RuntimeError("Retained staging directory changed; preserve recovery evidence")
     if store.body["active"]:
-        known.add(store.body["active"]["stage"])
+        active = store.body["active"]
+        known.add(active["stage"])
+        if store.body["schema"] == _LIFECYCLE_SCHEMA:
+            try:
+                info = os.stat(active["stage"], dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISDIR(info.st_mode) or _identity(info) != active["identity"]:
+                    raise RuntimeError("Foreign staging destination; preserve all artifacts")
+    if store.body["schema"] == _LIFECYCLE_SCHEMA:
+        for item in store.body["retained"]:
+            child = os.open(item["name"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+            try:
+                if _identity(_admit(child, private=True)) != item["identity"]:
+                    raise RuntimeError("Retained preparation changed; preserve all evidence")
+            finally:
+                os.close(child)
     if any(name.startswith(_PREFIX) and name not in known for name in os.listdir(fd)):
         raise RuntimeError("Unrecognized hook staging; missing ownership authority. Retain it for manual reconciliation")
 
@@ -604,13 +731,34 @@ def _prepare(fd, store, snapshots, plans, request, operation, names=NAMES):
                 for data, mode in desired]
     binding = {"request": request, "operation": operation, "rendered": rendered}
     if store.body["active"] is not None:
-        if store.body["active"]["binding"] != binding:
+        active = store.body["active"]
+        if active["binding"] != binding:
             raise RuntimeError("Pending hook batch belongs to a different request; retry the original root, operation, interpreter and output")
-        return store.body["active"]
+        if store.body["schema"] == _LIFECYCLE_SCHEMA and active["phase"] == "PREPARING":
+            if {name: _signature(value) for name, value in snapshots.items()} != active["originals"]:
+                raise RuntimeError("Original hooks changed during preparation; retain all evidence")
+            child = os.open(active["stage"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+            try:
+                if _identity(_admit(child, private=True)) != active["identity"]:
+                    raise RuntimeError("Preparation directory changed; preserve it")
+            finally:
+                os.close(child)
+            store.body["retained"].append({"name": active["stage"], "identity": active["identity"],
+                                            "binding": active["binding"], "originals": active["originals"],
+                                            "entries": active["entries"], "exclusion": active.get("exclusion"),
+                                            "reason": "incomplete preparation"})
+            store.body["active"] = None
+            store.save()
+        else:
+            if store.body["schema"] == _LIFECYCLE_SCHEMA and active["phase"] == "EXPOSING":
+                _expose_stage(fd, store)
+            return store.body["active"]
     if all(snapshot is None and data is None or snapshot is not None
            and data == snapshot[1] and mode == stat.S_IMODE(snapshot[0].st_mode)
            for snapshot, (data, mode) in zip(snapshots.values(), desired, strict=True)):
         return None
+    if store.body["schema"] == _LIFECYCLE_SCHEMA:
+        return _prepare_authenticated(fd, store, snapshots, plans, binding, desired, names)
     stage = _PREFIX + secrets.token_hex(16)
     try:
         _mkdir_private(fd, stage)
@@ -652,6 +800,148 @@ def _prepare(fd, store, snapshots, plans, request, operation, names=NAMES):
         return batch
     finally:
         os.close(stage_fd)
+
+
+def _expose_stage(fd, store):
+    """Reconcile one authenticated directory at its private or hook-local location."""
+    batch = store.body["active"]
+    name = batch["stage"]
+    def identity(parent):
+        try:
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("Foreign stage exposure object; preserve it")
+        return _identity(info)
+
+    source, destination = identity(store.fd), identity(fd)
+    if source == batch["identity"] and destination is None:
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+        try:
+            if _identity(_admit(child, private=True)) != batch["identity"]:
+                raise RuntimeError("Private stage changed before exposure; preserve it")
+            _completed_inventory(child, batch, prepared=True)
+            try:
+                _rename_directory(store.fd, name, fd, name)
+            except OSError as exc:
+                if exc.errno not in (errno.EACCES, errno.EPERM) or exc.filename != name:
+                    raise
+                raise RuntimeError("Cannot expose hook staging: atomic hook updates require permission to create and rename entries "
+                                   "in the hooks directory. Ask the directory administrator to grant suitable directory access, "
+                                   "then retry the exact original command") from exc
+            if identity(fd) != batch["identity"] or identity(store.fd) is not None:
+                raise RuntimeError("Uncertain stage exposure; preserve both locations")
+        finally:
+            os.close(child)
+    elif source is not None or destination != batch["identity"]:
+        raise RuntimeError("Foreign or uncertain stage exposure; preserve both locations")
+    else:
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            if _identity(_admit(child, private=True)) != batch["identity"]:
+                raise RuntimeError("Exposed stage changed; preserve it")
+            _completed_inventory(child, batch, prepared=True)
+        finally:
+            os.close(child)
+    os.fsync(store.fd)
+    os.fsync(fd)
+    batch["phase"] = "PREPARED"
+    store.save()
+
+
+def _prepare_authenticated(fd, store, snapshots, plans, binding, desired, names):
+    """Construct a complete stage beneath private authority before exposing it.
+
+    PREPARING permits no publication. Its interrupted objects stay intact when
+    an exact retry records a retained attempt and constructs a fresh one.
+    """
+    if os.fstat(store.fd).st_dev != os.fstat(fd).st_dev:
+        raise RuntimeError("V2 preparation requires authority on the hooks filesystem")
+    stage = _PREFIX + secrets.token_hex(16)
+    try:
+        _mkdir_private(store.fd, stage)
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EPERM) or exc.filename != stage:
+            raise
+        raise RuntimeError("Cannot create private hook preparation. Ask the directory administrator for suitable "
+                           f"authority directory access at {_state_root()}, then retry the exact original command") from exc
+    child = os.open(stage, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+    try:
+        batch = {"stage": stage, "identity": _identity(_admit(child, private=True)),
+                 "binding": binding, "entries": [], "messages": [p.message for p in plans],
+                 "phase": "PREPARING", "metadata_version": 1, "ownership_version": 1,
+                 "originals": {name: _signature(value) for name, value in snapshots.items()}}
+        os.fsync(store.fd)
+        store.body["active"] = batch
+        store.save()
+        _write(child, ".gitignore", b"*\n", 0o600)
+        os.fsync(child)
+        batch["exclusion"] = _signature(_read(child, ".gitignore"))
+        store.save()
+        for index, (name, (data, mode)) in enumerate(zip(names, desired, strict=True)):
+            snapshot = snapshots[name]
+            old = _signature(snapshot)
+            unchanged = (snapshot is None and data is None or snapshot is not None
+                         and old is not None and data == snapshot[1] and mode == old["mode"])
+            entry = {"name": name, "old": old, "new": old if unchanged else None,
+                     "changed": not unchanged, "slot": str(index), "preimage": None}
+            parent = os.fstat(fd)
+            new_group = parent.st_gid if sys.platform == "darwin" or parent.st_mode & stat.S_ISGID else os.getegid()
+            ownership = [os.getuid(), new_group] if snapshot is None else [snapshot[0].st_uid, snapshot[0].st_gid]
+            if not unchanged:
+                if snapshot is not None:
+                    if old is None:
+                        raise RuntimeError("Invalid original hook signature; preserve all evidence")
+                    _write(child, "pre-" + str(index), snapshot[1], old["mode"], snapshot[2], ownership)
+                    entry["preimage"] = _signature(_read(child, "pre-" + str(index)))
+                if data is not None:
+                    _write(child, str(index), data, mode, None if snapshot is None else snapshot[2], ownership)
+                    entry["new"] = _signature(_read(child, str(index)))
+            batch["entries"].append(entry)
+            os.fsync(child)
+            store.save()
+        os.fsync(child)
+        batch["phase"] = "EXPOSING"
+        store.save()
+        _expose_stage(fd, store)
+        return batch
+    finally:
+        os.close(child)
+
+
+def _completed_inventory(stage_fd, batch, *, prepared=False):
+    """Require the complete prepared or completed inventory at its boundary."""
+    expected = {".gitignore": batch["exclusion"]}
+    for entry in batch["entries"]:
+        if entry["preimage"] is not None:
+            expected["pre-" + entry["slot"]] = entry["preimage"]
+        signature = entry["new"] if prepared else entry["old"]
+        if entry["changed"] and signature is not None:
+            expected[entry["slot"]] = signature
+    if set(os.listdir(stage_fd)) != set(expected):
+        raise RuntimeError("Unknown completed-stage objects; retain the pending batch")
+    if any(_signature(_read(stage_fd, name)) != signature for name, signature in expected.items()):
+        raise RuntimeError("Completed stage evidence changed; retain the pending batch")
+    return expected
+
+
+def _check_pending_inventory(stage_fd, batch):
+    """Reject changed exclusion or unknown members during mixed-state retries.
+
+    _apply verifies slot presence and signatures against each entry's original
+    or published state. Both states must have the same authenticated exclusion
+    and may contain only that entry's named evidence.
+    """
+    allowed = {".gitignore"}
+    for entry in batch["entries"]:
+        if entry["preimage"] is not None:
+            allowed.add("pre-" + entry["slot"])
+        if entry["changed"]:
+            allowed.add(entry["slot"])
+    if (not set(os.listdir(stage_fd)).issubset(allowed)
+            or _signature(_read(stage_fd, ".gitignore")) != batch["exclusion"]):
+        raise RuntimeError("Pending stage exclusion or inventory changed; preserve all evidence")
 
 
 def _apply(fd, stage_fd, entry, publish=True):
@@ -749,17 +1039,10 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
         bound_request = {**request, "root": str(root), "hooks_path": str(hooks_dir)}
         with _authority(_state_root(), True) as (authority_fd, authority_check):
             name = _slot(hooks_identity)
-            created = False
-            try:
-                _mkdir_private(authority_fd, name)
-                created = True
-                os.fsync(authority_fd)
-            except FileExistsError:
-                pass
-            state_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
+            authority_check()
+            state_fd, store = _open_store(authority_fd, hooks_identity, fd)
             try:
                 state_identity = _identity(_admit(state_fd, private=True))
-                store = _Store(state_fd, hooks_identity, created)
                 if store.body["active"] is not None and store.body["active"].get("metadata_version") != 1:
                     raise RuntimeError("Legacy pending batch lacks hook metadata binding; retain all evidence for manual reconciliation")
                 if store.body["active"] is not None:
@@ -784,6 +1067,7 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
                             or _identity(os.stat(hooks_dir, follow_symlinks=False)) != hooks_identity):
                         raise RuntimeError("Hook or authority directory changed; retain all recovery files")
 
+                store.check = check
                 snapshots = {name: _read(fd, name) for name in names}
                 check()
                 plans = prepare(snapshots)
@@ -800,6 +1084,8 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
                     if _identity(_admit(stage_fd, private=True)) != batch["identity"]:
                         raise RuntimeError("Hook staging directory changed; retain all recovery files")
                     check()
+                    if store.body["schema"] == _LIFECYCLE_SCHEMA:
+                        _check_pending_inventory(stage_fd, batch)
                     for entry in batch["entries"]:
                         _apply(fd, stage_fd, entry, publish=False)
                     if batch["phase"] != "APPLYING":
@@ -810,6 +1096,8 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
                         _admit(stage_fd, private=True)
                         if _identity(os.stat(batch["stage"], dir_fd=fd, follow_symlinks=False)) != batch["identity"]:
                             raise RuntimeError("Hook staging path changed; retain the admitted directory")
+                        if store.body["schema"] == _LIFECYCLE_SCHEMA:
+                            _check_pending_inventory(stage_fd, batch)
                         _apply(fd, stage_fd, entry)
                     def completed():
                         """Require the admitted stage and live hooks to match the completed batch."""
@@ -827,6 +1115,8 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
                     completed()
                     os.fsync(stage_fd)
                     os.fsync(fd)
+                    if store.body["schema"] == _LIFECYCLE_SCHEMA:
+                        batch["completed_inventory"] = _completed_inventory(stage_fd, batch)
                     store.finish(completed)
                     check()
                     return batch["messages"], finalize()
@@ -870,6 +1160,8 @@ def _pending_record(hooks_dir):
                     slot_fd = os.open(_slot(identity), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
                 except FileNotFoundError:
                     result = absent()
+                    if result is None and any(name.startswith(_INITIALIZING) for name in os.listdir(authority_fd)):
+                        result = "unverified authority: unpublished authority candidates retained"
                 else:
                     try:
                         _admit(slot_fd, private=True)
@@ -878,8 +1170,15 @@ def _pending_record(hooks_dir):
                         active = store.body["active"]
                         result = None if active is None else {
                             "binding": active["binding"],
-                            "message": f"pending {active['binding']['operation']}; recovery files: {hooks_dir / active['stage']}",
+                            "message": f"pending {active['binding']['operation']} ({active['phase']}); recovery files: "
+                                       f"{(_state_root() / _slot(identity) if active['phase'] == 'PREPARING' else hooks_dir) / active['stage']}",
                         }
+                        if result is None and store.body.get("retained"):
+                            result = f"retained incomplete preparation evidence: {len(store.body['retained'])}; no automatic cleanup"
+                        if result is None and store.body["schema"] == _LIFECYCLE_SCHEMA:
+                            known = {item["name"] for item in store.body["retained"]}
+                            if any(name.startswith(_PREFIX) and name not in known for name in os.listdir(slot_fd)):
+                                result = "unverified authority: unclaimed private preparation artifacts retained"
                     finally:
                         os.close(slot_fd)
             return result

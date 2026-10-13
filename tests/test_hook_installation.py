@@ -116,7 +116,8 @@ def test_prepublication_failure_preserves_all_live_hooks(repo, monkeypatch, fail
         hooks.install(repo)
     assert _live(repo) == before
     assert not (repo / ".gitattributes").exists()
-    assert list(_hooks(repo).glob(publication._PREFIX + "*"))
+    assert not list(_hooks(repo).glob(publication._PREFIX + "*"))
+    assert list(publication._state_root().glob("*/" + publication._PREFIX + "*"))
 
 
 def test_never_writes_or_chmods_a_live_hook_and_preserves_noop_inodes(repo, monkeypatch):
@@ -739,7 +740,7 @@ def test_final_stage_substitution_retains_pending_batch(repo, monkeypatch):
     monkeypatch.setattr(publication, "_rename", substitute)
     with pytest.raises(RuntimeError, match="staging path changed before completion"):
         hooks.install(repo)
-    assert "pending install" in hooks.status(repo)
+    assert "pending/unverified" in hooks.status(repo)
     assert (retained / "pre-2").read_bytes() == (retained / "2").read_bytes()
     stage, = _hooks(repo).glob(publication._PREFIX + "*")
     assert (stage / "foreign").read_bytes() == b"foreign final stage\n"
@@ -896,7 +897,7 @@ def test_stage_exclusion_write_failure_precedes_payload_and_live_publication(rep
         hooks.install(repo)
     assert not payloads and _live(repo) == before
     assert not (repo / ".gitattributes").exists()
-    stage, = _hooks(repo).glob(publication._PREFIX + "*")
+    stage, = publication._state_root().glob("*/" + publication._PREFIX + "*")
     assert list(stage.iterdir()) == [stage / ".gitignore"]
     assert (stage / ".gitignore").read_bytes() == b"*\n"
 
@@ -1021,7 +1022,7 @@ def test_native_setgid_public_lifecycle(repo, monkeypatch, parent, entry_point):
     stages = list(_hooks(repo).glob(publication._PREFIX + "*"))
     assert len(stages) == 4
     for stage in stages:
-        assert stat.S_IMODE(stage.stat().st_mode) == (0o2700 if parent == "hooks" else 0o700)
+        assert stat.S_IMODE(stage.stat().st_mode) == (0o2700 if parent == "xdg" else 0o700)
         assert (stage / ".gitignore").read_bytes() == b"*\n"
         assert stat.S_IMODE((stage / ".gitignore").stat().st_mode) == 0o600
         assert all(stat.S_IMODE(p.stat().st_mode) == 0o751 for p in stage.iterdir() if p.name != ".gitignore")
@@ -1093,7 +1094,7 @@ def test_safe_setgid_stage_mode_does_not_grant_ownership(repo, monkeypatch, stag
     before = _snapshot(repo)
     with monkeypatch.context() as patch:
         _forbid_directory_permission_changes(patch)
-        with pytest.raises(RuntimeError, match="Unrecognized hook staging|staging directory changed"):
+        with pytest.raises(RuntimeError, match="Unrecognized hook staging|staging directory changed|Foreign staging destination"):
             hooks.install(repo)
     assert before == _snapshot(repo)
     assert (stage.stat().st_ino, stage.stat().st_mode) == (info.st_ino, info.st_mode)
@@ -2041,7 +2042,9 @@ def test_ownership_preservation_failure_precedes_all_live_changes(repo, tmp_path
     assert after[0] == before[0] and after[2] == before[2]
     assert {name: after[1][name] for name in before[1]} == before[1]
     stages = set(directory.glob(publication._PREFIX + "*"))
-    assert len(stages) == 2  # Successful baseline and retained, unsealed failed stage.
+    private_stages = set(publication._state_root().glob("*/" + publication._PREFIX + "*"))
+    assert len(stages) == 1 and len(private_stages) == 1
+    # The failed preparation remains private; only the successful baseline was exposed.
 
 
 @pytest.mark.parametrize("merge_guard", [False, True])
