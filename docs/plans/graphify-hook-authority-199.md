@@ -13,6 +13,25 @@ changes. No independent review or protected-change designation is claimed.
 The review distinguished reference retirement from physical deletion: the current
 rename primitives do not perform conditional removal of an authenticated source.
 
+### Deferred-feedback extension review
+
+The operator subsequently requested implementing the items deferred from #208
+on #209. Before implementation, direct owner review compared #209 `c45f3466`,
+#208 `821d1235`, the scope comment, live #199, and the completed-history checks.
+The review selected continuous admission checks for completed v2 manifests:
+status is read-only, while ordinary install/uninstall and retirement refuse
+changed or incomplete historical payloads before mutation. Missing v2 inventory
+is unverified legacy evidence, never reconstructed. V1 keeps its original
+admission contract and remains ineligible for retirement. This is the reviewed
+acceptance extension for that stronger policy, not an independent-review receipt.
+
+The review also requires carrying #208's producer fences and diagnostics into
+the dependent source. Candidate names remain hints, and unpublished/unclaimed
+artifacts must remain visible beside active, retained and completed observations.
+Native account/root checks prove refusal and preservation only; they approve
+no transfer, migration, cleanup or broader #196 qualification. Local base
+integration is authorized by the new repair request; publication remains separate.
+
 ## Selected contract
 
 - Maintenance is explicit: read-only preview, then execution naming the exact
@@ -38,6 +57,11 @@ rename primitives do not perform conditional removal of an authenticated source.
   or succeeded. Copied payloads alone cannot establish archive ownership.
 - Maintenance validates retained historical evidence; it does not require live
   hooks to equal an older batch's successors or borrow its publication request.
+- Admission checks every present completed v2 stage against its recorded closed
+  inventory, including status and ordinary mutations. Damaged historical evidence
+  is unverified, not a recoverable active request. A valid archived record may
+  still admit an absent original, and any present original must match. Missing
+  manifests or preservation fields refuse without adoption or reconstruction.
 - Keep v1 history usable under its existing contract but ineligible for automatic
   retirement. No account transfer, root migration, automatic expiration or purge.
 - Report retained stage count, archive bytes and incomplete artifacts. No automatic
@@ -54,10 +78,21 @@ rename primitives do not perform conditional removal of an authenticated source.
 | 199-A4 | Successful archive has complete bytes and provenance, original files unchanged; absent original accepted only after durable retirement, replacement refused. |
 | 199-A5 | Default/custom/Husky/shared hooks, authority-root/account changes, Git exclusion and native multi-account claims use qualified evidence. |
 | 199-A6 | Status remains read-only; storage failure causes no eviction, stage movement, removal or preimage purge. |
+| 199-A7 | Changed/missing preimages, exclusion damage, extra or unsafe members in any v2 completion are unverified in API/CLI status and block ordinary mutations/retirement with exact preservation; v1 stays compatible. |
+| 199-A8 | Integrated #208 completion fence, ACL/label guards and active-location checks remain effective; candidate/unclaimed warnings coexist with pending and retained summaries without weakening ownership. |
+| 199-A9 | Shared hooks, distinct authority roots and a native different-account attempt refuse adoption while preserving hooks, registration, history, archives and uncertain artifacts; platform/account limits are explicit. |
 
 Run focused maintenance checks separately from #198, then relevant integration
 and repository gates. Native evidence gaps remain explicit. The endpoint is a
-validated local diff; no push, merge, cleanup or issue closure is authorized.
+validated local diff; no commit, push, GitHub merge, cleanup or issue closure is
+authorized. The reviewed local base integration remains uncommitted.
+
+The added native account check is explicitly enabled on the owned Linux guest.
+It uses an issuer at UID 501 and a real root process at UID 0, with both retained
+and archived history. It checks authority refusal and exact preservation through
+status, preview, execution and ordinary operations. This is not nonprivileged
+account-to-account or macOS account qualification. Those broader claims, account
+transfer and enforcing SELinux policy remain outside this extension.
 
 ## Implementation handoff
 

@@ -10,6 +10,13 @@ V2 constructs a complete unpublished authority slot beneath admitted private
 storage before publishing the canonical slot without replacement. Interrupted
 initialization candidates remain intact and are not adopted. An occupied,
 incomplete or substituted canonical slot still requires manual reconciliation.
+New candidate names include a hooks-slot hint solely to scope diagnostics.
+Names do not establish ownership; older candidates without that hint stay
+preserved and are not attributed to another repository's absent slot.
+Matching unpublished candidates remain visible after a fresh canonical slot is
+published, alongside active or retained diagnostics. With completed authority,
+status shows the candidate warning and visible hook/driver observations. Neither
+the hint nor the warning authenticates or adopts those candidates.
 The canonical journal binds its own filesystem identity as well as the
 authority parent, slot, capability and hooks identities; copying its bytes into
 a replacement file does not restore authority.
@@ -38,12 +45,35 @@ creation owner/group, applied and checked before exposure; inability to preserve
 that ownership refuses preparation. Directory modes and ownership are not
 normalized. Complete v2 history includes a closed final stage inventory,
 including its exclusion file, preimages and displaced originals.
+The inventory is persisted in the APPLYING journal before the completion guard
+is written, so interruption after guard creation leaves a matching authenticated
+predecessor for exact retry. This does not reconcile older conflicting guards or
+add authority to missing, torn or substituted completion evidence.
+On Linux, creating new hooks beneath a hooks directory with a default POSIX ACL
+refuses rather than losing inherited access restrictions. On macOS, creation
+refuses when the hooks directory has an extended ACL; this conservative boundary
+does not distinguish inheritable entries from other entries. The same checks run
+before replacing an interrupted PREPARING attempt, exposure and each publication
+on an exact pending retry. This does not provide ACL-inheritance reconstruction
+or change existing v1 behavior.
+On Linux, creating new hooks also refuses when the target directory exposes a
+`security.selinux` label. Private preparation does not reproduce SELinux
+creation transitions or relabel published hooks; pending retries use the same
+refusal. This conservative limit is not enforcing-policy qualification.
 
 Public status now resolves existing paths only. Missing hooks directories and
 authority paths stay absent. It reports authenticated pending phases, unavailable
 or unverified authority, and retained incomplete evidence without repairing,
 creating, compacting or deleting state. Retained preparation is not pending
 publication, and its diagnostic does not establish ownership of its children.
+Git hooks-path lookup failures return an unverified diagnostic. Active v2
+stages must match their recorded identity at the phase-appropriate location;
+EXPOSING checks both legal locations and reports the one actually observed.
+Missing, substituted or conflicting locations are damaged/unverified evidence,
+not a recoverable pending location. These observations grant no repair authority.
+With no active batch, unclaimed private preparation artifacts take precedence
+over the retained-only diagnostic. Known retained evidence does not authenticate
+additional artifacts, and status preserves both.
 
 The separate [#198 acceptance extension](plans/graphify-hook-authority-198.md)
 records this local contract and its native qualification requirements.
@@ -53,6 +83,17 @@ records this local contract and its native qualification requirements.
 `graphify hook status` lists authenticated completed batch IDs and reports
 archived references, archive payload bytes, retained incomplete evidence and
 unclaimed private artifacts. Those counts do not attest unverified content.
+Each admission by this #199 reader validates present completed v2 stages against
+their recorded closed inventories, including read-only status and ordinary
+install/uninstall. Changed or missing preimages, damaged exclusion, unknown
+members or changed preservation metadata report unverified evidence and refuse
+mutation. Missing v2 manifests are preserved for manual reconciliation; they
+are not reconstructed. V1 keeps its original checks and remains ineligible for
+retirement. These observations do not freeze files against later editor changes.
+
+Unpublished candidates and unclaimed private artifacts remain visible beside
+retained-history summaries. Authenticated pending requests keep their binding;
+summary warnings confer no publication, adoption or cleanup authority.
 
 Preview a selected completed v2 batch without writes:
 
@@ -102,6 +143,11 @@ exclusion does not protect originals or archives from force-add, already-tracked
 files, removal of ignore files, or `git clean -x`.
 The [#199 acceptance extension](plans/graphify-hook-authority-199.md) records the
 separate maintenance boundary. It does not activate S6 GC or merge finalization.
+
+V2 journal and completion envelopes have a 16 MiB record limit. This is not a total-storage limit.
+Journal capacity is checked before creating a temporary file, reserving the
+maximum native inode width for its identity binding. A capacity-blocked save
+creates no temporary journal; existing interrupted files remain preserved.
 
 The v2 journal serializer also enforces the record limit on completion
 obligations before creating them. Capacity refusal preserves pending authority
@@ -383,7 +429,11 @@ Ignoring files does not protect them from `git clean -x`. Removing or changing
 the identity of a historical staging directory makes later operations refuse;
 no automatic history cleanup or reconstruction is provided. Later operations
 check retained directory identities and private completion records, but do not
-revalidate completed-stage contents. Preserve preimages and the stage's
+revalidate v1 completed-stage contents. This #199 reader additionally validates
+each present v2 completed manifest at admission, including archived originals.
+A valid archive permits an absent original; a foreign replacement still refuses.
+Earlier #198 readers keep their original contract until maintenance advances the
+record contract beyond what they support. Preserve preimages and the stage's
 `.gitignore`: changing or removing the ignore file can expose recovery contents
 to ordinary Git staging. Independently check retained files before using them
 for manual reconciliation.

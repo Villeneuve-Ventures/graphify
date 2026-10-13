@@ -86,21 +86,25 @@ def test_partial_batch_is_complete_per_path_and_resumes_exactly(repo, monkeypatc
 
 @pytest.mark.parametrize("failure", ["write", "mode", "seal"])
 def test_prepublication_failure_preserves_all_live_hooks(repo, monkeypatch, failure):
+    """Preparation failures retain evidence while preserving every live hook and registration."""
     before = _live(repo)
     write = publication._write
     save = publication._Store.save
 
     def fail_write(fd, name, data, mode, metadata=None, ownership=None):
+        """Inject a selected write failure before completing staged evidence."""
         if name == "1":
             raise OSError("stage write failed")
         return write(fd, name, data, mode, metadata, ownership)
 
     def fail_mode(fd, mode):
+        """Inject a metadata failure without changing a live hook."""
         if mode == 0o751:
             raise OSError("stage chmod failed")
         return original_chmod(fd, mode)
 
     def fail_seal(self):
+        """Stop persistence once an active batch requires authenticated evidence."""
         if self.body["active"]:
             raise OSError("seal failed")
         return save(self)
@@ -725,10 +729,12 @@ def test_noop_directory_substitution_refuses_before_registration(repo, monkeypat
 
 
 def test_final_stage_substitution_retains_pending_batch(repo, monkeypatch):
+    """A substituted final stage cannot authorize completion or be removed."""
     real = publication._rename
     retained = _hooks(repo) / "retained-final-stage"
 
     def substitute(source_fd, source, target_fd, target, **kwargs):
+        """Replace the completed stage path with foreign content before final checks."""
         result = real(source_fd, source, target_fd, target, **kwargs)
         if target == "post-merge":
             stage, = _hooks(repo).glob(publication._PREFIX + "*")
@@ -877,16 +883,19 @@ def test_existing_unrecognized_stage_is_not_adopted_or_given_exclusion(repo):
 
 
 def test_stage_exclusion_write_failure_precedes_payload_and_live_publication(repo, monkeypatch):
+    """Exclusion failure prevents payload construction and live publication."""
     real_write, real_fsync = publication._write, os.fsync
     before = _live(repo)
     payloads = []
 
     def record_write(fd, name, data, mode, metadata=None, ownership=None):
+        """Record attempted payload writes while preserving the normal writer behavior."""
         if name.isdigit() or name.startswith("pre-"):
             payloads.append(name)
         return real_write(fd, name, data, mode, metadata, ownership)
 
     def fail(fd):
+        """Inject the selected preparation failure before live publication."""
         if stat.S_ISDIR(os.fstat(fd).st_mode) and os.listdir(fd) == [".gitignore"]:
             raise OSError("injected exclusion persistence failure")
         return real_fsync(fd)
@@ -962,6 +971,7 @@ def _private_boundary(root, boundary):
 @pytest.mark.parametrize("parent", ["hooks", "xdg"])
 @pytest.mark.parametrize("entry_point", ["api", "cli"])
 def test_native_setgid_public_lifecycle(repo, monkeypatch, parent, entry_point):
+    """Public lifecycle operations preserve native setgid ownership and stage modes."""
     directory = _hooks(repo) if parent == "hooks" else Path(os.environ["XDG_STATE_HOME"])
     directory.mkdir(exist_ok=True)
     directory.chmod(0o2755)
@@ -975,6 +985,7 @@ def test_native_setgid_public_lifecycle(repo, monkeypatch, parent, entry_point):
     protected = _snapshot(_hooks(repo))["pre-push"]
 
     def invoke(operation):
+        """Exercise the selected public API or CLI with the fixture request unchanged."""
         if entry_point == "api":
             return getattr(hooks, operation)(repo)
         result = subprocess.run(
@@ -1081,6 +1092,7 @@ def test_unsafe_private_special_modes_refuse_without_normalization(repo, monkeyp
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="02700 admission requires native Linux")
 @pytest.mark.parametrize("stage_kind", ["unknown", "substituted"])
 def test_safe_setgid_stage_mode_does_not_grant_ownership(repo, monkeypatch, stage_kind):
+    """Permitted directory mode alone cannot authenticate a substituted stage."""
     if stage_kind == "substituted":
         _interrupt(repo, monkeypatch)
         stage = _private_boundary(repo, "stage")
@@ -1292,6 +1304,15 @@ def test_changed_staged_bsd_flags_refuse_pending_resume(repo, monkeypatch, name)
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
 def test_completed_history_without_bsd_flag_binding_remains_usable(repo, monkeypatch):
+    """Legacy v1 keeps its admission contract; v2 requires complete manifests."""
+    identity = publication._identity(_hooks(repo).stat())
+    with publication._authority(publication._state_root(), True) as (fd, _):
+        publication._mkdir_private(fd, publication._slot(identity))
+        child = os.open(publication._slot(identity), os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+        try:
+            publication._Store(child, identity, True)
+        finally:
+            os.close(child)
     original = publication._signature
 
     def legacy(snapshot):
@@ -1427,6 +1448,7 @@ def test_legacy_active_batch_without_metadata_binding_refuses(repo, monkeypatch)
 @pytest.mark.parametrize("directory_kind", ["ancestor", "slot", "stage"])
 @pytest.mark.parametrize("point,kind", [("prepared", "mode"), ("prepared", "acl"), ("published", "mode")])
 def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch, operation, directory_kind, point, kind):
+    """Unsafe authority metadata stops publication and reports unverified recovery evidence."""
     if operation == "uninstall":
         hooks.install(repo)
     home = Path.home()
@@ -1437,6 +1459,7 @@ def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch,
     stopped = {}
 
     def change_ancestor():
+        """Make the selected authority directory unsafe at the recorded boundary."""
         if kind == "mode":
             directory.chmod(0o777)
         elif sys.platform == "darwin":
@@ -1448,6 +1471,7 @@ def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch,
         stopped.update({name: value for name, value in _snapshot(_hooks(repo)).items() if "/" not in name})
 
     def prepare(*args, **kwargs):
+        """Inject the authority change after ordinary preparation completes."""
         nonlocal directory
         batch = original_prepare(*args, **kwargs)
         if directory_kind == "slot":
@@ -1459,6 +1483,7 @@ def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch,
         return batch
 
     def rename(source_fd, source, target_fd, target, **kwargs):
+        """Inject the authority change immediately after the selected publication."""
         result = original_rename(source_fd, source, target_fd, target, **kwargs)
         if point == "published" and target == "post-commit":
             change_ancestor()
@@ -1473,8 +1498,7 @@ def test_changed_authority_ancestor_stops_further_publication(repo, monkeypatch,
         assert stopped == {name: value for name, value in _snapshot(_hooks(repo)).items() if "/" not in name}
         assert (repo / ".git/config").read_bytes() == config
         assert ((repo / ".gitattributes").read_bytes() if (repo / ".gitattributes").exists() else None) == attrs
-        expected_status = f"pending {operation}" if directory_kind == "stage" else "unverified"
-        assert expected_status in hooks.status(repo)
+        assert "unverified" in hooks.status(repo)
     finally:
         if kind == "acl":
             if sys.platform == "darwin":
@@ -2012,6 +2036,7 @@ def test_native_ownership_survives_batch_replacements(repo, tmp_path, merge_guar
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
 @pytest.mark.parametrize("failure", ["denied", "ineffective"])
 def test_ownership_preservation_failure_precedes_all_live_changes(repo, tmp_path, monkeypatch, merge_guard, operation, failure):
+    """Unpreservable UID/GID leaves live hooks exact and partial preparation private."""
     directory, names = _ownership_batch(repo, merge_guard, True, tmp_path)
     if operation == "install":
         for name in names:
@@ -2024,6 +2049,7 @@ def test_ownership_preservation_failure_precedes_all_live_changes(repo, tmp_path
 
     def fail_last(fd, uid, gid):
         # Let earlier preimages/successors finish; fail the last hook's preimage.
+        """Make ownership preservation fail on the final staged successor."""
         calls.append((uid, gid))
         if len(calls) == last_preimage:
             if failure == "denied":

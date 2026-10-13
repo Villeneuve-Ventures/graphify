@@ -18,25 +18,30 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX authority lifecyc
 
 
 def slot(root):
+    """Locate the fixture authority slot from its actual hooks-directory identity."""
     return publication._state_root() / publication._slot(publication._identity(_hooks(root).stat()))
 
 
 def body(root):
+    """Read the fixture journal body for lifecycle-state assertions."""
     return json.loads((slot(root) / "journal").read_bytes())["body"]
 
 
 @pytest.mark.parametrize("point", ["capability", "journal", "publish"])
 def test_incomplete_slot_is_not_canonical_and_retry_preserves_candidate(repo, monkeypatch, point):
+    """Retry issues fresh authority while preserving an incomplete unpublished candidate."""
     write, rename = publication._write, publication._rename_directory
     before = _live(repo)
 
     def fail_write(fd, name, *args, **kwargs):
+        """Inject a selected write failure before completing staged evidence."""
         if (point == "capability" and name == "capability"
                 or point == "journal" and name.startswith("journal-")):
             raise OSError("injected initialization failure")
         return write(fd, name, *args, **kwargs)
 
     def fail_publish(*args, **kwargs):
+        """Interrupt canonical publication without adopting the retained candidate."""
         raise OSError("injected initialization failure")
 
     with monkeypatch.context() as patch:
@@ -60,10 +65,12 @@ def test_incomplete_slot_is_not_canonical_and_retry_preserves_candidate(repo, mo
 
 @pytest.mark.parametrize("name", [".gitignore", "pre-0", "0", "pre-1", "1", "pre-2", "2"])
 def test_incomplete_private_preparation_retries_without_adopting_or_removing_files(repo, monkeypatch, name):
+    """Exact retry retains incomplete preparation and every uncertain child unchanged."""
     write = publication._write
     before = _live(repo)
 
     def fail(fd, selected, *args, **kwargs):
+        """Inject the selected preparation failure before live publication."""
         if selected == name:
             raise OSError("injected preparation failure")
         return write(fd, selected, *args, **kwargs)
@@ -91,10 +98,12 @@ def test_incomplete_private_preparation_retries_without_adopting_or_removing_fil
 
 @pytest.mark.parametrize("after", [False, True])
 def test_exposure_interruption_reconciles_exact_stage(repo, monkeypatch, after):
+    """Exposure retry accepts the recorded directory at exactly one legal location."""
     rename = publication._rename_directory
     before = _live(repo)
 
     def fail(source_fd, source, target_fd, target):
+        """Interrupt exposure at the selected location without changing its ownership."""
         if source.startswith(publication._PREFIX):
             if after:
                 rename(source_fd, source, target_fd, target)
@@ -115,6 +124,7 @@ def test_exposure_interruption_reconciles_exact_stage(repo, monkeypatch, after):
 
 
 def test_copied_journal_refuses_even_with_unchanged_bytes(repo):
+    """Identical journal bytes cannot authenticate a replacement filesystem object."""
     hooks.install(repo)
     journal = slot(repo) / "journal"
     original = journal.read_bytes()
@@ -130,12 +140,14 @@ def test_copied_journal_refuses_even_with_unchanged_bytes(repo):
 
 @pytest.mark.parametrize("entry", ["api", "cli"])
 def test_status_does_not_create_missing_hooks_or_authority(repo, monkeypatch, entry):
+    """API and CLI status preserve missing hooks and authority paths."""
     path = repo / "missing" / "hooks"
     subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(path)], check=True)
     protected = _snapshot(repo)
     if entry == "api":
         mkdir = Path.mkdir
         def forbid(*args, **kwargs):
+            """Fail immediately if read-only status attempts directory creation."""
             pytest.fail("status attempted directory creation")
         with monkeypatch.context() as patch:
             patch.setattr(Path, "mkdir", forbid)
@@ -153,6 +165,7 @@ def test_status_does_not_create_missing_hooks_or_authority(repo, monkeypatch, en
 
 
 def test_complete_history_has_closed_inventory_and_legacy_store_stays_legacy(repo):
+    """Existing v1 authority remains v1 without gaining v2 retention permissions."""
     with publication._authority(publication._state_root(), True) as (fd, _):
         identity = publication._identity(_hooks(repo).stat())
         name = publication._slot(identity)
@@ -169,6 +182,7 @@ def test_complete_history_has_closed_inventory_and_legacy_store_stays_legacy(rep
 
 @pytest.mark.parametrize("point", ["capability", "preparing", "exposure", "prepared"])
 def test_process_kill_at_issuance_and_preparation_boundary(repo, point):
+    """Abrupt process death retains evidence and permits only authenticated exact retry."""
     code = """
 import os, signal, sys
 from pathlib import Path
@@ -205,6 +219,7 @@ hooks.install(Path(sys.argv[1]))
 
 
 def test_completed_inventory_keeps_preimages_and_displaced_originals(repo):
+    """Completed inventory retains both copies of original user-hook content."""
     original = _live(repo)
     hooks.install(repo)
     record = body(repo)["history"][0]
@@ -217,6 +232,7 @@ def test_completed_inventory_keeps_preimages_and_displaced_originals(repo):
 
 
 def test_new_guards_keep_hooks_directory_native_creation_group(repo):
+    """Private-born guards receive the selected hooks directory native creation group."""
     directory = _hooks(repo)
     os.chown(directory, -1, _different_permitted_group())
     if sys.platform.startswith("linux"):
@@ -232,10 +248,12 @@ def test_new_guards_keep_hooks_directory_native_creation_group(repo):
 
 @pytest.mark.parametrize("damage", ["exclusion", "extra"])
 def test_prepared_exclusion_and_unknown_members_refuse_before_live_publication(repo, monkeypatch, damage):
+    """Prepared exclusion damage or foreign members blocks every live publication."""
     prepare = publication._prepare
     before = _live(repo)
     observed = {}
     def changed(*args, **kwargs):
+        """Tamper with prepared evidence before any live hook may be published."""
         batch = prepare(*args, **kwargs)
         stage = _hooks(repo) / batch["stage"]
         if damage == "exclusion":
@@ -255,9 +273,11 @@ def test_prepared_exclusion_and_unknown_members_refuse_before_live_publication(r
 
 @pytest.mark.parametrize("after", [False, True])
 def test_exposing_retry_preserves_changed_exclusion_at_either_location(repo, monkeypatch, after):
+    """Exposure retry preserves altered exclusion evidence at either legal location."""
     rename = publication._rename_directory
     before = _live(repo)
     def interrupted(source_fd, source, target_fd, target):
+        """Interrupt exposure at the selected location without changing its ownership."""
         if source.startswith(publication._PREFIX):
             if after:
                 rename(source_fd, source, target_fd, target)
@@ -278,8 +298,10 @@ def test_exposing_retry_preserves_changed_exclusion_at_either_location(repo, mon
 
 
 def test_applying_retry_preserves_unknown_member_and_remaining_hooks(repo, monkeypatch):
+    """Publication retry preserves foreign members and leaves remaining hooks exact."""
     rename = publication._rename
     def interrupted(*args, **kwargs):
+        """Interrupt the first publication before recovery may advance."""
         result = rename(*args, **kwargs)
         if args[1] == "0":
             raise OSError("injected publication interruption")
@@ -300,6 +322,7 @@ def test_applying_retry_preserves_unknown_member_and_remaining_hooks(repo, monke
 
 
 def test_writer_refuses_records_that_exceed_the_reader_limit(repo):
+    """The writer rejects envelopes its bounded reader cannot accept."""
     hooks.install(repo)
     evidence = (_snapshot(repo), _snapshot(publication._state_root()))
     child = os.open(slot(repo), os.O_RDONLY | os.O_DIRECTORY)
@@ -314,8 +337,10 @@ def test_writer_refuses_records_that_exceed_the_reader_limit(repo):
 
 
 def test_completion_capacity_refusal_keeps_authenticated_pending_recovery(repo, monkeypatch):
+    """Completion capacity refusal keeps pending authority usable for exact retry."""
     finish = publication._Store.finish
     def limited(self, check):
+        """Reduce the record limit at completion and retain authenticated pending work."""
         with monkeypatch.context() as patch:
             patch.setattr(publication, "_RECORD_LIMIT", len(self._sealed()) - 1)
             return finish(self, check)
