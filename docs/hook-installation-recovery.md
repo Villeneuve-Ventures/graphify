@@ -132,6 +132,9 @@ Interrupted archival is visible as pending and blocks install/uninstall.
 Repeat its exact original batch and token after resolving the reported cause.
 A pending preview requires that same batch and request context; a different
 selection refuses rather than returning another batch's token.
+Status and preview check each bound partial archive directory's identity and
+private metadata. Missing, substituted or unsafe directories report unverified
+evidence and refuse preview or execution while preserving all artifacts.
 An authenticated partial archive is retained before a fresh copy is constructed;
 unrecorded artifacts are preserved without adoption. Changed sources or request
 context refuse. Status and preview never finish this operation automatically.

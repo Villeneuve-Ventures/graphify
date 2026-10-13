@@ -733,12 +733,29 @@ def _completed_stage_present(fd, record):
     return True
 
 
+def _check_partial_archive(store, archive):
+    """Check a journal-bound private archive directory without consuming its files.
+
+    Require the recorded identity and recheck its path before closing the
+    descriptor. Partial contents remain unverified and untouched.
+    """
+    name = _component(archive["name"])
+    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+    try:
+        if (_identity(_admit(child, private=True)) != archive["identity"]
+                or _identity(os.stat(name, dir_fd=store.fd, follow_symlinks=False)) != archive["identity"]):
+            raise RuntimeError("Interrupted archive substituted; preserve it")
+    finally:
+        os.close(child)
+
+
 def _check_stages(fd, store):
     """Check retained identities and v2 completed inventories before admission.
 
     Raise RuntimeError for missing, replaced, or unknown stages without removing
-    them. Reject unknown or changed v2 completed members. Other filesystem
-    errors propagate. Return the observed parent
+    them. Reject unknown or changed v2 completed members and missing, unsafe or
+    substituted bound partial archives. Other filesystem errors propagate.
+    Return the observed parent
     descriptor for an active v2 stage, otherwise None.
     """
     known = {item["name"] for item in store.body["history"]}
@@ -763,6 +780,9 @@ def _check_stages(fd, store):
                     raise RuntimeError("Retained preparation changed; preserve all evidence")
             finally:
                 os.close(child)
+        maintenance = store.body.get("maintenance")
+        if maintenance is not None and maintenance.get("archive") is not None:
+            _check_partial_archive(store, maintenance["archive"])
     if any(name.startswith(_PREFIX) and name not in known for name in os.listdir(fd)):
         raise RuntimeError("Unrecognized hook staging; missing ownership authority. Retain it for manual reconciliation")
     return active_parent
@@ -1467,12 +1487,7 @@ def _copy_archive(fd, store, record):
     closure = _completion_closure(store, record)
     if maintenance.get("archive") is not None:
         prior = maintenance["archive"]
-        child = os.open(_component(prior["name"]), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
-        try:
-            if _identity(_admit(child, private=True)) != prior["identity"]:
-                raise RuntimeError("Interrupted archive substituted; preserve it")
-        finally:
-            os.close(child)
+        _check_partial_archive(store, prior)
         store.body["retained"].append({"name": prior["name"], "identity": prior["identity"],
                                        "reason": "incomplete archive", "binding": maintenance["binding"]})
         maintenance["archive"] = None

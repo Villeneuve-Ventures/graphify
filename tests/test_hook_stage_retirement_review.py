@@ -422,3 +422,62 @@ def test_pending_preview_returns_exact_original_batch_and_token(repo, monkeypatc
     assert result == {"state": "RETIREMENT_PENDING", "batch": batch, "token": token, "physical_stage": "retained"}
     assert (protected(repo), protected(publication._state_root())) == before
     assert hooks.retire(repo, batch=batch, expected=token)["state"] == "RETIRED_ARCHIVED"
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory", "symlink", "file", "mode"])
+@pytest.mark.parametrize("entry", ["api", "cli"])
+@pytest.mark.parametrize("action", ["status", "preview"])
+def test_unverified_partial_archive_refuses_observation_and_retry(repo, monkeypatch, kind, entry, action):
+    """Missing or unsafe bound archive directories cannot be reported as retryable."""
+    hooks.install(repo)
+    batch = body(repo)["history"][0]["name"]
+    token = interrupt_archive(repo, monkeypatch, batch)
+    archive = slot(repo) / body(repo)["maintenance"]["archive"]["name"]
+    preserved = slot(repo) / "original-archive-preserved"
+    if kind == "mode":
+        archive.chmod(0o755)
+    else:
+        archive.rename(preserved)
+        if kind == "directory":
+            archive.mkdir(mode=0o700)
+            (archive / "foreign").write_bytes(b"do not modify the replacement")
+        elif kind == "symlink":
+            archive.symlink_to(preserved, target_is_directory=True)
+        elif kind == "file":
+            archive.write_bytes(b"keep this foreign file")
+    before = protected(repo), protected(publication._state_root())
+    if action == "status":
+        if entry == "api":
+            result = hooks.status(repo)
+        else:
+            command = cli(repo, "status")
+            assert command.returncode == 0, command.stderr
+            result = command.stdout
+        assert "unverified" in result and "pending stage archival" not in result
+        assert not isinstance(publication.recovery_record(_hooks(repo)), dict)
+    elif entry == "api":
+        with pytest.raises(RuntimeError):
+            hooks.retire(repo, batch=batch)
+    else:
+        command = cli(repo, "retire", "--batch", batch, "--preview")
+        assert command.returncode != 0 and token not in command.stdout
+    assert (protected(repo), protected(publication._state_root())) == before
+    with pytest.raises(RuntimeError):
+        hooks.retire(repo, batch=batch, expected=token)
+    assert (protected(repo), protected(publication._state_root())) == before
+
+
+def test_valid_partial_archive_keeps_unknown_contents_and_exact_retry(repo, monkeypatch):
+    """Directory admission verifies the bound object and leaves partial contents untouched."""
+    hooks.install(repo)
+    batch = body(repo)["history"][0]["name"]
+    token = interrupt_archive(repo, monkeypatch, batch)
+    archive = slot(repo) / body(repo)["maintenance"]["archive"]["name"]
+    (archive / "foreign").write_bytes(b"unverified partial child; preserve it")
+    before = protected(repo), protected(publication._state_root())
+    assert "pending stage archival" in hooks.status(repo)
+    assert hooks.retire(repo, batch=batch)["state"] == "RETIREMENT_PENDING"
+    assert (protected(repo), protected(publication._state_root())) == before
+    partial = protected(archive)
+    assert hooks.retire(repo, batch=batch, expected=token)["state"] == "RETIRED_ARCHIVED"
+    assert protected(archive) == partial
