@@ -27,6 +27,7 @@ _PREFIX = ".graphify-hook-batch-"
 _SCHEMA = "graphify.hook-installation.v1"
 _LIFECYCLE_SCHEMA = "graphify.hook-installation.v2"
 _INITIALIZING = ".initializing-hook-authority-"
+_ARCHIVE_PREFIX = ".hook-stage-archive-"
 _RECORD_LIMIT = 16 * 1024 * 1024
 _MKDIR_CODE = """import os, sys
 try:
@@ -467,6 +468,7 @@ class _Store:
             self.body = self._decode(document[1])
             if self.body["schema"] == _LIFECYCLE_SCHEMA and self.body["journal_identity"] != _identity(document[0]):
                 raise RuntimeError("Copied or replaced installer journal; retain all evidence")
+        self.journal_signature = _signature(_read(fd, "journal", private=True))
         self.guard = _read(fd, "completion", private=True)
         if self.guard is not None:
             obligation = self._decode(self.guard[1])
@@ -504,7 +506,7 @@ class _Store:
             if body["schema"] == _LIFECYCLE_SCHEMA:
                 if (body["authority_parent"] != self.parent_identity
                         or type(body["issuer_uid"]) is not int or body["issuer_uid"] != os.getuid()
-                        or type(body["contract"]) is not int or body["contract"] != 1
+                        or type(body["contract"]) is not int or body["contract"] not in (1, 2)
                         or len(data) > _RECORD_LIMIT):
                     raise ValueError("authority parent or record size")
                 if _canonical(envelope) != data:
@@ -568,6 +570,7 @@ class _Store:
         _write(self.fd, name, bound if self.body["schema"] == _LIFECYCLE_SCHEMA else self._sealed(), 0o600)
         os.replace(name, "journal", src_dir_fd=self.fd, dst_dir_fd=self.fd)
         os.fsync(self.fd)
+        self.journal_signature = _signature(_read(self.fd, "journal", private=True))
         if check is not None:
             check()
 
@@ -674,12 +677,18 @@ def _check_stages(fd, store):
     """
     known = {item["name"] for item in store.body["history"]}
     for item in store.body["history"]:
+        if "archive" in item:
+            _validate_archive(store, item)
         try:
             info = os.stat(item["name"], dir_fd=fd, follow_symlinks=False)
         except FileNotFoundError as exc:
+            if "archive" in item:
+                continue
             raise RuntimeError("Retained staging directory missing; preserve recovery evidence") from exc
         if not stat.S_ISDIR(info.st_mode) or _identity(info) != item["identity"]:
             raise RuntimeError("Retained staging directory changed; preserve recovery evidence")
+        if "archive" in item:
+            _stage_inventory(fd, item)
     if store.body["active"]:
         active = store.body["active"]
         known.add(active["stage"])
@@ -1043,6 +1052,8 @@ def run(root, hooks_dir, operation, request, prepare, *, recapture_request, fina
             state_fd, store = _open_store(authority_fd, hooks_identity, fd)
             try:
                 state_identity = _identity(_admit(state_fd, private=True))
+                if store.body.get("maintenance") is not None:
+                    raise RuntimeError("Pending stage archival; retry the exact retirement request and retain all evidence")
                 if store.body["active"] is not None and store.body["active"].get("metadata_version") != 1:
                     raise RuntimeError("Legacy pending batch lacks hook metadata binding; retain all evidence for manual reconciliation")
                 if store.body["active"] is not None:
@@ -1173,12 +1184,22 @@ def _pending_record(hooks_dir):
                             "message": f"pending {active['binding']['operation']} ({active['phase']}); recovery files: "
                                        f"{(_state_root() / _slot(identity) if active['phase'] == 'PREPARING' else hooks_dir) / active['stage']}",
                         }
-                        if result is None and store.body.get("retained"):
-                            result = f"retained incomplete preparation evidence: {len(store.body['retained'])}; no automatic cleanup"
+                        if result is None and store.body.get("maintenance") is not None:
+                            maintenance = store.body["maintenance"]
+                            result = {"binding": maintenance["binding"],
+                                      "message": "pending stage archival; retry the exact retirement request; original stages retained"}
                         if result is None and store.body["schema"] == _LIFECYCLE_SCHEMA:
                             known = {item["name"] for item in store.body["retained"]}
-                            if any(name.startswith(_PREFIX) and name not in known for name in os.listdir(slot_fd)):
-                                result = "unverified authority: unclaimed private preparation artifacts retained"
+                            known.update(item["archive"]["name"] for item in store.body["history"] if "archive" in item)
+                            unclaimed = sum(name.startswith((_PREFIX, _ARCHIVE_PREFIX)) and name not in known
+                                            for name in os.listdir(slot_fd))
+                            candidates = sum(name.startswith(_INITIALIZING) for name in os.listdir(authority_fd))
+                            if store.body["history"] or store.body["retained"] or unclaimed or candidates:
+                                result = {"binding": None, "message": None, "summary": {
+                                    "completed": [item["name"] for item in store.body["history"]],
+                                    "archived": sum("archive" in item for item in store.body["history"]),
+                                    "archive_payload_bytes": sum(item["archive"]["payload_bytes"] for item in store.body["history"] if "archive" in item),
+                                    "retained_incomplete": len(store.body["retained"]), "unclaimed": unclaimed + candidates}}
                     finally:
                         os.close(slot_fd)
             return result
@@ -1199,6 +1220,11 @@ def pending(hooks_dir):
     return result
 
 
+def recovery_record(hooks_dir):
+    """Return one read-only recovery observation, including authenticated history IDs."""
+    return _pending_record(hooks_dir)
+
+
 def pending_merge_guard_uninstall(hooks_dir):
     """Preserve five-hook retry selection from authenticated pending evidence.
 
@@ -1206,8 +1232,285 @@ def pending_merge_guard_uninstall(hooks_dir):
     request and validates recovery under its lock before changing any hook.
     """
     result = _pending_record(hooks_dir)
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or result["binding"] is None:
         return False
     binding = result["binding"]
     return (binding["operation"] == "uninstall"
             and binding["request"].get("merge_guard_hooks") == list(MERGE_GUARD_NAMES))
+
+
+def _stage_inventory(fd, record):
+    """Read only the exact closed inventory of an authenticated completed stage."""
+    inventory = record.get("inventory")
+    if not isinstance(inventory, dict) or ".gitignore" not in inventory:
+        raise RuntimeError("Legacy completed inventory is not eligible for retirement")
+    child = os.open(_component(record["name"]), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+    try:
+        if _identity(_admit(child, private=True)) != record["identity"]:
+            raise RuntimeError("Completed stage substituted; preserve it")
+        if set(os.listdir(child)) != set(inventory):
+            raise RuntimeError("Unknown or missing completed-stage members; preserve all content")
+        snapshots = {}
+        for name, signature in inventory.items():
+            _component(name)
+            if (not isinstance(signature, dict) or "ownership" not in signature or "metadata" not in signature):
+                raise RuntimeError("Legacy preservation evidence cannot authorize retirement")
+            if sys.platform == "darwin" and "flags" not in signature["metadata"]:
+                raise RuntimeError("Legacy BSD flag evidence cannot authorize retirement")
+            snapshot = _read(child, name)
+            if _signature(snapshot) != signature:
+                raise RuntimeError("Completed stage member changed; preserve all content")
+            snapshots[name] = snapshot
+        if (set(os.listdir(child)) != set(inventory)
+                or _identity(os.stat(record["name"], dir_fd=fd, follow_symlinks=False)) != record["identity"]):
+            raise RuntimeError("Completed stage changed during inspection; preserve it")
+        return snapshots
+    finally:
+        os.close(child)
+
+
+def _completion_closure(store, record):
+    """Validate all immutable private completion references without dropping history."""
+    pending = [record]
+    snapshots = {}
+    signatures = {}
+    while pending:
+        reference = pending.pop()
+        name = _component(reference["retired"])
+        if name in snapshots:
+            if signatures[name] != reference["completion"]:
+                raise RuntimeError("Conflicting completion reference; preserve all evidence")
+            continue
+        snapshot = _read(store.fd, name, private=True)
+        if _signature(snapshot) != reference["completion"] or snapshot is None:
+            raise RuntimeError("Completion closure missing or changed; preserve all evidence")
+        document = store._decode(snapshot[1])
+        batch = document["active"]
+        if batch is None or batch["stage"] != reference["name"] or batch["retirement"] != name:
+            raise RuntimeError("Completion reference does not describe its recorded batch")
+        if "inventory" in reference and reference["inventory"] != batch.get("completed_inventory"):
+            raise RuntimeError("Completion inventory does not match its immutable evidence")
+        signatures[name], snapshots[name] = reference["completion"], snapshot
+        pending.extend(document["history"])
+    return snapshots
+
+
+def _validate_archive(store, record):
+    """Authenticate an archive and every copy using its own object identities."""
+    archive = record["archive"]
+    child = os.open(_component(archive["name"]), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+    try:
+        if _identity(_admit(child, private=True)) != archive["identity"]:
+            raise RuntimeError("Archive directory substituted; preserve all evidence")
+        manifest = _read(child, "manifest", private=True)
+        if manifest is None or _signature(manifest) != archive["manifest"]:
+            raise RuntimeError("Archive manifest missing or replaced; preserve all evidence")
+        if len(manifest[1]) > _RECORD_LIMIT:
+            raise RuntimeError("Archive manifest exceeds its format limit")
+        envelope = json.loads(manifest[1])
+        body = envelope["body"]
+        seal = hmac.new(store.key, _canonical(body), hashlib.sha256).hexdigest()
+        if (not hmac.compare_digest(seal, envelope["seal"]) or _canonical(envelope) != manifest[1]
+                or body["schema"] != "graphify.hook-stage-archive.v1"
+                or body["authority"] != store.body["authority"] or body["key"] != store.identity
+                or body["authority_parent"] != store.parent_identity or body["hooks"] != store.hooks_identity
+                or body["issuer_uid"] != os.getuid()
+                or body["directory"] != archive["identity"] or body["manifest_identity"] != _identity(manifest[0])
+                or body["source"] != {"name": record["name"], "identity": record["identity"], "inventory": record["inventory"]}):
+            raise RuntimeError("Unauthenticated archive binding; preserve all evidence")
+        copies = body["payloads"]
+        completions = body["completions"]
+        if set(copies) != set(record["inventory"]) or record["retired"] not in completions:
+            raise RuntimeError("Incomplete archive evidence closure")
+        expected = {"manifest", ".gitignore"}
+        if _signature(_read(child, ".gitignore", private=True)) != body["exclusion"]:
+            raise RuntimeError("Archive exclusion changed; preserve all evidence")
+        for name, entry in [*copies.items(), *completions.items()]:
+            member = _component(entry["file"])
+            if member in expected:
+                raise RuntimeError("Aliased archive inventory")
+            expected.add(member)
+            snapshot = _read(child, member, private=True)
+            if _signature(snapshot) != entry["stored"] or snapshot is None:
+                raise RuntimeError("Archive payload changed; preserve all evidence")
+            original = record["inventory"][name] if name in copies else entry["original"]
+            if (entry["original"] != original or len(snapshot[1]) != original["size"]
+                    or hashlib.sha256(snapshot[1]).hexdigest() != original["sha256"]):
+                raise RuntimeError("Archive copy does not match its original evidence")
+        if set(os.listdir(child)) != expected:
+            raise RuntimeError("Unknown archive members; preserve them")
+        closure = _completion_closure(store, record)
+        if set(completions) != set(closure) or any(
+                completions[name]["original"] != _signature(snapshot) for name, snapshot in closure.items()):
+            raise RuntimeError("Archive completion closure changed")
+        if _identity(os.stat(archive["name"], dir_fd=store.fd, follow_symlinks=False)) != archive["identity"]:
+            raise RuntimeError("Archive path changed during verification")
+        return body
+    finally:
+        os.close(child)
+
+
+def _copy_archive(fd, store, record):
+    """Create a private archive; keep all originals and every interrupted copy."""
+    maintenance = store.body["maintenance"]
+    check = store.check
+    if check is None:
+        raise RuntimeError("Archive mutation requires its admitted lifecycle check")
+    snapshots = _stage_inventory(fd, record)
+    closure = _completion_closure(store, record)
+    if maintenance.get("archive") is not None:
+        prior = maintenance["archive"]
+        child = os.open(_component(prior["name"]), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+        try:
+            if _identity(_admit(child, private=True)) != prior["identity"]:
+                raise RuntimeError("Interrupted archive substituted; preserve it")
+        finally:
+            os.close(child)
+        store.body["retained"].append({"name": prior["name"], "identity": prior["identity"],
+                                       "reason": "incomplete archive", "binding": maintenance["binding"]})
+        maintenance["archive"] = None
+        store.save()
+    name = _ARCHIVE_PREFIX + secrets.token_hex(16)
+    _mkdir_private(store.fd, name)
+    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
+    try:
+        archive = {"name": name, "identity": _identity(_admit(child, private=True)),
+                   "token": maintenance["token"], "binding": maintenance["binding"]}
+        maintenance["archive"] = archive
+        os.fsync(store.fd)
+        store.save()
+        _write(child, ".gitignore", b"*\n", 0o600)
+        os.fsync(child)
+        body = {"schema": "graphify.hook-stage-archive.v1", "authority": store.body["authority"],
+                "issuer_uid": os.getuid(),
+                "authority_parent": store.parent_identity, "key": store.identity, "hooks": store.hooks_identity,
+                "directory": archive["identity"], "source": {"name": record["name"], "identity": record["identity"],
+                                                               "inventory": record["inventory"]},
+                "exclusion": _signature(_read(child, ".gitignore", private=True)), "payloads": {}, "completions": {}}
+        for category, sources in (("payloads", snapshots), ("completions", closure)):
+            for index, (original, snapshot) in enumerate(sorted(sources.items())):
+                if snapshot is None:
+                    raise RuntimeError("Required archive source disappeared")
+                member = category + "-" + str(index)
+                _write(child, member, snapshot[1], 0o600)
+                body[category][original] = {"file": member, "original": _signature(snapshot),
+                                            "stored": _signature(_read(child, member, private=True))}
+        def manifest(identity):
+            body["manifest_identity"] = identity
+            data = _canonical({"body": body, "seal": hmac.new(store.key, _canonical(body), hashlib.sha256).hexdigest()})
+            if len(data) > _RECORD_LIMIT:
+                raise RuntimeError("Archive manifest exceeds its format limit")
+            return data
+        _write(child, "manifest", manifest, 0o600)
+        os.fsync(child)
+        os.fsync(store.fd)
+        archive["manifest"] = _signature(_read(child, "manifest", private=True))
+        archive["payload_bytes"] = sum(len(value[1]) for value in [*snapshots.values(), *closure.values()] if value is not None)
+        _validate_archive(store, {**record, "archive": archive})
+        _stage_inventory(fd, record)
+        check()
+        record["archive"] = archive
+        store.body["maintenance"] = None
+        store.save()
+        return archive
+    finally:
+        os.close(child)
+
+
+def retire(root, hooks_dir, batch, *, expected=None, recapture_request):
+    """Preview, or explicitly archive one completed stage and retire its reference.
+
+    Preview performs no writes or locking. Execution requires its exact token,
+    both lifecycle locks and authenticated complete v2 evidence. Nothing is
+    removed or moved. Interrupted archives remain private and exact retry keeps
+    them before constructing a fresh copy. Existing v1 stores are not migrated.
+    """
+    _component(batch)
+    fd = os.open(hooks_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    common_fd = None
+    try:
+        if expected is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        common_raw = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+                                    capture_output=True, text=True, check=True).stdout.strip()
+        common = (root / common_raw).resolve()
+        common_fd = os.open(common, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        hooks_identity, common_identity = _identity(os.fstat(fd)), _identity(os.fstat(common_fd))
+        if expected is not None and hooks_identity != common_identity:
+            fcntl.flock(common_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        request = {**recapture_request(), "root": str(root), "hooks_path": str(hooks_dir), "common": common_identity}
+        binding = {"operation": "archive-stage", "batch": batch, "request": request}
+        with _authority(_state_root(), False) as (authority_fd, authority_check):
+            name = _slot(hooks_identity)
+            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=authority_fd)
+            try:
+                identity = _identity(_admit(child, private=True))
+                store = _Store(child, hooks_identity, False)
+                if store.body["schema"] != _LIFECYCLE_SCHEMA:
+                    raise RuntimeError("Legacy history is retained but not eligible for automatic retirement")
+                if store.guard is not None or store.body["active"] is not None:
+                    raise RuntimeError("Active hook work or completion obligation blocks retirement")
+                def check():
+                    authority_check()
+                    _admit(child, private=True)
+                    current = {**recapture_request(), "root": str(root), "hooks_path": str(hooks_dir), "common": common_identity}
+                    if (current != request or _identity(os.stat(common, follow_symlinks=False)) != common_identity
+                            or _identity(os.stat(hooks_dir, follow_symlinks=False)) != hooks_identity
+                            or _identity(os.stat(name, dir_fd=authority_fd, follow_symlinks=False)) != identity
+                            or _signature(_read(child, "capability", private=True)) != store.identity):
+                        raise RuntimeError("Retirement authority or request changed; preserve all evidence")
+                check()
+                _check_stages(fd, store)
+                records = [record for record in store.body["history"] if record["name"] == batch]
+                if len(records) != 1:
+                    raise RuntimeError("Select one authenticated completed batch; names alone grant no authority")
+                record = records[0]
+                maintenance = store.body.get("maintenance")
+                if "archive" in record:
+                    archive = record["archive"]
+                    if expected is not None:
+                        if expected != archive["token"] or binding != archive["binding"]:
+                            raise RuntimeError("Retirement retry belongs to a different request")
+                        os.fsync(child)
+                    check()
+                    return {"state": "RETIRED_ARCHIVED", "batch": batch, "physical_stage": "retained",
+                            "archive": str(_state_root() / name / archive["name"]), "payload_bytes": archive["payload_bytes"]}
+                if maintenance is not None:
+                    if expected is None:
+                        check()
+                        return {"state": "RETIREMENT_PENDING", "batch": maintenance["binding"]["batch"],
+                                "token": maintenance["token"], "physical_stage": "retained"}
+                    if binding != maintenance["binding"] or expected != maintenance["token"]:
+                        raise RuntimeError("Pending retirement requires its exact original request")
+                else:
+                    snapshots = _stage_inventory(fd, record)
+                    closure = _completion_closure(store, record)
+                    plan = {"binding": binding, "journal": store.journal_signature, "record": record}
+                    token = hmac.new(store.key, _canonical(plan), hashlib.sha256).hexdigest()
+                    check()
+                    if _signature(_read(child, "journal", private=True)) != store.journal_signature:
+                        raise RuntimeError("Retirement preview changed during inspection")
+                    if expected is None:
+                        return {"state": "COMPLETED_RETAINED", "batch": batch, "token": token,
+                                "payload_bytes": sum(len(value[1]) for value in [*snapshots.values(), *closure.values()] if value is not None),
+                                "physical_stage": "retained"}
+                    if expected != token:
+                        raise RuntimeError("Stale retirement preview; inspect again without changing evidence")
+                    store.body["contract"] = 2
+                    store.body["maintenance"] = {"binding": binding, "token": token, "archive": None}
+                    store.check = check
+                    store.save()
+                store.check = check
+                archive = _copy_archive(fd, store, record)
+                check()
+                return {"state": "RETIRED_ARCHIVED", "batch": batch, "physical_stage": "retained",
+                        "archive": str(_state_root() / name / archive["name"]), "payload_bytes": archive["payload_bytes"]}
+            finally:
+                os.close(child)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(f"Stage archival incomplete: {exc}. Preserve hook stages and private authority; "
+                           "retry only the exact retirement request or retain evidence for manual reconciliation. No stage was removed.") from exc
+    finally:
+        if common_fd is not None:
+            os.close(common_fd)
+        os.close(fd)

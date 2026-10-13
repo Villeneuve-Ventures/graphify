@@ -48,7 +48,60 @@ publication, and its diagnostic does not establish ownership of its children.
 The separate [#198 acceptance extension](plans/graphify-hook-authority-198.md)
 records this local contract and its native qualification requirements.
 
-V2 journal and completion envelopes have a 16 MiB record limit. This is not a total-storage limit.
+## Explicit archival of completed v2 stages
+
+`graphify hook status` lists authenticated completed batch IDs and reports
+archived references, archive payload bytes, retained incomplete evidence and
+unclaimed private artifacts. Those counts do not attest unverified content.
+
+Preview a selected completed v2 batch without writes:
+
+```sh
+graphify hook retire --batch .graphify-hook-batch-EXACT_ID --preview
+```
+
+Use the exact ID shown by status, not the placeholder above. Preview returns a
+token bound to the current maintenance request, journal and completed evidence.
+Execute only that preview with `graphify hook retire --batch EXACT_ID --execute
+TOKEN`. A stale token refuses without mutation. Execution holds the physical
+hooks and Git common-directory locks. Active hook work, a pending completion
+obligation, unsupported old evidence, missing or substituted stages, changed
+exclusion or unknown members block archival.
+
+Archival copies the full stage payload and reachable private completion envelopes
+to authenticated private storage. Original bytes, modes, UID/GID, ACL/xattrs,
+flags and identities are retained as evidence; copies have their own identities
+and private current-user permissions. They are not replacement recovery objects,
+and this operation grants no restoration or hook-publication authority. The
+archive has its own persisted self-ignore file for ordinary Git exclusion.
+
+Only after the complete archive is verified and flushed does an authenticated
+retirement record end the original stage's presence dependency. Every original
+stage stays untouched. Removing an original beforehand still blocks recovery;
+after verified retirement, its absence is allowed. A substituted or changed
+original or archive refuses further mutation and preserves all evidence.
+Original private completion records remain required; archival does not compact
+or remove them. It preserves their complete reference closure.
+
+Interrupted archival is visible as pending and blocks install/uninstall.
+Repeat its exact original batch and token after resolving the reported cause.
+An authenticated partial archive is retained before a fresh copy is constructed;
+unrecorded artifacts are preserved without adoption. Changed sources or request
+context refuse. Status and preview never finish this operation automatically.
+
+V2 issuer UID binding prevents account transfer by changing file ownership.
+Another authority root or account cannot import copied journals or archives.
+Existing v1 history remains usable but is ineligible for this maintenance path;
+no upgrade, migration or transfer is provided. Native multi-account access is
+not inferred from injected UID observations.
+
+Journal and archive-manifest formats have a 16 MiB record limit. This is not a
+total-storage limit. There is no expiration, eviction, preimage purge, stage
+movement or physical cleanup. Archival can increase disk use. Ordinary Git
+exclusion does not protect originals or archives from force-add, already-tracked
+files, removal of ignore files, or `git clean -x`.
+The [#199 acceptance extension](plans/graphify-hook-authority-199.md) records the
+separate maintenance boundary. It does not activate S6 GC or merge finalization.
 
 The v2 journal serializer also enforces the record limit on completion
 obligations before creating them. Capacity refusal preserves pending authority

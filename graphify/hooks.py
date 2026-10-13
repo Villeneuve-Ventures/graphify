@@ -1505,6 +1505,19 @@ def uninstall(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     )
 
 
+def retire(path: Path = Path("."), *, batch: str, expected: str | None = None) -> dict:
+    """Preview or explicitly archive a completed batch without removing its stage."""
+    if not _atomic_hooks_supported():
+        raise RuntimeError("Stage retirement is supported on macOS and Linux only")
+    root = _git_root(path)
+    if root is None:
+        raise RuntimeError(f"No git repository found at or above {path.resolve()}")
+    hooks_dir = _user_hooks_dir(_hooks_dir(root, create=False))
+    from graphify.hook_installation import retire as archive_stage
+    return archive_stage(root, hooks_dir, batch, expected=expected,
+                         recapture_request=lambda: _hook_request(root))
+
+
 def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     """Return hook, merge-driver, and macOS/Linux recovery status text.
 
@@ -1519,9 +1532,19 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
         return "Not in a git repository."
     hooks_dir = _user_hooks_dir(_hooks_dir(root, create=False))
     warning = ""
+    retention = ""
     if _atomic_hooks_supported():
-        from graphify.hook_installation import pending
-        recovery = pending(hooks_dir) if hooks_dir.exists() else "unverified authority: hooks directory absent"
+        from graphify.hook_installation import recovery_record
+        observed = recovery_record(hooks_dir) if hooks_dir.exists() else "unverified authority: hooks directory absent"
+        recovery = observed["message"] if isinstance(observed, dict) else observed
+        if isinstance(observed, dict) and "summary" in observed:
+            summary = observed["summary"]
+            retention = (f"\ncompleted stages retained: {len(summary['completed'])}; archived references: {summary['archived']}"
+                         f"\narchive payload bytes: {summary['archive_payload_bytes']}; retained incomplete evidence: {summary['retained_incomplete']}"
+                         f"\nprivate unclaimed artifacts: {summary['unclaimed']}")
+            if summary["unclaimed"]:
+                retention += " (preserved; ownership unverified)"
+            retention += "".join(f"\ncompleted batch: {name}" for name in summary["completed"])
         if recovery:
             if not recovery.startswith("unverified authority:"):
                 return f"hook installation: {recovery}"
@@ -1564,7 +1587,7 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
         f"post-commit: {commit}\n"
         f"post-checkout: {checkout}\n"
         f"post-merge: {post_merge}\n"
-        f"merge driver: {merge}" + guards +
+        f"merge driver: {merge}" + guards + retention +
         ("\nmerge guards: ordinary merge containment only; no finalization or clone qualification"
          if merge_guard else "")
     )

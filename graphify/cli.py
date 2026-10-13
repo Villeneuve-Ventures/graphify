@@ -1930,6 +1930,17 @@ def _dispatch_command(cmd: str) -> None:
 
         subcmd = sys.argv[2] if len(sys.argv) > 2 else ""
         options = sys.argv[3:]
+        if subcmd == "retire":
+            import argparse
+            from graphify.hooks import retire as hook_retire
+            parser = argparse.ArgumentParser(prog="graphify hook retire")
+            parser.add_argument("--batch", required=True, help="exact completed stage from authenticated history")
+            action = parser.add_mutually_exclusive_group()
+            action.add_argument("--preview", action="store_true", help="read-only preview (default)")
+            action.add_argument("--execute", metavar="TOKEN", help="execute the exact preview; original stages stay intact")
+            selected = parser.parse_args(options)
+            print(json.dumps(hook_retire(Path("."), batch=selected.batch, expected=selected.execute), sort_keys=True, indent=2))
+            return
         if options not in ([], ["--merge-guard"]):
             print("Usage: graphify hook [install|uninstall|status] [--merge-guard]", file=sys.stderr)
             sys.exit(1)

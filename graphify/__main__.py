@@ -658,6 +658,7 @@ def _run_cli() -> None:
         print("  hook uninstall          remove git hooks")
         print("    --merge-guard          also remove the opted-in merge guards")
         print("  hook status             check if git hooks are installed")
+        print("  hook retire --batch ID  preview completed-stage archival; execution keeps original stages")
         print(
             "  gemini install          write GEMINI.md section + BeforeTool hook (Gemini CLI)"
         )
