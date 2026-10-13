@@ -32,6 +32,17 @@ Native account/root checks prove refusal and preservation only; they approve
 no transfer, migration, cleanup or broader #196 qualification. Local base
 integration is authorized by the new repair request; publication remains separate.
 
+### Completion preservation repair review
+
+Before repairing the metadata gap at #209 `25cf4715`, direct owner review checked
+the existing A1/A3/A4 obligations. Capture admitted completion metadata separately
+from legacy authority signatures, bind it to preview and durable maintenance,
+and verify it against archive evidence. New maintenance uses reader contract 3
+so earlier readers refuse these obligations. Older archives or pending records
+without preservation evidence remain unverified and intact; no current metadata
+is backfilled into them. This repairs the selected contract and approves no
+transfer, migration, restoration or removal choice.
+
 ## Selected contract
 
 - Maintenance is explicit: read-only preview, then execution naming the exact
@@ -101,7 +112,8 @@ transfer and enforcing SELinux policy remain outside this extension.
 and explicit `retire` in `graphify/hook_installation.py`, the public wrapper in
 `graphify/hooks.py`, CLI dispatch/help and `tests/test_hook_stage_retirement.py`.
 It extends the compatible status summary and advances the reader contract to 2
-before maintenance intent. The separate #198 acceptance remains in force.
+before maintenance intent in the original implementation, and to 3 for completion
+preservation obligations. The separate #198 acceptance remains in force.
 
 Physical deletion, total-storage quotas, expiration, restoration, account/root
 transfer and legacy-history migration remain unresolved operator choices. None

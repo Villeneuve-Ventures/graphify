@@ -120,6 +120,15 @@ and private current-user permissions. They are not replacement recovery objects,
 and this operation grants no restoration or hook-publication authority. The
 archive has its own persisted self-ignore file for ordinary Git exclusion.
 
+Completion envelopes retain their legacy authority-signature format. Their
+admitted UID/GID and extended metadata are captured separately for the preview,
+persisted maintenance obligation and archive. A later metadata change invalidates
+the preview or blocks pending/archived admission without altering any evidence.
+New maintenance advances the reader contract to 3 before persisting intent so
+earlier readers refuse it. Older archives or pending obligations without this
+preservation evidence remain unverified and intact; they are not backfilled
+from current metadata or automatically migrated.
+
 Only after the complete archive is verified and flushed does an authenticated
 retirement record end the original stage's presence dependency. Every original
 stage stays untouched. Removing an original beforehand still blocks recovery;

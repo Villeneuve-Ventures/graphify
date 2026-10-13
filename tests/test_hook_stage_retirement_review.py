@@ -8,7 +8,7 @@ import sys
 
 import pytest
 from graphify import hooks
-from tests.test_hook_installation import repo, _hooks  # noqa: F401
+from tests.test_hook_installation import repo, _hooks, _set_extended_metadata, _different_permitted_group  # noqa: F401
 from tests.test_hook_authority_lifecycle import body, slot
 from tests.test_hook_authority_review import _evidence, _interrupt
 
@@ -542,3 +542,207 @@ def test_cli_help_exposes_retirement_preview_and_execution_without_writes(repo, 
     assert "--batch" in retirement_help and "--preview" in retirement_help
     assert "--execute TOKEN" in retirement_help and "original stages" in retirement_help
     assert (protected(repo), publication._state_root().exists()) == before
+
+
+def completion_preservation(root):
+    """Observe full metadata separately from historical private authority signatures."""
+    child = os.open(slot(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return {record["retired"]: publication._signature(publication._read(child, record["retired"]))
+                for record in body(root)["history"]}
+    finally:
+        os.close(child)
+
+
+def change_completion_metadata(path, kind):
+    """Apply native metadata to a fixture envelope within the private admission policy."""
+    if kind == "acl" and sys.platform != "darwin":
+        pytest.skip("Linux private authority rejects POSIX ACLs")
+    if kind == "gid":
+        os.chown(path, -1, _different_permitted_group())
+    else:
+        _set_extended_metadata(path, kind)
+
+
+@pytest.mark.parametrize("kind", ["xattr", "acl", "flags", "gid"])
+def test_archive_records_completion_preservation_for_entire_closure(repo, kind):
+    """Archive every envelope's native evidence while leaving originals and authority intact."""
+    hooks.install(repo)
+    hooks.uninstall(repo)
+    hooks.install(repo)
+    records = body(repo)["history"]
+    for record in records:
+        change_completion_metadata(slot(repo) / record["retired"], kind)
+    originals = completion_preservation(repo)
+    before = protected(repo), protected(publication._state_root())
+    batch = records[-1]["name"]
+    token = hooks.retire(repo, batch=batch)["token"]
+    assert (protected(repo), protected(publication._state_root())) == before
+    result = hooks.retire(repo, batch=batch, expected=token)
+    archive = Path(result["archive"])
+    manifest = json.loads((archive / "manifest").read_bytes())["body"]
+    assert set(manifest["completions"]) == set(originals)
+    for name, entry in manifest["completions"].items():
+        assert entry["original"] == originals[name]
+        copy = archive / entry["file"]
+        assert copy.read_bytes() == (slot(repo) / name).read_bytes()
+        assert copy.stat().st_ino != (slot(repo) / name).stat().st_ino
+        assert copy.stat().st_uid == os.getuid() and copy.stat().st_mode & 0o777 == 0o600
+    assert completion_preservation(repo) == originals
+    assert protected(repo) == before[0]
+    assert [r["completion"] for r in body(repo)["history"]] == [r["completion"] for r in records]
+
+
+@pytest.mark.parametrize("kind", ["xattr", "acl", "flags", "gid"])
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_archived_completion_metadata_drift_refuses_with_preservation(repo, kind, entry):
+    """Later metadata changes to an older referenced envelope cannot pass archive admission."""
+    hooks.install(repo)
+    hooks.uninstall(repo)
+    batch = body(repo)["history"][-1]["name"]
+    token = hooks.retire(repo, batch=batch)["token"]
+    hooks.retire(repo, batch=batch, expected=token)
+    change_completion_metadata(slot(repo) / body(repo)["history"][0]["retired"], kind)
+    before = protected(repo), protected(publication._state_root()), completion_preservation(repo)
+    if entry == "api":
+        status = hooks.status(repo)
+    else:
+        result = cli(repo, "status")
+        assert result.returncode == 0, result.stderr
+        status = result.stdout
+    assert "unverified" in status
+    for operation in (lambda: hooks.install(repo), lambda: hooks.uninstall(repo),
+                      lambda: hooks.retire(repo, batch=batch),
+                      lambda: hooks.retire(repo, batch=batch, expected=token)):
+        with pytest.raises(RuntimeError, match="Archive completion"):
+            operation()
+        assert (protected(repo), protected(publication._state_root()), completion_preservation(repo)) == before
+
+
+@pytest.mark.parametrize("kind", ["xattr", "acl", "flags", "gid"])
+def test_completion_metadata_change_stales_preview_before_writes(repo, kind):
+    """A preview token binds the full admitted completion metadata before maintenance intent."""
+    hooks.install(repo)
+    record = body(repo)["history"][0]
+    token = hooks.retire(repo, batch=record["name"])["token"]
+    change_completion_metadata(slot(repo) / record["retired"], kind)
+    before = protected(repo), protected(publication._state_root()), completion_preservation(repo)
+    with pytest.raises(RuntimeError, match="Stale retirement preview"):
+        hooks.retire(repo, batch=record["name"], expected=token)
+    assert (protected(repo), protected(publication._state_root()), completion_preservation(repo)) == before
+
+
+@pytest.mark.parametrize("kind", ["xattr", "acl", "flags", "gid"])
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_pending_completion_metadata_change_refuses_exact_retry(repo, monkeypatch, kind, entry):
+    """Persisted completion evidence must survive a partial archive and its read-only retry."""
+    hooks.install(repo)
+    record = body(repo)["history"][0]
+    token = interrupt_archive(repo, monkeypatch, record["name"])
+    change_completion_metadata(slot(repo) / record["retired"], kind)
+    before = protected(repo), protected(publication._state_root()), completion_preservation(repo)
+    if entry == "api":
+        status = hooks.status(repo)
+    else:
+        result = cli(repo, "status")
+        assert result.returncode == 0, result.stderr
+        status = result.stdout
+    assert "unverified" in status and "pending stage archival" not in status
+    for expected in (None, token):
+        with pytest.raises(RuntimeError, match="Pending completion preservation"):
+            hooks.retire(repo, batch=record["name"], expected=expected)
+        assert (protected(repo), protected(publication._state_root()), completion_preservation(repo)) == before
+
+
+@pytest.mark.parametrize("kind", ["xattr", "acl", "flags", "gid"])
+def test_completion_metadata_change_during_copy_keeps_pending_evidence(repo, monkeypatch, kind):
+    """A metadata edit during copy must not seal a retirement from the earlier snapshot."""
+    hooks.install(repo)
+    record = body(repo)["history"][0]
+    path = slot(repo) / record["retired"]
+    if kind == "flags" and sys.platform != "darwin":
+        pytest.skip("BSD flags require native macOS")
+    if kind == "acl" and sys.platform != "darwin":
+        pytest.skip("Linux private authority rejects POSIX ACLs")
+    token = hooks.retire(repo, batch=record["name"])["token"]
+    original_hooks = protected(repo)
+    write = publication._write
+
+    def copied(fd, name, *args, **kwargs):
+        """Change the retained original immediately after its archive bytes are copied."""
+        result = write(fd, name, *args, **kwargs)
+        if name == "completions-0":
+            change_completion_metadata(path, kind)
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication, "_write", copied)
+        with pytest.raises(RuntimeError, match="Archive completion"):
+            hooks.retire(repo, batch=record["name"], expected=token)
+    assert body(repo)["maintenance"] is not None
+    assert "archive" not in body(repo)["history"][0]
+    assert protected(repo) == original_hooks
+    before = protected(publication._state_root()), completion_preservation(repo)
+    assert "unverified" in hooks.status(repo)
+    assert (protected(publication._state_root()), completion_preservation(repo)) == before
+
+
+@pytest.mark.parametrize("missing", ["all", "metadata", "ownership"])
+def test_pending_legacy_completion_preservation_is_not_reconstructed(repo, monkeypatch, missing):
+    """Older pending obligations without the new evidence stay unverified and preserved."""
+    hooks.install(repo)
+    record = body(repo)["history"][0]
+    token = interrupt_archive(repo, monkeypatch, record["name"])
+    captured = completion_preservation(repo)
+    child = os.open(slot(repo), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        store = publication._Store(child, publication._identity(_hooks(repo).stat()), False)
+        store.body["contract"] = 2
+        if missing == "all":
+            store.body["maintenance"].pop("completions", None)
+        else:
+            store.body["maintenance"]["completions"] = captured
+            del captured[record["retired"]][missing]
+        store.save()
+    finally:
+        os.close(child)
+    before = protected(repo), protected(publication._state_root()), completion_preservation(repo)
+    assert "unverified" in hooks.status(repo)
+    for expected in (None, token):
+        with pytest.raises(RuntimeError, match="Pending completion preservation"):
+            hooks.retire(repo, batch=record["name"], expected=expected)
+        assert (protected(repo), protected(publication._state_root()), completion_preservation(repo)) == before
+
+
+@pytest.mark.parametrize("missing", ["metadata", "ownership", "flags"])
+def test_legacy_archive_completion_preservation_is_not_reconstructed(repo, missing):
+    """An authenticated older archive cannot borrow current metadata to fill its missing proof."""
+    if missing == "flags" and sys.platform != "darwin":
+        pytest.skip("BSD flag evidence is native macOS")
+    hooks.install(repo)
+    record = body(repo)["history"][0]
+    token = hooks.retire(repo, batch=record["name"])["token"]
+    archive = Path(hooks.retire(repo, batch=record["name"], expected=token)["archive"])
+    envelope = json.loads((archive / "manifest").read_bytes())
+    original = envelope["body"]["completions"][record["retired"]]["original"]
+    if missing == "flags":
+        original.get("metadata", {}).pop("flags", None)
+    else:
+        original.pop(missing, None)
+    child = os.open(slot(repo), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    archive_fd = os.open(archive, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        store = publication._Store(child, publication._identity(_hooks(repo).stat()), False)
+        (archive / "manifest").write_bytes(store._sealed(envelope["body"]))
+        store.body["contract"] = 2
+        store.body["history"][0]["archive"]["manifest"] = publication._signature(
+            publication._read(archive_fd, "manifest", private=True))
+        store.save()
+    finally:
+        os.close(archive_fd)
+        os.close(child)
+    before = protected(repo), protected(publication._state_root()), completion_preservation(repo)
+    assert "unverified" in hooks.status(repo)
+    with pytest.raises(RuntimeError, match="Archive completion"):
+        hooks.retire(repo, batch=record["name"])
+    assert (protected(repo), protected(publication._state_root()), completion_preservation(repo)) == before

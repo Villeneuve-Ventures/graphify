@@ -293,12 +293,13 @@ def _authority(path, create):
             os.close(parent)
 
 
-def _read(fd, name, private=False):
+def _read(fd, name, private=False, *, capture_metadata=False):
     """Return (stat, bytes, extended metadata) for a stable file, or None if absent.
 
     Resolve name relative to fd without following symlinks. With private=True,
     require current-user ownership, mode 0600, and a safe ACL, and omit extended
-    metadata. Reject nonregular files, hard links, and detected changes with
+    metadata unless capture_metadata requests separate preservation evidence.
+    Reject nonregular files, hard links, and detected changes with
     RuntimeError. Other I/O errors propagate; only absence at open returns None.
     """
     try:
@@ -318,7 +319,7 @@ def _read(fd, name, private=False):
         if private and (before.st_uid != os.getuid() or before.st_nlink != 1
                         or stat.S_IMODE(before.st_mode) != 0o600 or not _acl_safe(source)):
             raise RuntimeError(f"Unsafe installer authority file: {name}")
-        metadata = None if private else _extended(source)
+        metadata = None if private and not capture_metadata else _extended(source)
         chunks = []
         remaining = before.st_size
         while remaining:
@@ -327,7 +328,7 @@ def _read(fd, name, private=False):
                 raise RuntimeError(f"File changed while reading: {name}")
             chunks.append(chunk)
             remaining -= len(chunk)
-        if not private and _extended(source) != metadata:
+        if metadata is not None and _extended(source) != metadata:
             raise RuntimeError(f"Hook metadata changed while reading: {name}")
         after = os.fstat(source)
         stable = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
@@ -506,7 +507,7 @@ class _Store:
             if body["schema"] == _LIFECYCLE_SCHEMA:
                 if (body["authority_parent"] != self.parent_identity
                         or type(body["issuer_uid"]) is not int or body["issuer_uid"] != os.getuid()
-                        or type(body["contract"]) is not int or body["contract"] not in (1, 2)
+                        or type(body["contract"]) is not int or body["contract"] not in (1, 2, 3)
                         or len(data) > _RECORD_LIMIT):
                     raise ValueError("authority parent or record size")
                 if _canonical(envelope) != data:
@@ -781,8 +782,15 @@ def _check_stages(fd, store):
             finally:
                 os.close(child)
         maintenance = store.body.get("maintenance")
-        if maintenance is not None and maintenance.get("archive") is not None:
-            _check_partial_archive(store, maintenance["archive"])
+        if maintenance is not None:
+            records = [item for item in store.body["history"] if item["name"] == maintenance["binding"]["batch"]]
+            if len(records) != 1:
+                raise RuntimeError("Pending retirement has no exact completed record; preserve all evidence")
+            closure = _completion_closure(store, records[0])
+            if {name: _signature(snapshot) for name, snapshot in closure.items()} != maintenance.get("completions"):
+                raise RuntimeError("Pending completion preservation evidence missing or changed; preserve all evidence")
+            if maintenance.get("archive") is not None:
+                _check_partial_archive(store, maintenance["archive"])
     if any(name.startswith(_PREFIX) and name not in known for name in os.listdir(fd)):
         raise RuntimeError("Unrecognized hook staging; missing ownership authority. Retain it for manual reconciliation")
     return active_parent
@@ -1398,7 +1406,11 @@ def _stage_inventory(fd, record):
 
 
 def _completion_closure(store, record):
-    """Validate all immutable private completion references without dropping history."""
+    """Authenticate legacy references and capture full current preservation evidence.
+
+    Keep private authority signatures unchanged; metadata and ownership are
+    captured on the same admitted read for preview, maintenance and archives.
+    """
     pending = [record]
     snapshots = {}
     signatures = {}
@@ -1409,8 +1421,8 @@ def _completion_closure(store, record):
             if signatures[name] != reference["completion"]:
                 raise RuntimeError("Conflicting completion reference; preserve all evidence")
             continue
-        snapshot = _read(store.fd, name, private=True)
-        if _signature(snapshot) != reference["completion"] or snapshot is None:
+        snapshot = _read(store.fd, name, private=True, capture_metadata=True)
+        if snapshot is None or _signature((snapshot[0], snapshot[1], None)) != reference["completion"]:
             raise RuntimeError("Completion closure missing or changed; preserve all evidence")
         document = store._decode(snapshot[1])
         batch = document["active"]
@@ -1486,6 +1498,8 @@ def _copy_archive(fd, store, record):
         raise RuntimeError("Archive mutation requires its admitted lifecycle check")
     snapshots = _stage_inventory(fd, record)
     closure = _completion_closure(store, record)
+    if {name: _signature(snapshot) for name, snapshot in closure.items()} != maintenance.get("completions"):
+        raise RuntimeError("Pending completion preservation evidence missing or changed; preserve all evidence")
     if maintenance.get("archive") is not None:
         prior = maintenance["archive"]
         _check_partial_archive(store, prior)
@@ -1610,7 +1624,9 @@ def retire(root, hooks_dir, batch, *, expected=None, recapture_request):
                 else:
                     snapshots = _stage_inventory(fd, record)
                     closure = _completion_closure(store, record)
-                    plan = {"binding": binding, "journal": store.journal_signature, "record": record}
+                    completions = {name: _signature(snapshot) for name, snapshot in closure.items()}
+                    plan = {"binding": binding, "journal": store.journal_signature, "record": record,
+                            "completions": completions}
                     token = hmac.new(store.key, _canonical(plan), hashlib.sha256).hexdigest()
                     check()
                     if _signature(_read(child, "journal", private=True)) != store.journal_signature:
@@ -1621,8 +1637,9 @@ def retire(root, hooks_dir, batch, *, expected=None, recapture_request):
                                 "physical_stage": "retained"}
                     if expected != token:
                         raise RuntimeError("Stale retirement preview; inspect again without changing evidence")
-                    store.body["contract"] = 2
-                    store.body["maintenance"] = {"binding": binding, "token": token, "archive": None}
+                    store.body["contract"] = 3
+                    store.body["maintenance"] = {"binding": binding, "token": token, "archive": None,
+                                                 "completions": completions}
                     store.check = check
                     store.save()
                 store.check = check
