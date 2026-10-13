@@ -42,9 +42,12 @@ that ownership refuses preparation. Directory modes and ownership are not
 normalized. Complete v2 history includes a closed final stage inventory,
 including its exclusion file, preimages and displaced originals.
 On Linux, creating new hooks beneath a hooks directory with a default POSIX ACL
-refuses rather than losing inherited access restrictions. The same check runs
-before exposure and each publication on an exact pending retry. This does not
-provide ACL-inheritance reconstruction or change existing v1 behavior.
+refuses rather than losing inherited access restrictions. On macOS, creation
+refuses when the hooks directory has an extended ACL; this conservative boundary
+does not distinguish inheritable entries from other entries. The same checks run
+before replacing an interrupted PREPARING attempt, exposure and each publication
+on an exact pending retry. This does not provide ACL-inheritance reconstruction
+or change existing v1 behavior.
 
 Public status now resolves existing paths only. Missing hooks directories and
 authority paths stay absent. It reports authenticated pending phases, unavailable
@@ -56,6 +59,9 @@ stages must match their recorded identity at the phase-appropriate location;
 EXPOSING checks both legal locations and reports the one actually observed.
 Missing, substituted or conflicting locations are damaged/unverified evidence,
 not a recoverable pending location. These observations grant no repair authority.
+With no active batch, unclaimed private preparation artifacts take precedence
+over the retained-only diagnostic. Known retained evidence does not authenticate
+additional artifacts, and status preserves both.
 
 The separate [#198 acceptance extension](plans/graphify-hook-authority-198.md)
 records this local contract and its native qualification requirements.

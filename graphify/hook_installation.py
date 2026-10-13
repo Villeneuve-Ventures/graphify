@@ -779,6 +779,8 @@ def _prepare(fd, store, snapshots, plans, request, operation, names=NAMES):
         if active["binding"] != binding:
             raise RuntimeError("Pending hook batch belongs to a different request; retry the original root, operation, interpreter and output")
         if store.body["schema"] == _LIFECYCLE_SCHEMA and active["phase"] == "PREPARING":
+            _check_new_hook_acl(fd, any(snapshots[name] is None and data is not None
+                                      for name, (data, _) in zip(names, desired, strict=True)))
             if {name: _signature(value) for name, value in snapshots.items()} != active["originals"]:
                 raise RuntimeError("Original hooks changed during preparation; retain all evidence")
             child = os.open(active["stage"], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=store.fd)
@@ -898,9 +900,13 @@ def _expose_stage(fd, store):
 
 
 def _check_new_hook_acl(fd, creating):
-    """Refuse new Linux hooks when private staging cannot inherit target ACLs."""
-    if sys.platform == "linux" and creating and "system.posix_acl_default" in os.listxattr(fd):
-        raise RuntimeError("Cannot preserve hooks-directory default ACL for new hooks during private preparation; "
+    """Refuse new hooks when private staging cannot inherit native target ACLs."""
+    if not creating:
+        return
+    unsupported = (sys.platform == "linux" and "system.posix_acl_default" in os.listxattr(fd)
+                   or sys.platform == "darwin" and _darwin_acl(fd) is not None)
+    if unsupported:
+        raise RuntimeError("Cannot preserve hooks-directory default or extended ACL for new hooks during private preparation; "
                            "retain all hooks and evidence")
 
 
@@ -1234,12 +1240,12 @@ def _pending_record(hooks_dir):
                             "message": f"pending {active['binding']['operation']} ({active['phase']}); recovery files: "
                                        f"{(_state_root() / _slot(identity) if active_parent == slot_fd else hooks_dir) / active['stage']}",
                         }
-                        if result is None and store.body.get("retained"):
-                            result = f"retained incomplete preparation evidence: {len(store.body['retained'])}; no automatic cleanup"
                         if result is None and store.body["schema"] == _LIFECYCLE_SCHEMA:
                             known = {item["name"] for item in store.body["retained"]}
                             if any(name.startswith(_PREFIX) and name not in known for name in os.listdir(slot_fd)):
                                 result = "unverified authority: unclaimed private preparation artifacts retained"
+                        if result is None and store.body.get("retained"):
+                            result = f"retained incomplete preparation evidence: {len(store.body['retained'])}; no automatic cleanup"
                     finally:
                         os.close(slot_fd)
             return result

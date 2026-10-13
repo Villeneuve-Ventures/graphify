@@ -8,7 +8,7 @@ import sys
 
 import pytest
 from graphify import hooks
-from tests.test_hook_installation import repo, _hooks, _live, _snapshot  # noqa: F401
+from tests.test_hook_installation import repo, _hooks, _snapshot  # noqa: F401
 from tests.test_hook_authority_lifecycle import body, slot
 
 if os.name != "nt":
@@ -178,6 +178,103 @@ def test_capacity_retries_create_no_journal_temporaries(repo, monkeypatch):
         os.close(child)
 
 
+@pytest.mark.parametrize("entry", ["api", "cli"])
+def test_unclaimed_private_stage_takes_precedence_over_retained_evidence(repo, monkeypatch, entry):
+    """An interrupted stage birth stays visible even beside authenticated retained evidence."""
+    _interrupt(repo, monkeypatch, "preparing")
+    save = publication._Store.save
+
+    def interrupted(store):
+        """Stop the next stage before its PREPARING ownership is persisted."""
+        active = store.body["active"]
+        if store.body.get("retained") and active is not None and active["phase"] == "PREPARING":
+            raise OSError("injected unrecorded stage birth")
+        return save(store)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(publication._Store, "save", interrupted)
+        with pytest.raises(RuntimeError, match="unrecorded stage birth"):
+            hooks.install(repo)
+    record = body(repo)
+    assert record["active"] is None and len(record["retained"]) == 1
+    known = {item["name"] for item in record["retained"]}
+    unclaimed = [path for path in slot(repo).iterdir()
+                 if path.name.startswith(publication._PREFIX) and path.name not in known]
+    assert len(unclaimed) == 1
+    (unclaimed[0] / "uncertain-content").write_bytes(b"preserve without adoption")
+    protected = (_evidence(repo), _evidence(publication._state_root()))
+    if entry == "api":
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "mkdir", lambda *a, **k: pytest.fail("status attempted mkdir"))
+            result = hooks.status(repo)
+    else:
+        command = subprocess.run([sys.executable, "-B", "-m", "graphify", "hook", "status"], cwd=repo,
+                                 env={**os.environ, "PYTHONPATH": str(Path(hooks.__file__).parent.parent)},
+                                 capture_output=True, text=True)
+        assert command.returncode == 0 and "Traceback" not in command.stderr, command.stderr
+        result = command.stdout
+    assert "unverified authority" in result and "unclaimed private preparation" in result
+    assert (_evidence(repo), _evidence(publication._state_root())) == protected
+
+
+def _macos_inheritable_deny_acl(directory):
+    """Set a native macOS directory ACL whose denial passes to newly created files."""
+    subprocess.run(["/bin/chmod", "+a", "user:nobody deny read,execute,file_inherit,directory_inherit,only_inherit",
+                    str(directory)], check=True, capture_output=True)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        acl = publication._darwin_acl(fd)
+        assert acl is not None
+        return acl
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS inherited ACL")
+def test_new_macos_hook_inherited_acl_refuses_without_live_changes(repo):
+    """Private preparation cannot silently lose the hooks directory's native ACL denial."""
+    (_hooks(repo) / "post-commit").unlink()
+    acl = _macos_inheritable_deny_acl(_hooks(repo))
+    control = _hooks(repo) / "acl-inheritance-control"
+    control.write_bytes(b"native inherited ACL control")
+    fd = os.open(control, os.O_RDONLY)
+    try:
+        assert publication._darwin_acl(fd) is not None
+    finally:
+        os.close(fd)
+    protected = _evidence(repo)
+    with pytest.raises(RuntimeError, match="Cannot preserve hooks-directory.*ACL"):
+        hooks.install(repo)
+    assert _evidence(repo) == protected
+    assert body(repo)["active"] is None
+    assert not list(slot(repo).glob(publication._PREFIX + "*"))
+    assert acl == _macos_acl(_hooks(repo))
+
+
+def _macos_acl(directory):
+    """Read a native directory ACL through the existing descriptor-based helper."""
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        return publication._darwin_acl(fd)
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native macOS inherited ACL")
+@pytest.mark.parametrize("phase", ["preparing", "exposing-private", "exposing-hooks", "applying"])
+def test_macos_acl_added_during_pending_creation_refuses_retry(repo, monkeypatch, phase):
+    """Pending retry rechecks native target ACLs without altering hooks or authority."""
+    for name in publication.NAMES:
+        (_hooks(repo) / name).unlink()
+    _interrupt(repo, monkeypatch, phase)
+    acl = _macos_inheritable_deny_acl(_hooks(repo))
+    protected = (_evidence(repo), _evidence(publication._state_root()))
+    with pytest.raises(RuntimeError, match="Cannot preserve hooks-directory.*ACL"):
+        hooks.install(repo)
+    assert (_evidence(repo), _evidence(publication._state_root())) == protected
+    assert _macos_acl(_hooks(repo)) == acl
+
+
 def _default_acl(directory):
     """Set a native Linux inherited ACL containing a named account denial."""
     acl = struct.pack("<I", 2) + b"".join(
@@ -204,7 +301,7 @@ def test_new_hook_default_acl_refuses_without_live_changes(repo, legacy):
                 os.close(child)
     acl = _default_acl(_hooks(repo))
     protected = _evidence(repo)
-    with pytest.raises(RuntimeError, match="default ACL|Unsafe installer authority"):
+    with pytest.raises(RuntimeError, match="Cannot preserve hooks-directory.*ACL|Unsafe installer authority"):
         hooks.install(repo, merge_guard=True)
     observed = _evidence(repo)
     for before, after in zip(protected, observed, strict=True):
@@ -225,7 +322,7 @@ def test_default_acl_added_during_pending_creation_refuses_and_preserves(repo, m
     _interrupt(repo, monkeypatch, phase)
     acl = _default_acl(_hooks(repo))
     protected = (_evidence(repo), _evidence(publication._state_root()))
-    with pytest.raises(RuntimeError, match="default ACL"):
+    with pytest.raises(RuntimeError, match="Cannot preserve hooks-directory.*ACL"):
         hooks.install(repo)
     assert (_evidence(repo), _evidence(publication._state_root())) == protected
     assert os.getxattr(_hooks(repo), "system.posix_acl_default") == acl
