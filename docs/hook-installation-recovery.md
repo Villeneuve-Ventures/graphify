@@ -10,6 +10,9 @@ V2 constructs a complete unpublished authority slot beneath admitted private
 storage before publishing the canonical slot without replacement. Interrupted
 initialization candidates remain intact and are not adopted. An occupied,
 incomplete or substituted canonical slot still requires manual reconciliation.
+New candidate names include a hooks-slot hint solely to scope diagnostics.
+Names do not establish ownership; older candidates without that hint stay
+preserved and are not attributed to another repository's absent slot.
 The canonical journal binds its own filesystem identity as well as the
 authority parent, slot, capability and hooks identities; copying its bytes into
 a replacement file does not restore authority.
@@ -38,17 +41,29 @@ creation owner/group, applied and checked before exposure; inability to preserve
 that ownership refuses preparation. Directory modes and ownership are not
 normalized. Complete v2 history includes a closed final stage inventory,
 including its exclusion file, preimages and displaced originals.
+On Linux, creating new hooks beneath a hooks directory with a default POSIX ACL
+refuses rather than losing inherited access restrictions. The same check runs
+before exposure and each publication on an exact pending retry. This does not
+provide ACL-inheritance reconstruction or change existing v1 behavior.
 
 Public status now resolves existing paths only. Missing hooks directories and
 authority paths stay absent. It reports authenticated pending phases, unavailable
 or unverified authority, and retained incomplete evidence without repairing,
 creating, compacting or deleting state. Retained preparation is not pending
 publication, and its diagnostic does not establish ownership of its children.
+Git hooks-path lookup failures return an unverified diagnostic. Active v2
+stages must match their recorded identity at the phase-appropriate location;
+EXPOSING checks both legal locations and reports the one actually observed.
+Missing, substituted or conflicting locations are damaged/unverified evidence,
+not a recoverable pending location. These observations grant no repair authority.
 
 The separate [#198 acceptance extension](plans/graphify-hook-authority-198.md)
 records this local contract and its native qualification requirements.
 
 V2 journal and completion envelopes have a 16 MiB record limit. This is not a total-storage limit.
+Journal capacity is checked before creating a temporary file, reserving the
+maximum native inode width for its identity binding. A capacity-blocked save
+creates no temporary journal; existing interrupted files remain preserved.
 
 The v2 journal serializer also enforces the record limit on completion
 obligations before creating them. Capacity refusal preserves pending authority

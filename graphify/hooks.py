@@ -1512,12 +1512,16 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
     unverified recovery normally replaces hook observations; an unverified
     authority instead prefixes them with a warning. Recovery inspection does
     not repair state or create missing hooks directories.
-    Filesystem and decoding errors outside recovery diagnostics can propagate.
+    Hooks-path lookup failures are unverified recovery diagnostics. Other
+    filesystem and decoding errors outside recovery diagnostics can propagate.
     """
     root = _git_root(path)
     if root is None:
         return "Not in a git repository."
-    hooks_dir = _user_hooks_dir(_hooks_dir(root, create=False))
+    try:
+        hooks_dir = _user_hooks_dir(_hooks_dir(root, create=False))
+    except (RuntimeError, OSError) as exc:
+        return f"hook installation: unverified authority: {exc}"
     warning = ""
     if _atomic_hooks_supported():
         from graphify.hook_installation import pending
@@ -1529,6 +1533,7 @@ def status(path: Path = Path("."), *, merge_guard: bool = False) -> str:
                        "Hook and driver observations only; recovery state is unverified.\n")
 
     def _check(name: str, marker: str, marker_end: str) -> str:
+        """Describe regular hook markers without repairing unsafe or malformed content."""
         p = hooks_dir / name
         try:
             metadata = p.lstat()
