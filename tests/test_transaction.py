@@ -11292,8 +11292,8 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         ("prs.py", "_load_graph_json", "pull-request-impact"),
         ("reflect.py", "_load_node_community", "reflect-community"),
         ("reflect.py", "_load_known_nodes", "reflect-known-nodes"),
-        ("reflect.py", "reflect", "publication-prepare"),
-        ("reflect.py", "write_learning_sidecar", "publication-prepare"),
+        ("reflect.py", "reflect", "reflect"),
+        ("reflect.py", "write_learning_sidecar", "reflect"),
         ("reflect.py", "load_learning_overlay", "learning-overlay"),
         ("reflect.py", "_build_id_label_maps", "reflect-projection"),
         ("serve.py", "_load_graph", "serve"),
@@ -12470,7 +12470,8 @@ def test_snapshot_auxiliary_admission_bound_and_identity(tmp_path, monkeypatch, 
 
 
 @pytest.mark.parametrize("managed", [False, True])
-def test_snapshot_auxiliary_rejects_retarget_before_write(tmp_path, managed):
+@pytest.mark.parametrize("retain_in_place", [False, True])
+def test_snapshot_auxiliary_rejects_retarget_before_write(tmp_path, managed, retain_in_place):
     from graphify import transaction as module
 
     output, snapshot = _auxiliary_snapshot(tmp_path, managed=managed)
@@ -12478,7 +12479,10 @@ def test_snapshot_auxiliary_rejects_retarget_before_write(tmp_path, managed):
     output.mkdir()
     before = _file_bytes(output)
     with pytest.raises(PendingTransactionError, match="identity changed"):
-        module.publish_snapshot_auxiliary(snapshot, canonical_name=".graphify_learning.json", payload=b"{}")
+        module.publish_snapshot_auxiliary(
+            snapshot, canonical_name=".graphify_learning.json", payload=b"{}",
+            retain_in_place=retain_in_place,
+        )
     assert _file_bytes(output) == before
 
 
@@ -12552,14 +12556,18 @@ def test_snapshot_auxiliary_sparse_managed_view_refused_without_mutation(tmp_pat
     assert _file_bytes(output) == before
 
 
-def test_snapshot_auxiliary_active_generation_refused_without_mutation(tmp_path):
+@pytest.mark.parametrize("retain_in_place", [False, True])
+def test_snapshot_auxiliary_active_generation_refused_without_mutation(tmp_path, retain_in_place):
     from graphify import transaction as module
 
     output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
     transaction = begin_transaction("runtime", tmp_path, output=output, expected_snapshot=snapshot)
     before = _file_bytes(output)
     with owned_step(transaction), pytest.raises(PendingTransactionError):
-        module.publish_snapshot_auxiliary(snapshot, canonical_name=".graphify_learning.json", payload=b"{}")
+        module.publish_snapshot_auxiliary(
+            snapshot, canonical_name=".graphify_learning.json", payload=b"{}",
+            retain_in_place=retain_in_place,
+        )
     assert _file_bytes(output) == before
 
 
@@ -12751,3 +12759,125 @@ def test_snapshot_auxiliary_rejects_graph_name_collision_before_publication(
     assert _file_bytes(output) == before
     assert not (output / module.TRANSACTION_FILE).exists()
     assert open_graph_snapshot(snapshot.graph_path, purpose="serve").digest == snapshot.digest
+
+
+def test_publication_plan_carries_unchanged_artifact_without_rewriting(tmp_path, monkeypatch):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    artifact = output / "custom.txt"
+    inode = artifact.stat().st_ino
+    transaction = begin_transaction("runtime", tmp_path, output=output, expected_snapshot=snapshot)
+    original = module.commit_bytes
+
+    def refuse_rewrite(owner, name, payload, **kwargs):
+        assert name != "custom.txt", "unchanged artifact was rewritten"
+        return original(owner, name, payload, **kwargs)
+
+    monkeypatch.setattr(module, "commit_bytes", refuse_rewrite)
+    payloads = {"graph.json": _graph(transaction.generation), "manifest.json": b"{}"}
+    retained = {"custom.txt": (hashlib.sha256(b"preserve me").hexdigest(), 11)}
+    plan = PublicationPlan(payloads, retained=retained)
+    inventory = module._publication_inventory(plan)
+    assert next(item for item in inventory if item["name"] == "custom.txt") == {
+        "name": "custom.txt", "sha256": retained["custom.txt"][0], "size": 11,
+    }
+    commit_publication_plan(transaction, plan)
+    finish_transaction(transaction)
+    after = open_graph_snapshot(output / "graph.json", purpose="serve")
+    assert dict(after.inventory_selector)["custom.txt"] == retained["custom.txt"][0]
+    assert artifact.stat().st_ino == inode
+    assert artifact.read_bytes() == b"preserve me"
+
+
+@pytest.mark.parametrize("change", ["before-publication", "before-receipt"])
+def test_retained_publication_detects_artifact_change(tmp_path, monkeypatch, change):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    receipt = (output / module.RECEIPT_FILE).read_bytes()
+    transaction = begin_transaction("runtime", tmp_path, output=output, expected_snapshot=snapshot)
+    plan = PublicationPlan(
+        {"graph.json": _graph(transaction.generation), "manifest.json": b"{}"},
+        retained={"custom.txt": (hashlib.sha256(b"preserve me").hexdigest(), 11)},
+    )
+    if change == "before-publication":
+        (output / "custom.txt").write_bytes(b"changed!!!!")
+    else:
+        original = module.commit_generation
+
+        def change_before_receipt(*args, **kwargs):
+            (output / "custom.txt").write_bytes(b"changed!!!!")
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, "commit_generation", change_before_receipt)
+    with pytest.raises(PendingTransactionError, match="retained artifact"):
+        commit_publication_plan(transaction, plan)
+    assert (output / module.RECEIPT_FILE).read_bytes() == receipt
+    with pytest.raises(PendingTransactionError):
+        open_graph_snapshot(output / "graph.json", purpose="serve")
+
+
+@pytest.mark.parametrize("retained, deletions", [
+    ({"custom.txt": ("x", 11)}, ()),
+    ({"custom.txt": ("0" * 64, -1)}, ()),
+    ({"custom.txt": ("0" * 64, True)}, ()),
+    ({"../custom.txt": ("0" * 64, 11)}, ()),
+    ({"manifest.json": ("0" * 64, 2)}, ()),
+    ({"custom.txt": ("0" * 64, 11)}, ("custom.txt",)),
+    ({"GRAPH.JSON": ("0" * 64, 11)}, ()),
+])
+def test_retained_publication_plan_validation_precedes_mutation(tmp_path, retained, deletions):
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    transaction = begin_transaction("runtime", tmp_path, output=output, expected_snapshot=snapshot)
+    before = _file_bytes(output)
+    plan = PublicationPlan(
+        {"graph.json": _graph(transaction.generation), "manifest.json": b"{}"},
+        deletions, retained=retained,
+    )
+    with pytest.raises(PendingTransactionError):
+        commit_publication_plan(transaction, plan)
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("bound", ["count", "aggregate"])
+def test_retained_plan_counts_complete_inventory(tmp_path, monkeypatch, bound):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    transaction = begin_transaction("runtime", tmp_path, output=output, expected_snapshot=snapshot)
+    payloads = {"graph.json": _graph(transaction.generation), "manifest.json": b"{}"}
+    plan = PublicationPlan(payloads, retained={"custom.txt": ("0" * 64, 11)})
+    if bound == "count":
+        monkeypatch.setattr(module, "_MAX_RECEIPT_ARTIFACTS", 2)
+    else:
+        monkeypatch.setattr(module, "_MAX_RECEIPT_AGGREGATE_BYTES", sum(map(len, payloads.values())) + 10)
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="bounded inventory|aggregate budget"):
+        commit_publication_plan(transaction, plan)
+    assert _file_bytes(output) == before
+
+
+def test_snapshot_auxiliary_can_explicitly_carry_sparse_inventory(tmp_path, monkeypatch):
+    from graphify import transaction as module
+
+    output, _snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    sparse = open_graph_snapshot(output / "graph.json", purpose="reflect")
+    before_inode = (output / "custom.txt").stat().st_ino
+    original = module._hash_relative_bytes
+
+    def refuse_body_retention(capability, name, **kwargs):
+        if name == "custom.txt":
+            assert not kwargs.get("retain"), "unrelated artifact body was retained"
+        return original(capability, name, **kwargs)
+
+    monkeypatch.setattr(module, "_hash_relative_bytes", refuse_body_retention)
+    module.publish_snapshot_auxiliary(
+        sparse, canonical_name=".graphify_learning.json", payload=b'{"nodes":{}}',
+        retain_in_place=True,
+    )
+    after = open_graph_snapshot(output / "graph.json", purpose="serve")
+    assert after.generation == sparse.generation + 1
+    assert "custom.txt" in dict(after.inventory_selector)
+    assert (output / "custom.txt").read_bytes() == b"preserve me"
+    assert (output / "custom.txt").stat().st_ino == before_inode

@@ -16,9 +16,12 @@ Canonical graph admission validates every receipt artifact. The subsequent
 optional refresh rechecks exact graph bytes, receipt identity/digest and live
 protocol/drainer authority without rescanning unrelated artifact bodies. A
 receipt-owned sidecar also matches its admitted digest.
-HTML rendering admits the overlay from its graph JSON path; the default is the
-`graph.json` sibling of the HTML destination. Custom graph paths are passed by
-the CLI. Explicit overlays continue to bypass sidecar admission.
+HTML export admits learning against its original graph snapshot before staging,
+including for an external custom graph path. It passes the overlay to rendering
+without admitting the graph again or adding borrowed learning to receipt ownership.
+Prepared exports reuse their staged graph snapshot. Direct HTML rendering uses
+its graph JSON path, defaulting to the `graph.json` sibling of the destination.
+Explicit overlays continue to bypass sidecar admission.
 The version 1 node map, deterministic sorted UTF-8 serialization, provenance cap,
 code fingerprints and conservative staleness calculation keep their existing
 behavior.
@@ -30,6 +33,12 @@ reflection still writes its lessons document.
 Managed destinations use exact transaction ownership and a complete publication
 plan. A successful publication carries all retained graph facts and receipt
 artifacts forward, adds the sidecar, and advances the generation watermark.
+Reflection retains its analysis inputs in memory. Other unchanged receipt
+artifacts stay on disk, with their digest and size included in the complete plan.
+Streaming validation checks those bindings before publication and checks their
+digests again before receipt publication. The same count and aggregate byte
+bounds apply to the combined inventory. Unchanged artifact bodies are neither
+materialized nor rewritten for learning publication.
 Update/watch and cluster-only successors retain receipt-owned sidecar bytes and
 fingerprints, so consumers mark changed source code stale. Borrowed report-only
 learning remains outside receipt ownership.
@@ -37,8 +46,9 @@ After successful publication, reflection advances the already written lessons
 mtime through the descriptor of the written file so `reflect --if-stale` can
 skip unchanged inputs. Replacing the output directory or lessons path during
 publication cannot create or mark another file fresh. Publication failure does
-not advance that marker. Unrelated non-receipt artifacts remain in place. A sparse
-reader snapshot cannot be used for publication. An already active managed
+not advance that marker. Unrelated non-receipt artifacts remain in place. Sparse
+snapshot publication requires explicit unchanged-artifact retention; the default
+publisher still requires complete retained bytes. An already active managed
 generation is refused without mutation; the optional sidecar does not take over
 that owner. Plan preparation is validated before entering publication. A
 preparation failure uses the existing exact-owner cancellation boundary, which
@@ -66,3 +76,5 @@ recheck, unpublished-plan failure handling and external lock ordering.
 
 A further bounded interface review covered refusal of graph/sidecar filename
 collisions before either publication boundary is entered.
+The unchanged-artifact plan extension and opt-in sparse auxiliary publication
+received a separate bounded review before reflection integration.

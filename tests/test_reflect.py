@@ -1405,3 +1405,50 @@ def test_reflect_freshness_updates_original_lessons_after_replacement(
     source_out = retained_out if replacement == "output" else out
     assert lessons_fresh(retained_lessons, source_out / "memory", source_out / "graph.json")
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize("entry_point", ["reflect", "write_learning_sidecar"])
+def test_learning_publication_streams_unrelated_generation_artifacts(
+    tmp_path, monkeypatch, entry_point,
+):
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    transaction = transaction_module.begin_transaction("runtime", tmp_path, output=output)
+    graph = json.dumps({"graph": {transaction_module.GRAPH_WATERMARK_KEY: {
+        "schema": 1, "protocol_epoch": 1,
+        "generation": transaction.generation, "state": "active",
+    }}, "nodes": [], "links": []}).encode()
+    bulk = b"unchanged output" * (64 * 1024)
+    transaction_module.commit_publication_plan(transaction, transaction_module.PublicationPlan({
+        "graph.json": graph, "manifest.json": b"{}", "wiki/bulk.md": bulk,
+    }))
+    transaction_module.finish_transaction(transaction)
+    inode = (output / "wiki/bulk.md").stat().st_ino
+    (output / "private.txt").write_bytes(b"user data")
+    original_hash = transaction_module._hash_relative_bytes
+    original_read = transaction_module._read_relative_bytes
+
+    def hash_without_retention(capability, name, **kwargs):
+        if name == "wiki/bulk.md":
+            assert not kwargs.get("retain"), "optional learning retained an unrelated body"
+        return original_hash(capability, name, **kwargs)
+
+    def refuse_full_read(capability, name, *args, **kwargs):
+        assert name != "wiki/bulk.md", "optional learning read an unrelated full body"
+        return original_read(capability, name, *args, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "_hash_relative_bytes", hash_without_retention)
+    monkeypatch.setattr(transaction_module, "_read_relative_bytes", refuse_full_read)
+    if entry_point == "reflect":
+        lessons, _ = reflect(output / "memory", output / "reflections/LESSONS.md", graph_path=output / "graph.json")
+        assert lessons.is_file()
+    else:
+        write_learning_sidecar({}, output / "graph.json")
+    snapshot = transaction_module.open_graph_snapshot(output / "graph.json", purpose="serve")
+    assert snapshot.generation == transaction.generation + 1
+    assert "wiki/bulk.md" in dict(snapshot.inventory_selector)
+    assert json.loads((output / LEARNING_SIDECAR_NAME).read_bytes())["nodes"] == {}
+    assert (output / "wiki/bulk.md").read_bytes() == bulk
+    assert (output / "wiki/bulk.md").stat().st_ino == inode
+    assert (output / "private.txt").read_bytes() == b"user data"

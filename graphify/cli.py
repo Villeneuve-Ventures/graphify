@@ -1334,6 +1334,13 @@ def _transactional_export() -> None:
     ):
         external_html_predecessor = open_unmanaged_file(external_html_target)
     snapshot = source_snapshot
+    learning_overlay = None
+    if (
+        export_subcmd == "html" and "--no-viz" not in original_argv
+        and active_transaction is None
+    ):
+        from graphify.reflect import load_learning_overlay
+        learning_overlay = load_learning_overlay(graph, snapshot=snapshot)
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     normalized_argv = sys.argv
@@ -1429,7 +1436,10 @@ def _transactional_export() -> None:
             with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
                 captured_err
             ):
-                _dispatch_command("export")
+                if learning_overlay is None:
+                    _dispatch_command("export")
+                else:
+                    _dispatch_command("export", learning_overlay=learning_overlay)
         except SystemExit as exc:
             if exc.code not in (None, 0):
                 sys.stderr.write(captured_err.getvalue())
@@ -1803,7 +1813,7 @@ def _transaction_command() -> None:
     )
 
 
-def _dispatch_command(cmd: str) -> None:
+def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None:
     if cmd == "provider":
         from graphify.llm import _custom_providers_path, BACKENDS
         import json as _json
@@ -3382,12 +3392,15 @@ def _dispatch_command(cmd: str) -> None:
                     html_target.unlink()
                 print("--no-viz: skipped graph.html")
             else:
+                if learning_overlay is None:
+                    from graphify.reflect import load_learning_overlay
+                    learning_overlay = load_learning_overlay(graph_path, snapshot=_snapshot)
                 # Over-cap fallback (#1019): force the community-aggregation
                 # path so the oversized graph still renders a usable artifact.
                 _effective_node_limit = 5000 if _over_cap else node_limit
                 _to_html(G, communities, str(out_dir / "graph.html"),
                          community_labels=labels or None, node_limit=_effective_node_limit,
-                         graph_path=graph_path)
+                         graph_path=graph_path, learning_overlay=learning_overlay)
                 if G.number_of_nodes() <= _effective_node_limit:
                     print(f"graph.html written - open in any browser, no server needed")
                 if _over_cap:

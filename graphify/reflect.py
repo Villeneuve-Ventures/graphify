@@ -611,7 +611,7 @@ def reflect(memory_dir: Path, out_path: Path,
         try:
             from graphify.transaction import open_graph_snapshot
             graph_snapshot = open_graph_snapshot(
-                graph_path, purpose="publication-prepare"
+                graph_path, purpose="reflect"
             )
         except (OSError, ValueError):
             graph_snapshot = None
@@ -884,7 +884,7 @@ def write_learning_sidecar(agg: dict[str, Any], graph_path: Path,
     from graphify.transaction import open_graph_snapshot, publish_snapshot_auxiliary
 
     if snapshot is None:
-        snapshot = open_graph_snapshot(graph_path, purpose="publication-prepare")
+        snapshot = open_graph_snapshot(graph_path, purpose="reflect")
     _check_learning_graph_path(graph_path, snapshot)
     overlay = build_learning_overlay(
         agg, snapshot.graph_path, now=now, snapshot=snapshot
@@ -896,6 +896,7 @@ def write_learning_sidecar(agg: dict[str, Any], graph_path: Path,
         raise ValueError("learning sidecar exceeds aggregate byte budget")
     return publish_snapshot_auxiliary(
         snapshot, canonical_name=LEARNING_SIDECAR_NAME, payload=payload,
+        retain_in_place=True,
     )
 
 
