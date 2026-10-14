@@ -1249,3 +1249,62 @@ def test_cli_managed_reflect_if_stale_keeps_generation(tmp_path):
     assert "up to date" not in third.stdout.lower()
     assert open_graph_snapshot(graph_path, purpose="serve").generation == generation + 1
     assert lessons_fresh(lessons, memory, graph_path)
+
+
+@pytest.mark.parametrize("consumer", ["overlay", "report", "html"])
+@pytest.mark.parametrize("owned", [False, True], ids=["unowned", "receipt-owned"])
+def test_missing_learning_sidecar_checks_receipt_before_fallback(
+    tmp_path, capsys, consumer, owned,
+):
+    """Missing owned learning is diagnosed; optional consumers preserve graph facts."""
+    from graphify.build import build_from_json
+    from graphify.export import to_html
+    from graphify.report import load_learning_for_report
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY, PublicationPlan, begin_transaction,
+        commit_publication_plan, finish_transaction, open_graph_snapshot,
+    )
+
+    out = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=out)
+    graph = {"directed": False, "multigraph": False, "graph": {
+        GRAPH_WATERMARK_KEY: {"schema": 1, "protocol_epoch": 1,
+                              "generation": transaction.generation, "state": "active"},
+    }, "nodes": [{"id": "n", "label": "Topic", "source_file": ""}], "links": []}
+    artifacts = {"graph.json": json.dumps(graph).encode(), "manifest.json": b"{}"}
+    if owned:
+        artifacts[LEARNING_SIDECAR_NAME] = b'{"nodes":{"n":{"status":"preferred"}}}'
+    commit_publication_plan(transaction, PublicationPlan(artifacts))
+    finish_transaction(transaction)
+    graph_path = out / "graph.json"
+    assert (LEARNING_SIDECAR_NAME in dict(open_graph_snapshot(
+        graph_path, purpose="serve",
+    ).inventory_selector)) is owned
+    if owned:
+        (out / LEARNING_SIDECAR_NAME).unlink()
+    _write_raw_doc(out / "memory", "dead.md", "2026-05-01",
+                   outcome="dead_end", question="dead path", nodes=["Topic"])
+    before = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
+    capsys.readouterr()
+
+    if consumer == "overlay":
+        assert load_learning_overlay(graph_path) == {}
+    elif consumer == "report":
+        learning = load_learning_for_report(graph_path)
+        assert learning["overlay"] == {}
+        assert learning["dead_ends"][0]["question"] == "dead path"
+    else:
+        html_path = tmp_path / "rendered.html"
+        to_html(build_from_json(graph), {0: ["n"]}, str(html_path), graph_path=graph_path)
+        rendered = html_path.read_text()
+        assert "Topic" in rendered
+        assert "learning_status" not in rendered
+
+    diagnostic = capsys.readouterr().err
+    if owned:
+        assert "learning admission failed" in diagnostic
+        assert len(diagnostic.rstrip()) <= 240
+        assert str(out) not in diagnostic
+    else:
+        assert diagnostic == ""
+    assert {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()} == before

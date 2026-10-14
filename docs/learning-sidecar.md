@@ -4,8 +4,8 @@
 of `.graphify_learning.json` fails. Sidecar readers return an empty overlay on
 malformed JSON, admission failure or an oversized payload. Failures produce one
 stderr diagnostic of at most 240 characters, without document content or paths.
-An absent unowned sidecar is quiet. Disappearance of a receipt-owned sidecar
-after snapshot admission produces a diagnostic.
+An absent unowned sidecar is quiet. A missing receipt-owned sidecar produces a
+diagnostic, including when an HTML or report consumer first admits its snapshot.
 
 Admission and publication limit the complete serialized sidecar to **1 MiB**.
 Readers apply this limit to descriptor-based reads before JSON parsing, and check

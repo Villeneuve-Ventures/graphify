@@ -926,18 +926,14 @@ def _check_learning_graph_path(graph_path: Path, snapshot) -> None:
 def load_learning_overlay(graph_path: Path, *, snapshot=None) -> dict[str, dict[str, Any]]:
     """Admit at most LEARNING_MAX_BYTES against one graph snapshot, then parse.
 
-    Absence is quiet. Malformed, oversized or retargeted inputs emit a bounded
-    diagnostic and return {}. Optional learning never blocks the graph consumer.
+    Unowned absence is quiet. Malformed, oversized or retargeted inputs emit a
+    bounded diagnostic and return {}. Optional learning never blocks the consumer.
     Fingerprint comparison retains the existing conservative staleness behavior.
     """
     try:
         from graphify.transaction import open_graph_snapshot, admit_snapshot_auxiliary
 
         if snapshot is None:
-            try:
-                (Path(graph_path).parent / LEARNING_SIDECAR_NAME).lstat()
-            except FileNotFoundError:
-                return {}
             snapshot = open_graph_snapshot(graph_path, purpose="learning-overlay")
         _check_learning_graph_path(graph_path, snapshot)
         payload = admit_snapshot_auxiliary(
