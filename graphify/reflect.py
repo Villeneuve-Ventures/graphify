@@ -641,6 +641,9 @@ def reflect(memory_dir: Path, out_path: Path,
             write_learning_sidecar(
                 agg, Path(graph_path), now=now, snapshot=graph_snapshot
             )
+            # Managed publication rewrites graph/sidecar inputs. Mark the already
+            # written lessons fresh only after that publication has succeeded.
+            out_path.touch()
         except Exception as exc:
             _learning_diagnostic("publication", exc)
 

@@ -2831,7 +2831,7 @@ def _dispatch_command(cmd: str) -> None:
                 # path so an oversized graph still renders a usable graph.html.
                 _node_limit = 5000 if _over_cap else None
                 to_html(G, communities, str(html_target), community_labels=labels or None,
-                        node_limit=_node_limit)
+                        node_limit=_node_limit, graph_path=graph_json)
                 stages.mark("export"); stages.total()
                 print(f"Done - {len(communities)} communities. GRAPH_REPORT.md, graph.json and graph.html updated.")
             except ValueError as viz_err:
@@ -3383,7 +3383,8 @@ def _dispatch_command(cmd: str) -> None:
                 # path so the oversized graph still renders a usable artifact.
                 _effective_node_limit = 5000 if _over_cap else node_limit
                 _to_html(G, communities, str(out_dir / "graph.html"),
-                         community_labels=labels or None, node_limit=_effective_node_limit)
+                         community_labels=labels or None, node_limit=_effective_node_limit,
+                         graph_path=graph_path)
                 if G.number_of_nodes() <= _effective_node_limit:
                     print(f"graph.html written - open in any browser, no server needed")
                 if _over_cap:

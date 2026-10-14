@@ -928,3 +928,44 @@ def test_to_html_handles_null_source_file_and_label(tmp_path):
     out = tmp_path / "graph.html"
     to_html(G, {0: ["n1", "n2", "n3"]}, str(out))
     assert out.exists() and out.stat().st_size > 0
+
+
+@pytest.mark.parametrize("existing_html", [False, True])
+def test_to_html_default_overlay_uses_graph_json(tmp_path, capsys, existing_html):
+    """HTML destinations never serve as the JSON source for optional learning."""
+    import networkx as nx
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({"graph": {}, "nodes": [{"id": "n", "label": "Topic"}], "links": []}))
+    (tmp_path / ".graphify_learning.json").write_text(
+        json.dumps({"nodes": {"n": {"status": "preferred", "source_file": ""}}})
+    )
+    graph = nx.Graph()
+    graph.add_node("n", label="Topic")
+    output = tmp_path / "graph.html"
+    if existing_html:
+        output.write_text("<html>previous render</html>")
+    to_html(graph, {0: ["n"]}, str(output))
+    node = _vis_nodes_from_html(output.read_text())[0]
+    assert node["learning_status"] == "preferred"
+    assert node["color"]["border"] == "#22c55e"
+    assert not capsys.readouterr().err
+
+
+def test_to_html_overlay_honors_custom_graph_path(tmp_path, capsys):
+    """A custom source can supply learning to a separate HTML destination."""
+    import networkx as nx
+
+    source = tmp_path / "source"
+    source.mkdir()
+    graph_path = source / "custom.json"
+    graph_path.write_text(json.dumps({"graph": {}, "nodes": [{"id": "n"}], "links": []}))
+    (source / ".graphify_learning.json").write_text(
+        json.dumps({"nodes": {"n": {"status": "contested", "source_file": ""}}})
+    )
+    graph = nx.Graph()
+    graph.add_node("n", label="Topic")
+    output = tmp_path / "graph.html"
+    to_html(graph, {0: ["n"]}, str(output), graph_path=graph_path)
+    assert _vis_nodes_from_html(output.read_text())[0]["learning_status"] == "contested"
+    assert not capsys.readouterr().err

@@ -863,6 +863,38 @@ def _assert_transactional_export(out: Path) -> None:
     assert watermark["generation"] == receipt["generation"]
 
 
+@pytest.mark.parametrize("graph_name", ["graph.json", "custom.json"])
+def test_html_export_keeps_learning_for_actual_graph_name(tmp_path, graph_name):
+    """Managed export admits learning against the staged graph's actual filename."""
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY, PublicationPlan, begin_transaction,
+        commit_publication_plan, finish_transaction, open_graph_snapshot,
+    )
+
+    out = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=out)
+    payload = json.dumps({"directed": False, "multigraph": False, "graph": {
+        GRAPH_WATERMARK_KEY: {"schema": 1, "protocol_epoch": 1,
+                              "generation": transaction.generation, "state": "active"},
+    }, "nodes": [{"id": "n", "label": "Topic", "community": 0}], "links": []}).encode()
+    learning = json.dumps({"nodes": {"n": {"status": "preferred", "source_file": ""}}}).encode()
+    commit_publication_plan(transaction, PublicationPlan({
+        graph_name: payload, "manifest.json": b"{}", ".graphify_learning.json": learning,
+    }), graph_name=graph_name)
+    finish_transaction(transaction)
+    before = open_graph_snapshot(out / graph_name, purpose="serve")
+
+    result = _run(["export", "html", "--graph", str(out / graph_name)], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "learning admission failed" not in result.stderr
+    assert '"learning_status": "preferred"' in (out / "graph.html").read_text()
+    after = open_graph_snapshot(out / graph_name, purpose="serve")
+    assert after.data["nodes"] == before.data["nodes"]
+    assert after.data["links"] == before.data["links"]
+    assert (out / ".graphify_learning.json").read_bytes() == learning
+    assert after.generation == before.generation + 1
+
+
 def test_full_build_token_runner_exports_before_final_commit(tmp_path):
     from graphify.transaction import (
         begin_transaction,

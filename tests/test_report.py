@@ -157,7 +157,6 @@ def test_report_hubs_use_wikilinks_when_obsidian():
 
 
 def test_report_malformed_optional_sidecar_keeps_dead_ends(tmp_path, capsys):
-    import json
     from graphify.report import load_learning_for_report
 
     graph_path = tmp_path / "graph.json"

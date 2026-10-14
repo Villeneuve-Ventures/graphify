@@ -1206,3 +1206,46 @@ def test_learning_generated_payload_budget_preserves_previous_sidecar(tmp_path, 
     assert lessons.exists()
     assert sidecar.read_bytes() == b"previous"
     assert "byte budget" in capsys.readouterr().err
+
+
+def test_cli_managed_reflect_if_stale_keeps_generation(tmp_path):
+    """Sidecar publication leaves unchanged lessons fresh, but new memory reruns."""
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY, PublicationPlan, begin_transaction,
+        commit_publication_plan, finish_transaction, open_graph_snapshot,
+    )
+
+    out = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=out)
+    graph_path = out / "graph.json"
+    payload = json.dumps({"directed": False, "multigraph": False, "graph": {
+        GRAPH_WATERMARK_KEY: {"schema": 1, "protocol_epoch": 1,
+                              "generation": transaction.generation, "state": "active"},
+    }, "nodes": [{"id": "n", "label": "Topic"}], "links": []}).encode()
+    commit_publication_plan(transaction, PublicationPlan({"graph.json": payload, "manifest.json": b"{}"}))
+    finish_transaction(transaction)
+    memory = out / "memory"
+    _write_raw_doc(memory, "a.md", "2026-05-01", outcome="useful", nodes=["Topic"])
+    _write_raw_doc(memory, "b.md", "2026-05-02", outcome="useful", nodes=["Topic"])
+    first = _run(["reflect"], tmp_path)
+    assert first.returncode == 0, first.stderr
+    assert "learning publication failed" not in first.stderr
+    lessons = out / "reflections" / "LESSONS.md"
+    assert lessons_fresh(lessons, memory, graph_path)
+    generation = open_graph_snapshot(graph_path, purpose="serve").generation
+    before = {name: (out / name).read_bytes() for name in (
+        "graph.json", ".graphify_generation.json", LEARNING_SIDECAR_NAME, "reflections/LESSONS.md",
+    )}
+    lessons_mtime = lessons.stat().st_mtime_ns
+    second = _run(["reflect", "--if-stale"], tmp_path)
+    assert second.returncode == 0, second.stderr
+    assert "up to date" in second.stdout.lower()
+    assert open_graph_snapshot(graph_path, purpose="serve").generation == generation
+    assert {name: (out / name).read_bytes() for name in before} == before
+    assert lessons.stat().st_mtime_ns == lessons_mtime
+    _write_raw_doc(memory, "new.md", "2026-05-03", outcome="useful", nodes=["Topic"])
+    third = _run(["reflect", "--if-stale"], tmp_path)
+    assert third.returncode == 0, third.stderr
+    assert "up to date" not in third.stdout.lower()
+    assert open_graph_snapshot(graph_path, purpose="serve").generation == generation + 1
+    assert lessons_fresh(lessons, memory, graph_path)

@@ -11,6 +11,9 @@ Readers apply this limit to descriptor-based reads before JSON parsing, and chec
 file identity, content and the admitted graph/output/receipt snapshot before
 returning bytes. Serve uses the snapshot already admitted for its graph context.
 Replacing or retargeting that output cannot attach another output's overlay.
+HTML rendering admits the overlay from its graph JSON path; the default is the
+`graph.json` sibling of the HTML destination. Custom graph paths are passed by
+the CLI. Explicit overlays continue to bypass sidecar admission.
 The version 1 node map, deterministic sorted UTF-8 serialization, provenance cap,
 code fingerprints and conservative staleness calculation keep their existing
 behavior.
@@ -18,10 +21,13 @@ behavior.
 Managed destinations use exact transaction ownership and a complete publication
 plan. A successful publication carries all retained graph facts and receipt
 artifacts forward, adds the sidecar, and advances the generation watermark.
-Unrelated non-receipt artifacts remain in place. A sparse reader snapshot cannot
-be used for publication. An already active managed generation is refused without
-mutation; the optional sidecar does not take over that owner. External destinations
-use the existing atomic unmanaged writer, with the source snapshot checked again at its final publication boundary.
+After successful publication, reflection advances the already written lessons
+mtime so `reflect --if-stale` can skip unchanged inputs. Publication failure does
+not advance that marker. Unrelated non-receipt artifacts remain in place. A sparse
+reader snapshot cannot be used for publication. An already active managed
+generation is refused without mutation; the optional sidecar does not take over that owner. External destinations
+use the existing atomic unmanaged writer, with the source snapshot checked again
+at its final publication boundary.
 Symlink sidecar destinations are refused rather than followed. Unsupported native
 Windows mutation remains refused.
 
