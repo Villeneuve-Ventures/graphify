@@ -991,7 +991,10 @@ def _rebuild_code(
                 if not isinstance(graph_metadata, dict):
                     graph_metadata = {}
                     graph_data["graph"] = graph_metadata
-                (prepared / ".graphify_learning.json").unlink(missing_ok=True)
+                # Preserve learning already owned by the prior receipt. Its
+                # unchanged fingerprints let consumers mark changed code stale.
+                if ".graphify_learning.json" not in baseline_artifacts:
+                    (prepared / ".graphify_learning.json").unlink(missing_ok=True)
                 _discard_report_only_directory(prepared / "memory")
                 if merge_recovery:
                     generation = _finalize_prepared_transaction(

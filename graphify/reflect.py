@@ -655,8 +655,8 @@ def reflect(memory_dir: Path, out_path: Path,
 # A derived, experiential projection of the reflect aggregate, written next to
 # graph.json as ``.graphify_learning.json``. It carries which nodes have proven
 # preferred/tentative/contested, a code fingerprint for staleness detection, and
-# a short provenance trail. graph.json (durable structural truth) is never
-# touched — read surfaces merge this overlay in only at display time.
+# a short provenance trail. Graph facts stay unchanged; managed sidecar publication
+# can advance their generation watermark. Reads merge the overlay at display time.
 
 
 def _build_id_label_maps(graph_path: Path, *, snapshot=None) -> tuple[

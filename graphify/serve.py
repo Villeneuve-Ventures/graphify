@@ -52,8 +52,8 @@ def _graph_from_snapshot(snapshot) -> nx.Graph:
         G = json_graph.node_link_graph(data, edges="links")
     except TypeError:
         G = json_graph.node_link_graph(data)
-    # Learning state is optional and not part of the generation receipt. Load
-    # it only after the managed graph has crossed canonical snapshot admission.
+    # Optional learning is loaded after canonical graph snapshot admission.
+    # Receipt-owned sidecars remain bound to that same admitted generation.
     _refresh_learning_overlay(G, snapshot)
     return G
 

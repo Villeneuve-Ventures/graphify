@@ -906,7 +906,10 @@ def _transactional_cluster_only(cmd: str) -> None:
         if not manifest.is_file():
             manifest.write_bytes(b"{}")
         manifest_payload = manifest.read_bytes()
-        (staging / ".graphify_learning.json").unlink(missing_ok=True)
+        # Borrowed report learning stays outside ownership; receipt-owned
+        # learning must survive this successor plan with its fingerprints.
+        if ".graphify_learning.json" not in source_snapshot.artifacts:
+            (staging / ".graphify_learning.json").unlink(missing_ok=True)
         _discard_report_only_directory(staging / "memory")
         plan = publication_plan_from_directory(
             staging, prior_inventory=source_snapshot.artifacts

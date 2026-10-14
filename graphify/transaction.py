@@ -6761,14 +6761,12 @@ def _unlink_relative(capability: OutputCapability, relative_name: str) -> None:
         os.close(parent_fd)
 
 
-def _commit_publication_plan(
-    transaction: Transaction,
+def _validated_publication_plan(
     plan: PublicationPlan,
     *,
     graph_name: str = "graph.json",
-    failpoint: Callable[[str], None] | None = None,
-) -> GenerationReceipt:
-    """Publish one validated inventory, its explicit deletions, and receipt last."""
+) -> PublicationPlan:
+    """Validate the complete plan without entering a publication step."""
     graph_name = _validated_relative_name(graph_name)
     payloads: dict[str, bytes] = {}
     for raw_name, payload in plan.payloads.items():
@@ -6800,8 +6798,24 @@ def _commit_publication_plan(
     manifest_payload = payloads.get("manifest.json")
     if graph_payload is None or manifest_payload is None:
         raise PendingTransactionError("publication plan requires graph and manifest")
+    return PublicationPlan(payloads, tuple(deletions))
+
+
+def _commit_publication_plan(
+    transaction: Transaction,
+    plan: PublicationPlan,
+    *,
+    graph_name: str = "graph.json",
+    failpoint: Callable[[str], None] | None = None,
+) -> GenerationReceipt:
+    """Publish one validated inventory, its explicit deletions, and receipt last."""
+    graph_name = _validated_relative_name(graph_name)
+    validated = _validated_publication_plan(plan, graph_name=graph_name)
+    payloads = validated.payloads
+    graph_payload = payloads[graph_name]
+    manifest_payload = payloads["manifest.json"]
     with owned_step(transaction):
-        for name in deletions:
+        for name in validated.deletions:
             with pin_output(transaction.output) as capability, _locked(capability):
                 _validate_authority(capability, transaction)
                 _unlink_relative(capability, name)
@@ -6893,25 +6907,35 @@ def _publish_single_derived_artifact(
         output=graph_output,
         expected_snapshot=snapshot,
     )
-    graph_data = dict(snapshot.data)
-    metadata = dict(graph_data.get("graph") or {})
-    metadata[GRAPH_WATERMARK_KEY] = {
-        "schema": 1,
-        "protocol_epoch": 1,
-        "generation": transaction.generation,
-        "state": "active",
-    }
-    graph_data["graph"] = metadata
-    graph_payload = json.dumps(
-        graph_data, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
-    payloads = dict(snapshot.artifacts)
-    payloads[graph_path.name] = graph_payload
-    payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
-    payloads[relative] = payload
+    try:
+        graph_data = dict(snapshot.data)
+        metadata = dict(graph_data.get("graph") or {})
+        metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        graph_data["graph"] = metadata
+        graph_payload = json.dumps(
+            graph_data, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        payloads = dict(snapshot.artifacts)
+        payloads[graph_path.name] = graph_payload
+        payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
+        payloads[relative] = payload
+        plan = PublicationPlan(payloads)
+        if require_publication_plan:
+            plan = _validated_publication_plan(plan, graph_name=graph_path.name)
+    except Exception:
+        if require_publication_plan:
+            # Preparation has published nothing. The existing exact-owner
+            # no-op boundary must prove that the predecessor can be restored.
+            cancel_unpublished_transaction(transaction)
+        raise
     commit_publication_plan(
         transaction,
-        PublicationPlan(payloads),
+        plan,
         graph_name=graph_path.name,
     )
     finish_transaction(transaction)
@@ -6944,12 +6968,18 @@ def publish_snapshot_auxiliary(
             raise PendingTransactionError(
                 "auxiliary publication requires complete retained inventory"
             )
-        _publish_single_derived_artifact(
-            snapshot, graph_path=snapshot.graph_path, output_path=output / name,
-            payload=payload, source_managed=snapshot.receipt_digest is not None,
-            artifact_kind="auxiliary", require_publication_plan=True,
-        )
+        source_managed = snapshot.receipt_digest is not None
+        if source_managed:
+            _publish_single_derived_artifact(
+                snapshot, graph_path=snapshot.graph_path, output_path=output / name,
+                payload=payload, source_managed=True,
+                artifact_kind="auxiliary", require_publication_plan=True,
+            )
         capability.validate()
+    if not source_managed:
+        # The unmanaged writer locks ancestors before descendants. Enter it
+        # only after releasing this leaf lock; it rechecks the source snapshot.
+        commit_unmanaged_bytes(output / name, payload, expected_snapshot=snapshot)
     return output / name
 
 
@@ -7134,7 +7164,13 @@ def _validate_receipt_locked(
     protocol_override: Mapping[str, object] | None = None,
     drainer_override: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
     merge_supersession: tuple[str, str] | None = None,
+    admitted_receipt_digest: str | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, bytes]]:
+    """Validate receipt authority and, by default, every inventory artifact.
+
+    An exact already-admitted digest permits a graph/control-only recheck for
+    optional auxiliary reads. That path cannot retain artifact bytes or publish.
+    """
     try:
         receipt_payload = _read_bytes(capability, RECEIPT_FILE)
     except FileNotFoundError as exc:
@@ -7151,6 +7187,18 @@ def _validate_receipt_locked(
     if not isinstance(receipt, dict) or protocol is None:
         raise PendingTransactionError("generation receipt is missing")
     digest = hashlib.sha256(receipt_payload).hexdigest()
+    if admitted_receipt_digest is not None and (
+        digest != admitted_receipt_digest
+        or graph_payload is None
+        or transaction is not None
+        or retain_artifacts
+        or retain_limits
+        or merge_supersession is not None
+        or protocol_override is not None
+        or drainer_override is not None
+        or allow_missing_completed_drainer
+    ):
+        raise PendingTransactionError("admitted receipt recheck is inconsistent")
     drainer = _drainer_from_json(receipt.get("drainer"))
     required = receipt.get("required_artifacts")
     artifact_digests = receipt.get("artifact_digests")
@@ -7246,6 +7294,13 @@ def _validate_receipt_locked(
     aggregate_size = 0
     actual_digests: dict[str, str] = {}
     for name in required:
+        if admitted_receipt_digest is not None:
+            # The exact receipt already crossed full snapshot admission. Recheck
+            # its live authority without rescanning unrelated artifact bodies.
+            if not _is_hex(artifact_digests[name]):
+                raise PendingTransactionError("admitted artifact digest is malformed")
+            actual_digests[name] = artifact_digests[name]
+            continue
         should_retain = retain_all or name in retained
         artifact_digest, artifact_size, artifact_body = _hash_relative_bytes(
             capability,
@@ -9416,7 +9471,7 @@ def _inventory_selector(
 
 
 def _validate_expected_snapshot_locked(
-    capability: OutputCapability, snapshot: GraphSnapshot
+    capability: OutputCapability, snapshot: GraphSnapshot, *, auxiliary_read: bool = False,
 ) -> None:
     if snapshot.output_identity is not None and snapshot.output_identity != capability.identity:
         raise PendingTransactionError("admitted snapshot output identity changed")
@@ -9474,6 +9529,7 @@ def _validate_expected_snapshot_locked(
             capability,
             graph_payload=current_graph,
             retain_artifacts=(),
+            admitted_receipt_digest=snapshot.receipt_digest if auxiliary_read else None,
         )
         selector = tuple(
             sorted(
@@ -10072,9 +10128,12 @@ def admit_snapshot_auxiliary(
         raise PendingTransactionError("unsupported snapshot auxiliary")
     limit = min(limit, _artifact_read_limit(name))
     with pin_output(snapshot.graph_path.parent, mutation=False) as capability, _locked(capability):
-        _validate_expected_snapshot_locked(capability, snapshot)
+        _validate_expected_snapshot_locked(capability, snapshot, auxiliary_read=True)
+        expected_digest = dict(snapshot.inventory_selector).get(name)
         before = _entry_stat(capability, name)
         if before is None:
+            if expected_digest is not None:
+                raise PendingTransactionError("admitted auxiliary disappeared")
             return None
         payload = _read_bytes(capability, name, limit)
         final_payload = _read_bytes(capability, name, limit)
@@ -10083,7 +10142,9 @@ def admit_snapshot_auxiliary(
             raise PendingTransactionError("auxiliary identity changed while reading")
         if payload != final_payload:
             raise PendingTransactionError("auxiliary content changed while reading")
-        _validate_expected_snapshot_locked(capability, snapshot)
+        if expected_digest is not None and hashlib.sha256(payload).hexdigest() != expected_digest:
+            raise PendingTransactionError("admitted auxiliary digest changed")
+        _validate_expected_snapshot_locked(capability, snapshot, auxiliary_read=True)
         capability.validate()
     return payload
 

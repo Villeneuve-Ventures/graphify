@@ -12592,3 +12592,137 @@ def test_snapshot_auxiliary_windows_publication_refusal_before_mutation(tmp_path
     with pytest.raises(PendingTransactionError, match="Windows unmanaged final mutation"):
         module.commit_unmanaged_bytes(output / ".graphify_learning.json", b"{}", expected_snapshot=snapshot)
     assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("bound", ["count", "aggregate"])
+def test_optional_learning_plan_refusal_preserves_readable_generation(tmp_path, monkeypatch, capsys, bound):
+    """A rejected complete plan restores only its proven unpublished owner."""
+    from graphify import transaction as module
+    from graphify.reflect import reflect
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    if bound == "count":
+        monkeypatch.setattr(module, "_MAX_RECEIPT_ARTIFACTS", len(snapshot.artifacts))
+    else:
+        monkeypatch.setattr(
+            module, "_MAX_RECEIPT_AGGREGATE_BYTES",
+            sum(map(len, snapshot.artifacts.values())) + 1,
+        )
+    protected = {name: (output / name).read_bytes() for name in (
+        "graph.json", "custom.txt", module.RECEIPT_FILE, module.PROTOCOL_FILE, module.DRAINER_FILE,
+    )}
+    lessons, _ = reflect(output / "memory", output / "reflections" / "LESSONS.md",
+                         graph_path=output / "graph.json")
+    assert lessons.is_file()
+    assert "learning publication failed" in capsys.readouterr().err
+    after = open_graph_snapshot(output / "graph.json", purpose="serve")
+    assert after.generation == snapshot.generation
+    assert {name: (output / name).read_bytes() for name in protected} == protected
+    assert not (output / module.TRANSACTION_FILE).exists()
+    assert not (output / ".graphify_learning.json").exists()
+
+
+@pytest.mark.parametrize("change", [
+    "graph", "receipt-content", "receipt-identity", "protocol", "drainer",
+    "sidecar-content", "sidecar-missing",
+])
+def test_auxiliary_receipt_recheck_refuses_changed_binding(tmp_path, capsys, change):
+    """Lightweight refresh still pins graph, control identity and owned learning bytes."""
+    from graphify import transaction as module
+    from graphify.reflect import load_learning_overlay
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    module.publish_snapshot_auxiliary(
+        snapshot, canonical_name=".graphify_learning.json", payload=b'{"nodes":{}}',
+    )
+    snapshot = open_graph_snapshot(output / "graph.json", purpose="serve")
+    if change == "graph":
+        path = output / "graph.json"
+        path.write_bytes(path.read_bytes() + b" ")
+    elif change == "receipt-content":
+        path = output / module.RECEIPT_FILE
+        path.write_bytes(path.read_bytes() + b" ")
+    elif change == "receipt-identity":
+        path = output / module.RECEIPT_FILE
+        replacement = output / "replacement"
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
+    elif change == "protocol":
+        path = output / module.PROTOCOL_FILE
+        data = json.loads(path.read_bytes())
+        data["transaction_id"] = "0" * 64
+        path.write_text(json.dumps(data))
+    elif change == "drainer":
+        path = output / module.DRAINER_FILE
+        data = json.loads(path.read_bytes())
+        data["generation"] += 1
+        data["successor_generation"] += 1
+        path.write_text(json.dumps(data))
+    elif change == "sidecar-content":
+        (output / ".graphify_learning.json").write_bytes(b'{"nodes":{"foreign":{}}}')
+    else:
+        (output / ".graphify_learning.json").unlink()
+    before = _file_bytes(output)
+    assert load_learning_overlay(output / "graph.json", snapshot=snapshot) == {}
+    assert "learning admission failed" in capsys.readouterr().err
+    assert _file_bytes(output) == before
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason="Native Windows publication remains refused")
+def test_external_learning_writer_does_not_invert_lock_order(tmp_path):
+    """Two forced concurrent public writers complete without a lock cycle."""
+    output = tmp_path / 'output'
+    output.mkdir()
+    (output / 'graph.json').write_text('{"graph":{},"nodes":[],"links":[]}')
+    script = r'''
+import contextlib, json, os, sys, threading
+from pathlib import Path
+from graphify import transaction as tx
+from graphify.reflect import write_learning_sidecar
+out = Path(sys.argv[1])
+leaf_held = threading.Event()
+root_held = threading.Event()
+learning_root_attempt = threading.Event()
+real = tx._locked
+errors = []
+@contextlib.contextmanager
+def coordinated(cap):
+    learning = threading.current_thread().name == 'learning'
+    if learning and cap.path == Path('/'):
+        learning_root_attempt.set()
+    with real(cap):
+        if learning and cap.path == out:
+            leaf_held.set()
+            if not root_held.wait(3):
+                raise RuntimeError('competitor never held root')
+        if not learning and cap.path == Path('/'):
+            root_held.set()
+            if not learning_root_attempt.wait(3):
+                raise RuntimeError('learning never reached ancestor writer')
+        yield
+tx._locked = coordinated
+def learning():
+    try:
+        write_learning_sidecar({}, out / 'graph.json')
+    except Exception as error:
+        errors.append(str(error))
+def export():
+    try:
+        if not leaf_held.wait(3):
+            raise RuntimeError('learning never held leaf')
+        tx.commit_unmanaged_bytes(out / 'other.txt', b'keep')
+    except Exception as error:
+        errors.append(str(error))
+threads = [threading.Thread(target=learning, name='learning', daemon=True), threading.Thread(target=export, name='export', daemon=True)]
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(4)
+blocked = any(thread.is_alive() for thread in threads)
+print(json.dumps({'blocked': blocked, 'leaf_held': leaf_held.is_set(), 'root_held': root_held.is_set(), 'learning_root_attempt': learning_root_attempt.is_set(), 'errors': errors}), flush=True)
+os._exit(1 if blocked or errors else 0)
+'''
+    result = subprocess.run([sys.executable, '-c', script, str(output)], capture_output=True, text=True, timeout=12)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (output / 'other.txt').read_bytes() == b'keep'
+    assert json.loads((output / '.graphify_learning.json').read_text())['nodes'] == {}
