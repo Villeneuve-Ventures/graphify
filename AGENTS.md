@@ -29,6 +29,14 @@ the policy does not authorize its own approval, commit, publication, merge, or
 cleanup. Keep the detailed policy, acceptance packet, and complete candidate
 manifest available to every independent reviewer.
 
+## Local resource retention
+
+Follow [the local resource retention rule](docs/local-resource-retention.md) when
+creating investigation outputs and closing local work. Keep a local retention
+index outside Git. Preserve unique work, unresolved reproductions, required
+evidence, and active or paused resources; record final receipts and release
+conditions. The rule does not grant cleanup authority or schedule deletion.
+
 ## README language policy
 
 Graphify's maintained README documentation is English-only. Do not create,
