@@ -28,6 +28,7 @@ written there would be clobbered on the next export.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -632,20 +633,22 @@ def reflect(memory_dir: Path, out_path: Path,
                             known_nodes=known_nodes)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render_lessons_md(agg), encoding="utf-8")
+    with out_path.open("w", encoding="utf-8") as lessons:
+        lessons.write(render_lessons_md(agg))
+        lessons.flush()
 
-    # Also project a derived experiential sidecar next to graph.json when a graph
-    # is in hand. Best-effort: a sidecar failure must never break LESSONS.md.
-    if graph_path is not None:
-        try:
-            write_learning_sidecar(
-                agg, Path(graph_path), now=now, snapshot=graph_snapshot
-            )
-            # Managed publication rewrites graph/sidecar inputs. Mark the already
-            # written lessons fresh only after that publication has succeeded.
-            out_path.touch()
-        except Exception as exc:
-            _learning_diagnostic("publication", exc)
+        # Also project a derived experiential sidecar next to graph.json when a graph
+        # is in hand. Best-effort: a sidecar failure must never break LESSONS.md.
+        if graph_path is not None:
+            try:
+                write_learning_sidecar(
+                    agg, Path(graph_path), now=now, snapshot=graph_snapshot
+                )
+                # Advance only the written lessons inode after publication. A
+                # replaced output or lessons path must not acquire a fresh marker.
+                os.utime(lessons.fileno(), None)
+            except Exception as exc:
+                _learning_diagnostic("publication", exc)
 
     return out_path, agg
 

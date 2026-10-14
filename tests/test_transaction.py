@@ -12425,21 +12425,21 @@ else:
 
 
 # Bounded prerequisite-interface review for issue #91.
-def _auxiliary_snapshot(tmp_path, *, managed=False):
+def _auxiliary_snapshot(tmp_path, *, managed=False, graph_name="graph.json"):
     output = tmp_path / "graphify-out"
     output.mkdir()
     if managed:
         tx = begin_transaction("runtime", tmp_path, output=output)
         commit_publication_plan(tx, PublicationPlan({
-            "graph.json": _graph(tx.generation), "manifest.json": b"{}",
+            graph_name: _graph(tx.generation), "manifest.json": b"{}",
             "custom.txt": b"preserve me",
-        }))
+        }), graph_name=graph_name)
         finish_transaction(tx)
     else:
-        (output / "graph.json").write_bytes(
+        (output / graph_name).write_bytes(
             b'{"graph":{},"nodes":[],"links":[]}'
         )
-    return output, open_graph_snapshot(output / "graph.json", purpose="publication-prepare")
+    return output, open_graph_snapshot(output / graph_name, purpose="publication-prepare")
 
 
 @pytest.mark.parametrize("managed", [False, True])
@@ -12726,3 +12726,28 @@ os._exit(1 if blocked or errors else 0)
     assert result.returncode == 0, result.stdout + result.stderr
     assert (output / 'other.txt').read_bytes() == b'keep'
     assert json.loads((output / '.graphify_learning.json').read_text())['nodes'] == {}
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["external", "managed"])
+@pytest.mark.parametrize("graph_name", [".graphify_learning.json", ".GRAPHIFY_LEARNING.JSON"])
+def test_snapshot_auxiliary_rejects_graph_name_collision_before_publication(
+    tmp_path, monkeypatch, managed, graph_name,
+):
+    """Auxiliary name collisions must not enter either managed or external writes."""
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=managed, graph_name=graph_name)
+    before = _file_bytes(output)
+
+    def unexpected_publication(*args, **kwargs):
+        pytest.fail("graph/auxiliary collision entered publication")
+
+    monkeypatch.setattr(module, "begin_transaction", unexpected_publication)
+    monkeypatch.setattr(module, "commit_unmanaged_bytes", unexpected_publication)
+    with pytest.raises(PendingTransactionError, match="auxiliary.*graph"):
+        module.publish_snapshot_auxiliary(
+            snapshot, canonical_name=".graphify_learning.json", payload=b'{"nodes":{}}',
+        )
+    assert _file_bytes(output) == before
+    assert not (output / module.TRANSACTION_FILE).exists()
+    assert open_graph_snapshot(snapshot.graph_path, purpose="serve").digest == snapshot.digest

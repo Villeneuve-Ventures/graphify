@@ -23,6 +23,10 @@ The version 1 node map, deterministic sorted UTF-8 serialization, provenance cap
 code fingerprints and conservative staleness calculation keep their existing
 behavior.
 
+A sidecar name that collides with the graph filename, including case variants,
+is refused before publication starts. The custom graph remains usable, and
+reflection still writes its lessons document.
+
 Managed destinations use exact transaction ownership and a complete publication
 plan. A successful publication carries all retained graph facts and receipt
 artifacts forward, adds the sidecar, and advances the generation watermark.
@@ -30,7 +34,9 @@ Update/watch and cluster-only successors retain receipt-owned sidecar bytes and
 fingerprints, so consumers mark changed source code stale. Borrowed report-only
 learning remains outside receipt ownership.
 After successful publication, reflection advances the already written lessons
-mtime so `reflect --if-stale` can skip unchanged inputs. Publication failure does
+mtime through the descriptor of the written file so `reflect --if-stale` can
+skip unchanged inputs. Replacing the output directory or lessons path during
+publication cannot create or mark another file fresh. Publication failure does
 not advance that marker. Unrelated non-receipt artifacts remain in place. A sparse
 reader snapshot cannot be used for publication. An already active managed
 generation is refused without mutation; the optional sidecar does not take over
@@ -57,3 +63,6 @@ plan publication and source-bound unmanaged writes. Transaction decomposition,
 replacement policy and recovery sequencing are unchanged.
 A separate follow-up interface review covered the exact-receipt auxiliary
 recheck, unpublished-plan failure handling and external lock ordering.
+
+A further bounded interface review covered refusal of graph/sidecar filename
+collisions before either publication boundary is entered.

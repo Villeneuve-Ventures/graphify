@@ -1308,3 +1308,100 @@ def test_missing_learning_sidecar_checks_receipt_before_fallback(
     else:
         assert diagnostic == ""
     assert {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["external", "managed"])
+@pytest.mark.parametrize("graph_name", [LEARNING_SIDECAR_NAME, LEARNING_SIDECAR_NAME.upper()])
+def test_learning_collision_preserves_graph_and_lessons(tmp_path, capsys, managed, graph_name):
+    """A graph using the sidecar filename remains readable after optional refusal."""
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY, PublicationPlan, begin_transaction,
+        commit_publication_plan, finish_transaction, open_graph_snapshot,
+    )
+
+    out = tmp_path / "graphify-out"
+    out.mkdir()
+    graph_path = out / graph_name
+    if managed:
+        transaction = begin_transaction("runtime", tmp_path, output=out)
+        graph = {"graph": {}, "nodes": [{"id": "n", "label": "Topic"}], "links": []}
+        graph["graph"][GRAPH_WATERMARK_KEY] = {
+            "schema": 1, "protocol_epoch": 1,
+            "generation": transaction.generation, "state": "active",
+        }
+        commit_publication_plan(transaction, PublicationPlan({
+            graph_name: json.dumps(graph).encode(), "manifest.json": b"{}",
+            "custom.txt": b"retain me",
+        }), graph_name=graph_name)
+        finish_transaction(transaction)
+    else:
+        _overlay_graph(out, [{"id": "n", "label": "Topic"}])
+        (out / "graph.json").rename(graph_path)
+    snapshot = open_graph_snapshot(graph_path, purpose="serve")
+    before = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
+    lessons, _ = reflect(out / "memory", tmp_path / "reflections" / "LESSONS.md",
+                         graph_path=graph_path, now=_NOW)
+    assert lessons.read_text().startswith("#")
+    diagnostic = capsys.readouterr().err
+    assert "learning publication failed" in diagnostic
+    assert "graph publication not confirmed" in diagnostic
+    assert len(diagnostic.rstrip()) <= 240
+    assert {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()} == before
+    assert open_graph_snapshot(graph_path, purpose="serve").digest == snapshot.digest
+
+
+@pytest.mark.parametrize("replacement", ["output", "lessons"])
+def test_reflect_freshness_updates_original_lessons_after_replacement(
+    tmp_path, monkeypatch, capsys, replacement,
+):
+    """Freshness follows the written lessons inode after an output or leaf retarget."""
+    import os
+    import graphify.reflect as module
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY, PublicationPlan, begin_transaction,
+        commit_publication_plan, finish_transaction,
+    )
+
+    out = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=out)
+    payload = json.dumps({"graph": {GRAPH_WATERMARK_KEY: {
+        "schema": 1, "protocol_epoch": 1,
+        "generation": transaction.generation, "state": "active",
+    }}, "nodes": [], "links": []}).encode()
+    commit_publication_plan(transaction, PublicationPlan({
+        "graph.json": payload, "manifest.json": b"{}",
+    }))
+    finish_transaction(transaction)
+    lessons_path = out / "reflections" / "LESSONS.md"
+    retained_out = tmp_path / "retained-output"
+    retained_lessons = (retained_out / "reflections" / "LESSONS.md"
+                        if replacement == "output" else tmp_path / "retained-lessons.md")
+    original_write = module.write_learning_sidecar
+    foreign_before = {}
+    written = []
+
+    def state():
+        return {p.relative_to(out): (p.read_bytes(), p.stat().st_mtime_ns)
+                for p in out.rglob("*") if p.is_file()}
+
+    def replace_after_publication(*args, **kwargs):
+        result = original_write(*args, **kwargs)
+        written.append(lessons_path.read_bytes())
+        if replacement == "output":
+            out.rename(retained_out)
+            (out / "reflections").mkdir(parents=True)
+            (out / "graph.json").write_text('{"graph":{},"nodes":[],"links":[]}')
+        else:
+            lessons_path.rename(retained_lessons)
+            lessons_path.write_bytes(b"foreign lessons")
+            os.utime(lessons_path, ns=(1_000_000_000, 1_000_000_000))
+        foreign_before.update(state())
+        return result
+
+    monkeypatch.setattr(module, "write_learning_sidecar", replace_after_publication)
+    reflect(out / "memory", lessons_path, graph_path=out / "graph.json", now=_NOW)
+    assert state() == foreign_before
+    assert retained_lessons.read_bytes() == written[0]
+    source_out = retained_out if replacement == "output" else out
+    assert lessons_fresh(retained_lessons, source_out / "memory", source_out / "graph.json")
+    assert capsys.readouterr().err == ""

@@ -6956,6 +6956,8 @@ def publish_snapshot_auxiliary(
     name = _validated_shallow_name(canonical_name)
     if name != ".graphify_learning.json":
         raise PendingTransactionError("unsupported snapshot auxiliary")
+    if name.casefold() == snapshot.graph_path.name.casefold():
+        raise PendingTransactionError("auxiliary destination aliases graph file")
     output = snapshot.graph_path.parent
     with pin_output(output, mutation=False) as capability, _locked(capability):
         _validate_expected_snapshot_locked(capability, snapshot)
