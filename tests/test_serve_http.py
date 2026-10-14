@@ -343,7 +343,7 @@ def test_cached_context_refreshes_uncached_learning_overlay(tmp_path, monkeypatc
     monkeypatch.setattr(
         reflect_module,
         "load_learning_overlay",
-        lambda _path: next(overlays),
+        lambda _path, *, snapshot: next(overlays),
     )
     app = serve_mod._build_http_app(_graph_file(tmp_path), json_response=True)
     with _client(app) as client:

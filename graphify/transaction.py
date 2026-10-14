@@ -6840,10 +6840,17 @@ def _publish_single_derived_artifact(
     payload: bytes,
     source_managed: bool,
     artifact_kind: str,
+    require_publication_plan: bool = False,
 ) -> None:
     """Publish one graph-derived artifact through its exact output authority."""
-    graph_output = graph_path.expanduser().resolve().parent
-    resolved_output = output_path.expanduser().resolve()
+    graph_output = (
+        snapshot.graph_path.parent if require_publication_plan
+        else graph_path.expanduser().resolve().parent
+    )
+    resolved_output = (
+        output_path.expanduser().absolute() if require_publication_plan
+        else output_path.expanduser().resolve()
+    )
     destination_authority = managed_output_containing(resolved_output)
     contained_by_source = (
         resolved_output.parent == graph_output
@@ -6859,7 +6866,10 @@ def _publish_single_derived_artifact(
             f"{artifact_kind} destination is controlled by foreign managed authority"
         )
     if not managed_destination:
-        commit_unmanaged_bytes(resolved_output, payload)
+        commit_unmanaged_bytes(
+            resolved_output, payload,
+            expected_snapshot=snapshot if require_publication_plan else None,
+        )
         return
 
     relative = resolved_output.relative_to(graph_output).as_posix()
@@ -6869,6 +6879,8 @@ def _publish_single_derived_artifact(
             raise PendingTransactionError(
                 f"{artifact_kind} destination does not match exact transaction output"
             )
+        if require_publication_plan:
+            raise PendingTransactionError("auxiliary publication requires a closed source generation")
         commit_relative_bytes(active, relative, payload)
         return
 
@@ -6903,6 +6915,42 @@ def _publish_single_derived_artifact(
         graph_name=graph_path.name,
     )
     finish_transaction(transaction)
+
+
+def publish_snapshot_auxiliary(
+    snapshot: GraphSnapshot, *, canonical_name: str, payload: bytes,
+) -> Path:
+    """Publish a canonical sibling of an admitted graph, retaining its inventory.
+
+    Managed output uses the exact owner and a complete publication plan. External
+    output uses the unmanaged atomic writer with the same source snapshot pinned.
+    """
+    if not isinstance(snapshot, GraphSnapshot):
+        raise TypeError("auxiliary publication requires a graph snapshot")
+    if type(payload) is not bytes:
+        raise TypeError("auxiliary publication payload must be immutable bytes")
+    name = _validated_shallow_name(canonical_name)
+    if name != ".graphify_learning.json":
+        raise PendingTransactionError("unsupported snapshot auxiliary")
+    output = snapshot.graph_path.parent
+    with pin_output(output, mutation=False) as capability, _locked(capability):
+        _validate_expected_snapshot_locked(capability, snapshot)
+        _entry_stat(capability, name)  # Refuse symlink or non-regular destinations.
+        # A plan must carry all admitted facts and artifacts, not a sparse read view.
+        if any(
+            digest is not None and key not in snapshot.artifacts
+            for key, digest in snapshot.inventory_selector
+        ):
+            raise PendingTransactionError(
+                "auxiliary publication requires complete retained inventory"
+            )
+        _publish_single_derived_artifact(
+            snapshot, graph_path=snapshot.graph_path, output_path=output / name,
+            payload=payload, source_managed=snapshot.receipt_digest is not None,
+            artifact_kind="auxiliary", require_publication_plan=True,
+        )
+        capability.validate()
+    return output / name
 
 
 def _watermark(payload: bytes) -> dict[str, object]:
@@ -7373,6 +7421,7 @@ def commit_unmanaged_bytes(
     path: Path | str,
     payload: bytes,
     *,
+    expected_snapshot: GraphSnapshot | None = None,
     failpoint: Callable[[str], None] | None = None,
     expected_predecessor_digest: str | None | object = _ANY_UNMANAGED_PREDECESSOR,
     expected_predecessor_identity: OutputIdentity | None | object = (
@@ -7406,7 +7455,12 @@ def commit_unmanaged_bytes(
         raise PendingTransactionError(
             "native Windows unmanaged final mutation is not proven"
         )
-    destination = Path(path).expanduser().resolve(strict=False)
+    if expected_snapshot is not None and not isinstance(expected_snapshot, GraphSnapshot):
+        raise TypeError("unmanaged source admission requires a graph snapshot")
+    destination = (
+        Path(path).expanduser().absolute()
+        if expected_snapshot is not None else Path(path).expanduser().resolve(strict=False)
+    )
     existing_parent = destination.parent
     while not existing_parent.exists():
         if existing_parent.parent == existing_parent:
@@ -7464,6 +7518,8 @@ def commit_unmanaged_bytes(
         )
 
         def validate_chain() -> None:
+            if expected_snapshot is not None:
+                _validate_expected_snapshot_locked(destination_capability, expected_snapshot)
             for pinned in capabilities:
                 pinned.validate()
                 journals = [
@@ -9995,6 +10051,40 @@ def admit_snapshot_artifact(
         capability.validate()
     if managed_output_containing(resolved) is not None:
         raise PendingTransactionError("artifact override gained managed authority")
+    return payload
+
+
+def admit_snapshot_auxiliary(
+    snapshot: GraphSnapshot, *, canonical_name: str, limit: int,
+) -> bytes | None:
+    """Read one optional canonical sibling under the admitted graph identity.
+
+    Unlike receipt artifact admission, absence from the receipt is allowed. The
+    byte limit applies before parsing; named identity, content and graph authority
+    are rechecked before returning any bytes. No foreign override is accepted.
+    """
+    if not isinstance(snapshot, GraphSnapshot):
+        raise TypeError("auxiliary admission requires a graph snapshot")
+    name = _validated_shallow_name(canonical_name)
+    if type(limit) is not int or limit < 1:
+        raise ValueError("auxiliary admission limit must be a positive integer")
+    if name != ".graphify_learning.json":
+        raise PendingTransactionError("unsupported snapshot auxiliary")
+    limit = min(limit, _artifact_read_limit(name))
+    with pin_output(snapshot.graph_path.parent, mutation=False) as capability, _locked(capability):
+        _validate_expected_snapshot_locked(capability, snapshot)
+        before = _entry_stat(capability, name)
+        if before is None:
+            return None
+        payload = _read_bytes(capability, name, limit)
+        final_payload = _read_bytes(capability, name, limit)
+        after = _entry_stat(capability, name)
+        if after is None or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise PendingTransactionError("auxiliary identity changed while reading")
+        if payload != final_payload:
+            raise PendingTransactionError("auxiliary content changed while reading")
+        _validate_expected_snapshot_locked(capability, snapshot)
+        capability.validate()
     return payload
 
 

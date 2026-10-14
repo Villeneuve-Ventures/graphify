@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,9 @@ _UNCATEGORIZED = "Uncategorized"
 # merged in at display time from this file.
 LEARNING_SIDECAR_NAME = ".graphify_learning.json"
 _LEARNING_SCHEMA_VERSION = 1
+# Aggregate serialized sidecar budget, applied before JSON parsing/publication.
+LEARNING_MAX_BYTES = 1024 * 1024
+_LEARNING_DIAGNOSTIC_CHARS = 240
 _PROVENANCE_CAP = 5  # most-recent (question, date, outcome) entries per node
 
 # Scoring defaults (both exposed as CLI flags).
@@ -606,7 +610,7 @@ def reflect(memory_dir: Path, out_path: Path,
         try:
             from graphify.transaction import open_graph_snapshot
             graph_snapshot = open_graph_snapshot(
-                graph_path, purpose="reflect"
+                graph_path, purpose="publication-prepare"
             )
         except (OSError, ValueError):
             graph_snapshot = None
@@ -637,8 +641,8 @@ def reflect(memory_dir: Path, out_path: Path,
             write_learning_sidecar(
                 agg, Path(graph_path), now=now, snapshot=graph_snapshot
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _learning_diagnostic("publication", exc)
 
     return out_path, agg
 
@@ -871,43 +875,87 @@ def write_learning_sidecar(agg: dict[str, Any], graph_path: Path,
     Sorted keys + indent=2 so re-runs on identical input (and a fixed ``now``)
     are byte-identical. Returns the sidecar path.
     """
+    from graphify.transaction import open_graph_snapshot, publish_snapshot_auxiliary
+
+    if snapshot is None:
+        snapshot = open_graph_snapshot(graph_path, purpose="publication-prepare")
+    _check_learning_graph_path(graph_path, snapshot)
     overlay = build_learning_overlay(
-        agg, graph_path, now=now, snapshot=snapshot
+        agg, snapshot.graph_path, now=now, snapshot=snapshot
     )
-    sidecar = Path(graph_path).parent / LEARNING_SIDECAR_NAME
-    sidecar.write_text(
-        json.dumps(overlay, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    payload = (
+        json.dumps(overlay, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    if len(payload) > LEARNING_MAX_BYTES:
+        raise ValueError("learning sidecar exceeds aggregate byte budget")
+    return publish_snapshot_auxiliary(
+        snapshot, canonical_name=LEARNING_SIDECAR_NAME, payload=payload,
     )
-    return sidecar
 
 
-def load_learning_overlay(graph_path: Path) -> dict[str, dict[str, Any]]:
-    """Load the sidecar next to ``graph_path`` and return ``{node_id -> entry}``
-    with a recomputed ``stale: bool`` per entry. Best-effort -> {} on any error.
+def _learning_diagnostic(operation: str, error: Exception) -> None:
+    """Emit one bounded line without payloads, paths or arbitrary exception text."""
+    # Exception messages can contain an entire malformed document or user text.
+    # Stable categories make diagnostics bounded even for an unexpected failure.
+    from graphify.transaction import PendingTransactionError
 
-    Staleness: recompute ``file_hash(source_file)`` and compare to the entry's
-    stored ``code_fingerprint``. Matching fingerprints -> not stale. Differing,
-    missing-but-recomputable, or a vanished file -> stale (the safe, over-flagging
-    direction). An entry with no stored fingerprint AND no current file is not
-    marked stale (nothing to re-verify).
+    reason = type(error).__name__
+    if isinstance(error, PendingTransactionError):
+        reason = "snapshot, identity, authority or byte-budget refusal"
+    elif isinstance(error, (ValueError, UnicodeError)):
+        reason = "malformed content or aggregate byte budget exceeded"
+    elif isinstance(error, OSError):
+        reason = "I/O failure"
+    result = ("LESSONS.md remains available; graph publication not confirmed"
+              if operation == "publication" else "optional sidecar skipped")
+    message = f"[graphify] learning {operation} failed: {reason}; {result}"
+    print(message[:_LEARNING_DIAGNOSTIC_CHARS], file=sys.stderr)
+
+
+def _check_learning_graph_path(graph_path: Path, snapshot) -> None:
+    from graphify.transaction import PendingTransactionError
+
+    path = Path(graph_path).expanduser().absolute()
+    if path.parent.resolve(strict=True) / path.name != snapshot.graph_path:
+        raise PendingTransactionError("learning graph destination changed")
+
+
+def load_learning_overlay(graph_path: Path, *, snapshot=None) -> dict[str, dict[str, Any]]:
+    """Admit at most LEARNING_MAX_BYTES against one graph snapshot, then parse.
+
+    Absence is quiet. Malformed, oversized or retargeted inputs emit a bounded
+    diagnostic and return {}. Optional learning never blocks the graph consumer.
+    Fingerprint comparison retains the existing conservative staleness behavior.
     """
-    sidecar = Path(graph_path).parent / LEARNING_SIDECAR_NAME
     try:
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        from graphify.transaction import open_graph_snapshot, admit_snapshot_auxiliary
+
+        if snapshot is None:
+            try:
+                (Path(graph_path).parent / LEARNING_SIDECAR_NAME).lstat()
+            except FileNotFoundError:
+                return {}
+            snapshot = open_graph_snapshot(graph_path, purpose="learning-overlay")
+        _check_learning_graph_path(graph_path, snapshot)
+        payload = admit_snapshot_auxiliary(
+            snapshot, canonical_name=LEARNING_SIDECAR_NAME, limit=LEARNING_MAX_BYTES,
+        )
+        if payload is None:
+            return {}
+        data = json.loads(payload.decode("utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("nodes"), dict):
+            raise ValueError("malformed learning node map")
+        out: dict[str, dict[str, Any]] = {}
+        for nid, entry in data["nodes"].items():
+            if not isinstance(entry, dict):
+                continue
+            merged = dict(entry)
+            merged["stale"] = _is_stale(entry, snapshot.graph_path)
+            out[str(nid)] = merged
+        return out
+    except Exception as exc:
+        _learning_diagnostic("admission", exc)
         return {}
-    nodes = data.get("nodes")
-    if not isinstance(nodes, dict):
-        return {}
-    out: dict[str, dict[str, Any]] = {}
-    for nid, entry in nodes.items():
-        if not isinstance(entry, dict):
-            continue
-        merged = dict(entry)
-        merged["stale"] = _is_stale(entry, graph_path)
-        out[str(nid)] = merged
-    return out
 
 
 def _is_stale(entry: dict[str, Any], graph_path: Path) -> bool:

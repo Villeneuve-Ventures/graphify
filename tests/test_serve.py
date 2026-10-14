@@ -1255,3 +1255,23 @@ def test_score_query_collect_per_term_seeds_false_omits_tracking(monkeypatch):
     assert qs.best_seed_by_term == {}
     # And the combined output is still byte-identical to _score_nodes.
     assert qs.ranked == _score_nodes(G, ["foo", "bar", "baz"])
+
+
+def test_learning_consumer_uses_admitted_snapshot_on_output_retarget(tmp_path, monkeypatch, capsys):
+    import graphify.serve as module
+    from graphify.transaction import open_graph_snapshot
+
+    graph_path = tmp_path / "output" / "graph.json"
+    graph_path.parent.mkdir()
+    graph_path.write_text(json.dumps({"graph": {}, "nodes": [{"id": "original"}], "links": []}))
+    snapshot = open_graph_snapshot(graph_path, purpose="serve")
+    graph_path.parent.rename(tmp_path / "retained")
+    graph_path.parent.mkdir()
+    graph_path.write_text(json.dumps({"graph": {}, "nodes": [{"id": "other"}], "links": []}))
+    (graph_path.parent / ".graphify_learning.json").write_text(
+        json.dumps({"nodes": {"original": {"status": "preferred"}}})
+    )
+    graph = module._graph_from_snapshot(snapshot)
+    assert set(graph) == {"original"}
+    assert graph.graph["_learning_overlay"] == {}
+    assert "learning admission failed" in capsys.readouterr().err

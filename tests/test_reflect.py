@@ -1034,3 +1034,175 @@ def test_ambiguous_or_unresolved_citation_is_skipped(tmp_path):
     # Ambiguous "Dup" skipped; only the unambiguous "Solo" survives.
     assert "dup_a" not in nodes and "dup_b" not in nodes
     assert "solo" in nodes
+
+
+# Issue #91: exercise public sidecar entry points with isolated output trees.
+def test_learning_oversized_rejected_before_json_parse(tmp_path, monkeypatch, capsys):
+    import graphify.reflect as module
+
+    _overlay_graph(tmp_path, [{"id": "n"}])
+    # Keep the graph parser available; observe only oversized sidecar parsing.
+    (tmp_path / LEARNING_SIDECAR_NAME).write_bytes(b" " * (1024 * 1024 + 1))
+    original = module.json.loads
+    parsed_sizes = []
+
+    def observe(payload, *args, **kwargs):
+        parsed_sizes.append(len(payload))
+        return original(payload, *args, **kwargs)
+
+    monkeypatch.setattr(module.json, "loads", observe)
+    assert load_learning_overlay(tmp_path / "graph.json") == {}
+    assert max(parsed_sizes, default=0) <= 1024 * 1024
+    assert "learning admission failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("payload", [b"{", b"[]", b'{"nodes": []}', b"\xff"])
+def test_learning_malformed_is_optional_and_diagnosed(tmp_path, payload, capsys):
+    _overlay_graph(tmp_path, [{"id": "n"}])
+    (tmp_path / LEARNING_SIDECAR_NAME).write_bytes(payload)
+    assert load_learning_overlay(tmp_path / "graph.json") == {}
+    assert "learning admission failed" in capsys.readouterr().err
+
+
+def test_learning_interrupted_external_write_preserves_predecessor(tmp_path, monkeypatch):
+    from graphify import transaction as tx
+
+    _overlay_graph(tmp_path, [{"id": "n"}])
+    sidecar = tmp_path / LEARNING_SIDECAR_NAME
+    before = b'{"nodes": {"n": {"status": "preferred"}}}\n'
+    sidecar.write_bytes(before)
+    original_text = Path.write_text
+    original_commit = tx.commit_unmanaged_bytes
+
+    def interrupted_text(path, text, *args, **kwargs):
+        if path == sidecar:
+            path.write_bytes(text[:10].encode())
+            raise OSError("interrupted sidecar write")
+        return original_text(path, text, *args, **kwargs)
+
+    def interrupted_commit(path, payload, **kwargs):
+        def failpoint(stage):
+            if stage == "after_unmanaged_successor_stage":
+                raise OSError("interrupted sidecar write")
+        return original_commit(path, payload, failpoint=failpoint, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", interrupted_text)
+    monkeypatch.setattr(tx, "commit_unmanaged_bytes", interrupted_commit)
+    with pytest.raises(OSError, match="interrupted"):
+        write_learning_sidecar({}, tmp_path / "graph.json", now=_NOW)
+    assert sidecar.read_bytes() == before
+    assert {path.name for path in tmp_path.iterdir()} == {"graph.json", LEARNING_SIDECAR_NAME}
+
+
+def test_learning_write_rejects_output_retarget(tmp_path, monkeypatch):
+    import graphify.reflect as module
+    from graphify.transaction import PendingTransactionError
+
+    out = tmp_path / "output"
+    _overlay_graph(out, [{"id": "n"}])
+    original = module.build_learning_overlay
+
+    def retarget(*args, **kwargs):
+        overlay = original(*args, **kwargs)
+        out.rename(tmp_path / "admitted-output")
+        _overlay_graph(out, [{"id": "other"}])
+        return overlay
+
+    monkeypatch.setattr(module, "build_learning_overlay", retarget)
+    with pytest.raises(PendingTransactionError, match="identity changed"):
+        write_learning_sidecar({}, out / "graph.json", now=_NOW)
+    assert not (out / LEARNING_SIDECAR_NAME).exists()
+    assert not (tmp_path / "admitted-output" / LEARNING_SIDECAR_NAME).exists()
+
+
+@pytest.mark.parametrize("race", ["leaf", "content", "graph", "output"])
+def test_learning_read_races_are_optional_and_preserve_state(tmp_path, monkeypatch, capsys, race):
+    from graphify import transaction as tx
+
+    out = tmp_path / "output"
+    _overlay_graph(out, [{"id": "n"}])
+    sidecar = out / LEARNING_SIDECAR_NAME
+    payload = b'{"nodes":{"n":{"status":"preferred"}}}'
+    sidecar.write_bytes(payload)
+    snapshot = tx.open_graph_snapshot(out / "graph.json", purpose="serve")
+    original = tx._read_bytes
+    changed = False
+
+    def retarget(capability, name, limit=1024 * 1024):
+        nonlocal changed
+        result = original(capability, name, limit)
+        if name == LEARNING_SIDECAR_NAME and not changed:
+            changed = True
+            if race == "leaf":
+                replacement = out / "replacement"
+                replacement.write_bytes(payload)
+                replacement.replace(sidecar)
+            elif race == "content":
+                sidecar.write_bytes(payload.replace(b"preferred", b"contested"))
+            elif race == "graph":
+                _overlay_graph(out, [{"id": "changed"}])
+            else:
+                out.rename(tmp_path / "retained")
+                _overlay_graph(out, [{"id": "changed"}])
+        return result
+
+    monkeypatch.setattr(tx, "_read_bytes", retarget)
+    assert load_learning_overlay(snapshot.graph_path, snapshot=snapshot) == {}
+    assert "learning admission failed" in capsys.readouterr().err
+    if race == "output":
+        assert not sidecar.exists()
+        assert (tmp_path / "retained" / LEARNING_SIDECAR_NAME).read_bytes() == payload
+    else:
+        expected = payload.replace(b"preferred", b"contested") if race == "content" else payload
+        assert sidecar.read_bytes() == expected
+
+
+def test_learning_symlink_destination_preserves_target_and_lessons(tmp_path, capsys):
+    _overlay_graph(tmp_path, [{"id": "n"}])
+    foreign = tmp_path / "unrelated.json"
+    foreign.write_bytes(b"unrelated")
+    sidecar = tmp_path / LEARNING_SIDECAR_NAME
+    sidecar.symlink_to(foreign)
+    graph_before = (tmp_path / "graph.json").read_bytes()
+    lessons, _ = reflect(tmp_path / "memory", tmp_path / "LESSONS.md",
+                         graph_path=tmp_path / "graph.json", now=_NOW)
+    assert lessons.read_text().startswith("#")
+    assert foreign.read_bytes() == b"unrelated"
+    assert (tmp_path / "graph.json").read_bytes() == graph_before
+    assert sidecar.is_symlink()
+    assert "learning publication failed" in capsys.readouterr().err
+
+
+def test_learning_windows_refusal_keeps_lessons_and_graph(tmp_path, monkeypatch, capsys):
+    from graphify import transaction as tx
+
+    _overlay_graph(tmp_path, [{"id": "n"}])
+    graph_before = (tmp_path / "graph.json").read_bytes()
+    original = tx.commit_unmanaged_bytes
+
+    def unsupported(path, payload, **kwargs):
+        with monkeypatch.context() as platform:
+            platform.setattr(tx, "_PLATFORM", "windows")
+            return original(path, payload, **kwargs)
+
+    monkeypatch.setattr(tx, "commit_unmanaged_bytes", unsupported)
+    lessons, _ = reflect(tmp_path / "memory", tmp_path / "LESSONS.md",
+                         graph_path=tmp_path / "graph.json", now=_NOW)
+    assert lessons.exists()
+    assert (tmp_path / "graph.json").read_bytes() == graph_before
+    assert not (tmp_path / LEARNING_SIDECAR_NAME).exists()
+    assert "learning publication failed" in capsys.readouterr().err
+
+
+def test_learning_generated_payload_budget_preserves_previous_sidecar(tmp_path, monkeypatch, capsys):
+    import graphify.reflect as module
+
+    _overlay_graph(tmp_path, [{"id": "n"}])
+    sidecar = tmp_path / LEARNING_SIDECAR_NAME
+    sidecar.write_bytes(b"previous")
+    monkeypatch.setattr(module, "LEARNING_MAX_BYTES", 10)
+    lessons, _ = reflect(tmp_path / "memory", tmp_path / "LESSONS.md",
+                         graph_path=tmp_path / "graph.json", now=_NOW)
+    assert lessons.exists()
+    assert sidecar.read_bytes() == b"previous"
+    assert "byte budget" in capsys.readouterr().err

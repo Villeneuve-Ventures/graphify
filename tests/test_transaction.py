@@ -11292,7 +11292,9 @@ def test_graph_reader_inventory_classifies_every_canonical_call_site():
         ("prs.py", "_load_graph_json", "pull-request-impact"),
         ("reflect.py", "_load_node_community", "reflect-community"),
         ("reflect.py", "_load_known_nodes", "reflect-known-nodes"),
-        ("reflect.py", "reflect", "reflect"),
+        ("reflect.py", "reflect", "publication-prepare"),
+        ("reflect.py", "write_learning_sidecar", "publication-prepare"),
+        ("reflect.py", "load_learning_overlay", "learning-overlay"),
         ("reflect.py", "_build_id_label_maps", "reflect-projection"),
         ("serve.py", "_load_graph", "serve"),
         ("serve.py", "_load_ctx", "mcp-context-admission"),
@@ -12420,3 +12422,173 @@ else:
     assert result.returncode == 0, result.stderr.decode()
     assert b"LR-FIFO-REJECTED" in result.stdout
     assert _issue101_inventory(tmp_path) == before
+
+
+# Bounded prerequisite-interface review for issue #91.
+def _auxiliary_snapshot(tmp_path, *, managed=False):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    if managed:
+        tx = begin_transaction("runtime", tmp_path, output=output)
+        commit_publication_plan(tx, PublicationPlan({
+            "graph.json": _graph(tx.generation), "manifest.json": b"{}",
+            "custom.txt": b"preserve me",
+        }))
+        finish_transaction(tx)
+    else:
+        (output / "graph.json").write_bytes(
+            b'{"graph":{},"nodes":[],"links":[]}'
+        )
+    return output, open_graph_snapshot(output / "graph.json", purpose="publication-prepare")
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_snapshot_auxiliary_admission_bound_and_identity(tmp_path, monkeypatch, managed):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=managed)
+    sidecar = output / ".graphify_learning.json"
+    sidecar.write_bytes(b"12345")
+    with pytest.raises(PendingTransactionError, match="size limit"):
+        module.admit_snapshot_auxiliary(snapshot, canonical_name=sidecar.name, limit=4)
+    original = module._read_bytes
+    changed = False
+
+    def replace_after_read(capability, name, limit=1024 * 1024):
+        nonlocal changed
+        payload = original(capability, name, limit)
+        if name == sidecar.name and not changed:
+            changed = True
+            replacement = output / "replacement"
+            replacement.write_bytes(payload)
+            replacement.replace(sidecar)
+        return payload
+
+    monkeypatch.setattr(module, "_read_bytes", replace_after_read)
+    with pytest.raises(PendingTransactionError, match="identity changed"):
+        module.admit_snapshot_auxiliary(snapshot, canonical_name=sidecar.name, limit=5)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_snapshot_auxiliary_rejects_retarget_before_write(tmp_path, managed):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=managed)
+    output.rename(tmp_path / "retained")
+    output.mkdir()
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="identity changed"):
+        module.publish_snapshot_auxiliary(snapshot, canonical_name=".graphify_learning.json", payload=b"{}")
+    assert _file_bytes(output) == before
+
+
+def test_snapshot_auxiliary_managed_plan_preserves_receipt_inventory(tmp_path):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    module.publish_snapshot_auxiliary(snapshot, canonical_name=".graphify_learning.json", payload=b"{}")
+    after = open_graph_snapshot(output / "graph.json", purpose="publication-prepare")
+    assert after.data["nodes"] == snapshot.data["nodes"]
+    assert after.data["links"] == snapshot.data["links"]
+    assert after.artifacts["custom.txt"] == b"preserve me"
+    assert after.artifacts[".graphify_learning.json"] == b"{}"
+    assert after.generation == snapshot.generation + 1
+
+
+def test_snapshot_auxiliary_external_terminal_source_change_rolls_back(tmp_path, monkeypatch):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path)
+    sidecar = output / ".graphify_learning.json"
+    sidecar.write_bytes(b"old")
+    original = module.commit_unmanaged_bytes
+
+    def change_source(path, payload, **kwargs):
+        def failpoint(stage):
+            if stage == "after_unmanaged_successor_stage":
+                (output / "graph.json").write_bytes(b'{"graph":{},"nodes":[{"id":"new"}],"links":[]}')
+        return original(path, payload, failpoint=failpoint, **kwargs)
+
+    monkeypatch.setattr(module, "commit_unmanaged_bytes", change_source)
+    with pytest.raises(PendingTransactionError, match="graph changed"):
+        module.publish_snapshot_auxiliary(snapshot, canonical_name=sidecar.name, payload=b"new")
+    assert sidecar.read_bytes() == b"old"
+
+
+def test_snapshot_auxiliary_managed_interruption_refuses_graph_success(tmp_path, monkeypatch):
+    from graphify import transaction as module
+    from graphify.reflect import reflect
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    sidecar = output / ".graphify_learning.json"
+    sidecar.write_bytes(b"previous overlay")
+    receipt_before = (output / module.RECEIPT_FILE).read_bytes()
+    original = module.commit_bytes
+
+    def fail_sidecar(transaction, name, payload, **kwargs):
+        if name == sidecar.name:
+            raise OSError("interrupted managed sidecar publication")
+        return original(transaction, name, payload, **kwargs)
+
+    monkeypatch.setattr(module, "commit_bytes", fail_sidecar)
+    lessons, _ = reflect(output / "memory", output / "reflections" / "LESSONS.md",
+                         graph_path=output / "graph.json")
+    assert lessons.is_file()
+    assert sidecar.read_bytes() == b"previous overlay"
+    assert (output / "custom.txt").read_bytes() == snapshot.artifacts["custom.txt"]
+    assert (output / module.RECEIPT_FILE).read_bytes() == receipt_before
+    with pytest.raises(PendingTransactionError):
+        open_graph_snapshot(output / "graph.json", purpose="serve")
+
+
+def test_snapshot_auxiliary_sparse_managed_view_refused_without_mutation(tmp_path):
+    from graphify import transaction as module
+
+    output, _snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    sparse = open_graph_snapshot(output / "graph.json", purpose="serve")
+    before = _file_bytes(output)
+    with pytest.raises(PendingTransactionError, match="complete retained inventory"):
+        module.publish_snapshot_auxiliary(sparse, canonical_name=".graphify_learning.json", payload=b"{}")
+    assert _file_bytes(output) == before
+
+
+def test_snapshot_auxiliary_active_generation_refused_without_mutation(tmp_path):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path, managed=True)
+    transaction = begin_transaction("runtime", tmp_path, output=output, expected_snapshot=snapshot)
+    before = _file_bytes(output)
+    with owned_step(transaction), pytest.raises(PendingTransactionError):
+        module.publish_snapshot_auxiliary(snapshot, canonical_name=".graphify_learning.json", payload=b"{}")
+    assert _file_bytes(output) == before
+
+
+def test_snapshot_auxiliary_late_external_symlink_preserves_competitor(tmp_path, monkeypatch):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path)
+    sidecar = output / ".graphify_learning.json"
+    foreign = output / "foreign.txt"
+    foreign.write_bytes(b"keep")
+    original = module.commit_unmanaged_bytes
+
+    def retarget(path, payload, **kwargs):
+        sidecar.symlink_to(foreign)
+        return original(path, payload, **kwargs)
+
+    monkeypatch.setattr(module, "commit_unmanaged_bytes", retarget)
+    with pytest.raises(PendingTransactionError):
+        module.publish_snapshot_auxiliary(snapshot, canonical_name=sidecar.name, payload=b"{}")
+    assert sidecar.is_symlink()
+    assert foreign.read_bytes() == b"keep"
+
+
+def test_snapshot_auxiliary_windows_publication_refusal_before_mutation(tmp_path, monkeypatch):
+    from graphify import transaction as module
+
+    output, snapshot = _auxiliary_snapshot(tmp_path)
+    before = _file_bytes(output)
+    monkeypatch.setattr(module, "_PLATFORM", "windows")
+    with pytest.raises(PendingTransactionError, match="Windows unmanaged final mutation"):
+        module.commit_unmanaged_bytes(output / ".graphify_learning.json", b"{}", expected_snapshot=snapshot)
+    assert _file_bytes(output) == before
