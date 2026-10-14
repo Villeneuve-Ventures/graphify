@@ -41,6 +41,76 @@ def assert_retained(graph, data):
         assert graph.edges[source, target] == dict(attrs, _src=source, _tgt=target)
 
 
+@pytest.mark.parametrize("records,alias,expected", [
+    pytest.param([("rule", "rule", "docs/policy.md")], "policy", None,
+                 id="unrelated-entity"),
+    pytest.param([("docs_policybook", "book", "docs/policy.md")], "policybook", None,
+                 id="prefix-without-separator"),
+    pytest.param([("docs_policy", "Policy", "docs/policy.md")], "policy", "docs_policy",
+                 id="canonical-stem"),
+    pytest.param([("docs_policy_rule", "rule", "docs/policy.md")],
+                 "policy_rule", "docs_policy_rule", id="canonical-entity"),
+    pytest.param([("Docs-Policy-Rule", "rule", "docs/policy.md")],
+                 "policy_rule", "Docs-Policy-Rule", id="normalized-entity"),
+    pytest.param([("guides_docs_policy_rule", "rule", "guides/docs/policy.md")],
+                 "docs_policy_rule", "guides_docs_policy_rule", id="parent-stem-alias"),
+    pytest.param([("salted_file_7", "policy.md", "docs/policy.md")],
+                 "policy", "salted_file_7", id="salted-file-label"),
+    pytest.param([("docs_policy_rule", "rule", "docs/policy.md"),
+                  ("other_policy_rule", "other rule", "other/policy.md")],
+                 "policy_rule", None, id="competing-entities"),
+    pytest.param([("salted_file_7", "policy.md", "docs/policy.md"),
+                  ("other_policy", "Policy", "other/policy.md")],
+                 "policy", None, id="salted-file-competes"),
+    pytest.param([("rule", "rule", "docs/policy.md"),
+                  ("other_policy", "Policy", "other/policy.md")],
+                 "policy", "other_policy", id="unrelated-entity-is-not-a-claimant"),
+    pytest.param([("policy", "Exact identity", "stable.md"),
+                  ("docs_policy", "Policy", "docs/policy.md")],
+                 "policy", "policy", id="exact-id-precedence"),
+])
+@pytest.mark.parametrize("entry", ["full", "fresh", "retained-edge", "retained-group"])
+@pytest.mark.parametrize("directed", [False, True])
+def test_public_build_legacy_alias_admission(tmp_path, records, alias, expected, entry, directed):
+    """#134: only owning-path entities or filename-labelled files claim old stems."""
+    nodes = [node(identity, label, source) for identity, label, source in records]
+    nodes.append(node("anchor", source="anchor.md"))
+    references = [edge(alias, "anchor", "evidence.md")]
+    groups = [{"id": "evidence", "source_file": "evidence.md", "nodes": [alias, "anchor"]}]
+    if entry == "full":
+        graph = build([{"nodes": nodes, "edges": references, "hyperedges": groups}],
+                      root=tmp_path, dedup=False, directed=directed)
+    else:
+        path, data = seed(tmp_path, nodes,
+                          references if entry == "retained-edge" else [],
+                          groups if entry == "retained-group" else [])
+        before = path.read_bytes()
+        chunks = [{"edges": references, "hyperedges": groups}] if entry == "fresh" else []
+        if expected is None and entry.startswith("retained-"):
+            kind = "evidence" if entry == "retained-edge" else "hyperedge"
+            with pytest.raises(ValueError, match=f"lost retained {kind} endpoint"):
+                build_merge(chunks, path, root=tmp_path, dedup=False, directed=directed)
+            assert path.read_bytes() == before
+            return
+        graph = build_merge(chunks, path, root=tmp_path, dedup=False, directed=directed)
+        assert path.read_bytes() == before
+        for record in data["nodes"]:
+            assert graph.nodes[record["id"]] == {k: v for k, v in record.items() if k != "id"}
+
+    if entry != "retained-group":
+        if expected is None:
+            assert graph.number_of_edges() == 0
+        else:
+            assert graph.number_of_edges() == 1
+            assert graph.edges[expected, "anchor"]["_src"] == expected
+            assert graph.edges[expected, "anchor"]["_tgt"] == "anchor"
+    if entry != "retained-edge":
+        # Retained groups preserve raw member spellings; fresh unresolved members are pruned.
+        members = [alias, "anchor"] if entry == "retained-group" else (
+            [expected, "anchor"] if expected is not None else ["anchor"])
+        assert graph.graph["hyperedges"] == [dict(groups[0], nodes=members)]
+
+
 @pytest.mark.parametrize("directed", [False, True])
 def test_unrelated_semantic_facts_survive_update_and_repeat(tmp_path, directed):
     path, data = seed(tmp_path)

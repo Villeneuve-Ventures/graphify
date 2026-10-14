@@ -6,6 +6,17 @@ entries retain their original attribution.
 
 ## 0.10.0 (unreleased)
 
+- Fork compatibility change (#134): legacy file-stem aliases for entities now
+  require a normalized ID equal to the owning-path stem or starting with that
+  stem plus an underscore. An entity `rule` in `docs/policy.md` no longer claims
+  `policy`; `docs_policy_rule` still claims `policy_rule`. Filename-labelled file
+  nodes retain aliases even with salted IDs. Exact IDs and ambiguity handling
+  are unchanged. Full builds and fresh incremental references discard unresolved
+  edges and prune unresolved group members as before; retained unresolved edge
+  or group evidence causes incremental composition to refuse publication. Existing
+  graphs that relied on unsupported aliases must correct those references or
+  rebuild from source instead of silently attaching them to unrelated entities.
+
 - Fork tooling: PR-Agent now uses the pinned upstream v0.46.0 Action for
   repository-writer commands on PR comments. Automatic reviews and its custom
   compatibility CI job were removed; native `/review`, `/describe`, `/improve`,

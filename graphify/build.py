@@ -481,9 +481,10 @@ def _endpoint_aliases(nodes, node_source, ghost_remap, *, strict):
         if str(attrs.get("label", "")) == rel.name:
             suffix = ""  # this node IS the file, whatever its (possibly salted) id
         else:
-            suffix = ""
-            if _normalize_id(nid).startswith(new_stem):
-                suffix = _normalize_id(nid)[len(new_stem):]  # leading "_entity" or ""
+            norm_nid = _normalize_id(nid)
+            if norm_nid != new_stem and not norm_nid.startswith(new_stem + "_"):
+                continue  # unrelated entities cannot claim their owner's legacy file stem
+            suffix = norm_nid[len(new_stem):]  # leading "_entity" or ""
         for old_stem in _old_file_stems(rel):
             if old_stem == new_stem:
                 continue
