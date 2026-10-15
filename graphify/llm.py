@@ -1508,13 +1508,16 @@ def extract_files_direct(
     Raises ValueError for unknown backends or when no API key is configured.
     Raises ImportError if SDK missing.
 
-    Accepts ``str`` paths as well as ``Path``; string entries are coerced up
-    front so downstream helpers (``_partition_semantic_files``, ``_read_files``,
-    ``_build_image_refs``) can rely on ``Path`` semantics (#1386). FileSlice units
-    (from extract_corpus_parallel's oversized-doc slicing, #1369) pass through
-    untouched — Path(FileSlice) would raise (#1397/#1399).
+    Accepts ``str`` paths as well as ``Path``, anchored to the working directory
+    before downstream helpers read them (#1386). FileSlice units retain their
+    ranges while their parent paths are anchored too; they are never coerced with
+    Path(FileSlice) (#1397/#1399).
     """
-    files = [f if isinstance(f, (Path, FileSlice)) else Path(f) for f in files]
+    # Inputs name filesystem paths; completion declarations name paths under root.
+    # Anchor inputs once without resolving distinct logical file-symlink owners.
+    root = Path(root).absolute()
+    files = [replace(f, path=f.path.absolute()) if isinstance(f, FileSlice) else Path(f).absolute()
+             for f in files]
     if backend is None:
         backend = detect_backend()
         if backend is None:
@@ -1971,7 +1974,9 @@ def extract_corpus_parallel(
     Accepts ``str`` paths as well as ``Path``; string entries are coerced up
     front so packing/slicing helpers can rely on ``Path`` semantics (#1386).
     """
-    files = [f if isinstance(f, (Path, FileSlice)) else Path(f) for f in files]
+    root = Path(root).absolute()
+    files = [replace(f, path=f.path.absolute()) if isinstance(f, FileSlice) else Path(f).absolute()
+             for f in files]
     # Split oversized splittable documents into slices that cover the whole file
     # before packing, so content past _FILE_CHAR_CAP is extracted instead of
     # silently dropped (#1369). Files at/under the cap pass through unchanged.

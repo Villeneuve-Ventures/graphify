@@ -182,7 +182,7 @@ GRAPHIFY_PYTHON=$(GRAPHIFY_INPUT_PATH="${GRAPHIFY_INPUT_PATH-}" /bin/sh -p -c 'G
 "$GRAPHIFY_PYTHON" -E -P -B -c "
 import json
 from graphify.analyze import graph_diff
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from networkx.readwrite import json_graph
 import networkx as nx
 from pathlib import Path
@@ -190,7 +190,7 @@ from pathlib import Path
 # Load old graph (before update) from backup written before merge
 old_data = json.loads(Path('graphify-out/.graphify_old.json').read_text(encoding=\"utf-8\")) if Path('graphify-out/.graphify_old.json').exists() else None
 new_extract = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
-G_new = build_from_json(new_extract, directed=IS_DIRECTED)
+G_new = (_graph_from_accepted_merge(new_extract, directed=IS_DIRECTED) if new_extract.get('accepted_merge') else build_from_json(new_extract, directed=IS_DIRECTED))
 
 if old_data:
     G_old = json_graph.node_link_graph(old_data, edges='links')

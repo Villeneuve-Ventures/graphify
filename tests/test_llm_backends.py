@@ -1400,3 +1400,48 @@ def test_unbound_empty_completion_retries_after_consumed_input_binding(tmp_path,
     assert len(calls) == 3  # Two valid successful-empty halves after the unbound acknowledgement.
     assert result['completed_sources'] == sorted(map(str, sources))
     assert result['finish_reason'] == 'stop'
+
+
+@pytest.mark.parametrize('entry', ['direct', 'serial', 'parallel'])
+@pytest.mark.parametrize('unit_kind', ['file', 'slice', 'alias'])
+@pytest.mark.parametrize('absolute_root', [False, True])
+def test_relative_input_paths_bind_to_one_scan_root(tmp_path, monkeypatch, entry, unit_kind, absolute_root):
+    import re
+    from graphify.file_slice import FileSlice
+    monkeypatch.chdir(tmp_path)
+    root = Path('corpus')
+    root.mkdir()
+    source, other = root / 'doc.md', root / 'other.md'
+    source.write_text('first\nsecond\n')
+    other.write_text('Another complete source.')
+    if unit_kind == 'alias':
+        alias = root / 'alias.md'
+        alias.symlink_to('doc.md')
+        source = alias
+    units = ([FileSlice(source, 0, 6, 0, 2), FileSlice(source, 6, 13, 1, 2)]
+             if unit_kind == 'slice' else [source]) + [other]
+    if unit_kind == 'slice' and entry != 'direct':
+        # The corpus entry point creates its slices through the real expander.
+        units = [source, other]
+        monkeypatch.setattr(llm, '_FILE_CHAR_CAP', 8)
+    original = list(units)
+    prompts = []
+
+    def call(*args, **kwargs):
+        paths = re.findall(r'<untrusted_source path="([^"]+)"', args[3])
+        prompts.extend(paths)
+        return {'nodes': [{'id': Path(path).stem, 'source_file': path} for path in paths],
+                'edges': [], 'hyperedges': [], 'completed_sources': paths,
+                'input_tokens': 1, 'output_tokens': 1, 'finish_reason': 'stop'}
+
+    monkeypatch.setattr(llm, '_call_openai_compat', call)
+    monkeypatch.setenv('GRAPHIFY_NO_INCREMENTAL_CACHE', '1')
+    options = dict(backend='gemini', api_key='fixture-key', root=root.absolute() if absolute_root else root)
+    result = (llm.extract_files_direct(units, **options) if entry == 'direct' else
+              llm.extract_corpus_parallel(units, **options, chunk_size=1, token_budget=None,
+                                         max_concurrency=1 if entry == 'serial' else 2))
+    assert result['completed_sources'] == sorted([str(source.absolute()), str(other.absolute())])
+    assert {node['id'] for node in result['nodes']} == {source.stem, other.stem}
+    assert set(prompts) == {source.name, other.name}
+    assert not result.get('incomplete_sources')
+    assert units == original

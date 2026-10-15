@@ -88,3 +88,14 @@ Generated B0 resets the current batch's success manifest and direct aggregate in
 the exact prepared output namespace. File collectors register absolute chunk paths
 there through the prepared-token runner. Direct collectors stage their aggregate
 in the same namespace; B3 keeps it and concatenates chunk files only as a fallback.
+
+Extraction entry points anchor filesystem input paths once before binding consumed
+files, dispatched slices and cache scope to the scan root. Logical file-symlink
+owners remain distinct. Cache writes containing unowned records retain useful
+scoped claims but cannot certify a complete replay, including over an older
+complete entry. A genuine successful-empty extraction still qualifies.
+
+Devin keeps semantic completion through its final sanitize before emitting the
+replacement declaration. Later report, export and graph-diff stages restore an
+accepted merge without interpreting retained identities again; fresh extraction
+continues through the normal build path.

@@ -1026,3 +1026,29 @@ def test_complete_cache_lookup_with_relative_scan_root(tmp_path, monkeypatch, ab
     hit = check_semantic_cache(files, root=root, require_complete=True)
     assert hit[3] == []
     assert hit[0] == [{'id': 'fact', 'source_file': str(source.absolute())}]
+
+
+@pytest.mark.parametrize('kind', ['node', 'edge', 'hyperedge'])
+@pytest.mark.parametrize('owner', ['absent', None, ''])
+@pytest.mark.parametrize('previous_complete', [False, True])
+def test_unowned_records_revoke_complete_cache_without_discarding_scoped_claims(
+        tmp_path, kind, owner, previous_complete):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source = tmp_path / 'doc.md'
+    source.write_text('A complete response also contains a fact without ownership.')
+    if previous_complete:
+        save_semantic_cache([], [], root=tmp_path, completed_source_files=[source])
+    scoped = {'id': 'scoped', 'source_file': 'doc.md'}
+    nodes, edges, groups = [scoped], [], []
+    record = {'id': 'unowned'} if kind == 'node' else (
+        {'source': 'scoped', 'target': 'scoped'} if kind == 'edge' else
+        {'id': 'group', 'nodes': ['scoped']})
+    if owner != 'absent':
+        record['source_file'] = owner
+    {'node': nodes, 'edge': edges, 'hyperedge': groups}[kind].append(record)
+    save_semantic_cache(nodes, edges, groups, root=tmp_path,
+                        allowed_source_files=[source], completed_source_files=[source])
+    assert check_semantic_cache([str(source)], root=tmp_path, require_complete=True)[3] == [str(source)]
+    claims = check_semantic_cache([str(source)], root=tmp_path)
+    assert claims[3] == []
+    assert [node['id'] for node in claims[0]] == ['scoped']

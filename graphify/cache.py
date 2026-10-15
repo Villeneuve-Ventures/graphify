@@ -681,6 +681,9 @@ def save_semantic_cache(
 
     kind = "semantic" if mode is None else f"semantic-{mode}"
     by_file: dict[str, dict] = defaultdict(lambda: {"nodes": [], "edges": [], "hyperedges": []})
+    unowned_records = (any(not n.get("source_file", n.get("source")) for n in nodes)
+                       or any(not e.get("source_file") for e in edges)
+                       or any(not h.get("source_file") for h in (hyperedges or [])))
     for n in nodes:
         src = n.get("source_file", n.get("source", ""))
         if src:
@@ -716,6 +719,10 @@ def save_semantic_cache(
         by_file = combined
         for path in completed_paths:
             by_file[str(path)]  # Successful empty extraction is replayable too.
+        if unowned_records:
+            # Omitted records cannot be assigned to a source. Write useful
+            # claims, but invalidate even a previous complete cache certificate.
+            completed_paths.clear()
     allowed_paths = None
     if allowed_source_files is not None:
         allowed_paths = {resolved_source_path(path) for path in allowed_source_files}

@@ -6255,6 +6255,37 @@ def test_update_runbook_uses_explicit_replacement_and_preserves_accepted_facts(t
     assert graph.has_edge('legacy_rule', 'anchor') is (kind == 'edge')
 
 
+@pytest.mark.parametrize('source', ['shared', 'aider', 'devin'])
+@pytest.mark.parametrize('accepted', [False, True])
+@pytest.mark.parametrize('directed', [False, True])
+def test_update_graph_diff_uses_the_staged_accepted_graph(tmp_path, monkeypatch, source, accepted, directed):
+    output = tmp_path / 'graphify-out'
+    output.mkdir()
+    payload = {'accepted_merge': accepted,
+               'nodes': [{'id': 'policy_rule', 'label': 'Rule', 'source_file': 'docs/policy.md',
+                          'file_type': 'document'}], 'edges': [], 'hyperedges': []}
+    graph_path = output / 'graph.json'
+    graph_path.write_text(json.dumps({'nodes': payload['nodes'], 'links': []}))
+    before = graph_path.read_bytes()
+    staging = tmp_path if source == 'aider' else output
+    (staging / '.graphify_extract.json').write_text(json.dumps(payload))
+    fragment = (gen.FRAGMENTS_DIR / ('references/shared/update.md' if source == 'shared'
+                                   else f'core/{source}.md')).read_text()
+    block = next(block for block in re.findall(r'```bash\n(.*?)\n```', fragment, re.S)
+                 if 'G_new = ' in block)
+    arguments = shlex.split(block)
+    tree = ast.parse(arguments[arguments.index('-c') + 1].replace('IS_DIRECTED', str(directed)))
+    end = next(i for i, statement in enumerate(tree.body) if isinstance(statement, ast.Assign)
+               and any(isinstance(target, ast.Name) and target.id == 'G_new' for target in statement.targets))
+    monkeypatch.chdir(tmp_path)
+    namespace = {}
+    exec(compile(ast.Module(body=tree.body[:end + 1], type_ignores=[]), '<update-diff>', 'exec'), namespace)
+    graph = namespace['G_new']
+    assert set(graph) == {'policy_rule' if accepted else 'docs_policy_rule'}
+    assert graph.is_directed() == directed
+    assert graph_path.read_bytes() == before
+
+
 @pytest.mark.parametrize('platform_key', ['aider', 'devin'])
 @pytest.mark.parametrize('old,new', [
     ("replacement_sources=new_extraction.get('replacement_sources', [])", "replacement_sources=None"),

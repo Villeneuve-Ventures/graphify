@@ -493,3 +493,82 @@ exec({code!r})
 assert json.loads(Path('.graphify_semantic_new.json').read_text()) == {direct!r}
 """)
     assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('file_type', ['concept', 'rationale'])
+@pytest.mark.parametrize('completed', [False, True])
+def test_devin_part_c_keeps_completion_through_final_sanitize(tmp_path, monkeypatch, file_type, completed):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    code = _rendered_semantic_stage('devin', "merged_edges = ast['edges'] + sem['edges']")
+    semantic = {'nodes': [{'id': 'fresh', 'label': 'Named entity', 'file_type': file_type,
+                          'source_file': 'changed.md'}], 'edges': [],
+                'hyperedges': [{'id': 'group', 'nodes': ['fresh', 'retained'], 'source_file': 'changed.md'}],
+                'completed_sources': ['changed.md'] if completed else []}
+    _run(fixture, f"""
+Path('.graphify_ast.json').write_text(json.dumps({{'nodes': [], 'edges': []}}))
+Path('.graphify_semantic.json').write_text(json.dumps({semantic!r}))
+exec({code!r})
+merged = json.loads(Path('.graphify_extract.json').read_text())
+assert [node['id'] for node in merged['nodes']] == {['fresh'] if completed else []!r}
+assert [group['id'] for group in merged['hyperedges']] == {['group'] if completed else []!r}
+assert merged['replacement_sources'] == {['changed.md'] if completed else []!r}
+assert 'completed_sources' not in merged
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('accepted', [False, True])
+@pytest.mark.parametrize('directed', [False, True])
+def test_rendered_later_graph_consumers_preserve_accepted_facts(
+        tmp_path, monkeypatch, platform_key, accepted, directed):
+    import ast
+    import re
+    import shlex
+    from tools.skillgen import gen
+    output = tmp_path / 'graphify-out'
+    output.mkdir()
+    extraction = {'accepted_merge': accepted,
+                  'nodes': [{'id': 'policy_rule', 'label': 'Rule', 'source_file': 'docs/policy.md',
+                             'file_type': 'document', 'retained_attribute': 'exact'},
+                            {'id': 'anchor', 'label': 'Anchor', 'source_file': 'stable.md', 'file_type': 'document'}],
+                  'edges': [{'source': 'policy_rule', 'target': 'anchor', 'relation': 'references',
+                             'confidence': 'EXTRACTED', 'source_file': 'docs/policy.md'}],
+                  'hyperedges': [{'id': 'group', 'members': ['policy_rule', 'anchor', 'policy_rule']}]}
+    graph_path = output / 'graph.json'
+    graph_path.write_text(json.dumps({'nodes': extraction['nodes'], 'links': extraction['edges']}))
+    before = graph_path.read_bytes()
+    for directory in (tmp_path, output):
+        (directory / '.graphify_extract.json').write_text(json.dumps(extraction))
+        (directory / '.graphify_detect.json').write_text('{}')
+        (directory / '.graphify_analysis.json').write_text('{}')
+    count = 0
+    for artifact in gen.render(gen.load_platforms()[platform_key]):
+        for block in re.findall(r'```(?:bash|sh)\n(.*?)\n```', artifact.content, re.S):
+            if 'build_from_json(' not in block:
+                continue
+            raw = block.rsplit('-c "\n', 1)[1].rsplit('\n"', 1)[0]
+            code = shlex.split('python -c "' + raw + '"')[-1]
+            tree = ast.parse(code.replace('IS_DIRECTED', str(directed)).replace('INPUT_PATH', str(tmp_path)))
+            index = next(i for i, statement in enumerate(tree.body) if isinstance(statement, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id in {'G', 'G_new'}
+                                 for target in statement.targets))
+            target = tree.body[index].targets[0].id
+            prefix = ast.Module(body=tree.body[:index + 1], type_ignores=[])
+            runner = next(line for line in block.splitlines() if line.endswith('-c "'))
+            # Prepared bodies start in output; direct consumers start in the corpus.
+            monkeypatch.chdir(output if 'run-prepared-token' in runner else tmp_path)
+            namespace = {}
+            exec(compile(prefix, artifact.path, 'exec'), namespace)
+            graph = namespace[target]
+            expected_id = 'policy_rule' if accepted else 'docs_policy_rule'
+            assert set(graph) == {expected_id, 'anchor'}, (artifact.path, target, list(graph))
+            assert graph.has_edge(expected_id, 'anchor')
+            assert graph.is_directed() == directed
+            if accepted:
+                assert graph.nodes['policy_rule'] == {key: value for key, value in extraction['nodes'][0].items() if key != 'id'}
+                assert graph.graph['hyperedges'] == extraction['hyperedges']
+            assert graph_path.read_bytes() == before
+            count += 1
+    assert count >= (3 if platform_key == 'claude' else 8)

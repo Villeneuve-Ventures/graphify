@@ -422,7 +422,7 @@ Then regenerate the report and save the labels for the visualizer:
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.cluster import score_all
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate
@@ -433,7 +433,7 @@ detection  = json.loads(Path('graphify-out/.graphify_detect.json').read_text(enc
 analysis   = json.loads(Path('graphify-out/.graphify_analysis.json').read_text(encoding=\"utf-8\"))
 
 # root= as in Step 4 / the --update runbook (#1361) — same base for node-key parity.
-G = build_from_json(extraction, root='INPUT_PATH', directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, root='INPUT_PATH', directed=IS_DIRECTED))
 communities = {int(k): v for k, v in analysis['communities'].items()}
 cohesion = {int(k): v for k, v in analysis['cohesion'].items()}
 tokens = {'input': extraction.get('input_tokens', 0), 'output': extraction.get('output_tokens', 0)}

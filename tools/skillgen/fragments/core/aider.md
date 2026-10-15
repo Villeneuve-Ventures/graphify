@@ -486,7 +486,7 @@ Then regenerate the report and save the labels for the visualizer:
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.cluster import score_all
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate
@@ -496,7 +496,7 @@ extraction = json.loads(Path('.graphify_extract.json').read_text())
 detection  = json.loads(Path('.graphify_detect.json').read_text())
 analysis   = json.loads(Path('.graphify_analysis.json').read_text())
 
-G = build_from_json(extraction, directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 communities = {int(k): v for k, v in analysis['communities'].items()}
 cohesion = {int(k): v for k, v in analysis['cohesion'].items()}
 tokens = {'input': extraction.get('input_tokens', 0), 'output': extraction.get('output_tokens', 0)}
@@ -526,7 +526,7 @@ If `--obsidian` was given:
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.export import to_obsidian, to_canvas
 from pathlib import Path
 
@@ -534,7 +534,7 @@ extraction = json.loads(Path('.graphify_extract.json').read_text())
 analysis   = json.loads(Path('.graphify_analysis.json').read_text())
 labels_raw = json.loads(Path('.graphify_labels.json').read_text()) if Path('.graphify_labels.json').exists() else {}
 
-G = build_from_json(extraction, directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 communities = {int(k): v for k, v in analysis['communities'].items()}
 cohesion = {int(k): v for k, v in analysis['cohesion'].items()}
 labels = {int(k): v for k, v in labels_raw.items()}
@@ -557,7 +557,7 @@ Generate the HTML graph (always, unless `--no-viz`):
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.export import to_html
 from pathlib import Path
 
@@ -565,7 +565,7 @@ extraction = json.loads(Path('.graphify_extract.json').read_text())
 analysis   = json.loads(Path('.graphify_analysis.json').read_text())
 labels_raw = json.loads(Path('.graphify_labels.json').read_text()) if Path('.graphify_labels.json').exists() else {}
 
-G = build_from_json(extraction, directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 communities = {int(k): v for k, v in analysis['communities'].items()}
 labels = {int(k): v for k, v in labels_raw.items()}
 
@@ -584,11 +584,12 @@ else:
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.export import to_cypher
 from pathlib import Path
 
-G = build_from_json(json.loads(Path('.graphify_extract.json').read_text()), directed=IS_DIRECTED)
+extraction = json.loads(Path('.graphify_extract.json').read_text())
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 to_cypher(G, 'graphify-out/cypher.txt')
 print('cypher.txt written - import with: cypher-shell < graphify-out/cypher.txt')
 "
@@ -602,7 +603,7 @@ provider block after Step 9.
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.export import to_svg
 from pathlib import Path
 
@@ -610,7 +611,7 @@ extraction = json.loads(Path('.graphify_extract.json').read_text())
 analysis   = json.loads(Path('.graphify_analysis.json').read_text())
 labels_raw = json.loads(Path('.graphify_labels.json').read_text()) if Path('.graphify_labels.json').exists() else {}
 
-G = build_from_json(extraction, directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 communities = {int(k): v for k, v in analysis['communities'].items()}
 labels = {int(k): v for k, v in labels_raw.items()}
 
@@ -624,14 +625,14 @@ print('graph.svg written - embeds in Obsidian, Notion, GitHub READMEs')
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.export import to_graphml
 from pathlib import Path
 
 extraction = json.loads(Path('.graphify_extract.json').read_text())
 analysis   = json.loads(Path('.graphify_analysis.json').read_text())
 
-G = build_from_json(extraction, directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 communities = {int(k): v for k, v in analysis['communities'].items()}
 
 to_graphml(G, communities, 'graphify-out/graph.graphml')
@@ -905,7 +906,7 @@ After Step 4, show the graph diff:
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from graphify.analyze import graph_diff
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from networkx.readwrite import json_graph
 import networkx as nx
 from pathlib import Path
@@ -913,7 +914,7 @@ from pathlib import Path
 # Load old graph (before update) from backup written before merge
 old_data = json.loads(Path('.graphify_old.json').read_text()) if Path('.graphify_old.json').exists() else None
 new_extract = json.loads(Path('.graphify_extract.json').read_text())
-G_new = build_from_json(new_extract, directed=IS_DIRECTED)
+G_new = (_graph_from_accepted_merge(new_extract, directed=IS_DIRECTED) if new_extract.get('accepted_merge') else build_from_json(new_extract, directed=IS_DIRECTED))
 
 if old_data:
     G_old = json_graph.node_link_graph(old_data, edges='links')
