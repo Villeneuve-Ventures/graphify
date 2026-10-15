@@ -344,12 +344,12 @@ detect = json.loads(Path('.graphify_detect.json').read_text(encoding=\"utf-8\"))
 # every source file (#1392). Video is transcribed to a document in Step 2.5 first.
 all_files = [f for cat in ('document', 'paper', 'image') for f in detect['files'].get(cat, [])]
 
-cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(all_files, root='INPUT_PATH')
+cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(all_files, root='INPUT_PATH', require_complete=True)
 
 # Always (re)write the cache file: write hits, else DELETE any leftover from a prior
 # run so Part C never merges a stale .graphify_cached.json (#1392).
-if cached_nodes or cached_edges or cached_hyperedges:
-    Path('.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges}, ensure_ascii=False), encoding=\"utf-8\")
+if len(uncached) < len(all_files):
+    Path('.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges, 'completed_sources': sorted(set(all_files) - set(uncached))}, ensure_ascii=False), encoding=\"utf-8\")
 else:
     Path('.graphify_cached.json').unlink(missing_ok=True)
 Path('.graphify_uncached.txt').write_text('\n'.join(uncached), encoding=\"utf-8\")
@@ -361,7 +361,7 @@ Only dispatch subagents for files listed in `graphify-out/.graphify_uncached.txt
 
 **Step B1 - Split into chunks**
 
-Load files from `graphify-out/.graphify_uncached.txt`. Split into chunks of 20-25 files each. Each image gets its own chunk (vision needs separate context). When splitting, group files from the same directory together so related artifacts land in the same chunk and cross-file relationships are more likely to be extracted.
+Start a new extraction batch. Write `[]` to `graphify-out/.graphify_completed_chunks.json`. After validating each successful current dispatch, append only its chunk file path to that JSON list. Collect only results from this batch's successfully completed dispatches. Validate each completed_sources list against that chunk's assigned FILE_LIST; remove any source not fully read and extracted, any partial/truncated result, and any failed result. An empty array of records with explicit completion is valid; an absent result is not. Never infer completion from nodes, edges, hyperedges or progress callbacks. Load files from `graphify-out/.graphify_uncached.txt`. Split into chunks of 20-25 files each. Each image gets its own chunk (vision needs separate context). When splitting, group files from the same directory together so related artifacts land in the same chunk and cross-file relationships are more likely to be extracted.
 
 **Step B2 - Dispatch ALL subagents in a single message**
 
@@ -404,18 +404,19 @@ GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pa
 import json, glob
 from pathlib import Path
 
-chunks = sorted(glob.glob('.graphify_chunk_*.json'))
-all_nodes, all_edges, all_hyperedges = [], [], []
+chunks = json.loads(Path('.graphify_completed_chunks.json').read_text())
+all_nodes, all_edges, all_hyperedges, completed_sources = [], [], [], set()
 total_in, total_out = 0, 0
 for c in chunks:
     d = json.loads(Path(c).read_text(encoding=\"utf-8\"))
     all_nodes += d.get('nodes', [])
     all_edges += d.get('edges', [])
     all_hyperedges += d.get('hyperedges', [])
+    completed_sources.update(d.get('completed_sources', []))
     total_in += d.get('input_tokens', 0)
     total_out += d.get('output_tokens', 0)
 Path('.graphify_semantic_new.json').write_text(json.dumps({
-    'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges,
+    'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges, 'completed_sources': sorted(completed_sources),
     'input_tokens': total_in, 'output_tokens': total_out,
 }, indent=2, ensure_ascii=False), encoding=\"utf-8\")
 print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens')
@@ -433,7 +434,7 @@ from pathlib import Path
 
 new = json.loads(Path('graphify-out/.graphify_semantic_new.json').read_text(encoding=\"utf-8\")) if Path('graphify-out/.graphify_semantic_new.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}
 uncached = [line for line in Path('graphify-out/.graphify_uncached.txt').read_text(encoding=\"utf-8\").splitlines() if line]
-saved = save_semantic_cache(new.get('nodes', []), new.get('edges', []), new.get('hyperedges', []), root='INPUT_PATH', allowed_source_files=uncached)
+saved = save_semantic_cache(new.get('nodes', []), new.get('edges', []), new.get('hyperedges', []), root='INPUT_PATH', allowed_source_files=uncached, completed_source_files=new.get('completed_sources', []))
 print(f'Cached {saved} files')
 "
 ```
@@ -461,7 +462,7 @@ for n in all_nodes:
 merged = {
     'nodes': deduped,
     'edges': all_edges,
-    'hyperedges': all_hyperedges,
+    'hyperedges': all_hyperedges, 'completed_sources': sorted(set(cached.get('completed_sources', [])) | set(new.get('completed_sources', []))),
     'input_tokens': new.get('input_tokens', 0),
     'output_tokens': new.get('output_tokens', 0),
 }
@@ -495,7 +496,7 @@ merged_hyperedges = sem.get('hyperedges', [])
 merged = {
     'nodes': merged_nodes,
     'edges': merged_edges,
-    'hyperedges': merged_hyperedges,
+    'hyperedges': merged_hyperedges, 'replacement_sources': sorted(set(sem.get('completed_sources', [])) | {n['source_file'] for n in ast['nodes'] if n.get('source_file')}),
     'input_tokens': sem.get('input_tokens', 0),
     'output_tokens': sem.get('output_tokens', 0),
 }
@@ -516,7 +517,7 @@ GRAPHIFY_PYTHON=$(GRAPHIFY_INPUT_PATH="${GRAPHIFY_INPUT_PATH-}" /bin/sh -p -c 'G
 mkdir -p graphify-out
 GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; export GRAPHIFY_TRANSACTION_TOKEN; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.cluster import cluster, score_all
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate
@@ -528,10 +529,10 @@ detection  = json.loads(Path('.graphify_detect.json').read_text(encoding=\"utf-8
 
 # root= mirrors the --update runbook (#1361): relativize source_file to the same
 # base so the full build and incremental --update never drift apart on re-extract.
-G = build_from_json(extraction, root='INPUT_PATH', directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, root='INPUT_PATH', directed=IS_DIRECTED))
 # Guard BEFORE any write: an empty extraction must not clobber a good graph.json /
 # GRAPH_REPORT.md / analysis sidecar. Check immediately after build (#1392).
-if G.number_of_nodes() == 0:
+if G.number_of_nodes() == 0 and not extraction.get('complete_empty_replacement'):
     print('ERROR: Graph is empty - extraction produced no nodes.')
     print('Possible causes: all files were skipped, binary-only corpus, or extraction failed.')
     raise SystemExit(1)
@@ -548,7 +549,7 @@ questions = suggest_questions(G, communities, labels)
 # nothing) when the new graph is smaller than the existing graph.json. Only write
 # GRAPH_REPORT.md + the analysis sidecar when the graph was actually written, so
 # they never describe a graph that graph.json doesn't contain (#1392).
-wrote = to_json(G, communities, 'graph.json')
+wrote = to_json(G, communities, 'graph.json', force=bool(extraction.get('accepted_merge')))
 if not wrote:
     print('ERROR: refused to shrink graph.json (existing graph has more nodes; #479).')
     print('If this shrink is intentional (you deleted files), re-run a full build with --force.')

@@ -108,12 +108,11 @@ from graphify.detect import save_manifest
 new_extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
 incremental = json.loads(Path('graphify-out/.graphify_incremental.json').read_text(encoding=\"utf-8\"))
 deleted = list(incremental.get('deleted_files', []))
-# prune_sources is ONLY for genuinely DELETED files. Changed/re-extracted files are
-# handled by build_merge's replace-on-re-extract (#1344): every source_file in
-# new_chunks is dropped from the base before merge, so old/stale nodes don't survive.
-# Do NOT add `changed` here: with root= passed, prune_set relativizes to the same base
-# as the freshly merged nodes and would DELETE the re-extracted content (#1178 is moot
-# now that replace — not the dedup pass — reconciles changed files).
+# Complete replacement is explicit. Part C carries only successful extraction
+# completions (and successful AST node owners) in replacement_sources. Missing
+# metadata means additional claims; it does not mean successful empty extraction.
+# Replacement wins over prune only for those declared sources. Every other prune
+# removes retained and fresh nodes/relationships, including hyperedges.
 prune = list(deleted) or None
 
 # Use build_merge() — reads graph.json directly without NetworkX round-trip
@@ -128,6 +127,7 @@ G = build_merge(
     [new_extraction],
     graph_path='graphify-out/graph.json',
     prune_sources=prune,
+    replacement_sources=new_extraction.get('replacement_sources', []),
     root='INPUT_PATH',
     directed=IS_DIRECTED,
 )
@@ -135,6 +135,7 @@ print(f'[graphify update] Merged: {G.number_of_nodes()} nodes, {G.number_of_edge
 
 # Write merged result back to .graphify_extract.json so Step 4 sees the full graph
 merged_out = {
+    'accepted_merge': True,
     'nodes': [{'id': n, **d} for n, d in G.nodes(data=True)],
     'edges': [
         # Explicit source/target last so they win over any stale attrs in d.
@@ -146,6 +147,7 @@ merged_out = {
     # and new_extraction (build_merge combines them). Falling back to
     # new_extraction only would silently drop prior-run hyperedges (#801).
     'hyperedges': list(G.graph.get('hyperedges', [])),
+    'complete_empty_replacement': bool(new_extraction.get('replacement_sources')) and not any(new_extraction.get(key) for key in ('nodes', 'edges', 'hyperedges')),
     'input_tokens': new_extraction.get('input_tokens', 0),
     'output_tokens': new_extraction.get('output_tokens', 0),
 }
@@ -157,7 +159,8 @@ print(f'[graphify update] Merged extraction written ({len(merged_out[\"nodes\"])
 # root= matches the build_merge call above so the manifest keys stay relative to
 # the scan root — portable across clones/machines, so --update keeps matching
 # cached files instead of missing every one after a move (#1417).
-save_manifest(incremental['files'], root='INPUT_PATH')
+from graphify.cli import _stamped_manifest_files
+save_manifest(_stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')), root='INPUT_PATH')
 print('[graphify update] Manifest saved.')
 "
 ```

@@ -455,8 +455,10 @@ Edge direction rule — source is always the ACTOR, target is the ACTED-UPON:
 
 Hyperedges: if 3 or more nodes clearly participate together in a shared concept, flow, or pattern that is not captured by pairwise edges alone, add a hyperedge to the top-level `hyperedges` array (e.g. all classes implementing one protocol, all functions in one auth flow even if they don't all call each other, all concepts from a paper section forming one coherent idea). Use sparingly — only when the group relationship adds information beyond the pairwise edges. Maximum 3 hyperedges per chunk.
 
+Completion: include completed_sources only for input files fully read and fully extracted, even when they yield no records. Omit failed, unreadable, partial or truncated files. Ownership on a record alone is not completion.
+
 Output exactly this schema:
-{"nodes":[{"id":"stem_entity","label":"Human Readable Name","file_type":"code|document|paper|image|rationale|concept","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"input_tokens":0,"output_tokens":0}
+{"nodes":[{"id":"stem_entity","label":"Human Readable Name","file_type":"code|document|paper|image|rationale|concept","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"completed_sources":["relative/path"],"input_tokens":0,"output_tokens":0}
 """
 
 _DEEP_EXTRACTION_SUFFIX = """\
@@ -542,7 +544,7 @@ def _wrap_untrusted(rel: str, content: str) -> str:
     )
 
 
-def _read_files(units: "list[Path | FileSlice]", root: Path) -> str:
+def _read_files(units: "list[Path | FileSlice]", root: Path, *, consumed=None) -> str:
     """Return file/slice contents formatted for the extraction prompt.
 
     Each unit is wrapped in an <untrusted_source> delimiter block and known
@@ -574,6 +576,11 @@ def _read_files(units: "list[Path | FileSlice]", root: Path) -> str:
         # Whole files are still capped (covers non-splittable large files like
         # code); slices are already bounded to the cap, so the cap is a no-op.
         parts.append(_wrap_untrusted(rel, content[:_FILE_CHAR_CAP]))
+        if (consumed is not None and len(content) <= _FILE_CHAR_CAP
+                and (p.suffix.lower() != ".pdf" or content)):
+            # The tolerant PDF reader returns empty text on failure too; without
+            # text there is no proof that semantic extraction consumed the PDF.
+            consumed.update(_completed_source_paths({"completed_sources": [str(p)]}, root))
     return "\n\n".join(parts)
 
 
@@ -814,11 +821,15 @@ def _sanitize_fragment(parsed: dict) -> dict:
     """
     for key in ("nodes", "edges", "hyperedges"):
         value = parsed.get(key)
+        if not isinstance(value, list):
+            parsed["completed_sources"] = []
         if value is None:
             continue
         if not isinstance(value, list):
             parsed[key] = []
             continue
+        if any(not isinstance(entry, dict) for entry in value):
+            parsed["completed_sources"] = []
         parsed[key] = [entry for entry in value if isinstance(entry, dict)]
     return parsed
 
@@ -920,7 +931,11 @@ def _response_is_hollow(raw_content: str | None, parsed: dict) -> bool:
     nodes = parsed.get("nodes")
     edges = parsed.get("edges")
     hyperedges = parsed.get("hyperedges")
-    return not nodes and not edges and not hyperedges
+    completed = parsed.get("completed_sources")
+    acknowledged = (isinstance(completed, list) and bool(completed)
+                    and all(isinstance(source, str) and source.strip() and "\x00" not in source
+                            for source in completed))
+    return not nodes and not edges and not hyperedges and not acknowledged
 
 
 def _backend_env_keys(backend: str) -> list[str]:
@@ -1432,6 +1447,52 @@ def _call_bedrock(model: str, user_message: str, max_tokens: int = 8192, *, deep
     return result
 
 
+def _completed_source_paths(result: dict, root: Path) -> set[str]:
+    """Read explicit completion, never infer it from relationship ownership."""
+    from .build import _replacement_source_set
+
+    if result.get("finish_reason") not in (None, "stop"):
+        return set()
+    for key in ("nodes", "edges", "hyperedges"):
+        records = result.get(key, [])
+        if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+            return set()
+        for record in records:
+            if key == "nodes" and not isinstance(record.get("id"), str):
+                return set()
+            if key == "edges" and any(not isinstance(record.get(end, record.get(alias)), str)
+                                      for end, alias in (("source", "from"), ("target", "to"))):
+                return set()
+            if "source_file" in record and not isinstance(record["source_file"], str):
+                return set()
+            owner = record.get("source_file", record.get("source") if key == "nodes" else None)
+            if owner is not None:
+                from .build import _merge_source_file
+                try:
+                    _merge_source_file(owner, str(root.resolve()))
+                except ValueError:
+                    return set()
+            if key == "hyperedges":
+                from .build import _hashable
+                if not _hashable(record.get("id")):
+                    return set()
+                members = next((record[name] for name in ("nodes", "members", "node_ids")
+                                if isinstance(record.get(name), list)), None)
+                if members is None or any(not isinstance(member, str) for member in members):
+                    return set()
+    try:
+        sources = _replacement_source_set(result.get("completed_sources", []), str(root.resolve()))
+        return {os.path.abspath(root.resolve() / source) for source in sources}
+    except (ValueError, OSError, RuntimeError):
+        return set()
+
+
+def _merge_completion(left: dict, right: dict) -> dict:
+    incomplete = set(left.get("incomplete_sources", [])) | set(right.get("incomplete_sources", []))
+    complete = set(left.get("completed_sources", [])) | set(right.get("completed_sources", []))
+    return {"completed_sources": sorted(complete - incomplete), "incomplete_sources": sorted(incomplete)}
+
+
 def extract_files_direct(
     files: list[Path],
     backend: str | None = None,
@@ -1491,7 +1552,8 @@ def extract_files_direct(
     # as before; images become structured refs the backend renders as pixels
     # (vision backends) or as a text reference node (everything else).
     text_files, image_files = _partition_semantic_files(files)
-    user_msg = _read_files(text_files, root)
+    consumed = set()
+    user_msg = _read_files(text_files, root, consumed=consumed)
     vision = _backend_supports_vision(backend)
     # Only base64 (inline) vision backends need the bytes loaded + size-capped;
     # path-based backends (claude-cli) and non-vision backends do not.
@@ -1500,13 +1562,24 @@ def extract_files_direct(
     if image_refs and not vision:
         image_refs = _strip_pixels(image_refs)
     max_out = _resolve_max_tokens(cfg.get("max_tokens", 8192))
+    consumed.update(_completed_source_paths({"completed_sources": [ref.rel for ref in image_refs
+                    if ref.raw is not None or backend in _PATH_IMAGE_BACKENDS]}, root))
+
+    def completed(result):
+        # Only the explicit acknowledgement of input actually consumed may remove
+        # accepted facts. A capped text or unavailable image remains additional.
+        complete = _completed_source_paths(result, root) & consumed
+        if result.get("finish_reason") == "length":
+            complete.clear()
+        result["completed_sources"] = sorted(complete)
+        return result
 
     if backend == "claude":
-        return _call_claude(key, mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
+        return completed(_call_claude(key, mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs))
     if backend == "claude-cli":
-        return _call_claude_cli(user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
+        return completed(_call_claude_cli(user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs))
     if backend == "bedrock":
-        return _call_bedrock(mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs)
+        return completed(_call_bedrock(mdl, user_msg, max_tokens=max_out, deep_mode=deep_mode, images=image_refs))
     if backend == "azure":
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").strip()
         if not endpoint:
@@ -1514,7 +1587,7 @@ def extract_files_direct(
                 "Azure OpenAI backend requires AZURE_OPENAI_ENDPOINT to be set "
                 "(e.g. https://my-resource.openai.azure.com/)."
             )
-        return _call_azure(
+        return completed(_call_azure(
             key,
             endpoint,
             mdl,
@@ -1522,8 +1595,8 @@ def extract_files_direct(
             temperature=_resolve_temperature(cfg.get("temperature", 0), mdl),
             max_tokens=max_out,
             deep_mode=deep_mode,
-        )
-    return _call_openai_compat(
+        ))
+    return completed(_call_openai_compat(
         cfg["base_url"],
         key,
         mdl,
@@ -1541,7 +1614,7 @@ def extract_files_direct(
         deep_mode=deep_mode,
         images=image_refs,
         extra_body=cfg.get("extra_body"),
-    )
+    ))
 
 
 def _estimate_file_tokens(unit: "Path | FileSlice") -> int:
@@ -1710,6 +1783,7 @@ def _extract_with_adaptive_retry(
             right_units, backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
         )
         return {
+            **_merge_completion(left, right),
             "nodes": left.get("nodes", []) + right.get("nodes", []),
             "edges": left.get("edges", []) + right.get("edges", []),
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
@@ -1747,14 +1821,16 @@ def _extract_with_adaptive_retry(
                 f"and cannot be split further: {exc}",
                 file=sys.stderr,
             )
-            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
+            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop", "completed_sources": [],
+                    "incomplete_sources": sorted(_completed_source_paths({"completed_sources": [str(unit_path(u)) for u in chunk]}, root))}
         if _depth >= max_depth:
             print(
                 f"[graphify] chunk of {len(chunk)} still overflows context at "
                 f"recursion depth {_depth} (max {max_depth}) — dropping",
                 file=sys.stderr,
             )
-            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
+            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop", "completed_sources": [],
+                    "incomplete_sources": sorted(_completed_source_paths({"completed_sources": [str(unit_path(u)) for u in chunk]}, root))}
         print(
             f"[graphify] chunk of {len(chunk)} exceeded context at depth "
             f"{_depth} ({type(exc).__name__}); splitting in half and retrying",
@@ -1768,6 +1844,7 @@ def _extract_with_adaptive_retry(
             chunk[mid:], backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
         )
         return {
+            **_merge_completion(left, right),
             "nodes": left.get("nodes", []) + right.get("nodes", []),
             "edges": left.get("edges", []) + right.get("edges", []),
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
@@ -1777,6 +1854,11 @@ def _extract_with_adaptive_retry(
             "finish_reason": "stop",
         }
 
+    complete = (_completed_source_paths(result, root)
+                if result.get("finish_reason") != "length" else set())
+    dispatched = _completed_source_paths({"completed_sources": [str(unit_path(unit)) for unit in chunk]}, root)
+    result["completed_sources"] = sorted(complete & dispatched)
+    result["incomplete_sources"] = sorted(dispatched - complete)
     if result.get("finish_reason") != "length":
         return result
 
@@ -1819,6 +1901,7 @@ def _extract_with_adaptive_retry(
     )
 
     return {
+        **_merge_completion(left, right),
         "nodes": left.get("nodes", []) + right.get("nodes", []),
         "edges": left.get("edges", []) + right.get("edges", []),
         "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
@@ -1895,6 +1978,7 @@ def extract_corpus_parallel(
     merged: dict = {
         "nodes": [], "edges": [], "hyperedges": [],
         "input_tokens": 0, "output_tokens": 0,
+        "completed_sources": [], "incomplete_sources": [],
         "failed_chunks": 0,  # count of chunks that raised — loud failure on chunk errors
     }
     total = len(chunks)
@@ -1911,6 +1995,10 @@ def extract_corpus_parallel(
                 max_depth=max_retry_depth,
                 deep_mode=deep_mode,
             )
+            dispatched = _completed_source_paths({"completed_sources": [str(unit_path(unit)) for unit in chunk]}, root)
+            complete = _completed_source_paths(result, root) & dispatched
+            result["completed_sources"] = sorted(complete)
+            result["incomplete_sources"] = sorted(dispatched - complete)
             result["elapsed_seconds"] = round(time.time() - t0, 2)
             return idx, result, None
         except Exception as exc:  # noqa: BLE001 — caller-facing surface, log + continue
@@ -1970,6 +2058,8 @@ def extract_corpus_parallel(
             if exc is not None:
                 print(f"[graphify] chunk {idx + 1}/{total} failed: {exc}", file=sys.stderr)
                 merged["failed_chunks"] += 1
+                merged["incomplete_sources"].extend(_completed_source_paths(
+                    {"completed_sources": [str(unit_path(u)) for u in chunk]}, root))
                 continue
             assert result is not None
             _merge_into(merged, result)
@@ -1995,6 +2085,8 @@ def extract_corpus_parallel(
                         file=sys.stderr,
                     )
                     merged["failed_chunks"] += 1
+                    merged["incomplete_sources"].extend(_completed_source_paths(
+                        {"completed_sources": [str(unit_path(u)) for u in chunks[idx]]}, root))
                     continue
                 assert result is not None
                 results_by_idx[idx] = result
@@ -2086,7 +2178,7 @@ def extract_corpus_parallel(
             file=sys.stderr,
         )
 
-    covered: set[Path] = set()
+    covered: set[Path] = {Path(source) for source in _merge_completion(merged, {})["completed_sources"]}
     for n in merged.get("nodes", []):
         sf = n.get("source_file")
         if sf:
@@ -2106,11 +2198,13 @@ def extract_corpus_parallel(
             "returned a response but omitted them; a re-run will retry them.",
             file=sys.stderr,
         )
+    merged.update(_merge_completion(merged, {}))
     return merged
 
 
 def _merge_into(merged: dict, result: dict) -> None:
     """Append a chunk result into the running merged accumulator."""
+    merged.update(_merge_completion(merged, result))
     merged["nodes"].extend(result.get("nodes", []))
     merged["edges"].extend(result.get("edges", []))
     merged["hyperedges"].extend(result.get("hyperedges", []))

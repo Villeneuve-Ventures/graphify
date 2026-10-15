@@ -2181,8 +2181,26 @@ _PREPARED_WORKSPACE_RELOCATIONS = {
 }
 
 
+def _normalise_issue131_monolith(text: str, platform_key: str) -> str:
+    """Undo only exact reviewed ownership-contract hunks for the v8 audit.
+
+    Unlike a line allowlist, this binds declaration, cache and merge plumbing as
+    complete blocks. A missing or altered block leaves the render unnormalised,
+    so the existing frozen-v8 audit still refuses drift.
+    """
+    migrations = json.loads((SKILLGEN_DIR / "issue131-monolith-migration.json").read_text())
+    hunks = migrations[platform_key]
+    comparable = text.replace(_POSIX_OPERATION_GUARD, "@@ISSUE131_OPERATION_GUARD@@")
+    if any(comparable.count(hunk["after"]) != 1 for hunk in hunks):
+        return text
+    for hunk in hunks:
+        comparable = comparable.replace(hunk["after"], hunk["before"], 1)
+    return comparable.replace("@@ISSUE131_OPERATION_GUARD@@", _POSIX_OPERATION_GUARD)
+
+
 def _normalise_prepared_workspace_paths(text: str, platform_key: str) -> str:
     """Map only the reviewed line multiset back to pristine-v8 path spelling."""
+    text = _normalise_issue131_monolith(text, platform_key)
     normalised: list[str] = []
     remaining = _PREPARED_WORKSPACE_RELOCATIONS[platform_key].copy()
     for line in text.splitlines(keepends=True):

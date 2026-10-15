@@ -317,6 +317,7 @@ def test_manifest_stamps_freshly_extracted_semantic_docs(monkeypatch, tmp_path):
                        "file_type": "document"}],
             "edges": [],
             "hyperedges": [],
+            "completed_sources": ["README.md"],
             "input_tokens": 10,
             "output_tokens": 5,
         }
@@ -425,6 +426,7 @@ def test_manifest_stamps_hyperedge_only_docs(monkeypatch, tmp_path):
             "edges": [],
             "hyperedges": [{"id": "h1", "label": "Shared", "nodes": ["a", "b", "c"],
                             "relation": "participate_in", "source_file": "README.md"}],
+            "completed_sources": ["README.md"],
             "input_tokens": 10,
             "output_tokens": 5,
         }
@@ -591,7 +593,7 @@ def test_cache_check_mode_deep_reads_deep_namespace(monkeypatch, tmp_path, capsy
     doc = tmp_path / "doc.md"
     doc.write_text("# Doc\n")
     save_semantic_cache([{"id": "d", "source_file": "doc.md"}], [],
-                        root=tmp_path, mode="deep")
+                        root=tmp_path, mode="deep", completed_source_files=[doc])
     files_from = tmp_path / "files.txt"
     files_from.write_text(str(doc) + "\n")
     monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
@@ -984,3 +986,165 @@ def test_no_cluster_incremental_prunes_newly_excluded_file(
         f"--no-cluster early exit must prune excluded sources, still see {sources}"
     )
     assert any("keep.py" in s for s in sources)
+
+
+@pytest.mark.parametrize("kind", ["edge", "hyperedge", "empty", "omitted"])
+def test_incremental_semantic_replacement_requires_completion(tmp_path, monkeypatch, kind):
+    import json
+    from graphify.build import build_merge as real_merge
+    corpus = _make_corpus(tmp_path)
+    evidence = corpus / "README.md"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    phase = ["seed"]
+    calls = []
+
+    def semantic(paths, **kwargs):
+        result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0,
+                  "output_tokens": 0, "completed_sources": [str(evidence)]}
+        if phase[0] == "seed":
+            result["nodes"] = [{"id": "stable_a", "label": "A", "file_type": "concept", "source_file": "stable.md"},
+                               {"id": "stable_b", "label": "B", "file_type": "concept", "source_file": "stable.md"}]
+            result["hyperedges"] = [{"id": "old", "source_file": "README.md", "nodes": ["stable_a"]}]
+        elif kind == "hyperedge":
+            result["hyperedges"] = [{"id": "new", "source_file": "README.md", "nodes": ["stable_b"]}]
+        elif kind == "edge":
+            result["edges"] = [{"source": "stable_a", "target": "stable_b", "relation": "references",
+                                "confidence": "EXTRACTED", "source_file": "README.md"}]
+        elif kind == "omitted":
+            result.pop("completed_sources")
+        kwargs["on_chunk_done"](0, 1, result)
+        return result
+
+    def merge(*args, **kwargs):
+        calls.append(kwargs["replacement_sources"])
+        return real_merge(*args, **kwargs)
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", semantic)
+    monkeypatch.setattr("graphify.build.build_merge", merge)
+    # The stable retained nodes are synthetic fixture facts, outside the changed
+    # extraction source. Keep normal stale-source detection out of this test.
+    monkeypatch.setattr("graphify.cli._stale_graph_sources", lambda *a, **kw: [])
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(corpus), "--backend", "claude", "--no-viz"])
+    mainmod.main()
+    phase[0] = "refresh"
+    evidence.write_text(evidence.read_text() + "\nchanged evidence\n")
+    mainmod.main()
+    result = json.loads((corpus / "graphify-out" / "graph.json").read_text())
+    ids = {group["id"] for group in result.get("hyperedges", [])}
+    assert ids == ({"old"} if kind == "omitted" else {"new"} if kind == "hyperedge" else set())
+    assert {"stable_a", "stable_b"} <= {n["id"] for n in result["nodes"]}
+    assert (str(evidence) in calls[-1]) is (kind != "omitted")
+    if kind != "omitted":
+        # Empty completed extraction is stamped and does not get re-extracted.
+        assert json.loads((corpus / "graphify-out" / "manifest.json").read_text())["README.md"]["semantic_hash"]
+
+
+def test_incremental_complete_empty_source_can_empty_entire_graph(tmp_path, monkeypatch):
+    import json
+    source = tmp_path / "only.md"
+    source.write_text("# Original source\n")
+    phase = ["seed"]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fixture-key")
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+
+    def extract(paths, **kwargs):
+        result = {"nodes": ([{"id": "only_fact", "label": "Accepted fact", "source_file": "only.md",
+                              "file_type": "document"}] if phase[0] == "seed" else []),
+                  "edges": [], "hyperedges": [], "completed_sources": [str(source)],
+                  "input_tokens": 0, "output_tokens": 0}
+        kwargs["on_chunk_done"](0, 1, result)
+        return result
+
+    monkeypatch.setattr("graphify.llm.extract_corpus_parallel", extract)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "extract", str(tmp_path), "--backend", "claude", "--no-viz"])
+    mainmod.main()
+    phase[0] = "empty"
+    source.write_text("# No remaining facts\n")
+    mainmod.main()
+    assert json.loads((tmp_path / "graphify-out" / "graph.json").read_text())["nodes"] == []
+
+
+def test_explicit_completion_controls_manifest_stamping(tmp_path):
+    from graphify.cli import _stamped_manifest_files
+    complete, partial = str(tmp_path / "empty.md"), str(tmp_path / "partial.md")
+    stamped = _stamped_manifest_files({"document": [complete, partial]}, {
+        "completed_sources": [complete], "nodes": [{"id": "partial", "source_file": partial}],
+    }, tmp_path)
+    assert stamped == {"document": [complete]}
+
+
+def test_cache_check_rejects_legacy_completion_and_clears_stale_handoff(tmp_path, monkeypatch):
+    import json
+    from graphify.cache import save_semantic_cache
+    source = tmp_path / "doc.md"
+    source.write_text("# Source\n")
+    output = tmp_path / "graphify-out"
+    save_semantic_cache([], [], [], root=tmp_path, completed_source_files=[source])
+    files = tmp_path / "files.txt"
+    files.write_text(str(source))
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "cache-check", str(files), "--root", str(tmp_path)])
+    mainmod.main()
+    cached = output / ".graphify_cached.json"
+    assert json.loads(cached.read_text())["completed_sources"] == [str(source)]
+    # A new legacy/partial checkpoint for identical input is not a completion.
+    save_semantic_cache([{"id": "partial", "source_file": str(source)}], [], root=tmp_path)
+    mainmod.main()
+    assert not cached.exists()
+    assert (output / ".graphify_uncached.txt").read_text() == str(source)
+
+
+def test_merge_helper_commands_preserve_explicit_empty_completion(tmp_path, monkeypatch):
+    import json
+    source = str(tmp_path / "empty.md")
+    chunk = tmp_path / "chunk.json"
+    chunk.write_text(json.dumps({"nodes": [], "edges": [], "hyperedges": [], "completed_sources": [source]}))
+    chunks = tmp_path / "chunks.json"
+    merged = tmp_path / "merged.json"
+    monkeypatch.setattr(mainmod, "_check_skill_version", lambda _: None)
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "merge-chunks", str(chunk), "--out", str(chunks)])
+    mainmod.main()
+    assert json.loads(chunks.read_text())["completed_sources"] == [source]
+    monkeypatch.setattr(mainmod.sys, "argv", ["graphify", "merge-semantic", "--new", str(chunks), "--out", str(merged)])
+    mainmod.main()
+    assert json.loads(merged.read_text())["completed_sources"] == [source]
+
+
+def test_complete_cache_with_separate_output_replays_relative_owner_facts(tmp_path, monkeypatch):
+    import json
+    corpus = _make_corpus(tmp_path)
+    output = tmp_path / 'separate-output'
+    calls = []
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'fixture-key')
+    monkeypatch.setattr(mainmod, '_check_skill_version', lambda _: None)
+
+    def extract(paths, **kwargs):
+        calls.append(paths)
+        result = {'nodes': [{'id': 'readme_fact', 'label': 'Named fact from README',
+                             'file_type': 'document', 'source_file': 'README.md'}],
+                  'edges': [], 'hyperedges': [], 'completed_sources': ['README.md'],
+                  'input_tokens': 0, 'output_tokens': 0}
+        kwargs['on_chunk_done'](0, 1, result)
+        return result
+
+    monkeypatch.setattr('graphify.llm.extract_corpus_parallel', extract)
+    monkeypatch.setattr(mainmod.sys, 'argv', ['graphify', 'extract', str(corpus), '--backend', 'claude',
+                                            '--mode', 'deep', '--no-viz', '--out', str(output)])
+    mainmod.main()
+    first = json.loads((output / 'graphify-out/graph.json').read_text())
+    assert 'readme_fact' in {node['id'] for node in first['nodes']}
+    # Deep mode replays the warm semantic cache even with no changed files.
+    mainmod.main()
+    second = json.loads((output / 'graphify-out/graph.json').read_text())
+    assert len(calls) == 1
+    assert {node['id']: node for node in first['nodes']} == {node['id']: node for node in second['nodes']}
+
+
+def test_explicit_manifest_completion_does_not_stamp_other_file_alias(tmp_path):
+    from graphify.cli import _stamped_manifest_files
+    source, alias = tmp_path / 'source.md', tmp_path / 'alias.md'
+    source.write_text('Same bytes')
+    alias.symlink_to(source)
+    assert _stamped_manifest_files({'document': [str(source), str(alias)]}, {
+        'completed_sources': [str(alias)]}, tmp_path) == {'document': [str(alias)]}

@@ -5349,7 +5349,8 @@ def test_monoliths_carry_the_1392_runbook_fixes():
         # #18/#20 zero-node guard before any write, report/analysis gated on
         # to_json's return.
         lines = body.splitlines()
-        build_i = next(i for i, l in enumerate(lines) if "G = build_from_json(extraction, directed=IS_DIRECTED)" in l)
+        build_i = next(i for i, line in enumerate(lines)
+                       if line.strip().startswith("G = ") and "build_from_json(extraction," in line)
         guard_i = next(i for i, l in enumerate(lines[build_i:], build_i) if "number_of_nodes() == 0" in l)
         report_i = next(i for i, l in enumerate(lines[build_i:], build_i) if "GRAPH_REPORT.md').write_text(report)" in l)
         wrote_i = next(i for i, l in enumerate(lines[build_i:], build_i) if l.strip().startswith("wrote = to_json("))
@@ -6205,3 +6206,70 @@ def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolut
     assert (workspace / "graphify-out" / ".graphify_root").read_text() == str(
         tmp_path.resolve()
     )
+
+
+@pytest.mark.parametrize("source", ["shared", "aider", "devin"])
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("kind", ["edge", "hyperedge", "empty", "omitted"])
+def test_update_runbook_uses_explicit_replacement_and_preserves_accepted_facts(tmp_path, monkeypatch, source, directed, kind):
+    out = tmp_path / "graphify-out"
+    out.mkdir()
+    retained = [{"id": "legacy_rule", "label": "Rule", "source_file": "docs/policy.md", "file_type": "document"},
+                {"id": "anchor", "label": "Anchor", "source_file": "stable.md", "file_type": "document"}]
+    path = out / "graph.json"
+    path.write_text(json.dumps({"nodes": retained, "links": [], "hyperedges": [
+        {"id": "old", "source_file": "evidence.md", "nodes": ["anchor"]}]}))
+    before = path.read_bytes()
+    fresh = {"nodes": [], "edges": [], "hyperedges": [], "replacement_sources": ["evidence.md"]}
+    if kind == "edge":
+        fresh["edges"] = [{"source": "legacy_rule", "target": "anchor", "source_file": "evidence.md",
+                           "relation": "references", "confidence": "EXTRACTED"}]
+    elif kind == "hyperedge":
+        fresh["hyperedges"] = [{"id": "new", "source_file": "evidence.md", "nodes": ["anchor"]}]
+    elif kind == "omitted":
+        fresh.pop("replacement_sources")
+    staging = tmp_path if source == "aider" else out
+    (staging / ".graphify_extract.json").write_text(json.dumps(fresh))
+    (staging / ".graphify_incremental.json").write_text(json.dumps({"deleted_files": [], "files": {}}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("graphify.detect.save_manifest", lambda *a, **kw: None)
+    shared = (gen.FRAGMENTS_DIR / ("references/shared/update.md" if source == "shared"
+                                 else f"core/{source}.md")).read_text()
+    block = next(b for b in re.findall(r'```bash\n(.*?)\n```', shared, re.S) if 'G = build_merge(' in b)
+    argv = shlex.split(block)
+    code = argv[argv.index('-c') + 1].replace('INPUT_PATH', str(tmp_path)).replace('IS_DIRECTED', str(directed))
+    exec(compile(code, '<update-runbook>', 'exec'), {})
+    assert path.read_bytes() == before
+    # Part C's accepted merge must not rekey an old semantic ID during Step 4.
+    core = (gen.FRAGMENTS_DIR / f"core/{'core' if source == 'shared' else source}.md").read_text()
+    block = next(b for b in re.findall(r'```bash\n(.*?)\n```', core, re.S) if 'G = (_graph_from_accepted_merge(' in b)
+    argv = shlex.split(block)
+    code = argv[argv.index('-c') + 1].split('# Guard BEFORE any write:')[0]
+    (staging / '.graphify_detect.json').write_text('{}')
+    namespace = {}
+    exec(compile(code.replace('INPUT_PATH', str(tmp_path)).replace('IS_DIRECTED', str(directed)), '<update-build>', 'exec'), namespace)
+    graph = namespace['G']
+    assert set(graph) == {'legacy_rule', 'anchor'}
+    assert graph.nodes['legacy_rule'] == {k: v for k, v in retained[0].items() if k != 'id'}
+    assert {h['id'] for h in graph.graph['hyperedges']} == ({'old'} if kind == 'omitted' else {'new'} if kind == 'hyperedge' else set())
+    assert graph.has_edge('legacy_rule', 'anchor') is (kind == 'edge')
+
+
+@pytest.mark.parametrize('platform_key', ['aider', 'devin'])
+@pytest.mark.parametrize('old,new', [
+    ("replacement_sources=new_extraction.get('replacement_sources', [])", "replacement_sources=None"),
+    ('require_complete=True', 'require_complete=False'),
+    ("completed_source_files=new.get('completed_sources', [])", 'completed_source_files=[]'),
+])
+def test_monolith_ownership_migration_rejects_plumbing_drift(monkeypatch, platform_key, old, new):
+    platform = gen.load_platforms()[platform_key]
+    original_render = gen.render
+    def drift(selected):
+        artifacts = original_render(selected)
+        if selected.key == platform_key:
+            artifact = artifacts[0]
+            assert old in artifact.content
+            artifacts[0] = gen.RenderedArtifact(artifact.path, artifact.content.replace(old, new, 1))
+        return artifacts
+    monkeypatch.setattr(gen, 'render', drift)
+    assert gen.monolith_roundtrip(platform)

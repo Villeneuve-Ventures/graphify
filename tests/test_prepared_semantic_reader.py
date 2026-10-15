@@ -397,3 +397,44 @@ def test_malformed_member_conflict_preserves_all_published_bytes(tmp_path, monke
     assert after == before
     with pytest.raises(tx.PendingTransactionError):
         tx.open_graph_snapshot(fixture.output / "graph.json", purpose="refused-malformed-member")
+
+
+@pytest.mark.parametrize("kind", ["edge", "hyperedge", "empty", "conflict"])
+def test_explicit_relationship_replacement_under_native_prepared_owner(tmp_path, monkeypatch, kind):
+    chunk = _chunk("one")
+    chunk["hyperedges"].append({"id": "old", "source_file": "changed.md", "nodes": ["retained"]})
+    fixture = _prepare(_baseline(tmp_path, monkeypatch, accepted_chunk=chunk))
+    before = _published_bytes(fixture.output)
+    fresh = {"nodes": [], "edges": [], "hyperedges": []}
+    if kind == "edge":
+        fresh["edges"] = [{"source": "changed", "target": "anchor", "source_file": "changed.md",
+                            "relation": "references", "confidence": "EXTRACTED"}]
+        # The replaced node itself is gone; fresh unknown references retain
+        # established discard behavior. Foreign-owned facts remain unchanged.
+    elif kind == "hyperedge":
+        fresh["hyperedges"] = [{"id": "new", "source_file": "changed.md", "nodes": ["retained", "anchor"]}]
+    elif kind == "conflict":
+        fresh["hyperedges"] = [{"id": "retained-group", "source_file": "changed.md", "nodes": ["anchor"]}]
+    code = f"""
+from graphify.export import to_json
+from graphify.detect import save_manifest
+graph = build_merge([{fresh!r}], output / 'graph.json', root=root,
+                    replacement_sources=[str(root / 'changed.md')])
+assert 'changed' not in graph
+assert to_json(graph, {{}}, 'graph.json', force=True, built_at_commit={fixture.second_head!r})
+save_manifest({{'document': [str(root / 'changed.md'), str(root / 'retained.md')]}},
+              manifest_path='manifest.json', root=root)
+tx.finalize_prepared_transaction()
+"""
+    if kind == "conflict":
+        with pytest.raises(Exception, match="retained hyperedge"):
+            _run(fixture, code)
+        assert _published_bytes(fixture.output) == before
+        return
+    _run(fixture, code)
+    published = tx.open_graph_snapshot(fixture.output / "graph.json", purpose="explicit-replacement")
+    assert published.data['links'] == fixture.baseline.data['links']
+    assert {group['id'] for group in published.data['hyperedges']} == (
+        {'retained-group', 'new'} if kind == 'hyperedge' else {'retained-group'})
+    old = {node['id']: node for node in fixture.baseline.data['nodes']}
+    assert {node['id']: node for node in published.data['nodes']} == {key: old[key] for key in ('retained', 'anchor')}

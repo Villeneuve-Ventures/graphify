@@ -1073,6 +1073,42 @@ def _hashable(value):
     return True
 
 
+def _merge_source_file(source, root):
+    """Canonical ownership key; retained payloads stay unchanged."""
+    if source is None:
+        return None
+    if not isinstance(source, str) or "\x00" in source or (source and not source.strip()):
+        raise ValueError("Semantic update source_file must be a path string or absent")
+    if not source:
+        return source
+    source = os.path.normpath(source.replace("\\", "/")).replace("\\", "/")
+    if root and os.path.isabs(source):
+        path, root_path = Path(source), Path(root).resolve()
+        try:
+            return path.relative_to(root_path).as_posix()
+        except ValueError:
+            # Resolve a scan-root alias, not the leaf: two corpus filenames
+            # can share bytes through a symlink but own different graph facts.
+            for parent in path.parents:
+                try:
+                    if parent.resolve() == root_path:
+                        return path.relative_to(parent).as_posix()
+                except (OSError, RuntimeError):
+                    continue
+    return source
+
+
+def _replacement_source_set(sources, root):
+    if not isinstance(sources, list):
+        raise ValueError("replacement_sources must be a list of non-empty path strings")
+    result = set()
+    for source in sources:
+        if not isinstance(source, str) or not source.strip() or "\x00" in source:
+            raise ValueError("replacement_sources must contain non-empty path strings")
+        result.add(_merge_source_file(source, root))
+    return result
+
+
 def _check_retained_node(retained, incoming, root):
     from graphify.dedup import _defines_id
 
@@ -1080,7 +1116,7 @@ def _check_retained_node(retained, incoming, root):
         result = _fact_attributes(record)
         if "source_file" not in result and "source" in result:
             result["source_file"] = result.pop("source")
-        result["source_file"] = _norm_source_file(result.get("source_file"), root)
+        result["source_file"] = _merge_source_file(result.get("source_file"), root)
         return result
     old, new = normalized(retained), normalized(incoming)
     if old == new:
@@ -1092,7 +1128,7 @@ def _check_retained_node(retained, incoming, root):
 
 
 def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
-                             directed, dedup, dedup_llm_backend):
+                             directed, dedup, dedup_llm_backend, replacement_sources):
     """Transform fresh extraction only, then compose accepted facts without loss."""
     from graphify.dedup import _deduplicate_entities_with_remap
 
@@ -1101,16 +1137,37 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
         for key in fresh:
             fresh[key].extend(deepcopy(chunk.get(key, [])))
     fresh["hyperedges"] = _admit_hyperedges(fresh["hyperedges"])
-    normalize = lambda source: _norm_source_file(source, root)
+    normalize = lambda source: _merge_source_file(source, root)
     node_owner = lambda n: normalize(n.get("source_file", n.get("source")))
-    replaced = {normalize(n.get("source_file")) for n in fresh["nodes"] if n.get("source_file")}
-    # Keep replacement-source selection above admission: ownership is unchanged.
+    # Invalid ownership cannot grant replacement or disappear behind a prune.
+    for records in (nodes, edges, hyperedges, *fresh.values()):
+        for record in records:
+            if isinstance(record, dict):
+                normalize(record.get("source_file"))
+    for record in nodes + fresh["nodes"]:
+        if isinstance(record, dict):
+            node_owner(record)  # Validate the legacy node source alias too.
+    for key, records in fresh.items():
+        for record in records:
+            if isinstance(record, dict):
+                owner_field = "source_file" if "source_file" in record else (
+                    "source" if key == "nodes" and "source" in record else None)
+                if owner_field:
+                    record[owner_field] = normalize(record[owner_field])
+    replaced = (_replacement_source_set(replacement_sources, root)
+                if replacement_sources is not None else
+                {normalize(n.get("source_file")) for n in fresh["nodes"]
+                 if isinstance(n, dict) and n.get("source_file")})
+    # Legacy node-based authority stays above identity admission for compatibility.
     fresh["nodes"], fresh["edges"] = _admit_string_identities(
         fresh["nodes"], fresh["edges"], keep_incomplete_edges=True)
     prune_request_count = len(pruned)
     pruned = {normalize(source) for source in pruned if source} - replaced
     removed = replaced | pruned
-    fresh["edges"] = [e for e in fresh["edges"] if normalize(e.get("source_file")) not in pruned]
+    fresh["nodes"] = [n for n in fresh["nodes"] if node_owner(n) not in pruned]
+    for key in ("edges", "hyperedges"):
+        fresh[key] = [record for record in fresh[key]
+                      if normalize(record.get("source_file")) not in pruned]
     retained = [n for n in nodes if node_owner(n) not in removed]
     repos = {n.get("repo") for n in retained + fresh["nodes"] if n.get("repo")}
     if dedup and len(repos) > 1:
@@ -1353,15 +1410,22 @@ def build_merge(
     dedup: bool = True,
     dedup_llm_backend: str | None = None,
     root: str | Path | None = None,
+    replacement_sources: list[str] | None = None,
     ast_refresh_sources: list[str] | None = None,
     ast_refresh_source_map: dict[str, str] | None = None,
 ) -> nx.Graph:
-    """Load existing graph.json, merge new chunks into it, and save back.
+    """Compose new chunks with accepted graph.json facts without writing the file.
 
-    Re-extracted files REPLACE their prior contribution: any source_file present
-    in new_chunks is dropped from the loaded graph before merging, so a changed
-    file's stale nodes/edges don't accumulate. Files absent from new_chunks are
-    preserved unchanged; deleted files are removed via prune_sources.
+    replacement_sources=None preserves legacy replacement by fresh node owners.
+    An explicit list is the entire complete-replacement set; [] adds claims only.
+    Callers must list only successfully completed sources, including successful
+    empty extraction. Edge/hyperedge owners alone never grant replacement.
+    Replacement removes that source's prior nodes, edges and hyperedges; foreign
+    records survive unless their endpoints were retired. Replacement wins over
+    prune_sources for the same normalized source; prune removes retained AND
+    fresh records for every other source. Invalid ownership/declarations refuse.
+    Separators, dot segments and in-root absolute paths share ownership keys;
+    retained payloads are not rewritten. Files outside both sets stay accepted.
     Deduplication and extraction normalization apply only to fresh chunks.
     Conflicting claims on retained identities refuse the update before export.
     Safe to call repeatedly.
@@ -1433,6 +1497,8 @@ def build_merge(
         else _infer_merge_root(graph_path)
     )
     if ast_refresh_sources is not None:
+        if replacement_sources is not None:
+            raise ValueError("replacement_sources cannot be combined with ast_refresh_sources")
         refreshed = _compose_ast_refresh(
             new_chunks, existing_nodes, existing_edges, existing_hyperedges,
             ast_refresh_sources, prune_sources or [], root=_eff_root,
@@ -1449,8 +1515,30 @@ def build_merge(
     return _compose_semantic_update(
         new_chunks, existing_nodes, existing_edges, existing_hyperedges,
         prune_sources or [], root=_eff_root, directed=directed, dedup=dedup,
-        dedup_llm_backend=dedup_llm_backend,
+        dedup_llm_backend=dedup_llm_backend, replacement_sources=replacement_sources,
     )
+
+
+def _graph_from_accepted_merge(extraction: dict, *, directed: bool = False) -> nx.Graph:
+    """Restore serialized build_merge output without reinterpreting accepted facts.
+
+    Runbooks stage this output between merge and export. Endpoint admission here
+    prevents NetworkX from creating implicit nodes if that staged shape is invalid.
+    """
+    nodes, edges = extraction["nodes"], extraction["edges"]
+    if any(not isinstance(node, dict) or not isinstance(node.get("id"), str) for node in nodes):
+        raise ValueError("Invalid accepted merge node identity")
+    identities = {node["id"] for node in nodes}
+    if len(identities) != len(nodes):
+        raise ValueError("Duplicate accepted merge node identity")
+    if any(not isinstance(edge, dict) or any(not isinstance(edge.get(end), str)
+            or edge[end] not in identities for end in ("source", "target")) for edge in edges):
+        raise ValueError("Invalid accepted merge edge endpoint")
+    return nx.node_link_graph({
+        "directed": directed, "multigraph": False, "nodes": nodes,
+        "links": [dict(edge, _src=edge["source"], _tgt=edge["target"]) for edge in edges],
+        "graph": {"hyperedges": extraction.get("hyperedges", [])},
+    }, edges="links")
 
 
 def prefix_graph_for_global(G: nx.Graph, repo_tag: str) -> nx.Graph:

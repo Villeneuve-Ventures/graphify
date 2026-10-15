@@ -276,12 +276,12 @@ detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
 # extraction step re-read every source file (#1392).
 all_files = [f for cat in ('document', 'paper', 'image') for f in detect['files'].get(cat, [])]
 
-cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(all_files)
+cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(all_files, require_complete=True)
 
 # Always (re)write the cache file: write hits, else DELETE any leftover from a
 # prior run so Part C never merges a stale .graphify_cached.json (#1392).
-if cached_nodes or cached_edges or cached_hyperedges:
-    Path('graphify-out/.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges}))
+if len(uncached) < len(all_files):
+    Path('graphify-out/.graphify_cached.json').write_text(json.dumps({'nodes': cached_nodes, 'edges': cached_edges, 'hyperedges': cached_hyperedges, 'completed_sources': sorted(set(all_files) - set(uncached))}))
 else:
     Path('graphify-out/.graphify_cached.json').unlink(missing_ok=True)
 Path('graphify-out/.graphify_uncached.txt').write_text('\n'.join(uncached))
@@ -293,7 +293,7 @@ Only dispatch subagents for files listed in `graphify-out/.graphify_uncached.txt
 
 **Step B1 - Split into chunks**
 
-Load files from `graphify-out/.graphify_uncached.txt`. Split into chunks of 20-25 files each. Each image gets its own chunk (vision needs separate context). When splitting, group files from the same directory together so related artifacts land in the same chunk and cross-file relationships are more likely to be extracted.
+Start a new extraction batch. Write `[]` to `graphify-out/.graphify_completed_chunks.json`. After validating each successful current dispatch, append only its chunk file path to that JSON list. Collect only results from this batch's successfully completed dispatches. Validate each completed_sources list against that chunk's assigned FILE_LIST; remove any source not fully read and extracted, any partial/truncated result, and any failed result. An empty array of records with explicit completion is valid; an absent result is not. Never infer completion from nodes, edges, hyperedges or progress callbacks. Load files from `graphify-out/.graphify_uncached.txt`. Split into chunks of 20-25 files each. Each image gets its own chunk (vision needs separate context). When splitting, group files from the same directory together so related artifacts land in the same chunk and cross-file relationships are more likely to be extracted.
 
 **Step B2 - Dispatch subagents**
 
@@ -311,6 +311,8 @@ For each chunk, dispatch a subagent with this exact prompt (fill in FILE_LIST):
 
 ```
 You are a graphify extraction subagent. Read the files listed and extract a knowledge graph fragment.
+- Completion: completed_sources lists only assigned files fully read and fully extracted in this run, including successful empty extraction. Omit failed, omitted, partial or truncated files; record ownership alone never establishes completion.
+
 Output ONLY valid JSON with no commentary: {"nodes": [...], "edges": [...], "hyperedges": [...], "input_tokens": 0, "output_tokens": 0}
 
 Extraction rules:
@@ -346,7 +348,7 @@ Extraction rules:
 - AMBIGUOUS edges: 0.1-0.3
 
 Schema:
-{"nodes":[{"id":"filestem_entityname","label":"Human Readable Name","file_type":"code|document|paper|image|rationale|concept","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to|rationale_for","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"input_tokens":0,"output_tokens":0}
+{"nodes":[{"id":"filestem_entityname","label":"Human Readable Name","file_type":"code|document|paper|image|rationale|concept","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to|rationale_for","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"completed_sources":["<FILE_LIST path verbatim>"],"input_tokens":0,"output_tokens":0}
 
 Files:
 FILE_LIST
@@ -370,8 +372,8 @@ import json, glob
 from pathlib import Path
 from graphify.semantic_cleanup import load_validated_semantic_fragment, sanitize_semantic_fragment
 
-chunks = sorted(glob.glob('graphify-out/.graphify_chunk_*.json'))
-all_nodes, all_edges, all_hyperedges = [], [], []
+chunks = json.loads(Path('graphify-out/.graphify_completed_chunks.json').read_text())
+all_nodes, all_edges, all_hyperedges, completed_sources = [], [], [], set()
 total_in, total_out = 0, 0
 for c in chunks:
     d, errors = load_validated_semantic_fragment(Path(c))
@@ -382,10 +384,11 @@ for c in chunks:
     all_nodes += d.get('nodes', [])
     all_edges += d.get('edges', [])
     all_hyperedges += d.get('hyperedges', [])
+    completed_sources.update(d.get('completed_sources', []))
     total_in += d.get('input_tokens', 0)
     total_out += d.get('output_tokens', 0)
 Path('graphify-out/.graphify_semantic_new.json').write_text(json.dumps({
-    'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges,
+    'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges, 'completed_sources': sorted(completed_sources),
     'input_tokens': total_in, 'output_tokens': total_out,
 }, indent=2))
 print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens')
@@ -401,7 +404,7 @@ from pathlib import Path
 
 new = json.loads(Path('graphify-out/.graphify_semantic_new.json').read_text()) if Path('graphify-out/.graphify_semantic_new.json').exists() else {'nodes':[],'edges':[],'hyperedges':[]}
 uncached = [line for line in Path('graphify-out/.graphify_uncached.txt').read_text().splitlines() if line]
-saved = save_semantic_cache(new.get('nodes', []), new.get('edges', []), new.get('hyperedges', []), allowed_source_files=uncached)
+saved = save_semantic_cache(new.get('nodes', []), new.get('edges', []), new.get('hyperedges', []), allowed_source_files=uncached, completed_source_files=new.get('completed_sources', []))
 print(f'Cached {saved} files')
 "
 ```
@@ -429,7 +432,7 @@ for n in all_nodes:
 merged = {
     'nodes': deduped,
     'edges': all_edges,
-    'hyperedges': all_hyperedges,
+    'hyperedges': all_hyperedges, 'completed_sources': sorted(set(cached.get('completed_sources', [])) | set(new.get('completed_sources', []))),
     'input_tokens': new.get('input_tokens', 0),
     'output_tokens': new.get('output_tokens', 0),
 }
@@ -464,7 +467,7 @@ merged_hyperedges = sem.get('hyperedges', [])
 merged = {
     'nodes': merged_nodes,
     'edges': merged_edges,
-    'hyperedges': merged_hyperedges,
+    'hyperedges': merged_hyperedges, 'replacement_sources': sorted(set(sem.get('completed_sources', [])) | {n['source_file'] for n in ast['nodes'] if n.get('source_file')}),
     'input_tokens': sem.get('input_tokens', 0),
     'output_tokens': sem.get('output_tokens', 0),
 }
@@ -484,7 +487,7 @@ print(f'Merged: {total} nodes, {edges} edges ({len(ast[\"nodes\"])} AST + {len(s
 mkdir -p graphify-out
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
-from graphify.build import build_from_json
+from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.cluster import cluster, score_all
 from graphify.analyze import god_nodes, surprising_connections, suggest_questions
 from graphify.report import generate
@@ -494,10 +497,10 @@ from pathlib import Path
 extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
 detection  = json.loads(Path('graphify-out/.graphify_detect.json').read_text())
 
-G = build_from_json(extraction, directed=IS_DIRECTED)
+G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 # Guard BEFORE any write: an empty extraction must not clobber a good graph.json /
 # GRAPH_REPORT.md / analysis sidecar. Check immediately after build (#1392).
-if G.number_of_nodes() == 0:
+if G.number_of_nodes() == 0 and not extraction.get('complete_empty_replacement'):
     print('ERROR: Graph is empty - extraction produced no nodes.')
     print('Possible causes: all files were skipped, binary-only corpus, or extraction failed.')
     raise SystemExit(1)
@@ -513,7 +516,7 @@ questions = suggest_questions(G, communities, labels)
 # Persist the graph first and only write the report/analysis if it actually
 # persisted - to_json refuses to shrink an existing graph.json (#479), and a
 # report describing a graph we did not write would be a lie (#1392).
-wrote = to_json(G, communities, 'graphify-out/graph.json')
+wrote = to_json(G, communities, 'graphify-out/graph.json', force=bool(extraction.get('accepted_merge')))
 if not wrote:
     print('ERROR: refused to shrink graphify-out/graph.json (fewer nodes than the existing graph). Run a full rebuild to be safe.')
     raise SystemExit(1)
@@ -954,24 +957,69 @@ Then:
 
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
-import sys, json
-from graphify.build import build_from_json
-from graphify.export import to_json
-from networkx.readwrite import json_graph
-import networkx as nx
+import json
 from pathlib import Path
+from graphify.build import build_merge
+from graphify.detect import save_manifest
 
-# Load existing graph
-existing_data = json.loads(Path('graphify-out/graph.json').read_text())
-G_existing = json_graph.node_link_graph(existing_data, edges='links')
+# Load new extraction and incremental state
+new_extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
+incremental = json.loads(Path('graphify-out/.graphify_incremental.json').read_text(encoding=\"utf-8\"))
+deleted = list(incremental.get('deleted_files', []))
+# Complete replacement is explicit. Part C carries only successful extraction
+# completions (and successful AST node owners) in replacement_sources. Missing
+# metadata means additional claims; it does not mean successful empty extraction.
+# Replacement wins over prune only for those declared sources. Every other prune
+# removes retained and fresh nodes/relationships, including hyperedges.
+prune = list(deleted) or None
 
-# Load new extraction
-new_extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
-G_new = build_from_json(new_extraction, directed=IS_DIRECTED)
+# Use build_merge() — reads graph.json directly without NetworkX round-trip
+# so edge direction (calls, implements, imports) is always preserved (#801).
+# Pass root= so prune_sources (absolute paths from detect_incremental) are
+# relativized to match the graph's relative source_file values; without it
+# nothing is pruned and stale nodes accumulate on every update (#1361).
+# directed=IS_DIRECTED: replace IS_DIRECTED with True if --directed was given, else
+# False. Without it a --directed --update silently rebuilds undirected and collapses
+# reciprocal A<->B edges (#1392).
+G = build_merge(
+    [new_extraction],
+    graph_path='graphify-out/graph.json',
+    prune_sources=prune,
+    replacement_sources=new_extraction.get('replacement_sources', []),
+    root='INPUT_PATH',
+    directed=IS_DIRECTED,
+)
+print(f'[graphify update] Merged: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges')
 
-# Merge: new nodes/edges into existing graph
-G_existing.update(G_new)
-print(f'Merged: {G_existing.number_of_nodes()} nodes, {G_existing.number_of_edges()} edges')
+# Write merged result back to .graphify_extract.json so Step 4 sees the full graph
+merged_out = {
+    'accepted_merge': True,
+    'nodes': [{'id': n, **d} for n, d in G.nodes(data=True)],
+    'edges': [
+        # Explicit source/target last so they win over any stale attrs in d.
+        {**{k: val for k, val in d.items() if k not in ('_src', '_tgt', 'source', 'target')},
+         'source': d.get('_src', u), 'target': d.get('_tgt', v)}
+        for u, v, d in G.edges(data=True)
+    ],
+    # G.graph["hyperedges"] holds hyperedges from both existing graph.json
+    # and new_extraction (build_merge combines them). Falling back to
+    # new_extraction only would silently drop prior-run hyperedges (#801).
+    'hyperedges': list(G.graph.get('hyperedges', [])),
+    'complete_empty_replacement': bool(new_extraction.get('replacement_sources')) and not any(new_extraction.get(key) for key in ('nodes', 'edges', 'hyperedges')),
+    'input_tokens': new_extraction.get('input_tokens', 0),
+    'output_tokens': new_extraction.get('output_tokens', 0),
+}
+Path('graphify-out/.graphify_extract.json').write_text(json.dumps(merged_out, ensure_ascii=False), encoding=\"utf-8\")
+print(f'[graphify update] Merged extraction written ({len(merged_out[\"nodes\"])} nodes, {len(merged_out[\"edges\"])} edges)')
+
+# Save manifest so next --update diffs against today's state, not the
+# prior run's baseline (prevents ghost-node reports on subsequent updates).
+# root= matches the build_merge call above so the manifest keys stay relative to
+# the scan root — portable across clones/machines, so --update keeps matching
+# cached files instead of missing every one after a move (#1417).
+from graphify.cli import _stamped_manifest_files
+save_manifest(_stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')), root='INPUT_PATH')
+print('[graphify update] Manifest saved.')
 "
 ```
 
