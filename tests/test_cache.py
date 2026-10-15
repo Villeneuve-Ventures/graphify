@@ -910,3 +910,145 @@ def test_save_semantic_cache_merge_existing_prunes_only_incoming(tmp_path):
     assert ("a", "a") in pairs, "prior entry's valid edge must survive the union"
     assert ("a", "b") in pairs, "incoming valid edge must be kept"
     assert not any("stray" in p for p in pairs)
+
+
+@pytest.mark.parametrize("mode", [None, "deep"])
+@pytest.mark.parametrize("kind", ["empty", "edge", "hyperedge", "aliases"])
+def test_complete_semantic_cache_is_explicit_and_invalidates_partial_entries(tmp_path, mode, kind):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source = tmp_path / "source.md"
+    source.write_text("source content")
+    nodes, edges, groups = [], [], []
+    if kind in {"edge", "aliases"}:
+        edges = [{"source": "a", "target": "b", "source_file": "source.md"}]
+    if kind in {"hyperedge", "aliases"}:
+        groups = [{"id": "g", "nodes": ["a"], "source_file": str(source)}]
+    options = dict(root=tmp_path, mode=mode, allowed_source_files=[source])
+    save_semantic_cache(nodes, edges, groups, **options)
+    assert check_semantic_cache([str(source)], tmp_path, mode, require_complete=True)[3] == [str(source)]
+    assert save_semantic_cache(nodes, edges, groups, **options, completed_source_files=[source]) == 1
+    hit = check_semantic_cache([str(source)], tmp_path, mode, require_complete=True)
+    assert hit[3] == [] and len(hit[1]) == len(edges) and len(hit[2]) == len(groups)
+    # An interrupted checkpoint cannot inherit the complete flag from its base.
+    save_semantic_cache([], [{"source": "c", "target": "d", "source_file": str(source)}],
+                        **options, merge_existing=True, completed_source_files=[source])
+    assert check_semantic_cache([str(source)], tmp_path, mode, require_complete=True)[3] == [str(source)]
+    assert check_semantic_cache([str(source)], tmp_path, mode)[3] == []  # default compatibility
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_complete_empty_cache_cannot_authorize_undispatched_file(tmp_path, allowed):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source = tmp_path / "source.md"
+    source.write_text("hello")
+    saved = save_semantic_cache([], [], [], root=tmp_path, completed_source_files=[source],
+                                allowed_source_files=[source] if allowed else [])
+    assert saved == int(allowed)
+    assert bool(check_semantic_cache([str(source)], tmp_path, require_complete=True)[3]) is not allowed
+
+
+@pytest.mark.parametrize('kind', ['node', 'edge', 'hyperedge', 'empty'])
+@pytest.mark.parametrize('owner', ['docs/source.md', 'docs\\source.md'])
+def test_complete_semantic_cache_separates_source_and_storage_roots(tmp_path, kind, owner):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    corpus = tmp_path / 'corpus'
+    storage = tmp_path / 'storage'
+    (corpus / 'docs').mkdir(parents=True)
+    source = corpus / 'docs/source.md'
+    source.write_text('Named source fact')
+    nodes = [{'id': 'a', 'source_file': owner}] if kind == 'node' else []
+    edges = [{'source': 'a', 'target': 'b', 'source_file': owner}] if kind == 'edge' else []
+    groups = [{'id': 'g', 'nodes': ['a'], 'source_file': owner}] if kind == 'hyperedge' else []
+    assert save_semantic_cache(nodes, edges, groups, root=corpus, cache_root=storage,
+                               allowed_source_files=[source], completed_source_files=[source]) == 1
+    hit = check_semantic_cache([str(source)], root=corpus, cache_root=storage, require_complete=True)
+    assert hit[3] == []
+    assert tuple(map(len, hit[:3])) == tuple(map(len, (nodes, edges, groups)))
+    for collection in hit[:3]:
+        for record in collection:
+            # Cache payload spelling may vary; the merge ownership key must not.
+            from graphify.build import _merge_source_file
+            assert _merge_source_file(record['source_file'], str(corpus)) == 'docs/source.md'
+    assert (storage / 'graphify-out/cache/semantic').is_dir()
+    assert not (corpus / 'graphify-out/cache/semantic').exists()
+
+
+def test_filtered_semantic_cache_cannot_certify_empty_replacement(tmp_path):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source = tmp_path / 'source.md'
+    source.write_text('Actual source')
+    saved = save_semantic_cache(
+        [{'id': 'ghost', 'source_file': 'nonexistent.md'}],
+        [{'source': 'ghost', 'target': 'retained', 'source_file': str(source)}],
+        root=tmp_path, allowed_source_files=[source], completed_source_files=[source])
+    assert saved == 1
+    assert check_semantic_cache([str(source)], tmp_path, require_complete=True)[3] == [str(source)]
+    assert check_semantic_cache([str(source)], tmp_path)[3] == []
+
+
+@pytest.mark.parametrize('empty', [False, True])
+def test_complete_cache_cannot_transfer_ownership_through_file_symlink(tmp_path, empty):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source, alias = tmp_path / 'source.md', tmp_path / 'alias.md'
+    source.write_text('Shared bytes, distinct logical owners')
+    alias.symlink_to(source)
+    nodes = [] if empty else [{'id': 'source_fact', 'source_file': 'source.md'}]
+    save_semantic_cache(nodes, [], root=tmp_path, completed_source_files=[source])
+    assert check_semantic_cache([str(source)], tmp_path, require_complete=True)[3] == []
+    assert check_semantic_cache([str(alias)], tmp_path, require_complete=True)[3] == [str(alias)]
+    save_semantic_cache([], [], root=tmp_path, completed_source_files=[alias])
+    assert check_semantic_cache([str(alias)], tmp_path, require_complete=True)[3] == []
+    assert check_semantic_cache([str(source)], tmp_path, require_complete=True)[3] == [str(source)]
+
+
+def test_complete_cache_keeps_legacy_node_owner_without_mutating_input(tmp_path):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source = tmp_path / 'source.md'
+    source.write_text('Legacy owned fact')
+    nodes = [{'id': 'fact', 'source': 'source.md'}]
+    save_semantic_cache(nodes, [], root=tmp_path, completed_source_files=[source])
+    hit = check_semantic_cache([str(source)], tmp_path, require_complete=True)
+    assert hit[0] == [{'id': 'fact', 'source_file': str(source)}]
+    assert nodes == [{'id': 'fact', 'source': 'source.md'}]
+
+
+@pytest.mark.parametrize('absolute_file', [False, True])
+def test_complete_cache_lookup_with_relative_scan_root(tmp_path, monkeypatch, absolute_file):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    monkeypatch.chdir(tmp_path)
+    root = Path('corpus')
+    root.mkdir()
+    source = root / 'doc.md'
+    source.write_text('A source-owned fact')
+    save_semantic_cache([{'id': 'fact', 'source_file': 'doc.md'}], [], root=root,
+                        completed_source_files=['doc.md'])
+    files = [str(source.resolve()) if absolute_file else 'doc.md']
+    hit = check_semantic_cache(files, root=root, require_complete=True)
+    assert hit[3] == []
+    assert hit[0] == [{'id': 'fact', 'source_file': str(source.absolute())}]
+
+
+@pytest.mark.parametrize('kind', ['node', 'edge', 'hyperedge'])
+@pytest.mark.parametrize('owner', ['absent', None, ''])
+@pytest.mark.parametrize('previous_complete', [False, True])
+def test_unowned_records_revoke_complete_cache_without_discarding_scoped_claims(
+        tmp_path, kind, owner, previous_complete):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    source = tmp_path / 'doc.md'
+    source.write_text('A complete response also contains a fact without ownership.')
+    if previous_complete:
+        save_semantic_cache([], [], root=tmp_path, completed_source_files=[source])
+    scoped = {'id': 'scoped', 'source_file': 'doc.md'}
+    nodes, edges, groups = [scoped], [], []
+    record = {'id': 'unowned'} if kind == 'node' else (
+        {'source': 'scoped', 'target': 'scoped'} if kind == 'edge' else
+        {'id': 'group', 'nodes': ['scoped']})
+    if owner != 'absent':
+        record['source_file'] = owner
+    {'node': nodes, 'edge': edges, 'hyperedge': groups}[kind].append(record)
+    save_semantic_cache(nodes, edges, groups, root=tmp_path,
+                        allowed_source_files=[source], completed_source_files=[source])
+    assert check_semantic_cache([str(source)], root=tmp_path, require_complete=True)[3] == [str(source)]
+    claims = check_semantic_cache([str(source)], root=tmp_path)
+    assert claims[3] == []
+    assert [node['id'] for node in claims[0]] == ['scoped']

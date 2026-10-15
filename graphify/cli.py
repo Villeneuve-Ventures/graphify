@@ -68,10 +68,10 @@ def _stamped_manifest_files(
     sem_result: dict,
     root: Path,
 ) -> dict[str, list[str]]:
-    """Manifest-safe files dict: only stamp semantic files that actually
-    produced output (cache hit or fresh extraction). Files whose chunk failed
-    have no source_file entry in sem_result — leaving their semantic_hash
-    empty so detect_incremental re-queues them (#933).
+    """Stamp explicit completed_sources when present, including empty results.
+
+    Legacy callers without completion metadata retain output-based stamping.
+    Uncompleted files stay unstamped so detect_incremental re-queues them (#933).
 
     Both sides of the membership test are resolved against the scan ``root``
     before comparing (#1897): node/edge/hyperedge ``source_file`` values are
@@ -90,6 +90,9 @@ def _stamped_manifest_files(
     root = Path(root)
 
     def _resolve(value: str) -> Path:
+        if "completed_sources" in sem_result:
+            from graphify.build import _merge_source_file
+            return Path(os.path.abspath(root.resolve() / _merge_source_file(value, str(root.resolve()))))
         p = Path(value)
         if not p.is_absolute():
             p = root / p
@@ -98,8 +101,8 @@ def _stamped_manifest_files(
         except (OSError, RuntimeError):
             return p
 
-    sem_extracted: set[Path] = set()
-    for coll in ("nodes", "edges", "hyperedges"):
+    sem_extracted: set[Path] = {_resolve(source) for source in sem_result.get("completed_sources", [])}
+    for coll in (() if "completed_sources" in sem_result else ("nodes", "edges", "hyperedges")):
         for item in sem_result.get(coll, []):
             sf = item.get("source_file", "")
             if sf:
@@ -4025,6 +4028,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             "nodes": [], "edges": [], "hyperedges": [],
             "input_tokens": 0, "output_tokens": 0,
         }
+        semantic_replacements: set[str] = set()
         sem_cache_hits = 0
         sem_cache_misses = 0
         # Deep mode uses its own namespace (cache/semantic-deep/) so deep and
@@ -4040,8 +4044,10 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 uncached_paths = list(sem_paths_str)
             else:
                 cached_nodes, cached_edges, cached_hyperedges, uncached_paths = (
-                    _check_semantic_cache(sem_paths_str, root=out_root, mode=sem_cache_mode)
+                    _check_semantic_cache(sem_paths_str, root=target, cache_root=out_root, mode=sem_cache_mode,
+                                          require_complete=incremental_mode and not no_cluster)
                 )
+            semantic_replacements.update(set(sem_paths_str) - set(uncached_paths))
             sem_cache_hits = len(semantic_files) - len(uncached_paths)
             sem_cache_misses = len(uncached_paths)
             sem_result["nodes"].extend(cached_nodes)
@@ -4105,14 +4111,22 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                         file=sys.stderr,
                     )
                     sys.exit(1)
+                # This list is runtime completion evidence, not inferred from
+                # record owners or the progress callback (which may be partial).
+                from graphify.llm import _completed_source_paths
+                completed = _completed_source_paths(fresh, target) & _completed_source_paths(
+                    {"completed_sources": uncached_paths}, target)
+                semantic_replacements.update(completed)
                 try:
                     _save_semantic_cache(
                         fresh.get("nodes", []),
                         fresh.get("edges", []),
                         fresh.get("hyperedges", []),
-                        root=out_root,
+                        root=target,
+                        cache_root=out_root,
                         allowed_source_files=uncached_paths,
                         mode=sem_cache_mode,
+                        completed_source_files=completed,
                     )
                 except Exception as exc:
                     print(f"[graphify extract] warning: could not write semantic cache: {exc}", file=sys.stderr)
@@ -4121,6 +4135,8 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 sem_result["hyperedges"].extend(fresh.get("hyperedges", []))
                 sem_result["input_tokens"] += fresh.get("input_tokens", 0)
                 sem_result["output_tokens"] += fresh.get("output_tokens", 0)
+
+        sem_result["completed_sources"] = sorted(semantic_replacements)
 
         # Prune orphaned semantic cache entries. The semantic cache is
         # content-hash-keyed and unversioned, so it is never swept by the AST
@@ -4138,11 +4154,11 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                     for _fp in files_by_type.get(_kind, []):
                         _abs = Path(_fp)
                         if not _abs.is_absolute():
-                            _abs = Path(out_root) / _abs
+                            _abs = target / _abs
                         if not _abs.is_file():
                             continue  # deleted/missing — leave out so its entry is pruned
                         try:
-                            _live_hashes.add(_file_hash(_abs, out_root))
+                            _live_hashes.add(_file_hash(_abs, target, cache_root=out_root))
                         except OSError:
                             continue  # unreadable files cannot establish a live cache key
                 _prune_semantic_cache(out_root, _live_hashes)
@@ -4349,12 +4365,19 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 dedup_llm_backend=dedup_backend,
                 root=target,
                 **({"ast_refresh_sources": ast_refresh_sources,
-                    "ast_refresh_source_map": ast_refresh_source_map} if ast_refresh else {}),
+                    "ast_refresh_source_map": ast_refresh_source_map} if ast_refresh else {
+                        "replacement_sources": sorted(semantic_replacements | {
+                            record["source_file"]
+                            for result in (ast_result, pg_result, cargo_result)
+                            for record in result.get("nodes", []) if record.get("source_file")
+                        })}),
             )
         else:
             G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
         stages.mark("build")
-        if G.number_of_nodes() == 0:
+        complete_empty_replacement = (incremental_mode and bool(semantic_replacements)
+                                      and not any(merged.get(key) for key in ("nodes", "edges", "hyperedges")))
+        if G.number_of_nodes() == 0 and not complete_empty_replacement:
             print(
                 "[graphify extract] graph is empty — extraction produced no nodes. "
                 "Possible causes: all files skipped, binary-only corpus, or LLM "
@@ -4503,16 +4526,19 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 i += 1
         files = [f for f in files_from.read_text(encoding="utf-8").splitlines() if f.strip()]
         cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(
-            files, root, mode=cache_mode
+            files, root, mode=cache_mode, require_complete=True
         )
         out = root / _GRAPHIFY_OUT
         out.mkdir(parents=True, exist_ok=True)
-        if cached_nodes or cached_edges or cached_hyperedges:
+        if len(uncached) < len(files):
             (out / ".graphify_cached.json").write_text(
-                json.dumps({"nodes": cached_nodes, "edges": cached_edges, "hyperedges": cached_hyperedges},
+                json.dumps({"nodes": cached_nodes, "edges": cached_edges, "hyperedges": cached_hyperedges,
+                            "completed_sources": sorted(set(files) - set(uncached))},
                            ensure_ascii=False),
                 encoding="utf-8",
             )
+        else:
+            (out / ".graphify_cached.json").unlink(missing_ok=True)
         (out / ".graphify_uncached.txt").write_text("\n".join(uncached), encoding="utf-8")
         print(f"Cache: {len(files) - len(uncached)} hit, {len(uncached)} miss")
 
@@ -4541,7 +4567,8 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
         for arg in chunk_args:
             expanded = _glob.glob(arg)
             chunk_files.extend(sorted(expanded) if expanded else [arg])
-        merged: dict = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
+        merged: dict = {"nodes": [], "edges": [], "hyperedges": [], "completed_sources": [],
+                        "input_tokens": 0, "output_tokens": 0}
         seen_ids: set[str] = set()
         for cf in chunk_files:
             try:
@@ -4555,6 +4582,13 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                     merged["nodes"].append(n)
             merged["edges"].extend(chunk.get("edges", []))
             merged["hyperedges"].extend(chunk.get("hyperedges", []))
+            from graphify.build import _replacement_source_set
+            from graphify.llm import _completed_source_paths
+            if _completed_source_paths(chunk, Path.cwd()):
+                # Validate the fragment, but keep root-relative declarations
+                # unbound until its consumer supplies the actual scan root.
+                merged["completed_sources"] = sorted(set(merged.get("completed_sources", []))
+                    | _replacement_source_set(chunk.get("completed_sources", []), None))
             merged["input_tokens"] += chunk.get("input_tokens", 0)
             merged["output_tokens"] += chunk.get("output_tokens", 0)
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4600,6 +4634,8 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             "nodes": all_nodes,
             "edges": cached_data.get("edges", []) + new_data.get("edges", []),
             "hyperedges": cached_data.get("hyperedges", []) + new_data.get("hyperedges", []),
+            "completed_sources": sorted(set(cached_data.get("completed_sources", []))
+                                        | set(new_data.get("completed_sources", []))),
         }
         out_path2.parent.mkdir(parents=True, exist_ok=True)
         out_path2.write_text(json.dumps(merged2, ensure_ascii=False), encoding="utf-8")

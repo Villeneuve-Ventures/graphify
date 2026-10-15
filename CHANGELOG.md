@@ -6,6 +6,14 @@ entries retain their original attribution.
 
 ## 0.10.0 (unreleased)
 
+- Fork compatibility change (#131): `build_merge(replacement_sources=[...])`
+  supports complete edge-only, hyperedge-only and empty-source replacement.
+  `[]` adds compatible claims only; omission retains legacy node-based replacement.
+  Replacement wins over prune for the same normalized owner; other prunes now
+  remove fresh hyperedges too. Incremental callers use explicit successful
+  completion, and re-extract legacy/partial cache entries before replacement.
+  See [the ownership contract](docs/semantic-replacement.md).
+
 - Fork compatibility change (#134): legacy file-stem aliases for entities now
   require a normalized ID equal to the owning-path stem or starting with that
   stem plus an underscore. An entity `rule` in `docs/policy.md` no longer claims

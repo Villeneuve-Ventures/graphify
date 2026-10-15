@@ -595,11 +595,15 @@ def check_semantic_cache(
     files: list[str],
     root: Path = Path("."),
     mode: str | None = None,
+    *, require_complete: bool = False,
+    cache_root: Path | None = None,
 ) -> tuple[list[dict], list[dict], list[dict], list[str]]:
     """Check semantic extraction cache for a list of absolute file paths.
 
     Returns (cached_nodes, cached_edges, cached_hyperedges, uncached_files).
     Uncached files need Claude extraction; cached files are merged directly.
+    require_complete excludes legacy/partial checkpoints from replacement callers.
+    root anchors source ownership; cache_root optionally selects storage elsewhere.
 
     ``mode`` selects the cache namespace: ``None`` (the default) reads
     ``cache/semantic/`` — byte-identical to the historical behavior, so
@@ -608,6 +612,8 @@ def check_semantic_cache(
     ``cache/semantic-{mode}/`` instead, so deep-mode results never shadow
     (or get shadowed by) standard-mode entries for the same content (#1894).
     """
+    from .build import _merge_source_file
+
     kind = "semantic" if mode is None else f"semantic-{mode}"
     cached_nodes: list[dict] = []
     cached_edges: list[dict] = []
@@ -617,9 +623,11 @@ def check_semantic_cache(
     for fpath in files:
         p = Path(fpath)
         if not p.is_absolute():
-            p = Path(root) / p
-        result = load_cached(p, root, kind=kind)
-        if result is not None:
+            p = Path(root).resolve() / p
+        result = load_cached(p, root, kind=kind, cache_root=cache_root)
+        if result is not None and (not require_complete or (
+                result.get("complete_source") is True
+                and result.get("complete_source_owner") == _merge_source_file(str(p), str(Path(root).resolve())))):
             cached_nodes.extend(result.get("nodes", []))
             cached_edges.extend(result.get("edges", []))
             cached_hyperedges.extend(result.get("hyperedges", []))
@@ -637,6 +645,8 @@ def save_semantic_cache(
     merge_existing: bool = False,
     allowed_source_files: Iterable[str | Path] | None = None,
     mode: str | None = None,
+    *, completed_source_files: Iterable[str | Path] = (),
+    cache_root: Path | None = None,
 ) -> int:
     """Save semantic extraction results to cache, keyed by source_file.
 
@@ -660,15 +670,26 @@ def save_semantic_cache(
     cache-write keys. Semantic nodes can legitimately mention another corpus
     file, but a model must not be able to replace that file's complete cache
     entry unless the file was part of the current extraction batch (#1757).
+    completed_source_files marks final complete results, including empty ones.
+    root anchors source ownership and hashes; cache_root selects output storage,
+    matching load_cached/save_cached. Filtered or unioned checkpoints cannot
+    establish completeness. Default callers
+    keep their historical claims-only cache behavior.
     Returns the number of files cached.
     """
     from collections import defaultdict
 
     kind = "semantic" if mode is None else f"semantic-{mode}"
     by_file: dict[str, dict] = defaultdict(lambda: {"nodes": [], "edges": [], "hyperedges": []})
+    unowned_records = (any(not n.get("source_file", n.get("source")) for n in nodes)
+                       or any(not e.get("source_file") for e in edges)
+                       or any(not h.get("source_file") for h in (hyperedges or [])))
     for n in nodes:
-        src = n.get("source_file", "")
+        src = n.get("source_file", n.get("source", ""))
         if src:
+            if "source_file" not in n:
+                n = {key: value for key, value in n.items() if key != "source"}
+                n["source_file"] = src
             by_file[src]["nodes"].append(n)
     for e in edges:
         src = e.get("source_file", "")
@@ -682,16 +703,26 @@ def save_semantic_cache(
     root_path = Path(root).resolve()
 
     def resolved_source_path(value: str | Path) -> Path:
-        path = Path(value)
-        if not path.is_absolute():
-            path = root_path / path
-        try:
-            return path.resolve()
-        except (OSError, RuntimeError):
-            # Keep the cache write best-effort for inaccessible paths or a
-            # symlink loop emitted by an untrusted semantic result.
-            return Path(os.path.abspath(path))
+        from .build import _merge_source_file
 
+        owner = _merge_source_file(os.fspath(value), str(root_path))
+        return Path(os.path.abspath(root_path / owner))
+
+    completed_paths = {resolved_source_path(path) for path in completed_source_files}
+    # Coalesce ownership aliases before certifying a complete entry: otherwise
+    # the last spelling could overwrite only part of the completed extraction.
+    if completed_paths:
+        combined = defaultdict(lambda: {"nodes": [], "edges": [], "hyperedges": []})
+        for source, result in by_file.items():
+            for key in ("nodes", "edges", "hyperedges"):
+                combined[str(resolved_source_path(source))][key].extend(result[key])
+        by_file = combined
+        for path in completed_paths:
+            by_file[str(path)]  # Successful empty extraction is replayable too.
+        if unowned_records:
+            # Omitted records cannot be assigned to a source. Write useful
+            # claims, but invalidate even a previous complete cache certificate.
+            completed_paths.clear()
     allowed_paths = None
     if allowed_source_files is not None:
         allowed_paths = {resolved_source_path(path) for path in allowed_source_files}
@@ -732,7 +763,7 @@ def save_semantic_cache(
 
             def edge_dangles(e: dict) -> bool:
                 try:
-                    return e.get("source") in skipped_ids or e.get("target") in skipped_ids
+                    return e.get("source", e.get("from")) in skipped_ids or e.get("target", e.get("to")) in skipped_ids
                 except TypeError:
                     # Non-hashable endpoint from an untrusted result; leave it
                     # to build-time validation rather than fail the save.
@@ -740,17 +771,21 @@ def save_semantic_cache(
 
             def hyperedge_dangles(h: dict) -> bool:
                 try:
-                    return bool(skipped_ids & set(h.get("nodes") or []))
+                    return bool(skipped_ids & set(h.get("nodes", h.get("members", h.get("node_ids"))) or []))
                 except TypeError:
                     return False
 
             for fpath, result in by_file.items():
                 if group_skipped(fpath):
                     continue
+                before = len(result["edges"]), len(result["hyperedges"])
                 result["edges"] = [e for e in result["edges"] if not edge_dangles(e)]
                 result["hyperedges"] = [
                     h for h in result["hyperedges"] if not hyperedge_dangles(h)
                 ]
+                if before != (len(result["edges"]), len(result["hyperedges"])):
+                    # Useful filtered claims are not a complete replay snapshot.
+                    completed_paths.discard(resolved_source_path(fpath))
 
     saved = 0
     for fpath, result in by_file.items():
@@ -765,13 +800,19 @@ def save_semantic_cache(
                 )
                 continue
             if merge_existing:
-                prev = load_cached(p, root, kind=kind)
+                prev = load_cached(p, root, kind=kind, cache_root=cache_root)
                 if prev:
                     result = {
                         "nodes": (prev.get("nodes", []) or []) + result["nodes"],
                         "edges": (prev.get("edges", []) or []) + result["edges"],
                         "hyperedges": (prev.get("hyperedges", []) or []) + result["hyperedges"],
                     }
-            save_cached(p, result, root, kind=kind)
+            # Checkpoints and legacy entries are useful claims, never complete
+            # replacement evidence. Only a final, non-unioned extraction qualifies.
+            if p in completed_paths and not merge_existing:
+                from .build import _merge_source_file
+                result["complete_source"] = True
+                result["complete_source_owner"] = _merge_source_file(str(p), str(root_path))
+            save_cached(p, result, root, kind=kind, cache_root=cache_root)
             saved += 1
     return saved

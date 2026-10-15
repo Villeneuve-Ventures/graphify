@@ -1167,3 +1167,181 @@ def test_empty_string_retained_node_preserves_edge_and_group_by_default(tmp_path
     assert graph.graph["hyperedges"] == [group]
     assert "beacon" in graph
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("kind", ["edge", "hyperedge", "empty"])
+@pytest.mark.parametrize("prune", [False, True])
+def test_explicit_complete_source_replacement(tmp_path, directed, dedup, kind, prune):
+    foreign = [node("docs_stable_a", source="docs/stable.md"), node("b"), node("c")]
+    old_group = {"id": "old", "source_file": "evidence.md", "members": ["stable_a", "b"]}
+    kept_group = {"id": "foreign", "source_file": "stable.md", "nodes": ["b", "c"]}
+    path, _ = seed(tmp_path, foreign + [node("stale", source="evidence.md")],
+                   [edge("docs_stable_a", "b", "evidence.md"), edge("b", "c")],
+                   [old_group, kept_group])
+    before = path.read_bytes()
+    fresh = {}
+    if kind == "edge":
+        fresh["edges"] = [edge("stable_a", "b", str(tmp_path / "evidence.md"), detail="new")]
+    elif kind == "hyperedge":
+        fresh["hyperedges"] = [{"id": "new", "source_file": "evidence.md", "node_ids": ["stable_a", "b"]}]
+    graph = build_merge([fresh], path, root=tmp_path, directed=directed, dedup=dedup,
+                        replacement_sources=["./evidence.md", str(tmp_path / "evidence.md")],
+                        prune_sources=["evidence.md"] if prune else None)
+    assert set(graph) == {n["id"] for n in foreign}
+    for record in foreign:
+        assert graph.nodes[record["id"]] == {k: v for k, v in record.items() if k != "id"}
+    assert graph.edges["b", "c"]["source_file"] == "stable.md"
+    assert graph.has_edge("docs_stable_a", "b") is (kind == "edge")
+    groups = graph.graph.get("hyperedges", [])
+    assert kept_group in groups
+    assert {h["id"] for h in groups} == ({"foreign", "new"} if kind == "hyperedge" else {"foreign"})
+    if kind == "hyperedge":
+        assert next(h for h in groups if h["id"] == "new")["nodes"] == ["docs_stable_a", "b"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("kind", ["edge", "hyperedge"])
+def test_relationship_owner_alone_is_additional_claim(tmp_path, explicit, kind):
+    path, _ = seed(tmp_path, [node("a"), node("b"), node("c")],
+                   [edge("a", "b", "evidence.md")],
+                   [{"id": "old", "source_file": "evidence.md", "nodes": ["a"]}])
+    fresh = {"edges": [edge("b", "c", "evidence.md")]} if kind == "edge" else {
+        "hyperedges": [{"id": "new", "source_file": "evidence.md", "nodes": ["b"]}]}
+    graph = build_merge([fresh], path, root=tmp_path,
+                        **({"replacement_sources": []} if explicit else {}))
+    assert graph.has_edge("a", "b")
+    assert "old" in {h["id"] for h in graph.graph["hyperedges"]}
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_prune_removes_fresh_relationship_claims_without_replacement(tmp_path, directed, dedup, legacy):
+    path, _ = seed(tmp_path, [node("a"), node("b")], [], [])
+    before = path.read_bytes()
+    fresh = {"edges": [edge("a", "b", "evidence.md")],
+             "hyperedges": [{"id": "new", "source_file": "evidence.md", "nodes": ["a"]}]}
+    graph = build_merge([fresh], path, root=tmp_path, directed=directed, dedup=dedup,
+                        prune_sources=[str(tmp_path / "evidence.md")],
+                        **({} if legacy else {"replacement_sources": []}))
+    assert graph.number_of_edges() == 0 and not graph.graph.get("hyperedges")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["node", "edge", "hyperedge"])
+@pytest.mark.parametrize("dedup", [False, True])
+@pytest.mark.parametrize("directed", [False, True])
+def test_explicit_replacement_keeps_foreign_identity_conflict_refusal(tmp_path, kind, dedup, directed):
+    group = {"id": "foreign", "source_file": "stable.md", "nodes": ["a"]}
+    path, _ = seed(tmp_path, [node("a"), node("b")], [edge("a", "b")], [group])
+    before = path.read_bytes()
+    fresh = {"node": {"nodes": [node("a", "Conflicting definition", "evidence.md")]},
+             "edge": {"edges": [edge("a", "b", "evidence.md")]},
+             "hyperedge": {"hyperedges": [dict(group, source_file="evidence.md")]}}[kind]
+    with pytest.raises(ValueError, match="conflicts with retained"):
+        build_merge([fresh], path, root=tmp_path, dedup=dedup, directed=directed,
+                    replacement_sources=["evidence.md"])
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("declaration", ["evidence.md", [None], [7], [{}], [""], ["  "], ["a\x00b"]])
+def test_malformed_replacement_declaration_refuses_without_write(tmp_path, declaration):
+    path, _ = seed(tmp_path)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="replacement_sources"):
+        build_merge([], path, root=tmp_path, replacement_sources=declaration)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("collection", ["nodes", "edges", "hyperedges"])
+@pytest.mark.parametrize("owner", [[], {}, 7, False])
+def test_malformed_record_ownership_refuses_without_write(tmp_path, collection, owner):
+    path, _ = seed(tmp_path, [node("a"), node("b")], [], [])
+    before = path.read_bytes()
+    record = {"nodes": node("fresh"), "edges": edge("a", "b"),
+              "hyperedges": {"id": "new", "nodes": ["a"]}}[collection]
+    record["source_file"] = owner
+    with pytest.raises(ValueError, match="source_file"):
+        build_merge([{collection: [record]}], path, root=tmp_path, replacement_sources=[])
+    assert path.read_bytes() == before
+
+
+def test_explicit_additional_node_claim_does_not_replace_its_source(tmp_path):
+    path, _ = seed(tmp_path, [node("a"), node("b")], [edge("a", "b")])
+    graph = build_merge([{"nodes": [node("a")]}], path, root=tmp_path, replacement_sources=[])
+    assert set(graph) == {"a", "b"} and graph.has_edge("a", "b")
+
+
+@pytest.mark.parametrize("owner", ["docs/evidence.md", "./docs/evidence.md", "docs\\evidence.md", "absolute"])
+@pytest.mark.parametrize("declaration", ["docs/evidence.md", "./docs/evidence.md", "docs\\evidence.md", "absolute"])
+def test_explicit_ownership_paths_share_inferred_root(tmp_path, owner, declaration):
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    (output / ".graphify_root").write_text(str(tmp_path))
+    owner = str(tmp_path / "docs/evidence.md") if owner == "absolute" else owner
+    declaration = str(tmp_path / "docs/evidence.md") if declaration == "absolute" else declaration
+    path, _ = seed(output, [node("a")], [], [{"id": "old", "source_file": owner, "nodes": ["a"]}])
+    before = path.read_bytes()
+    graph = build_merge([], path, replacement_sources=[declaration], prune_sources=[owner])
+    assert set(graph) == {"a"} and not graph.graph.get("hyperedges")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("collection", ["nodes", "links", "hyperedges"])
+def test_malformed_retained_ownership_refuses_without_write(tmp_path, collection):
+    path, data = seed(tmp_path, [node("a"), node("b")], [edge("a", "b")],
+                      [{"id": "group", "source_file": "stable.md", "nodes": ["a"]}])
+    data[collection][0]["source_file"] = {"untrusted": "owner"}
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="source_file"):
+        build_merge([], path, root=tmp_path, replacement_sources=["stable.md"])
+    assert path.read_bytes() == before
+
+
+def test_semantic_declaration_does_not_change_ast_refresh_contract(tmp_path):
+    path, _ = seed(tmp_path)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="cannot be combined"):
+        build_merge([], path, replacement_sources=[], ast_refresh_sources=[])
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("nodes,edges", [
+    ([{"id": []}], []), ([{"id": "a"}, {"id": "a"}], []),
+    ([{"id": "a"}], [{"source": "a", "target": "missing"}]),
+    ([{"id": "a"}], [{"source": "a", "target": []}]),
+])
+def test_staged_accepted_merge_refuses_invalid_identities(nodes, edges):
+    from graphify.build import _graph_from_accepted_merge
+    with pytest.raises(ValueError, match="accepted merge"):
+        _graph_from_accepted_merge({"nodes": nodes, "edges": edges})
+
+
+@pytest.mark.parametrize('root_alias', [False, True])
+@pytest.mark.parametrize('directed', [False, True])
+def test_completion_replaces_logical_symlink_owner_only(tmp_path, root_alias, directed):
+    from graphify.llm import _completed_source_paths
+    corpus = tmp_path / 'corpus'
+    corpus.mkdir()
+    (corpus / 'source.md').write_text('Shared content')
+    (corpus / 'alias.md').symlink_to(corpus / 'source.md')
+    scan_root = tmp_path / 'root-alias' if root_alias else corpus
+    if root_alias:
+        scan_root.symlink_to(corpus, target_is_directory=True)
+    path, _ = seed(corpus, nodes=[node('a')], edges=[], hyperedges=[
+        {'id': 'old', 'nodes': ['a'], 'source_file': 'alias.md'},
+        {'id': 'foreign', 'nodes': ['a'], 'source_file': 'source.md'}])
+    before = path.read_bytes()
+    fresh = {'nodes': [], 'edges': [], 'hyperedges': [
+        {'id': 'new', 'nodes': ['a'], 'source_file': str(scan_root / 'alias.md')}],
+        'completed_sources': [str(scan_root / 'alias.md')]}
+    declarations = sorted(_completed_source_paths(fresh, scan_root))
+    graph = build_merge([fresh], path, root=str(scan_root), directed=directed,
+                        replacement_sources=declarations)
+    assert {h['id'] for h in graph.graph['hyperedges']} == {'new', 'foreign'}
+    assert next(h for h in graph.graph['hyperedges'] if h['id'] == 'new')['source_file'] == 'alias.md'
+    assert path.read_bytes() == before

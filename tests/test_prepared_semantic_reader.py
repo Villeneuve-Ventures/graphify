@@ -397,3 +397,178 @@ def test_malformed_member_conflict_preserves_all_published_bytes(tmp_path, monke
     assert after == before
     with pytest.raises(tx.PendingTransactionError):
         tx.open_graph_snapshot(fixture.output / "graph.json", purpose="refused-malformed-member")
+
+
+@pytest.mark.parametrize("kind", ["edge", "hyperedge", "empty", "conflict"])
+def test_explicit_relationship_replacement_under_native_prepared_owner(tmp_path, monkeypatch, kind):
+    chunk = _chunk("one")
+    chunk["hyperedges"].append({"id": "old", "source_file": "changed.md", "nodes": ["retained"]})
+    fixture = _prepare(_baseline(tmp_path, monkeypatch, accepted_chunk=chunk))
+    before = _published_bytes(fixture.output)
+    fresh = {"nodes": [], "edges": [], "hyperedges": []}
+    if kind == "edge":
+        fresh["edges"] = [{"source": "changed", "target": "anchor", "source_file": "changed.md",
+                            "relation": "references", "confidence": "EXTRACTED"}]
+        # The replaced node itself is gone; fresh unknown references retain
+        # established discard behavior. Foreign-owned facts remain unchanged.
+    elif kind == "hyperedge":
+        fresh["hyperedges"] = [{"id": "new", "source_file": "changed.md", "nodes": ["retained", "anchor"]}]
+    elif kind == "conflict":
+        fresh["hyperedges"] = [{"id": "retained-group", "source_file": "changed.md", "nodes": ["anchor"]}]
+    code = f"""
+from graphify.export import to_json
+from graphify.detect import save_manifest
+graph = build_merge([{fresh!r}], output / 'graph.json', root=root,
+                    replacement_sources=[str(root / 'changed.md')])
+assert 'changed' not in graph
+assert to_json(graph, {{}}, 'graph.json', force=True, built_at_commit={fixture.second_head!r})
+save_manifest({{'document': [str(root / 'changed.md'), str(root / 'retained.md')]}},
+              manifest_path='manifest.json', root=root)
+tx.finalize_prepared_transaction()
+"""
+    if kind == "conflict":
+        with pytest.raises(Exception, match="retained hyperedge"):
+            _run(fixture, code)
+        assert _published_bytes(fixture.output) == before
+        return
+    _run(fixture, code)
+    published = tx.open_graph_snapshot(fixture.output / "graph.json", purpose="explicit-replacement")
+    assert published.data['links'] == fixture.baseline.data['links']
+    assert {group['id'] for group in published.data['hyperedges']} == (
+        {'retained-group', 'new'} if kind == 'hyperedge' else {'retained-group'})
+    old = {node['id']: node for node in fixture.baseline.data['nodes']}
+    assert {node['id']: node for node in published.data['nodes']} == {key: old[key] for key in ('retained', 'anchor')}
+
+
+def _rendered_semantic_stage(platform_key, needle):
+    import re
+    import shlex
+    from tools.skillgen import gen
+    body = gen.render(gen.load_platforms()[platform_key])[0].content
+    block = next(block for block in re.findall(r'```(?:bash|sh)\n(.*?)\n```', body, re.S)
+                 if needle in block)
+    assert 'run-prepared-token' in next(line for line in block.splitlines() if line.endswith('-c "'))
+    raw = block.rsplit('-c "\n', 1)[1].rsplit('\n"', 1)[0]
+    return shlex.split('python -c "' + raw + '"')[-1]
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'devin', 'aider', 'opencode', 'codex'])
+def test_rendered_cache_check_resets_completion_manifest_in_prepared_output(tmp_path, monkeypatch, platform_key):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    code = _rendered_semantic_stage(platform_key, 'cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(')
+    code = code.replace('INPUT_PATH', str(fixture.root))
+    merge_code = _rendered_semantic_stage(platform_key, 'chunks = json.loads(')
+    _run(fixture, f"""
+Path('.graphify_detect.json').write_text(json.dumps({{'files': {{'document': [str(root / 'changed.md')]}}}}))
+Path('.graphify_completed_chunks.json').write_text('["stale-chunk.json"]')
+Path('.graphify_semantic_new.json').write_text('{{"completed_sources": ["stale.md"]}}')
+exec({code!r})
+assert json.loads(Path('.graphify_completed_chunks.json').read_text()) == []
+assert not Path('.graphify_semantic_new.json').exists()
+assert Path.cwd() != output
+chunk = Path.cwd() / '.graphify_chunk_01.json'
+chunk.write_text(json.dumps({{'nodes': [{{'id': 'fresh', 'source_file': 'changed.md'}}],
+    'edges': [], 'hyperedges': [], 'completed_sources': [str(root / 'changed.md')]}}))
+Path('.graphify_completed_chunks.json').write_text(json.dumps([str(chunk)]))
+exec({merge_code!r})
+merged = json.loads(Path('.graphify_semantic_new.json').read_text())
+assert [node['id'] for node in merged['nodes']] == ['fresh']
+assert merged['completed_sources'] == [str(root / 'changed.md')]
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform_key', ['aider', 'opencode'])
+def test_rendered_chunk_merge_preserves_current_direct_aggregate(tmp_path, monkeypatch, platform_key):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    code = _rendered_semantic_stage(platform_key, 'chunks = json.loads(')
+    direct = {'nodes': [{'id': 'fact', 'source_file': 'changed.md'}], 'edges': [], 'hyperedges': [],
+              'completed_sources': [str(fixture.root / 'changed.md')], 'input_tokens': 1, 'output_tokens': 2}
+    _run(fixture, f"""
+Path('.graphify_completed_chunks.json').write_text('[]')
+Path('.graphify_semantic_new.json').write_text(json.dumps({direct!r}))
+exec({code!r})
+assert json.loads(Path('.graphify_semantic_new.json').read_text()) == {direct!r}
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('file_type', ['concept', 'rationale'])
+@pytest.mark.parametrize('completed', [False, True])
+def test_devin_part_c_keeps_completion_through_final_sanitize(tmp_path, monkeypatch, file_type, completed):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    code = _rendered_semantic_stage('devin', "merged_edges = ast['edges'] + sem['edges']")
+    semantic = {'nodes': [{'id': 'fresh', 'label': 'Named entity', 'file_type': file_type,
+                          'source_file': 'changed.md'}], 'edges': [],
+                'hyperedges': [{'id': 'group', 'nodes': ['fresh', 'retained'], 'source_file': 'changed.md'}],
+                'completed_sources': ['changed.md'] if completed else []}
+    _run(fixture, f"""
+Path('.graphify_ast.json').write_text(json.dumps({{'nodes': [], 'edges': []}}))
+Path('.graphify_semantic.json').write_text(json.dumps({semantic!r}))
+exec({code!r})
+merged = json.loads(Path('.graphify_extract.json').read_text())
+assert [node['id'] for node in merged['nodes']] == {['fresh'] if completed else []!r}
+assert [group['id'] for group in merged['hyperedges']] == {['group'] if completed else []!r}
+assert merged['replacement_sources'] == {['changed.md'] if completed else []!r}
+assert 'completed_sources' not in merged
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('accepted', [False, True])
+@pytest.mark.parametrize('directed', [False, True])
+def test_rendered_later_graph_consumers_preserve_accepted_facts(
+        tmp_path, monkeypatch, platform_key, accepted, directed):
+    import ast
+    import re
+    import shlex
+    from tools.skillgen import gen
+    output = tmp_path / 'graphify-out'
+    output.mkdir()
+    extraction = {'accepted_merge': accepted,
+                  'nodes': [{'id': 'policy_rule', 'label': 'Rule', 'source_file': 'docs/policy.md',
+                             'file_type': 'document', 'retained_attribute': 'exact'},
+                            {'id': 'anchor', 'label': 'Anchor', 'source_file': 'stable.md', 'file_type': 'document'}],
+                  'edges': [{'source': 'policy_rule', 'target': 'anchor', 'relation': 'references',
+                             'confidence': 'EXTRACTED', 'source_file': 'docs/policy.md'}],
+                  'hyperedges': [{'id': 'group', 'members': ['policy_rule', 'anchor', 'policy_rule']}]}
+    graph_path = output / 'graph.json'
+    graph_path.write_text(json.dumps({'nodes': extraction['nodes'], 'links': extraction['edges']}))
+    before = graph_path.read_bytes()
+    for directory in (tmp_path, output):
+        (directory / '.graphify_extract.json').write_text(json.dumps(extraction))
+        (directory / '.graphify_detect.json').write_text('{}')
+        (directory / '.graphify_analysis.json').write_text('{}')
+    count = 0
+    for artifact in gen.render(gen.load_platforms()[platform_key]):
+        for block in re.findall(r'```(?:bash|sh)\n(.*?)\n```', artifact.content, re.S):
+            if 'build_from_json(' not in block:
+                continue
+            raw = block.rsplit('-c "\n', 1)[1].rsplit('\n"', 1)[0]
+            code = shlex.split('python -c "' + raw + '"')[-1]
+            tree = ast.parse(code.replace('IS_DIRECTED', str(directed)).replace('INPUT_PATH', str(tmp_path)))
+            index = next(i for i, statement in enumerate(tree.body) if isinstance(statement, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id in {'G', 'G_new'}
+                                 for target in statement.targets))
+            target = tree.body[index].targets[0].id
+            prefix = ast.Module(body=tree.body[:index + 1], type_ignores=[])
+            runner = next(line for line in block.splitlines() if line.endswith('-c "'))
+            # Prepared bodies start in output; direct consumers start in the corpus.
+            monkeypatch.chdir(output if 'run-prepared-token' in runner else tmp_path)
+            namespace = {}
+            exec(compile(prefix, artifact.path, 'exec'), namespace)
+            graph = namespace[target]
+            expected_id = 'policy_rule' if accepted else 'docs_policy_rule'
+            assert set(graph) == {expected_id, 'anchor'}, (artifact.path, target, list(graph))
+            assert graph.has_edge(expected_id, 'anchor')
+            assert graph.is_directed() == directed
+            if accepted:
+                assert graph.nodes['policy_rule'] == {key: value for key, value in extraction['nodes'][0].items() if key != 'id'}
+                assert graph.graph['hyperedges'] == extraction['hyperedges']
+            assert graph_path.read_bytes() == before
+            count += 1
+    assert count >= (3 if platform_key == 'claude' else 8)

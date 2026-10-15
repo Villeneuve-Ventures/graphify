@@ -1,5 +1,6 @@
 """Tests for direct semantic-extraction backend selection."""
 
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1251,3 +1252,196 @@ def test_call_llm_openai_compat_client_built_with_timeout_and_retries(monkeypatc
     llm._call_llm("hi", backend="kimi")
     assert ctor_kwargs.get("timeout") == 1.0, ctor_kwargs
     assert ctor_kwargs.get("max_retries", 0) >= 5, ctor_kwargs
+
+
+@pytest.mark.parametrize("failure", ["none", "omitted", "truncated", "error", "malformed"])
+@pytest.mark.parametrize("workers", [1, 2])
+def test_completion_requires_every_dispatched_unit(tmp_path, monkeypatch, failure, workers):
+    from graphify.file_slice import FileSlice
+    source = tmp_path / "source.md"
+    source.write_text("first\nsecond\n")
+    # One file has two independently dispatched slices. A failed or omitted slice
+    # must not let its successful sibling erase the accepted complete source.
+    units = [FileSlice(source, 0, 6, 0, 2), FileSlice(source, 6, 13, 1, 2)]
+    monkeypatch.setattr(llm, "expand_oversized_files", lambda *_: units)
+    monkeypatch.setenv("GRAPHIFY_NO_INCREMENTAL_CACHE", "1")
+
+    def extract(chunk, **kwargs):
+        result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0,
+                  "output_tokens": 0, "completed_sources": [str(source)], "finish_reason": "stop"}
+        if chunk[0] == units[1]:
+            if failure == "omitted":
+                result.pop("completed_sources")
+            elif failure == "truncated":
+                result["finish_reason"] = "length"
+            elif failure == "error":
+                raise RuntimeError("fixture read failed")
+            elif failure == "malformed":
+                result["completed_sources"] = [None]
+        return result
+
+    monkeypatch.setattr(llm, "extract_files_direct", extract)
+    result = llm.extract_corpus_parallel([source], root=tmp_path, backend="kimi",
+                                       chunk_size=1, token_budget=None,
+                                       max_concurrency=workers, max_retry_depth=0)
+    assert result["completed_sources"] == ([str(source)] if failure == "none" else [])
+
+
+@pytest.mark.parametrize("mode", ["empty", "unreadable", "capped", "outside", "truncated", "bad-shape"])
+def test_direct_extraction_completion_is_bound_to_consumed_input(tmp_path, monkeypatch, mode):
+    source = tmp_path / "source.md"
+    source.write_text("hello")
+    monkeypatch.setenv("GEMINI_API_KEY", "fixture-key")
+    if mode == "unreadable":
+        monkeypatch.setattr(llm, "_file_to_text", lambda *_: (_ for _ in ()).throw(OSError("unreadable")))
+    if mode == "capped":
+        monkeypatch.setattr(llm, "_FILE_CHAR_CAP", 2)
+    parsed = llm._parse_llm_json(json.dumps({
+        "nodes": [] if mode != "bad-shape" else [7], "edges": [], "hyperedges": [],
+        "completed_sources": ["../foreign.md" if mode == "outside" else "./source.md"],
+    }))
+    parsed["finish_reason"] = "length" if mode == "truncated" else "stop"
+    monkeypatch.setattr(llm, "_call_openai_compat", lambda *a, **kw: parsed)
+    result = llm.extract_files_direct([source], backend="gemini", root=tmp_path)
+    assert result["completed_sources"] == ([str(source)] if mode == "empty" else [])
+    if mode == "empty":
+        assert not llm._response_is_hollow('{"completed_sources":["source.md"]}', result)
+
+
+@pytest.mark.parametrize("reason", ["length", "content_filter", "error"])
+def test_non_success_finish_never_declares_complete_source(tmp_path, reason):
+    assert llm._completed_source_paths({"completed_sources": ["source.md"], "finish_reason": reason}, tmp_path) == set()
+
+
+def test_empty_pdf_text_is_not_completion_evidence(tmp_path, monkeypatch):
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"broken pdf")
+    monkeypatch.setenv("GEMINI_API_KEY", "fixture-key")
+    monkeypatch.setattr(llm, "_file_to_text", lambda *_: "")
+    result = {"nodes": [], "edges": [], "hyperedges": [], "completed_sources": [str(source)]}
+    monkeypatch.setattr(llm, "_call_openai_compat", lambda *a, **kw: result)
+    assert llm.extract_files_direct([source], backend="gemini", root=tmp_path)["completed_sources"] == []
+
+
+@pytest.mark.parametrize("sliced", [False, True])
+def test_recursive_retry_does_not_turn_partial_halves_into_complete_extraction(tmp_path, monkeypatch, sliced):
+    from graphify.file_slice import FileSlice
+    source = tmp_path / "source.md"
+    other = source if sliced else tmp_path / "other.md"
+    source.write_text("first\nsecond\n")
+    other.write_text("first\nsecond\n")
+    units = [FileSlice(source, 0, 6, 0, 2), FileSlice(source, 6, 13, 1, 2)] if sliced else [source, other]
+
+    def extract(chunk, **kwargs):
+        return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0,
+                "completed_sources": [str(llm.unit_path(chunk[0]))],
+                "finish_reason": "stop" if chunk == units[:1] else "length"}
+
+    monkeypatch.setattr(llm, "extract_files_direct", extract)
+    result = llm._extract_with_adaptive_retry(units, "kimi", "fixture", "m", tmp_path, max_depth=1)
+    assert result["finish_reason"] == "stop"  # legacy useful partial-output behavior
+    assert result["completed_sources"] == ([] if sliced else [str(source)])
+
+
+@pytest.mark.parametrize('root_alias', [False, True])
+def test_completion_preserves_logical_file_alias_through_actual_extraction(tmp_path, monkeypatch, root_alias):
+    corpus = tmp_path / 'corpus'
+    corpus.mkdir()
+    source, alias = corpus / 'source.md', corpus / 'alias.md'
+    source.write_text('The same bytes are available at two paths.')
+    alias.symlink_to(source)
+    scan_root = tmp_path / 'root-alias' if root_alias else corpus
+    if root_alias:
+        scan_root.symlink_to(corpus, target_is_directory=True)
+    monkeypatch.setenv('GEMINI_API_KEY', 'fixture-key')
+    monkeypatch.setenv('GRAPHIFY_NO_INCREMENTAL_CACHE', '1')
+    result = {'nodes': [], 'edges': [], 'hyperedges': [], 'completed_sources': [str(scan_root / 'alias.md')],
+              'input_tokens': 0, 'output_tokens': 0, 'finish_reason': 'stop'}
+    monkeypatch.setattr(llm, '_call_openai_compat', lambda *a, **kw: dict(result))
+    extracted = llm.extract_corpus_parallel([scan_root / 'alias.md'], backend='gemini', root=scan_root,
+                                          max_concurrency=1, token_budget=None)
+    assert extracted['completed_sources'] == [str(alias)]
+
+
+@pytest.mark.parametrize('malformed', [False, True])
+def test_completion_admits_supported_record_aliases_only(tmp_path, malformed):
+    result = {'completed_sources': ['source.md'],
+              'nodes': [{'id': 'fact', 'source': [] if malformed else 'source.md'}],
+              'edges': [{'from': 'fact', 'to': 'retained', 'source_file': 'source.md'}],
+              'hyperedges': [{'id': 'group', 'members': ['fact'], 'source_file': 'source.md'}]}
+    assert llm._completed_source_paths(result, tmp_path) == (set() if malformed else {str(tmp_path / 'source.md')})
+
+
+@pytest.mark.parametrize('acknowledged', ['../wrong.md', 'misspelled.md'])
+def test_unbound_empty_completion_retries_after_consumed_input_binding(tmp_path, monkeypatch, acknowledged):
+    import re
+    import sys
+    from types import SimpleNamespace
+    sources = [tmp_path / 'first.md', tmp_path / 'second.md']
+    for source in sources:
+        source.write_text('A complete document with no extracted facts')
+    calls = []
+
+    def create(**kwargs):
+        message = kwargs['messages'][1]['content']
+        paths = re.findall(r'<untrusted_source path="([^"]+)"', message)
+        calls.append(paths)
+        payload = {'nodes': [], 'edges': [], 'hyperedges': [],
+                   'completed_sources': [acknowledged] if len(paths) > 1 else paths}
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)), finish_reason='stop')],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
+
+    sdk = SimpleNamespace(OpenAI=lambda **kw: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    monkeypatch.setitem(sys.modules, 'openai', sdk)
+    result = llm._extract_with_adaptive_retry(sources, 'kimi', 'fixture-key', 'fixture-model',
+                                            tmp_path, max_depth=1)
+    assert len(calls) == 3  # Two valid successful-empty halves after the unbound acknowledgement.
+    assert result['completed_sources'] == sorted(map(str, sources))
+    assert result['finish_reason'] == 'stop'
+
+
+@pytest.mark.parametrize('entry', ['direct', 'serial', 'parallel'])
+@pytest.mark.parametrize('unit_kind', ['file', 'slice', 'alias'])
+@pytest.mark.parametrize('absolute_root', [False, True])
+def test_relative_input_paths_bind_to_one_scan_root(tmp_path, monkeypatch, entry, unit_kind, absolute_root):
+    import re
+    from graphify.file_slice import FileSlice
+    monkeypatch.chdir(tmp_path)
+    root = Path('corpus')
+    root.mkdir()
+    source, other = root / 'doc.md', root / 'other.md'
+    source.write_text('first\nsecond\n')
+    other.write_text('Another complete source.')
+    if unit_kind == 'alias':
+        alias = root / 'alias.md'
+        alias.symlink_to('doc.md')
+        source = alias
+    units = ([FileSlice(source, 0, 6, 0, 2), FileSlice(source, 6, 13, 1, 2)]
+             if unit_kind == 'slice' else [source]) + [other]
+    if unit_kind == 'slice' and entry != 'direct':
+        # The corpus entry point creates its slices through the real expander.
+        units = [source, other]
+        monkeypatch.setattr(llm, '_FILE_CHAR_CAP', 8)
+    original = list(units)
+    prompts = []
+
+    def call(*args, **kwargs):
+        paths = re.findall(r'<untrusted_source path="([^"]+)"', args[3])
+        prompts.extend(paths)
+        return {'nodes': [{'id': Path(path).stem, 'source_file': path} for path in paths],
+                'edges': [], 'hyperedges': [], 'completed_sources': paths,
+                'input_tokens': 1, 'output_tokens': 1, 'finish_reason': 'stop'}
+
+    monkeypatch.setattr(llm, '_call_openai_compat', call)
+    monkeypatch.setenv('GRAPHIFY_NO_INCREMENTAL_CACHE', '1')
+    options = dict(backend='gemini', api_key='fixture-key', root=root.absolute() if absolute_root else root)
+    result = (llm.extract_files_direct(units, **options) if entry == 'direct' else
+              llm.extract_corpus_parallel(units, **options, chunk_size=1, token_budget=None,
+                                         max_concurrency=1 if entry == 'serial' else 2))
+    assert result['completed_sources'] == sorted([str(source.absolute()), str(other.absolute())])
+    assert {node['id'] for node in result['nodes']} == {source.stem, other.stem}
+    assert set(prompts) == {source.name, other.name}
+    assert not result.get('incomplete_sources')
+    assert units == original

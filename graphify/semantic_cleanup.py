@@ -184,6 +184,11 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
     Returns the same dict for convenience.
     """
     _invalid_ft = frozenset({"rationale", "concept"})
+    from .build import _replacement_source_set
+    try:
+        complete = bool(_replacement_source_set(fragment.get("completed_sources", []), None))
+    except ValueError:
+        complete = False
 
     nodes: list[dict] = fragment.get("nodes", [])
     edges: list[dict] = fragment.get("edges", [])
@@ -217,6 +222,12 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
         ft = n.get("file_type", "")
         label = n.get("label", "")
         if ft in _invalid_ft:
+            # Complete extraction uses the current six-value schema. Preserve
+            # valid named concepts; otherwise cleanup could falsely certify an
+            # empty replacement. Keep legacy cleanup for undeclared fragments.
+            if complete and not _is_sentence_like_rationale_label(label):
+                keep_nodes.append(n)
+                continue
             # Explicitly-invalid file_type ("rationale" or "concept"): if
             # the label looks like a sentence we may convert to attribute.
             if _is_sentence_like_rationale_label(label):
@@ -278,9 +289,13 @@ def sanitize_semantic_fragment(fragment: dict) -> dict:
         he_nodes = he.get("nodes")
         if not isinstance(he_nodes, list):
             continue
-        filtered = [ref for ref in he_nodes if isinstance(ref, str) and ref in surviving_ids]
-        if len(filtered) < 2:
-            # A hyperedge needs at least two surviving members to be meaningful.
+        # Complete fragments may reference accepted entities outside the fresh
+        # extraction. Build admission owns endpoint resolution against that graph.
+        filtered = [ref for ref in he_nodes if isinstance(ref, str) and ref not in remove_ids
+                    and (complete or ref in surviving_ids)]
+        if len(filtered) < (1 if complete else 2):
+            # Legacy fragments keep the two-member cleanup rule; complete
+            # fragments defer singleton/external-member admission to build.
             continue
         if len(filtered) != len(he_nodes):
             he = dict(he)

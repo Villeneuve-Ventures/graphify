@@ -375,3 +375,34 @@ def test_validate_accepts_node_ids_keyed_hyperedge():
     ]
     errors = sc.validate_semantic_fragment(fragment)
     assert errors == []
+
+
+def test_complete_relationship_fragment_defers_retained_member_resolution():
+    fragment = {"nodes": [], "edges": [], "completed_sources": ["evidence.md"],
+                "hyperedges": [{"id": "evidence", "nodes": ["retained_alias"], "source_file": "evidence.md"}]}
+    assert sc.validate_semantic_fragment(fragment) == []
+    assert sc.sanitize_semantic_fragment(fragment)["hyperedges"][0]["nodes"] == ["retained_alias"]
+
+
+def test_malformed_completion_does_not_bypass_group_cleanup():
+    fragment = {"nodes": [], "edges": [], "completed_sources": [None],
+                "hyperedges": [{"id": "evidence", "nodes": ["unknown"]}]}
+    assert sc.sanitize_semantic_fragment(fragment)["hyperedges"] == []
+
+
+def test_complete_named_concept_refresh_is_not_sanitized_into_source_deletion(tmp_path):
+    from graphify.build import build_merge
+    path = tmp_path / 'graph.json'
+    path.write_text(json.dumps({'nodes': [
+        {'id': 'evidence_old', 'label': 'Old fact', 'file_type': 'concept', 'source_file': 'evidence.md'},
+        {'id': 'stable', 'label': 'Foreign fact', 'file_type': 'document', 'source_file': 'stable.md'},
+    ], 'links': []}))
+    before = path.read_bytes()
+    fragment = {'nodes': [
+        {'id': 'evidence_rule', 'label': 'Valid named rule', 'file_type': 'concept', 'source_file': 'evidence.md'},
+    ], 'edges': [], 'hyperedges': [], 'completed_sources': ['evidence.md']}
+    sanitized = sc.sanitize_semantic_fragment(fragment)
+    graph = build_merge([sanitized], path, root=tmp_path, replacement_sources=sanitized['completed_sources'])
+    assert set(graph) == {'evidence_rule', 'stable'}
+    assert graph.nodes['evidence_rule']['label'] == 'Valid named rule'
+    assert path.read_bytes() == before
