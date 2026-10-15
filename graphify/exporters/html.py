@@ -331,6 +331,7 @@ def to_html(
     member_counts: dict[int, int] | None = None,
     node_limit: int | None = None,
     learning_overlay: dict | None = None,
+    graph_path: str | Path | None = None,
 ) -> None:
     """Generate an interactive vis.js HTML visualization of the graph.
 
@@ -343,6 +344,9 @@ def to_html(
 
     If node_limit is set and the graph exceeds it, automatically builds an
     aggregated community-level meta-graph instead of raising ValueError.
+
+    Optional learning is admitted from graph_path, or the sibling graph.json
+    when omitted. An explicit learning_overlay bypasses sidecar admission.
     """
     require_ordinary_output(output_path)
     limit = node_limit if node_limit is not None else _viz_node_limit()
@@ -394,7 +398,8 @@ def to_html(
                     })
                 meta.graph["hyperedges"] = remapped
             to_html(meta, meta_communities, output_path,
-                    community_labels=community_labels, member_counts=mc)
+                    community_labels=community_labels, member_counts=mc,
+                    learning_overlay=learning_overlay, graph_path=graph_path)
             print(f"graph.html written (aggregated: {meta.number_of_nodes()} community nodes, {meta.number_of_edges()} cross-community edges)")
             print("Tip: run with --obsidian for full node-level detail.")
             return
@@ -410,14 +415,16 @@ def to_html(
     max_mc = (max(member_counts.values(), default=1) or 1) if member_counts else 1
 
     # Work-memory overlay (derived sidecar). When not passed explicitly, load it
-    # best-effort from the sibling .graphify_learning.json next to the output
-    # graph.html (which lives beside graph.json). Empty/missing => no learning
+    # against the actual graph JSON, never the HTML destination. By default
+    # graph.json lives beside graph.html. Empty/missing => no learning
     # fields, so the un-annotated render is byte-identical to pre-feature.
     if learning_overlay is None:
         learning_overlay = {}
         try:
             from graphify.reflect import load_learning_overlay as _llo
-            learning_overlay = _llo(Path(output_path))
+            source_graph = (Path(graph_path) if graph_path is not None
+                            else Path(output_path).with_name("graph.json"))
+            learning_overlay = _llo(source_graph)
         except Exception:
             learning_overlay = {}
     # Status -> ring color. preferred=green, contested=amber. Tentative gets no

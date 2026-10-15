@@ -154,3 +154,21 @@ def test_report_hubs_use_wikilinks_when_obsidian():
     labels = {cid: f"Widget {cid}" for cid in communities}
     report = generate(G, communities, cohesion, labels, gods, surprises, detection, tokens, "./project", min_community_size=1, obsidian=True)
     assert "[[_COMMUNITY_" in report
+
+
+def test_report_malformed_optional_sidecar_keeps_dead_ends(tmp_path, capsys):
+    from graphify.report import load_learning_for_report
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({"graph": {}, "nodes": [], "links": []}))
+    (tmp_path / ".graphify_learning.json").write_bytes(b"[]")
+    memory = tmp_path / "memory"
+    memory.mkdir()
+    (memory / "dead.md").write_text(
+        '---\ntype: "qa"\ndate: "2026-05-01"\nquestion: "dead path"\n'
+        'outcome: "dead_end"\nsource_nodes: []\n---\nanswer\n'
+    )
+    result = load_learning_for_report(graph_path)
+    assert result["overlay"] == {}
+    assert result["dead_ends"][0]["question"] == "dead path"
+    assert "learning admission failed" in capsys.readouterr().err

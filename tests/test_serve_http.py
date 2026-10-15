@@ -343,7 +343,7 @@ def test_cached_context_refreshes_uncached_learning_overlay(tmp_path, monkeypatc
     monkeypatch.setattr(
         reflect_module,
         "load_learning_overlay",
-        lambda _path: next(overlays),
+        lambda _path, *, snapshot: next(overlays),
     )
     app = serve_mod._build_http_app(_graph_file(tmp_path), json_response=True)
     with _client(app) as client:
@@ -357,6 +357,48 @@ def test_cached_context_refreshes_uncached_learning_overlay(tmp_path, monkeypatc
         )
     assert "learning=preferred" in result
     assert "learning=contested" not in result
+
+
+def test_cached_learning_refresh_scans_receipt_inventory_once(tmp_path, monkeypatch):
+    """Optional refresh avoids duplicate bulk I/O while full admission detects corruption."""
+    from collections import Counter
+    from graphify import transaction as tx
+
+    output = tmp_path / "graphify-out"
+    owner = tx.begin_transaction("runtime", tmp_path, output=output)
+    data = dict(SAMPLE_GRAPH)
+    data["graph"] = {tx.GRAPH_WATERMARK_KEY: {
+        "schema": 1, "protocol_epoch": 1,
+        "generation": owner.generation, "state": "active",
+    }}
+    bulk_size = 8 * 1024 * 1024
+    tx.commit_publication_plan(owner, tx.PublicationPlan({
+        "graph.json": json.dumps(data).encode(), "manifest.json": b"{}",
+        "graph.html": b"x" * bulk_size, ".graphify_learning.json": b'{"nodes":{}}',
+    }))
+    tx.finish_transaction(owner)
+    reads = Counter()
+    original = tx._hash_relative_bytes
+
+    def count(capability, name, **kwargs):
+        digest, size, payload = original(capability, name, **kwargs)
+        reads[name] += size
+        return digest, size, payload
+
+    monkeypatch.setattr(tx, "_hash_relative_bytes", count)
+    app = serve_mod._build_http_app(str(output / "graph.json"), json_response=True)
+    with _client(app) as client:
+        headers = _init_session(client)
+        assert "Nodes: 2" in _call_tool(client, headers, "graph_stats", {}, rid=2)
+        reads.clear()
+        assert "Nodes: 2" in _call_tool(client, headers, "graph_stats", {}, rid=3)
+        assert reads["graph.html"] == bulk_size
+        # Snapshot admission still checks every artifact, including one that
+        # the cached query and auxiliary refresh never consume directly.
+        (output / "graph.html").write_bytes(b"changed")
+        blocked = _call_tool(client, headers, "graph_stats", {}, rid=4)
+        assert "managed artifact digest changed" in blocked
+        assert "Nodes: 2" not in blocked
 
 
 def test_stateless_mode_initialize(tmp_path):

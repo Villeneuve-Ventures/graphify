@@ -389,10 +389,13 @@ class QueueFileRecord:
 
 @dataclass(frozen=True)
 class PublicationPlan:
-    """Validated complete generation inventory plus exact intended deletions."""
+    """Complete inventory of new bytes and unchanged bindings, plus deletions."""
 
     payloads: Mapping[str, bytes]
     deletions: tuple[str, ...] = ()
+    # Unchanged destination artifacts, bound by digest and size. Their bodies
+    # stay on disk and cross the receipt boundary through streaming validation.
+    retained: Mapping[str, tuple[str, int]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -4680,7 +4683,9 @@ def _publication_inventory(plan: PublicationPlan) -> list[dict[str, object]]:
                 "size": len(payload),
             }
         )
-    return inventory
+    for name, (digest, size) in _validated_retained_artifacts(plan).items():
+        inventory.append({"name": name, "sha256": digest, "size": size})
+    return sorted(inventory, key=lambda item: str(item["name"]))
 
 
 def _publication_plan_digest(
@@ -6761,6 +6766,64 @@ def _unlink_relative(capability: OutputCapability, relative_name: str) -> None:
         os.close(parent_fd)
 
 
+def _validated_retained_artifacts(plan: PublicationPlan) -> dict[str, tuple[str, int]]:
+    retained: dict[str, tuple[str, int]] = {}
+    for raw_name, binding in plan.retained.items():
+        name = _validated_relative_name(raw_name)
+        if (
+            name in plan.payloads or name in retained
+            or not isinstance(binding, tuple) or len(binding) != 2
+            or not _is_hex(binding[0])
+            or type(binding[1]) is not int or binding[1] < 0
+        ):
+            raise PendingTransactionError("publication plan retained artifacts are malformed")
+        retained[name] = binding
+    return retained
+
+
+def _validated_publication_plan(
+    plan: PublicationPlan,
+    *,
+    graph_name: str = "graph.json",
+) -> PublicationPlan:
+    """Validate the complete plan without entering a publication step."""
+    graph_name = _validated_relative_name(graph_name)
+    payloads: dict[str, bytes] = {}
+    for raw_name, payload in plan.payloads.items():
+        name = _validated_relative_name(raw_name)
+        if name in payloads or type(payload) is not bytes:
+            raise PendingTransactionError("publication plan payloads are malformed")
+        payloads[name] = payload
+    retained = _validated_retained_artifacts(plan)
+    deletions: list[str] = []
+    for raw_name in plan.deletions:
+        name = _validated_relative_name(raw_name)
+        if name in deletions:
+            raise PendingTransactionError("publication plan deletions are duplicated")
+        deletions.append(name)
+    if (
+        len(payloads) + len(retained) > _MAX_RECEIPT_ARTIFACTS
+        or len(deletions) > _MAX_RECEIPT_ARTIFACTS
+        or len(payloads) + len(retained) + len(deletions) > _MAX_RECEIPT_ARTIFACTS
+    ):
+        raise PendingTransactionError("publication plan exceeds bounded inventory")
+    aggregate = sum(size for _digest, size in retained.values())
+    if aggregate > _MAX_RECEIPT_AGGREGATE_BYTES:
+        raise PendingTransactionError("publication plan exceeds aggregate budget")
+    for payload in payloads.values():
+        aggregate += len(payload)
+        if aggregate > _MAX_RECEIPT_AGGREGATE_BYTES:
+            raise PendingTransactionError("publication plan exceeds aggregate budget")
+    _reject_casefold_collisions((*payloads, *retained, *deletions, graph_name))
+    if (set(payloads) | set(retained)).intersection(deletions):
+        raise PendingTransactionError("publication plan payload and deletion overlap")
+    graph_payload = payloads.get(graph_name)
+    manifest_payload = payloads.get("manifest.json")
+    if graph_payload is None or manifest_payload is None:
+        raise PendingTransactionError("publication plan requires graph and manifest")
+    return PublicationPlan(payloads, tuple(deletions), retained)
+
+
 def _commit_publication_plan(
     transaction: Transaction,
     plan: PublicationPlan,
@@ -6770,38 +6833,23 @@ def _commit_publication_plan(
 ) -> GenerationReceipt:
     """Publish one validated inventory, its explicit deletions, and receipt last."""
     graph_name = _validated_relative_name(graph_name)
-    payloads: dict[str, bytes] = {}
-    for raw_name, payload in plan.payloads.items():
-        name = _validated_relative_name(raw_name)
-        if name in payloads or type(payload) is not bytes:
-            raise PendingTransactionError("publication plan payloads are malformed")
-        payloads[name] = payload
-    deletions: list[str] = []
-    for raw_name in plan.deletions:
-        name = _validated_relative_name(raw_name)
-        if name in deletions:
-            raise PendingTransactionError("publication plan deletions are duplicated")
-        deletions.append(name)
-    if (
-        len(payloads) > _MAX_RECEIPT_ARTIFACTS
-        or len(deletions) > _MAX_RECEIPT_ARTIFACTS
-        or len(payloads) + len(deletions) > _MAX_RECEIPT_ARTIFACTS
-    ):
-        raise PendingTransactionError("publication plan exceeds bounded inventory")
-    aggregate = 0
-    for payload in payloads.values():
-        aggregate += len(payload)
-        if aggregate > _MAX_RECEIPT_AGGREGATE_BYTES:
-            raise PendingTransactionError("publication plan exceeds aggregate budget")
-    _reject_casefold_collisions((*payloads, *deletions, graph_name))
-    if set(payloads).intersection(deletions):
-        raise PendingTransactionError("publication plan payload and deletion overlap")
-    graph_payload = payloads.get(graph_name)
-    manifest_payload = payloads.get("manifest.json")
-    if graph_payload is None or manifest_payload is None:
-        raise PendingTransactionError("publication plan requires graph and manifest")
+    validated = _validated_publication_plan(plan, graph_name=graph_name)
+    payloads = validated.payloads
+    graph_payload = payloads[graph_name]
+    manifest_payload = payloads["manifest.json"]
     with owned_step(transaction):
-        for name in deletions:
+        if validated.retained:
+            with pin_output(transaction.output) as capability, _locked(capability):
+                _validate_authority(capability, transaction)
+                remaining = _MAX_RECEIPT_AGGREGATE_BYTES - sum(map(len, payloads.values()))
+                for name, expected in validated.retained.items():
+                    digest, size, _body = _hash_relative_bytes(
+                        capability, name, aggregate_remaining=remaining,
+                    )
+                    if (digest, size) != expected:
+                        raise PendingTransactionError("publication plan retained artifact changed")
+                    remaining -= size
+        for name in validated.deletions:
             with pin_output(transaction.output) as capability, _locked(capability):
                 _validate_authority(capability, transaction)
                 _unlink_relative(capability, name)
@@ -6816,7 +6864,10 @@ def _commit_publication_plan(
             transaction,
             graph_payload=graph_payload,
             manifest_payload=manifest_payload,
-            required_artifacts=tuple(payloads),
+            required_artifacts=(*payloads, *validated.retained),
+            expected_artifact_digests={
+                name: digest for name, (digest, _size) in validated.retained.items()
+            },
             graph_name=graph_name,
             failpoint=failpoint,
         )
@@ -6840,10 +6891,18 @@ def _publish_single_derived_artifact(
     payload: bytes,
     source_managed: bool,
     artifact_kind: str,
+    require_publication_plan: bool = False,
+    retained: Mapping[str, tuple[str, int]] | None = None,
 ) -> None:
     """Publish one graph-derived artifact through its exact output authority."""
-    graph_output = graph_path.expanduser().resolve().parent
-    resolved_output = output_path.expanduser().resolve()
+    graph_output = (
+        snapshot.graph_path.parent if require_publication_plan
+        else graph_path.expanduser().resolve().parent
+    )
+    resolved_output = (
+        output_path.expanduser().absolute() if require_publication_plan
+        else output_path.expanduser().resolve()
+    )
     destination_authority = managed_output_containing(resolved_output)
     contained_by_source = (
         resolved_output.parent == graph_output
@@ -6859,7 +6918,10 @@ def _publish_single_derived_artifact(
             f"{artifact_kind} destination is controlled by foreign managed authority"
         )
     if not managed_destination:
-        commit_unmanaged_bytes(resolved_output, payload)
+        commit_unmanaged_bytes(
+            resolved_output, payload,
+            expected_snapshot=snapshot if require_publication_plan else None,
+        )
         return
 
     relative = resolved_output.relative_to(graph_output).as_posix()
@@ -6869,6 +6931,8 @@ def _publish_single_derived_artifact(
             raise PendingTransactionError(
                 f"{artifact_kind} destination does not match exact transaction output"
             )
+        if require_publication_plan:
+            raise PendingTransactionError("auxiliary publication requires a closed source generation")
         commit_relative_bytes(active, relative, payload)
         return
 
@@ -6881,28 +6945,105 @@ def _publish_single_derived_artifact(
         output=graph_output,
         expected_snapshot=snapshot,
     )
-    graph_data = dict(snapshot.data)
-    metadata = dict(graph_data.get("graph") or {})
-    metadata[GRAPH_WATERMARK_KEY] = {
-        "schema": 1,
-        "protocol_epoch": 1,
-        "generation": transaction.generation,
-        "state": "active",
-    }
-    graph_data["graph"] = metadata
-    graph_payload = json.dumps(
-        graph_data, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8")
-    payloads = dict(snapshot.artifacts)
-    payloads[graph_path.name] = graph_payload
-    payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
-    payloads[relative] = payload
+    try:
+        graph_data = dict(snapshot.data)
+        metadata = dict(graph_data.get("graph") or {})
+        metadata[GRAPH_WATERMARK_KEY] = {
+            "schema": 1,
+            "protocol_epoch": 1,
+            "generation": transaction.generation,
+            "state": "active",
+        }
+        graph_data["graph"] = metadata
+        graph_payload = json.dumps(
+            graph_data, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        payloads = dict(snapshot.artifacts)
+        payloads[graph_path.name] = graph_payload
+        payloads.setdefault("manifest.json", snapshot.manifest_payload or b"{}")
+        payloads[relative] = payload
+        plan = PublicationPlan(payloads, retained=retained or {})
+        if require_publication_plan:
+            plan = _validated_publication_plan(plan, graph_name=graph_path.name)
+    except Exception:
+        if require_publication_plan:
+            # Preparation has published nothing. The existing exact-owner
+            # no-op boundary must prove that the predecessor can be restored.
+            cancel_unpublished_transaction(transaction)
+        raise
     commit_publication_plan(
         transaction,
-        PublicationPlan(payloads),
+        plan,
         graph_name=graph_path.name,
     )
     finish_transaction(transaction)
+
+
+def publish_snapshot_auxiliary(
+    snapshot: GraphSnapshot, *, canonical_name: str, payload: bytes,
+    retain_in_place: bool = False,
+) -> Path:
+    """Publish a canonical sibling of an admitted graph, retaining its inventory.
+
+    Managed output uses the exact owner and a complete publication plan. External
+    output uses the unmanaged atomic writer with the same source snapshot pinned.
+    With retain_in_place, a sparse managed snapshot may carry its unchanged
+    receipt artifacts by digest and size instead of retaining their bodies.
+    """
+    if not isinstance(snapshot, GraphSnapshot):
+        raise TypeError("auxiliary publication requires a graph snapshot")
+    if type(payload) is not bytes:
+        raise TypeError("auxiliary publication payload must be immutable bytes")
+    if type(retain_in_place) is not bool:
+        raise TypeError("retain_in_place must be boolean")
+    name = _validated_shallow_name(canonical_name)
+    if name != ".graphify_learning.json":
+        raise PendingTransactionError("unsupported snapshot auxiliary")
+    if name.casefold() == snapshot.graph_path.name.casefold():
+        raise PendingTransactionError("auxiliary destination aliases graph file")
+    output = snapshot.graph_path.parent
+    with pin_output(output, mutation=False) as capability, _locked(capability):
+        _validate_expected_snapshot_locked(capability, snapshot)
+        _entry_stat(capability, name)  # Refuse symlink or non-regular destinations.
+        # Every admitted artifact must be represented by bytes or an explicitly
+        # validated unchanged binding in the complete plan.
+        source_managed = snapshot.receipt_digest is not None
+        retained: dict[str, tuple[str, int]] = {}
+        if retain_in_place and source_managed:
+            remaining = _MAX_RECEIPT_AGGREGATE_BYTES - sum(map(len, snapshot.artifacts.values()))
+            for key, expected_digest in snapshot.inventory_selector:
+                if (
+                    expected_digest is None or key in snapshot.artifacts
+                    or key in {name, snapshot.graph_path.name, "manifest.json"}
+                ):
+                    continue
+                digest, size, _body = _hash_relative_bytes(
+                    capability, key, aggregate_remaining=remaining,
+                )
+                if digest != expected_digest:
+                    raise PendingTransactionError("admitted retained artifact changed")
+                retained[key] = (digest, size)
+                remaining -= size
+        elif any(
+            digest is not None and key not in snapshot.artifacts
+            for key, digest in snapshot.inventory_selector
+        ):
+            raise PendingTransactionError(
+                "auxiliary publication requires complete retained inventory"
+            )
+        if source_managed:
+            _publish_single_derived_artifact(
+                snapshot, graph_path=snapshot.graph_path, output_path=output / name,
+                payload=payload, source_managed=True,
+                artifact_kind="auxiliary", require_publication_plan=True,
+                retained=retained,
+            )
+        capability.validate()
+    if not source_managed:
+        # The unmanaged writer locks ancestors before descendants. Enter it
+        # only after releasing this leaf lock; it rechecks the source snapshot.
+        commit_unmanaged_bytes(output / name, payload, expected_snapshot=snapshot)
+    return output / name
 
 
 def _watermark(payload: bytes) -> dict[str, object]:
@@ -7000,6 +7141,7 @@ def commit_generation(
     required_artifacts: tuple[str, ...],
     graph_name: str = "graph.json",
     failpoint: Callable[[str], None] | None = None,
+    expected_artifact_digests: Mapping[str, str] | None = None,
 ) -> GenerationReceipt:
     graph_name = _validated_relative_name(graph_name)
     required_artifacts = tuple(
@@ -7011,6 +7153,12 @@ def commit_generation(
     ):
         raise PendingTransactionError("generation inventory contains duplicate artifacts")
     _reject_casefold_collisions((*required_artifacts, graph_name))
+    expected_artifact_digests = dict(expected_artifact_digests or {})
+    if any(
+        name not in required_artifacts or not _is_hex(digest)
+        for name, digest in expected_artifact_digests.items()
+    ):
+        raise PendingTransactionError("expected retained artifact digests are malformed")
     watermark = _watermark(graph_payload)
     if graph_name not in required_artifacts or "manifest.json" not in required_artifacts:
         raise PendingTransactionError(
@@ -7025,6 +7173,11 @@ def commit_generation(
             _receipt, existing_digest, _inventory = _validate_receipt_locked(
                 capability, transaction=live
             )
+            if any(
+                _receipt["artifact_digests"].get(name) != digest
+                for name, digest in expected_artifact_digests.items()
+            ):
+                raise PendingTransactionError("completed retained artifact differs from plan")
             _unlink(capability, PREDECESSOR_FILE)
             return GenerationReceipt(existing_digest, live.generation)
         if _read_bytes(capability, graph_name, max(len(graph_payload), 1)) != graph_payload:
@@ -7042,6 +7195,8 @@ def commit_generation(
                 ),
             )
             aggregate_size += artifact_size
+            if name in expected_artifact_digests and artifact_digest != expected_artifact_digests[name]:
+                raise PendingTransactionError("published retained artifact differs from plan")
             artifact_digests[name] = artifact_digest
         receipt_body = {
             "schema": 1,
@@ -7086,7 +7241,13 @@ def _validate_receipt_locked(
     protocol_override: Mapping[str, object] | None = None,
     drainer_override: tuple[DrainerTuple, str, dict[str, Any]] | None = None,
     merge_supersession: tuple[str, str] | None = None,
+    admitted_receipt_digest: str | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, bytes]]:
+    """Validate receipt authority and, by default, every inventory artifact.
+
+    An exact already-admitted digest permits a graph/control-only recheck for
+    optional auxiliary reads. That path cannot retain artifact bytes or publish.
+    """
     try:
         receipt_payload = _read_bytes(capability, RECEIPT_FILE)
     except FileNotFoundError as exc:
@@ -7103,6 +7264,18 @@ def _validate_receipt_locked(
     if not isinstance(receipt, dict) or protocol is None:
         raise PendingTransactionError("generation receipt is missing")
     digest = hashlib.sha256(receipt_payload).hexdigest()
+    if admitted_receipt_digest is not None and (
+        digest != admitted_receipt_digest
+        or graph_payload is None
+        or transaction is not None
+        or retain_artifacts
+        or retain_limits
+        or merge_supersession is not None
+        or protocol_override is not None
+        or drainer_override is not None
+        or allow_missing_completed_drainer
+    ):
+        raise PendingTransactionError("admitted receipt recheck is inconsistent")
     drainer = _drainer_from_json(receipt.get("drainer"))
     required = receipt.get("required_artifacts")
     artifact_digests = receipt.get("artifact_digests")
@@ -7198,6 +7371,13 @@ def _validate_receipt_locked(
     aggregate_size = 0
     actual_digests: dict[str, str] = {}
     for name in required:
+        if admitted_receipt_digest is not None:
+            # The exact receipt already crossed full snapshot admission. Recheck
+            # its live authority without rescanning unrelated artifact bodies.
+            if not _is_hex(artifact_digests[name]):
+                raise PendingTransactionError("admitted artifact digest is malformed")
+            actual_digests[name] = artifact_digests[name]
+            continue
         should_retain = retain_all or name in retained
         artifact_digest, artifact_size, artifact_body = _hash_relative_bytes(
             capability,
@@ -7373,6 +7553,7 @@ def commit_unmanaged_bytes(
     path: Path | str,
     payload: bytes,
     *,
+    expected_snapshot: GraphSnapshot | None = None,
     failpoint: Callable[[str], None] | None = None,
     expected_predecessor_digest: str | None | object = _ANY_UNMANAGED_PREDECESSOR,
     expected_predecessor_identity: OutputIdentity | None | object = (
@@ -7406,7 +7587,12 @@ def commit_unmanaged_bytes(
         raise PendingTransactionError(
             "native Windows unmanaged final mutation is not proven"
         )
-    destination = Path(path).expanduser().resolve(strict=False)
+    if expected_snapshot is not None and not isinstance(expected_snapshot, GraphSnapshot):
+        raise TypeError("unmanaged source admission requires a graph snapshot")
+    destination = (
+        Path(path).expanduser().absolute()
+        if expected_snapshot is not None else Path(path).expanduser().resolve(strict=False)
+    )
     existing_parent = destination.parent
     while not existing_parent.exists():
         if existing_parent.parent == existing_parent:
@@ -7464,6 +7650,8 @@ def commit_unmanaged_bytes(
         )
 
         def validate_chain() -> None:
+            if expected_snapshot is not None:
+                _validate_expected_snapshot_locked(destination_capability, expected_snapshot)
             for pinned in capabilities:
                 pinned.validate()
                 journals = [
@@ -9360,7 +9548,7 @@ def _inventory_selector(
 
 
 def _validate_expected_snapshot_locked(
-    capability: OutputCapability, snapshot: GraphSnapshot
+    capability: OutputCapability, snapshot: GraphSnapshot, *, auxiliary_read: bool = False,
 ) -> None:
     if snapshot.output_identity is not None and snapshot.output_identity != capability.identity:
         raise PendingTransactionError("admitted snapshot output identity changed")
@@ -9418,6 +9606,7 @@ def _validate_expected_snapshot_locked(
             capability,
             graph_payload=current_graph,
             retain_artifacts=(),
+            admitted_receipt_digest=snapshot.receipt_digest if auxiliary_read else None,
         )
         selector = tuple(
             sorted(
@@ -9995,6 +10184,45 @@ def admit_snapshot_artifact(
         capability.validate()
     if managed_output_containing(resolved) is not None:
         raise PendingTransactionError("artifact override gained managed authority")
+    return payload
+
+
+def admit_snapshot_auxiliary(
+    snapshot: GraphSnapshot, *, canonical_name: str, limit: int,
+) -> bytes | None:
+    """Read one optional canonical sibling under the admitted graph identity.
+
+    Unlike receipt artifact admission, absence from the receipt is allowed. The
+    byte limit applies before parsing; named identity, content and graph authority
+    are rechecked before returning any bytes. No foreign override is accepted.
+    """
+    if not isinstance(snapshot, GraphSnapshot):
+        raise TypeError("auxiliary admission requires a graph snapshot")
+    name = _validated_shallow_name(canonical_name)
+    if type(limit) is not int or limit < 1:
+        raise ValueError("auxiliary admission limit must be a positive integer")
+    if name != ".graphify_learning.json":
+        raise PendingTransactionError("unsupported snapshot auxiliary")
+    limit = min(limit, _artifact_read_limit(name))
+    with pin_output(snapshot.graph_path.parent, mutation=False) as capability, _locked(capability):
+        _validate_expected_snapshot_locked(capability, snapshot, auxiliary_read=True)
+        expected_digest = dict(snapshot.inventory_selector).get(name)
+        before = _entry_stat(capability, name)
+        if before is None:
+            if expected_digest is not None:
+                raise PendingTransactionError("admitted auxiliary disappeared")
+            return None
+        payload = _read_bytes(capability, name, limit)
+        final_payload = _read_bytes(capability, name, limit)
+        after = _entry_stat(capability, name)
+        if after is None or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise PendingTransactionError("auxiliary identity changed while reading")
+        if payload != final_payload:
+            raise PendingTransactionError("auxiliary content changed while reading")
+        if expected_digest is not None and hashlib.sha256(payload).hexdigest() != expected_digest:
+            raise PendingTransactionError("admitted auxiliary digest changed")
+        _validate_expected_snapshot_locked(capability, snapshot, auxiliary_read=True)
+        capability.validate()
     return payload
 
 

@@ -21,12 +21,14 @@ except ImportError:
 
 
 def _refresh_learning_overlay(graph: nx.Graph, snapshot) -> None:
-    """Refresh the optional non-receipt overlay on every context admission."""
+    """Refresh the optional overlay on every context admission."""
     try:
         from graphify.reflect import load_learning_overlay as _llo
 
-        graph.graph["_learning_overlay"] = _llo(snapshot.graph_path)
-    except Exception:
+        graph.graph["_learning_overlay"] = _llo(snapshot.graph_path, snapshot=snapshot)
+    except Exception as exc:
+        from graphify.reflect import _learning_diagnostic
+        _learning_diagnostic("admission", exc)
         graph.graph["_learning_overlay"] = {}
 
 
@@ -50,8 +52,8 @@ def _graph_from_snapshot(snapshot) -> nx.Graph:
         G = json_graph.node_link_graph(data, edges="links")
     except TypeError:
         G = json_graph.node_link_graph(data)
-    # Learning state is optional and not part of the generation receipt. Load
-    # it only after the managed graph has crossed canonical snapshot admission.
+    # Optional learning is loaded after canonical graph snapshot admission.
+    # Receipt-owned sidecars remain bound to that same admitted generation.
     _refresh_learning_overlay(G, snapshot)
     return G
 

@@ -906,7 +906,10 @@ def _transactional_cluster_only(cmd: str) -> None:
         if not manifest.is_file():
             manifest.write_bytes(b"{}")
         manifest_payload = manifest.read_bytes()
-        (staging / ".graphify_learning.json").unlink(missing_ok=True)
+        # Borrowed report learning stays outside ownership; receipt-owned
+        # learning must survive this successor plan with its fingerprints.
+        if ".graphify_learning.json" not in source_snapshot.artifacts:
+            (staging / ".graphify_learning.json").unlink(missing_ok=True)
         _discard_report_only_directory(staging / "memory")
         plan = publication_plan_from_directory(
             staging, prior_inventory=source_snapshot.artifacts
@@ -1331,6 +1334,13 @@ def _transactional_export() -> None:
     ):
         external_html_predecessor = open_unmanaged_file(external_html_target)
     snapshot = source_snapshot
+    learning_overlay = None
+    if (
+        export_subcmd == "html" and "--no-viz" not in original_argv
+        and active_transaction is None
+    ):
+        from graphify.reflect import load_learning_overlay
+        learning_overlay = load_learning_overlay(graph, snapshot=snapshot)
     captured_out = io.StringIO()
     captured_err = io.StringIO()
     normalized_argv = sys.argv
@@ -1426,7 +1436,10 @@ def _transactional_export() -> None:
             with contextlib.redirect_stdout(captured_out), contextlib.redirect_stderr(
                 captured_err
             ):
-                _dispatch_command("export")
+                if learning_overlay is None:
+                    _dispatch_command("export")
+                else:
+                    _dispatch_command("export", learning_overlay=learning_overlay)
         except SystemExit as exc:
             if exc.code not in (None, 0):
                 sys.stderr.write(captured_err.getvalue())
@@ -1800,7 +1813,7 @@ def _transaction_command() -> None:
     )
 
 
-def _dispatch_command(cmd: str) -> None:
+def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None:
     if cmd == "provider":
         from graphify.llm import _custom_providers_path, BACKENDS
         import json as _json
@@ -2831,7 +2844,7 @@ def _dispatch_command(cmd: str) -> None:
                 # path so an oversized graph still renders a usable graph.html.
                 _node_limit = 5000 if _over_cap else None
                 to_html(G, communities, str(html_target), community_labels=labels or None,
-                        node_limit=_node_limit)
+                        node_limit=_node_limit, graph_path=graph_json)
                 stages.mark("export"); stages.total()
                 print(f"Done - {len(communities)} communities. GRAPH_REPORT.md, graph.json and graph.html updated.")
             except ValueError as viz_err:
@@ -3379,11 +3392,15 @@ def _dispatch_command(cmd: str) -> None:
                     html_target.unlink()
                 print("--no-viz: skipped graph.html")
             else:
+                if learning_overlay is None:
+                    from graphify.reflect import load_learning_overlay
+                    learning_overlay = load_learning_overlay(graph_path, snapshot=_snapshot)
                 # Over-cap fallback (#1019): force the community-aggregation
                 # path so the oversized graph still renders a usable artifact.
                 _effective_node_limit = 5000 if _over_cap else node_limit
                 _to_html(G, communities, str(out_dir / "graph.html"),
-                         community_labels=labels or None, node_limit=_effective_node_limit)
+                         community_labels=labels or None, node_limit=_effective_node_limit,
+                         graph_path=graph_path, learning_overlay=learning_overlay)
                 if G.number_of_nodes() <= _effective_node_limit:
                     print(f"graph.html written - open in any browser, no server needed")
                 if _over_cap:

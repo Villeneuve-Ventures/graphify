@@ -863,6 +863,78 @@ def _assert_transactional_export(out: Path) -> None:
     assert watermark["generation"] == receipt["generation"]
 
 
+@pytest.mark.parametrize("graph_name", ["graph.json", "custom.json"])
+def test_html_export_keeps_learning_for_actual_graph_name(tmp_path, graph_name):
+    """Managed export admits learning against the staged graph's actual filename."""
+    from graphify.transaction import (
+        GRAPH_WATERMARK_KEY, PublicationPlan, begin_transaction,
+        commit_publication_plan, finish_transaction, open_graph_snapshot,
+    )
+
+    out = tmp_path / "graphify-out"
+    transaction = begin_transaction("runtime", tmp_path, output=out)
+    payload = json.dumps({"directed": False, "multigraph": False, "graph": {
+        GRAPH_WATERMARK_KEY: {"schema": 1, "protocol_epoch": 1,
+                              "generation": transaction.generation, "state": "active"},
+    }, "nodes": [{"id": "n", "label": "Topic", "community": 0}], "links": []}).encode()
+    learning = json.dumps({"nodes": {"n": {"status": "preferred", "source_file": ""}}}).encode()
+    commit_publication_plan(transaction, PublicationPlan({
+        graph_name: payload, "manifest.json": b"{}", ".graphify_learning.json": learning,
+    }), graph_name=graph_name)
+    finish_transaction(transaction)
+    before = open_graph_snapshot(out / graph_name, purpose="serve")
+
+    result = _run(["export", "html", "--graph", str(out / graph_name)], tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "learning admission failed" not in result.stderr
+    assert '"learning_status": "preferred"' in (out / "graph.html").read_text()
+    after = open_graph_snapshot(out / graph_name, purpose="serve")
+    assert after.data["nodes"] == before.data["nodes"]
+    assert after.data["links"] == before.data["links"]
+    assert (out / ".graphify_learning.json").read_bytes() == learning
+    assert after.generation == before.generation + 1
+
+
+@pytest.mark.parametrize("command", ["update", "cluster-only"])
+def test_managed_refresh_preserves_learning_and_marks_changed_code_stale(tmp_path, command):
+    """Ordinary refresh keeps preferred/contested bytes and their old fingerprints."""
+    from datetime import datetime, timezone
+    from graphify.reflect import load_learning_overlay, write_learning_sidecar
+    from graphify.transaction import open_graph_snapshot
+
+    source = tmp_path / "a.py"
+    source.write_text("def foo():\n    return 1\n\ndef bar():\n    return foo()\n")
+    first = _run(["update", ".", "--no-cluster"], tmp_path)
+    assert first.returncode == 0, first.stdout + first.stderr
+    output = tmp_path / "graphify-out"
+    graph_path = output / "graph.json"
+    nodes = open_graph_snapshot(graph_path, purpose="serve").data["nodes"]
+    ids = {node["label"]: node["id"] for node in nodes}
+    write_learning_sidecar({
+        "preferred": [{"node": ids["foo()"], "score": 2.0, "n": 2}],
+        "contested": [{"node": ids["bar()"], "score": 0.0, "neg": 2, "verdict": "even"}],
+    }, graph_path, now=datetime(2026, 10, 14, tzinfo=timezone.utc))
+    learning = output / ".graphify_learning.json"
+    before = learning.read_bytes()
+    assert all(not entry["stale"] for entry in load_learning_overlay(graph_path).values())
+    unrelated = output / "private.txt"
+    unrelated.write_bytes(b"keep user bytes")
+    source.write_text("def foo():\n    return 2\n\ndef bar():\n    return foo()\n")
+    args = (["update", ".", "--no-cluster", "--force"] if command == "update"
+            else ["cluster-only", ".", "--no-viz", "--no-label"])
+    result = _run(args, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert learning.read_bytes() == before
+    overlay = load_learning_overlay(graph_path)
+    assert overlay[ids["foo()"]]["status"] == "preferred"
+    assert overlay[ids["bar()"]]["status"] == "contested"
+    assert all(entry["stale"] for entry in overlay.values())
+    snapshot = open_graph_snapshot(graph_path, purpose="serve")
+    assert ".graphify_learning.json" in dict(snapshot.inventory_selector)
+    assert {ids["foo()"], ids["bar()"]} <= {node["id"] for node in snapshot.data["nodes"]}
+    assert unrelated.read_bytes() == b"keep user bytes"
+
+
 def test_full_build_token_runner_exports_before_final_commit(tmp_path):
     from graphify.transaction import (
         begin_transaction,
@@ -2518,3 +2590,90 @@ def test_cli_update_subprocess_recovers_merge_pending_union(tmp_path):
     assert snapshot.data["graph"][transaction_module.GRAPH_WATERMARK_KEY][
         "state"
     ] == "active"
+
+
+@pytest.mark.parametrize("graph_name", ["graph.json", "custom.json"])
+def test_external_html_export_admits_original_learning(tmp_path, graph_name):
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / graph_name
+    graph.write_text(json.dumps({
+        "directed": False, "multigraph": False, "graph": {},
+        "nodes": [{"id": "n", "label": "Topic", "community": 0}], "links": [],
+    }))
+    learning = b'{"nodes":{"n":{"status":"preferred","source_file":""}}}'
+    (source / ".graphify_learning.json").write_bytes(learning)
+    original = graph.read_bytes()
+
+    result = _run(["export", "html", "--graph", str(graph)], tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '"learning_status": "preferred"' in (source / "graph.html").read_text()
+    assert "learning admission failed" not in result.stderr
+    assert graph.read_bytes() == original
+    assert (source / ".graphify_learning.json").read_bytes() == learning
+    assert not (source / ".graphify_generation.json").exists()
+
+
+def test_managed_html_export_reuses_source_admission_without_owning_borrowed_learning(
+    tmp_path, monkeypatch,
+):
+    import graphify.cli as cli_module
+    import graphify.transaction as transaction_module
+
+    output = tmp_path / "graphify-out"
+    transaction = transaction_module.begin_transaction("runtime", tmp_path, output=output)
+    data = {"directed": False, "multigraph": False, "graph": {
+        transaction_module.GRAPH_WATERMARK_KEY: {
+            "schema": 1, "protocol_epoch": 1,
+            "generation": transaction.generation, "state": "active",
+        },
+    }, "nodes": [{"id": "n", "label": "Topic", "community": 0}], "links": []}
+    transaction_module.commit_publication_plan(transaction, transaction_module.PublicationPlan({
+        "graph.json": json.dumps(data).encode(), "manifest.json": b"{}",
+        "graph.html": b"previous HTML" * 1024,
+    }))
+    transaction_module.finish_transaction(transaction)
+    learning = b'{"nodes":{"n":{"status":"contested","source_file":""}}}'
+    (output / ".graphify_learning.json").write_bytes(learning)
+    calls = []
+    original = transaction_module.open_graph_snapshot
+
+    def record_admission(path, **kwargs):
+        calls.append(kwargs["purpose"])
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(transaction_module, "open_graph_snapshot", record_admission)
+    monkeypatch.setattr(sys, "argv", ["graphify", "export", "html", "--graph", str(output / "graph.json")])
+    monkeypatch.chdir(tmp_path)
+    cli_module.dispatch_command("export")
+
+    assert "learning-overlay" not in calls
+    assert '"learning_status": "contested"' in (output / "graph.html").read_text()
+    assert (output / ".graphify_learning.json").read_bytes() == learning
+    snapshot = original(output / "graph.json", purpose="serve")
+    assert ".graphify_learning.json" not in dict(snapshot.inventory_selector)
+    assert snapshot.data["nodes"] == data["nodes"]
+
+
+@pytest.mark.parametrize(
+    "payload", [b"{malformed", b" " * (1024 * 1024 + 1)], ids=["malformed", "oversized"],
+)
+def test_external_html_export_diagnoses_optional_learning_failure(tmp_path, payload):
+    source = tmp_path / "external"
+    source.mkdir()
+    graph = source / "custom.json"
+    graph.write_text('{"directed":false,"multigraph":false,"graph":{},"nodes":[{"id":"n"}],"links":[]}')
+    (source / ".graphify_learning.json").write_bytes(payload)
+    before = graph.read_bytes()
+
+    result = _run(["export", "html", "--graph", str(graph)], tmp_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "learning admission failed" in result.stderr
+    diagnostics = [line for line in result.stderr.splitlines() if "learning admission failed" in line]
+    assert len(diagnostics) == 1 and len(diagnostics[0]) <= 240
+    assert str(source) not in diagnostics[0]
+    assert '"learning_status"' not in (source / "graph.html").read_text()
+    assert graph.read_bytes() == before
+    assert (source / ".graphify_learning.json").read_bytes() == payload
