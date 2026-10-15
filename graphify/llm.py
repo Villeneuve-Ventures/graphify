@@ -1571,7 +1571,13 @@ def extract_files_direct(
         complete = _completed_source_paths(result, root) & consumed
         if result.get("finish_reason") == "length":
             complete.clear()
+        acknowledged = result.get("completed_sources")
         result["completed_sources"] = sorted(complete)
+        if (acknowledged and not complete and result.get("finish_reason") in (None, "stop")
+                and not any(result.get(key) for key in ("nodes", "edges", "hyperedges"))):
+            # A syntactically valid but unbound acknowledgement is still hollow.
+            # Preserve the normal adaptive recovery after checking consumed input.
+            result["finish_reason"] = "length"
         return result
 
     if backend == "claude":

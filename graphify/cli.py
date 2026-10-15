@@ -4567,7 +4567,8 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
         for arg in chunk_args:
             expanded = _glob.glob(arg)
             chunk_files.extend(sorted(expanded) if expanded else [arg])
-        merged: dict = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
+        merged: dict = {"nodes": [], "edges": [], "hyperedges": [], "completed_sources": [],
+                        "input_tokens": 0, "output_tokens": 0}
         seen_ids: set[str] = set()
         for cf in chunk_files:
             try:
@@ -4581,9 +4582,13 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                     merged["nodes"].append(n)
             merged["edges"].extend(chunk.get("edges", []))
             merged["hyperedges"].extend(chunk.get("hyperedges", []))
+            from graphify.build import _replacement_source_set
             from graphify.llm import _completed_source_paths
-            merged["completed_sources"] = sorted(set(merged.get("completed_sources", []))
-                                                  | _completed_source_paths(chunk, Path.cwd()))
+            if _completed_source_paths(chunk, Path.cwd()):
+                # Validate the fragment, but keep root-relative declarations
+                # unbound until its consumer supplies the actual scan root.
+                merged["completed_sources"] = sorted(set(merged.get("completed_sources", []))
+                    | _replacement_source_set(chunk.get("completed_sources", []), None))
             merged["input_tokens"] += chunk.get("input_tokens", 0)
             merged["output_tokens"] += chunk.get("output_tokens", 0)
         out_path.parent.mkdir(parents=True, exist_ok=True)

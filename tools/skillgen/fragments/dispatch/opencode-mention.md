@@ -10,7 +10,7 @@ Dispatch one `@mention` per chunk — ALL in the same response:
 @agent Chunk 2 of TOTAL_CHUNKS: [next chunk]
 ```
 
-Wait for all agents to return. Parse each response as JSON. Accumulate nodes/edges/hyperedges across all results and write to `graphify-out/.graphify_semantic_new.json`. If the `@agent` path cannot write chunk files, fall back to the serial path that writes each `graphify-out/.graphify_chunk_NN.json` before merge.
+Wait for all agents to return. Parse each response as JSON. Accumulate nodes/edges/hyperedges and validated completed_sources across current successful results. Stage the direct aggregate as `.graphify_semantic_new.json` inside the prepared output directory through the exact prepared-token runner used by B3. B3 preserves this current aggregate. If direct collection fails, use the serial path to write each chunk file and register its absolute path in the prepared success manifest before the B3 fallback merge.
 
 Subagent prompt template:
 

@@ -77,3 +77,14 @@ Generated update runbooks carry explicit completion through chunk collection,
 cache merge and Part C into `replacement_sources`. Only current successful
 extraction results may populate the completion list; stale chunk files are not
 completion evidence. Extraction specifications request the same declaration.
+
+Chunk handoffs keep relative completion declarations unbound until their consumer
+supplies the scan root; `merge-chunks` does not substitute its working directory.
+An empty response with no acknowledgement of consumed input still takes hollow
+response recovery. Relative cache roots use the same ownership key as absolute
+roots, without resolving distinct file-symlink owners into one source.
+
+Generated B0 resets the current batch's success manifest and direct aggregate in
+the exact prepared output namespace. File collectors register absolute chunk paths
+there through the prepared-token runner. Direct collectors stage their aggregate
+in the same namespace; B3 keeps it and concatenates chunk files only as a fallback.

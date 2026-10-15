@@ -438,3 +438,58 @@ tx.finalize_prepared_transaction()
         {'retained-group', 'new'} if kind == 'hyperedge' else {'retained-group'})
     old = {node['id']: node for node in fixture.baseline.data['nodes']}
     assert {node['id']: node for node in published.data['nodes']} == {key: old[key] for key in ('retained', 'anchor')}
+
+
+def _rendered_semantic_stage(platform_key, needle):
+    import re
+    import shlex
+    from tools.skillgen import gen
+    body = gen.render(gen.load_platforms()[platform_key])[0].content
+    block = next(block for block in re.findall(r'```(?:bash|sh)\n(.*?)\n```', body, re.S)
+                 if needle in block)
+    assert 'run-prepared-token' in next(line for line in block.splitlines() if line.endswith('-c "'))
+    raw = block.rsplit('-c "\n', 1)[1].rsplit('\n"', 1)[0]
+    return shlex.split('python -c "' + raw + '"')[-1]
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'devin', 'aider', 'opencode', 'codex'])
+def test_rendered_cache_check_resets_completion_manifest_in_prepared_output(tmp_path, monkeypatch, platform_key):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    code = _rendered_semantic_stage(platform_key, 'cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(')
+    code = code.replace('INPUT_PATH', str(fixture.root))
+    merge_code = _rendered_semantic_stage(platform_key, 'chunks = json.loads(')
+    _run(fixture, f"""
+Path('.graphify_detect.json').write_text(json.dumps({{'files': {{'document': [str(root / 'changed.md')]}}}}))
+Path('.graphify_completed_chunks.json').write_text('["stale-chunk.json"]')
+Path('.graphify_semantic_new.json').write_text('{{"completed_sources": ["stale.md"]}}')
+exec({code!r})
+assert json.loads(Path('.graphify_completed_chunks.json').read_text()) == []
+assert not Path('.graphify_semantic_new.json').exists()
+assert Path.cwd() != output
+chunk = Path.cwd() / '.graphify_chunk_01.json'
+chunk.write_text(json.dumps({{'nodes': [{{'id': 'fresh', 'source_file': 'changed.md'}}],
+    'edges': [], 'hyperedges': [], 'completed_sources': [str(root / 'changed.md')]}}))
+Path('.graphify_completed_chunks.json').write_text(json.dumps([str(chunk)]))
+exec({merge_code!r})
+merged = json.loads(Path('.graphify_semantic_new.json').read_text())
+assert [node['id'] for node in merged['nodes']] == ['fresh']
+assert merged['completed_sources'] == [str(root / 'changed.md')]
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform_key', ['aider', 'opencode'])
+def test_rendered_chunk_merge_preserves_current_direct_aggregate(tmp_path, monkeypatch, platform_key):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    code = _rendered_semantic_stage(platform_key, 'chunks = json.loads(')
+    direct = {'nodes': [{'id': 'fact', 'source_file': 'changed.md'}], 'edges': [], 'hyperedges': [],
+              'completed_sources': [str(fixture.root / 'changed.md')], 'input_tokens': 1, 'output_tokens': 2}
+    _run(fixture, f"""
+Path('.graphify_completed_chunks.json').write_text('[]')
+Path('.graphify_semantic_new.json').write_text(json.dumps({direct!r}))
+exec({code!r})
+assert json.loads(Path('.graphify_semantic_new.json').read_text()) == {direct!r}
+""")
+    assert _published_bytes(fixture.output) == before

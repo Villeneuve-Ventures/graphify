@@ -1148,3 +1148,45 @@ def test_explicit_manifest_completion_does_not_stamp_other_file_alias(tmp_path):
     alias.symlink_to(source)
     assert _stamped_manifest_files({'document': [str(source), str(alias)]}, {
         'completed_sources': [str(alias)]}, tmp_path) == {'document': [str(alias)]}
+
+
+def test_merge_chunks_keeps_relative_completion_for_downstream_scan_root(tmp_path, monkeypatch):
+    import json
+    from graphify.build import build_merge
+    corpus = tmp_path / 'corpus'
+    corpus.mkdir()
+    graph_path = tmp_path / 'graph.json'
+    graph_path.write_text(json.dumps({'nodes': [{'id': 'stable', 'source_file': 'stable.md'}],
+        'links': [], 'hyperedges': [{'id': 'old', 'source_file': 'doc.md', 'nodes': ['stable']}]}))
+    before = graph_path.read_bytes()
+    chunk = tmp_path / 'chunk.json'
+    chunk.write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [
+        {'id': 'new', 'source_file': 'doc.md', 'nodes': ['stable']}], 'completed_sources': ['doc.md']}))
+    merged_path = tmp_path / 'merged.json'
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mainmod, '_check_skill_version', lambda _: None)
+    monkeypatch.setattr(mainmod.sys, 'argv', ['graphify', 'merge-chunks', str(chunk), '--out', str(merged_path)])
+    mainmod.main()
+    merged = json.loads(merged_path.read_text())
+    assert merged['completed_sources'] == ['doc.md']
+    graph = build_merge([merged], graph_path, root=corpus,
+                        replacement_sources=merged['completed_sources'])
+    assert {group['id'] for group in graph.graph['hyperedges']} == {'new'}
+    assert graph_path.read_bytes() == before
+
+
+@pytest.mark.parametrize('completion', [None, [], [None]])
+def test_merge_chunks_keeps_explicit_no_completion_for_unacknowledged_claims(tmp_path, monkeypatch, completion):
+    import json
+    chunk = tmp_path / 'chunk.json'
+    data = {'nodes': [{'id': 'fact', 'source_file': 'doc.md'}], 'edges': [], 'hyperedges': []}
+    if completion is not None:
+        data['completed_sources'] = completion
+    chunk.write_text(json.dumps(data))
+    output = tmp_path / 'merged.json'
+    monkeypatch.setattr(mainmod, '_check_skill_version', lambda _: None)
+    monkeypatch.setattr(mainmod.sys, 'argv', ['graphify', 'merge-chunks', str(chunk), '--out', str(output)])
+    mainmod.main()
+    merged = json.loads(output.read_text())
+    assert merged['completed_sources'] == []
+    assert merged['nodes'] == data['nodes']

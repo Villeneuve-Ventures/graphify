@@ -268,6 +268,8 @@ if len(uncached) < len(all_files):
 else:
     Path('.graphify_cached.json').unlink(missing_ok=True)
 Path('.graphify_uncached.txt').write_text('\n'.join(uncached))
+Path('.graphify_completed_chunks.json').write_text('[]')
+Path('.graphify_semantic_new.json').unlink(missing_ok=True)
 print(f'Cache: {len(all_files)-len(uncached)} files hit, {len(uncached)} files need extraction')
 "
 ```
@@ -276,7 +278,7 @@ Only dispatch subagents for files listed in `.graphify_uncached.txt`. If all fil
 
 **Step B1 - Split into chunks**
 
-Start a new extraction batch. Write `[]` to `graphify-out/.graphify_completed_chunks.json`. After validating each successful current dispatch, append only its chunk file path to that JSON list. Collect only results from this batch's successfully completed dispatches. Validate each completed_sources list against that chunk's assigned FILE_LIST; remove any source not fully read and extracted, any partial/truncated result, and any failed result. An empty array of records with explicit completion is valid; an absent result is not. Never infer completion from nodes, edges, hyperedges or progress callbacks. Load files from `.graphify_uncached.txt`. Split into chunks of 20-25 files each. Each image gets its own chunk (vision needs separate context). When splitting, group files from the same directory together so related artifacts land in the same chunk and cross-file relationships are more likely to be extracted.
+B0 starts a new extraction batch: it resets `.graphify_completed_chunks.json` and removes the previous direct aggregate inside the prepared output directory. Register each validated chunk's absolute file path in that same manifest through the exact prepared-token runner used by B3. Collect only results from this batch's successfully completed dispatches. Validate each completed_sources list against that chunk's assigned FILE_LIST; remove any source not fully read and extracted, any partial/truncated result, and any failed result. An empty array of records with explicit completion is valid; an absent result is not. Never infer completion from nodes, edges, hyperedges or progress callbacks. Load files from `.graphify_uncached.txt`. Split into chunks of 20-25 files each. Each image gets its own chunk (vision needs separate context). When splitting, group files from the same directory together so related artifacts land in the same chunk and cross-file relationships are more likely to be extracted.
 
 **Step B2 - Sequential extraction (Aider)**
 
@@ -301,7 +303,7 @@ Process each file one at a time. For each file:
 Schema for each file's output:
 {"nodes":[{"id":"filestem_entityname","label":"Human Readable Name","file_type":"code|document|paper|image|rationale|concept","source_file":"relative/path","source_location":null,"source_url":null,"captured_at":null,"author":null,"contributor":null}],"edges":[{"source":"node_id","target":"node_id","relation":"calls|implements|references|cites|conceptually_related_to|shares_data_with|semantically_similar_to|rationale_for","confidence":"EXTRACTED|INFERRED|AMBIGUOUS","confidence_score":1.0,"source_file":"relative/path","source_location":null,"weight":1.0}],"hyperedges":[{"id":"snake_case_id","label":"Human Readable Label","nodes":["node_id1","node_id2","node_id3"],"relation":"participate_in|implement|form","confidence":"EXTRACTED|INFERRED","confidence_score":0.75,"source_file":"relative/path"}],"completed_sources":["<FILE_LIST path verbatim>"],"input_tokens":0,"output_tokens":0}
 
-After processing all files, write the accumulated result to `.graphify_semantic_new.json`.
+After processing all files, stage the accumulated result as `.graphify_semantic_new.json` inside the prepared output directory through the exact prepared-token runner used by Step B3. Preserve validated completed_sources. Step B3 keeps this current direct aggregate; disk concatenation is a fallback only.
 
 **Step B3 - Cache and merge**
 
@@ -312,25 +314,26 @@ If more than half the chunks failed, stop and tell the user.
 Merge all chunk files into `.graphify_semantic_new.json`. **After each Agent call completes, read the real token counts from the Agent tool result's `usage` field and write them back into the chunk JSON before merging** — the chunk JSON itself always has placeholder zeros. Then run:
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
-import json, glob
+import json
 from pathlib import Path
 
-chunks = json.loads(Path('graphify-out/.graphify_completed_chunks.json').read_text())
-all_nodes, all_edges, all_hyperedges, completed_sources = [], [], [], set()
-total_in, total_out = 0, 0
-for c in chunks:
-    d = json.loads(Path(c).read_text())
-    all_nodes += d.get('nodes', [])
-    all_edges += d.get('edges', [])
-    all_hyperedges += d.get('hyperedges', [])
-    completed_sources.update(d.get('completed_sources', []))
-    total_in += d.get('input_tokens', 0)
-    total_out += d.get('output_tokens', 0)
-Path('graphify-out/.graphify_semantic_new.json').write_text(json.dumps({
-    'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges, 'completed_sources': sorted(completed_sources),
-    'input_tokens': total_in, 'output_tokens': total_out,
-}, indent=2))
-print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens')
+if not Path('graphify-out/.graphify_semantic_new.json').exists():
+    chunks = json.loads(Path('graphify-out/.graphify_completed_chunks.json').read_text())
+    all_nodes, all_edges, all_hyperedges, completed_sources = [], [], [], set()
+    total_in, total_out = 0, 0
+    for c in chunks:
+        d = json.loads(Path(c).read_text())
+        all_nodes += d.get('nodes', [])
+        all_edges += d.get('edges', [])
+        all_hyperedges += d.get('hyperedges', [])
+        completed_sources.update(d.get('completed_sources', []))
+        total_in += d.get('input_tokens', 0)
+        total_out += d.get('output_tokens', 0)
+    Path('graphify-out/.graphify_semantic_new.json').write_text(json.dumps({
+        'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges, 'completed_sources': sorted(completed_sources),
+        'input_tokens': total_in, 'output_tokens': total_out,
+    }, indent=2))
+    print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens')
 "
 ```
 

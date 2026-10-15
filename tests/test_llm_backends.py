@@ -1370,3 +1370,33 @@ def test_completion_admits_supported_record_aliases_only(tmp_path, malformed):
               'edges': [{'from': 'fact', 'to': 'retained', 'source_file': 'source.md'}],
               'hyperedges': [{'id': 'group', 'members': ['fact'], 'source_file': 'source.md'}]}
     assert llm._completed_source_paths(result, tmp_path) == (set() if malformed else {str(tmp_path / 'source.md')})
+
+
+@pytest.mark.parametrize('acknowledged', ['../wrong.md', 'misspelled.md'])
+def test_unbound_empty_completion_retries_after_consumed_input_binding(tmp_path, monkeypatch, acknowledged):
+    import re
+    import sys
+    from types import SimpleNamespace
+    sources = [tmp_path / 'first.md', tmp_path / 'second.md']
+    for source in sources:
+        source.write_text('A complete document with no extracted facts')
+    calls = []
+
+    def create(**kwargs):
+        message = kwargs['messages'][1]['content']
+        paths = re.findall(r'<untrusted_source path="([^"]+)"', message)
+        calls.append(paths)
+        payload = {'nodes': [], 'edges': [], 'hyperedges': [],
+                   'completed_sources': [acknowledged] if len(paths) > 1 else paths}
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(payload)), finish_reason='stop')],
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1))
+
+    sdk = SimpleNamespace(OpenAI=lambda **kw: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+    monkeypatch.setitem(sys.modules, 'openai', sdk)
+    result = llm._extract_with_adaptive_retry(sources, 'kimi', 'fixture-key', 'fixture-model',
+                                            tmp_path, max_depth=1)
+    assert len(calls) == 3  # Two valid successful-empty halves after the unbound acknowledgement.
+    assert result['completed_sources'] == sorted(map(str, sources))
+    assert result['finish_reason'] == 'stop'

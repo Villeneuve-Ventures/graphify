@@ -623,7 +623,7 @@ def check_semantic_cache(
     for fpath in files:
         p = Path(fpath)
         if not p.is_absolute():
-            p = Path(root) / p
+            p = Path(root).resolve() / p
         result = load_cached(p, root, kind=kind, cache_root=cache_root)
         if result is not None and (not require_complete or (
                 result.get("complete_source") is True

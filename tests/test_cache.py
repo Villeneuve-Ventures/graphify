@@ -1010,3 +1010,19 @@ def test_complete_cache_keeps_legacy_node_owner_without_mutating_input(tmp_path)
     hit = check_semantic_cache([str(source)], tmp_path, require_complete=True)
     assert hit[0] == [{'id': 'fact', 'source_file': str(source)}]
     assert nodes == [{'id': 'fact', 'source': 'source.md'}]
+
+
+@pytest.mark.parametrize('absolute_file', [False, True])
+def test_complete_cache_lookup_with_relative_scan_root(tmp_path, monkeypatch, absolute_file):
+    from graphify.cache import check_semantic_cache, save_semantic_cache
+    monkeypatch.chdir(tmp_path)
+    root = Path('corpus')
+    root.mkdir()
+    source = root / 'doc.md'
+    source.write_text('A source-owned fact')
+    save_semantic_cache([{'id': 'fact', 'source_file': 'doc.md'}], [], root=root,
+                        completed_source_files=['doc.md'])
+    files = [str(source.resolve()) if absolute_file else 'doc.md']
+    hit = check_semantic_cache(files, root=root, require_complete=True)
+    assert hit[3] == []
+    assert hit[0] == [{'id': 'fact', 'source_file': str(source.absolute())}]
