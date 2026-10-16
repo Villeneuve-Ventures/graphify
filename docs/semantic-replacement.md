@@ -107,13 +107,20 @@ A deletion-only batch skips extraction and overwrites the current aggregate with
 empty records and `replacement_sources: []`. Prior aggregate/chunk files cannot
 establish a current replacement. The shared and inline update sections use the
 same exact prepared-token runner and private output namespace as the build.
-The merge stages its graph-diff baseline there as well.
+The merge stages its graph-diff baseline there as well. Step 9 removes that
+baseline before finalization, so it cannot publish deleted records as a backup.
 
-An accepted merge may explicitly mark a validated prune-to-empty result with
-`complete_empty_prune`. This is distinct from successful semantic extraction;
+Only a deletion-only batch (`new_total == 0`) may explicitly mark a validated
+prune-to-empty result with `complete_empty_prune`. This is distinct from successful semantic extraction;
 the later empty-graph guard requires `accepted_merge` for that prune marker.
 Undeclared empty input still refuses. The ownership and prune precedence above
 are unchanged.
+
+The semantic update entry starts its own handoff against the certified published
+snapshot. A retry requires its retained exact token and matching operation, root
+and output; it cannot take over another pending operation. A no-op cancels its
+unpublished handoff. Detection reads the published manifest even after Step 9
+has staged a new one, so a retry still sees every unpublished deletion.
 
 Merge preparation stages completion-filtered `manifest_files` with the accepted
 graph; it does not save the manifest. Step 9 saves that manifest after successful

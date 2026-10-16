@@ -6316,10 +6316,14 @@ def test_monolith_ownership_migration_rejects_plumbing_drift(monkeypatch, platfo
 
 @pytest.mark.parametrize('platform_key', ['aider', 'devin'])
 @pytest.mark.parametrize('old,new', [
-    ("'complete_empty_prune': bool(prune) and G.number_of_nodes() == 0", "'complete_empty_prune': True"),
+    ("'complete_empty_prune': bool(prune) and incremental.get('new_total') == 0", "'complete_empty_prune': bool(prune)"),
     ("'replacement_sources':[]", "'replacement_sources':['stale.md']"),
     ("extract['manifest_files'] if extract.get('accepted_merge')", "detect['files'] if extract.get('accepted_merge')"),
     ('" || exit $?\n', '"\n'),
+    ("Path('.graphify_old.json').unlink(missing_ok=True)", "pass  # baseline leaked"),
+    ("current_transaction().output / 'manifest.json'", "'manifest.json'"),
+    ("cancel_unpublished_transaction(current_transaction())", "pass  # no-op leaked"),
+    ("live['\"'\"'kind'\"'\"'] != '\"'\"'update'\"'\"'", "False"),
 ])
 def test_deletion_migration_refuses_unreviewed_consumer_drift(monkeypatch, platform_key, old, new):
     platform = gen.load_platforms()[platform_key]

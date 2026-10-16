@@ -717,6 +717,7 @@ cost['runs'].append({
 cost['total_input_tokens'] += input_tok
 cost['total_output_tokens'] += output_tok
 cost_path.write_text(json.dumps(cost, indent=2))
+Path('graphify-out/.graphify_old.json').unlink(missing_ok=True)
 
 print(f'This run: {input_tok:,} input tokens, {output_tok:,} output tokens')
 print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_tokens\"]:,} output ({len(cost[\"runs\"])} runs)')
@@ -772,13 +773,17 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 Use when you've added or modified files since the last run. Only re-extracts changed files - saves tokens and time.
 
+The first detection block starts an update handoff against the published snapshot. For a retry, retain its exported `GRAPHIFY_TRANSACTION_TOKEN`; a pending operation without that exact token must stop. Detection always compares against the published manifest until finalization. If no changes remain, the block cancels its unpublished handoff and you must stop.
+
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from graphify.detect import detect_incremental, save_manifest
 from pathlib import Path
 
-result = detect_incremental(Path('INPUT_PATH'), manifest_path='graphify-out/manifest.json')
+from graphify.transaction import current_transaction, cancel_unpublished_transaction
+
+result = detect_incremental(Path('INPUT_PATH'), manifest_path=current_transaction().output / 'manifest.json')
 new_total = result.get('new_total', 0)
 print(json.dumps(result, indent=2))
 Path('.graphify_incremental.json').write_text(json.dumps(result))
@@ -789,6 +794,7 @@ Path('.graphify_detect.json').write_text(json.dumps({
 deleted = list(result.get('deleted_files', []))
 if new_total == 0 and not deleted:
     print('No files changed since last run. Nothing to update.')
+    cancel_unpublished_transaction(current_transaction())
     raise SystemExit(0)
 if deleted:
     print(f'{len(deleted)} deleted file(s) to prune.')
@@ -875,7 +881,7 @@ Path('.graphify_old.json').write_bytes(Path('graphify-out/graph.json').read_byte
 merged_out = {
     'accepted_merge': True,
     'manifest_files': _stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')),
-    'complete_empty_prune': bool(prune) and G.number_of_nodes() == 0,
+    'complete_empty_prune': bool(prune) and incremental.get('new_total') == 0 and G.number_of_nodes() == 0,
     'nodes': [{'id': n, **d} for n, d in G.nodes(data=True)],
     'edges': [
         # Explicit source/target last so they win over any stale attrs in d.
@@ -928,7 +934,7 @@ if old_data:
 "
 ```
 
-The merge stage saves the previous graph in its prepared output for the graph diff; do not copy or remove that baseline through public paths. Step 9 finalizes the prepared generation.
+The merge stage saves the previous graph in its prepared output for the graph diff; do not copy or remove that baseline through public paths. Step 9 removes the private diff baseline before finalizing the prepared generation.
 
 ---
 

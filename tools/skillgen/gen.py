@@ -1157,6 +1157,44 @@ def _route_incremental_transaction(body: str) -> str:
     start = body.index(marker)
     end = body.index("## For --cluster-only", start)
     section = _route_prepared_python_blocks(body[start:end], mutations_only=False)
+    # A semantic update starts here, rather than in the full-build-only Step 1.
+    # Retry only through a retained exact token; do not discover another owner.
+    handoff = r'''import os, sys
+from pathlib import Path
+from graphify.paths import GRAPHIFY_OUT
+from graphify.transaction import (PendingTransactionError, begin_transaction,
+    open_graph_snapshot, run_token, stage_transaction_handoff, transaction_status)
+root = Path(sys.argv[1]).resolve(strict=True)
+configured = Path(GRAPHIFY_OUT).expanduser()
+output = (configured if configured.is_absolute() else root / configured).resolve()
+try:
+    snapshot = open_graph_snapshot(output / 'graph.json', purpose='semantic-update')
+except PendingTransactionError:
+    token = os.environ.get('GRAPHIFY_TRANSACTION_TOKEN')
+    if not token:
+        raise PendingTransactionError('pending update requires its retained exact token')
+    live = transaction_status(output)['transaction']
+    if (not live or live['kind'] != 'update' or live['root'] != str(root)
+            or Path(token).absolute().parent != output):
+        raise PendingTransactionError('update handoff root, output or kind mismatch')
+    check = ("from pathlib import Path\n"
+             "from graphify.transaction import current_transaction, PendingTransactionError\n"
+             "tx = current_transaction()\n"
+             f"if tx.kind != 'update' or tx.root != {str(root)!r} or tx.output != Path({str(output)!r}):\n"
+             "    raise PendingTransactionError('update handoff root, output or kind mismatch')\n")
+    run_token(token, ['-c', check])
+else:
+    token = stage_transaction_handoff(begin_transaction('update', root,
+        output=output, expected_snapshot=snapshot)).path
+print(token, end='')
+'''
+    prefix = (
+        'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+        + shlex.quote(handoff) + ' INPUT_PATH) || exit $?\n'
+        'export GRAPHIFY_TRANSACTION_TOKEN\n'
+    )
+    first = section.index('GRAPHIFY_TRANSACTION_TOKEN=$(')
+    section = section[:first] + prefix + section[first:]
     return body[:start] + section + body[end:]
 
 

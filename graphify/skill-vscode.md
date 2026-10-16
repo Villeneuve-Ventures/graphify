@@ -709,7 +709,7 @@ cost['runs'].append({
 cost['total_input_tokens'] += input_tok
 cost['total_output_tokens'] += output_tok
 cost_path.write_text(json.dumps(cost, indent=2, ensure_ascii=False), encoding=\"utf-8\")
-
+Path('.graphify_old.json').unlink(missing_ok=True)
 print(f'This run: {input_tok:,} input tokens, {output_tok:,} output tokens')
 print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_tokens\"]:,} output ({len(cost[\"runs\"])} runs)')
 " || exit $?
