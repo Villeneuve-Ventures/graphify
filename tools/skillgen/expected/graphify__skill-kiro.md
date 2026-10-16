@@ -534,7 +534,7 @@ detection  = json.loads(Path('.graphify_detect.json').read_text(encoding=\"utf-8
 G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, root='INPUT_PATH', directed=IS_DIRECTED))
 # Guard BEFORE any write: an empty extraction must not clobber a good graph.json /
 # GRAPH_REPORT.md / analysis sidecar. Check immediately after build (#1392).
-if G.number_of_nodes() == 0 and not extraction.get('complete_empty_replacement'):
+if G.number_of_nodes() == 0 and not (extraction.get('complete_empty_replacement') or extraction.get('accepted_merge') and extraction.get('complete_empty_prune')):
     print('ERROR: Graph is empty - extraction produced no nodes.')
     print('Possible causes: all files were skipped, binary-only corpus, or extraction failed.')
     raise SystemExit(1)
@@ -691,10 +691,10 @@ detect = json.loads(Path('.graphify_detect.json').read_text(encoding=\"utf-8\"))
 # root= relativizes the manifest keys to the scan root (same base as the build),
 # so the on-disk manifest is portable across clones/machines and a later --update
 # matches cached files instead of missing every one (#1417).
-save_manifest(detect.get('all_files') or detect['files'], root='INPUT_PATH')
+extract = json.loads(Path('.graphify_extract.json').read_text(encoding=\"utf-8\"))
+save_manifest(extract['manifest_files'] if extract.get('accepted_merge') else detect.get('all_files', detect['files']), manifest_path='manifest.json', root='INPUT_PATH')
 
 # Update cumulative cost tracker
-extract = json.loads(Path('.graphify_extract.json').read_text(encoding=\"utf-8\"))
 input_tok = extract.get('input_tokens', 0)
 output_tok = extract.get('output_tokens', 0)
 
@@ -716,7 +716,7 @@ cost_path.write_text(json.dumps(cost, indent=2, ensure_ascii=False), encoding=\"
 
 print(f'This run: {input_tok:,} input tokens, {output_tok:,} output tokens')
 print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_tokens\"]:,} output ({len(cost[\"runs\"])} runs)')
-"
+" || exit $?
 GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; export GRAPHIFY_TRANSACTION_TOKEN; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c 'from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()'
 ```
 

@@ -27,7 +27,7 @@ import sys, json
 from graphify.detect import detect_incremental, save_manifest
 from pathlib import Path
 
-result = detect_incremental(Path('INPUT_PATH'))
+result = detect_incremental(Path('INPUT_PATH'), manifest_path='graphify-out/manifest.json')
 new_total = result.get('new_total', 0)
 print(json.dumps(result, indent=2, ensure_ascii=False))
 Path('graphify-out/.graphify_incremental.json').write_text(json.dumps(result, ensure_ascii=False), encoding=\"utf-8\")
@@ -81,17 +81,15 @@ If `code_only` is True: print `[graphify update] Code-only changes detected - sk
 If `code_only` is False (any changed file is a doc/paper/image/video): **first, if any changed file is in `new_files['video']`, run `references/transcribe.md` (Step 2.5) on those files, then rewrite `.graphify_detect.json` to move the resulting transcript paths into `files['document']` and drop `files['video']`** — otherwise raw `.mp4/.mp3` paths are fed to semantic subagents as unreadable media (#1392). Then run the full Steps 3A–3C pipeline as normal.
 
 
-If no new files exist (only deletions), create an empty extraction so the merge step can prune:
+If no new files exist (only deletions), skip Steps 3A–3C and overwrite the current extraction below, then go directly to merge. Do not reuse prior aggregates, chunks or completion declarations:
 
 ```bash
-if [ ! -f graphify-out/.graphify_extract.json ]; then
-    echo '[graphify update] Only deletions -- creating empty extraction for merge.'
-    "$(cat graphify-out/.graphify_python)" -E -P -B -c "
+echo '[graphify update] Only deletions -- creating empty extraction for merge.'
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
-Path('graphify-out/.graphify_extract.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
+Path('graphify-out/.graphify_extract.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'replacement_sources':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
 "
-fi
 ```
 
 
@@ -102,7 +100,7 @@ Then:
 import json
 from pathlib import Path
 from graphify.build import build_merge
-from graphify.detect import save_manifest
+from graphify.cli import _stamped_manifest_files
 
 # Load new extraction and incremental state
 new_extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
@@ -133,9 +131,14 @@ G = build_merge(
 )
 print(f'[graphify update] Merged: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges')
 
+# Keep the graph-diff baseline in the same private namespace as the merge.
+Path('graphify-out/.graphify_old.json').write_bytes(Path('graphify-out/graph.json').read_bytes())
+
 # Write merged result back to .graphify_extract.json so Step 4 sees the full graph
 merged_out = {
     'accepted_merge': True,
+    'manifest_files': _stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')),
+    'complete_empty_prune': bool(prune) and G.number_of_nodes() == 0,
     'nodes': [{'id': n, **d} for n, d in G.nodes(data=True)],
     'edges': [
         # Explicit source/target last so they win over any stale attrs in d.
@@ -154,14 +157,8 @@ merged_out = {
 Path('graphify-out/.graphify_extract.json').write_text(json.dumps(merged_out, ensure_ascii=False), encoding=\"utf-8\")
 print(f'[graphify update] Merged extraction written ({len(merged_out[\"nodes\"])} nodes, {len(merged_out[\"edges\"])} edges)')
 
-# Save manifest so next --update diffs against today's state, not the
-# prior run's baseline (prevents ghost-node reports on subsequent updates).
-# root= matches the build_merge call above so the manifest keys stay relative to
-# the scan root — portable across clones/machines, so --update keeps matching
-# cached files instead of missing every one after a move (#1417).
-from graphify.cli import _stamped_manifest_files
-save_manifest(_stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')), root='INPUT_PATH')
-print('[graphify update] Manifest saved.')
+# Step 9 saves the staged manifest only after graph/report generation succeeds.
+
 "
 ```
 
@@ -194,8 +191,7 @@ if old_data:
 "
 ```
 
-Before the merge step, save the old graph: `cp graphify-out/graph.json graphify-out/.graphify_old.json`
-Clean up after: `rm -f graphify-out/.graphify_old.json`
+The merge stage saves the previous graph in its prepared output for the graph diff; do not copy or remove that baseline through public paths. Step 9 finalizes the prepared generation.
 
 ---
 

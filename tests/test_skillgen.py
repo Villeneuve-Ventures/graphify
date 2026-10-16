@@ -5392,7 +5392,15 @@ def test_generated_runbooks_pass_root_to_save_manifest():
                 assert "root=" in ln, (
                     f"{path.relative_to(REPO_ROOT)}: save_manifest without root= (#1417): {ln.strip()!r}"
                 )
-    assert checked >= 4, f"expected save_manifest calls across the runbooks, found {checked}"
+    # #215 removes early update saves; each full-build Step 9 owns one save.
+    assert checked == 3, f"expected exactly the three final manifest saves, found {checked}"
+    for path in targets:
+        body = path.read_text(encoding="utf-8")
+        if '## For --update (incremental re-extraction)' in body:
+            update = body.split('## For --update (incremental re-extraction)', 1)[1]
+            update = update.split('## For --cluster-only', 1)[0]
+            assert 'save_manifest(' not in update
+            assert "'manifest_files': _stamped_manifest_files(" in update
 
 
 def test_devin_keeps_its_multi_field_frontmatter():
@@ -6304,3 +6312,37 @@ def test_monolith_ownership_migration_rejects_plumbing_drift(monkeypatch, platfo
         return artifacts
     monkeypatch.setattr(gen, 'render', drift)
     assert gen.monolith_roundtrip(platform)
+
+
+@pytest.mark.parametrize('platform_key', ['aider', 'devin'])
+@pytest.mark.parametrize('old,new', [
+    ("'complete_empty_prune': bool(prune) and G.number_of_nodes() == 0", "'complete_empty_prune': True"),
+    ("'replacement_sources':[]", "'replacement_sources':['stale.md']"),
+    ("extract['manifest_files'] if extract.get('accepted_merge')", "detect['files'] if extract.get('accepted_merge')"),
+    ('" || exit $?\n', '"\n'),
+])
+def test_deletion_migration_refuses_unreviewed_consumer_drift(monkeypatch, platform_key, old, new):
+    platform = gen.load_platforms()[platform_key]
+    original = gen.render
+    def drift(selected):
+        artifacts = original(selected)
+        if selected.key == platform_key:
+            artifact = artifacts[0]
+            assert old in artifact.content
+            artifacts[0] = gen.RenderedArtifact(artifact.path, artifact.content.replace(old, new, 1))
+        return artifacts
+    monkeypatch.setattr(gen, 'render', drift)
+    assert gen.monolith_roundtrip(platform)
+
+
+@pytest.mark.parametrize('damage', ['missing-cluster', 'duplicate-update', 'duplicate-cluster'])
+def test_incremental_routing_refuses_ambiguous_fences(damage):
+    body = '## For --update (incremental re-extraction)\nbody\n## For --cluster-only\n'
+    if damage == 'missing-cluster':
+        body = body.replace('## For --cluster-only', '')
+    elif damage == 'duplicate-update':
+        body += '## For --update (incremental re-extraction)\n'
+    else:
+        body += '## For --cluster-only\n'
+    with pytest.raises(ValueError, match='incremental transaction fence'):
+        gen._route_incremental_transaction(body)

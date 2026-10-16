@@ -47,7 +47,7 @@ def _published_bytes(output):
             for name in ("graph.json", "manifest.json", tx.RECEIPT_FILE)}
 
 
-def _baseline(tmp_path, monkeypatch, *, separate=False, accepted_chunk=None):
+def _baseline(tmp_path, monkeypatch, *, separate=False, accepted_chunk=None, directed=False):
     root = tmp_path / "corpus"
     root.mkdir()
     monkeypatch.chdir(root)
@@ -76,8 +76,8 @@ from graphify.detect import save_manifest
 from graphify.export import to_json
 from graphify.transaction import finalize_prepared_transaction
 root = Path({str(root)!r})
-graph = (build_from_json({accepted_chunk!r}, root=root) if {accepted_chunk is not None!r}
-         else build([{_chunk('one')!r}], root=root))
+graph = (build_from_json({accepted_chunk!r}, root=root, directed={directed!r}) if {accepted_chunk is not None!r}
+         else build([{_chunk('one')!r}], root=root, directed={directed!r}))
 assert to_json(graph, {{}}, 'graph.json', built_at_commit={first_head!r})
 save_manifest({{'document': [str(root / 'changed.md'), str(root / 'retained.md')]}},
               manifest_path='manifest.json', root=root)
@@ -572,3 +572,189 @@ def test_rendered_later_graph_consumers_preserve_accepted_facts(
             assert graph_path.read_bytes() == before
             count += 1
     assert count >= (3 if platform_key == 'claude' else 8)
+
+
+def _deletion_stage(platform_key, needle, *, reference=False):
+    import re
+    import shlex
+    from tools.skillgen import gen
+    artifacts = gen.render(gen.load_platforms()[platform_key])
+    artifact = next(a for a in artifacts if a.path.endswith('/update.md')) if reference else artifacts[0]
+    block = next(b for b in re.findall(r'```(?:bash|sh)\n(.*?)\n```', artifact.content, re.S)
+                 if needle in b)
+    raw = block.rsplit('-c "\n', 1)[1].split('\n"', 1)[0]
+    code = shlex.split('python -c "' + raw + '"')[-1]
+    return block, code
+
+
+def _deletion_fixture(tmp_path, monkeypatch, *, platform_key, empty=False, directed=False):
+    chunk = _chunk('one')
+    chunk['hyperedges'].append({'id': 'deleted-group', 'nodes': ['changed', 'retained'],
+                               'source_file': 'changed.md'})
+    fixture = _baseline(tmp_path, monkeypatch, accepted_chunk=chunk, directed=directed)
+    fixture.deleted = ['changed.md', 'retained.md'] if empty else ['changed.md']
+    for name in fixture.deleted:
+        (fixture.root / name).unlink()
+    _git(fixture.root, 'add', '-u')
+    _git(fixture.root, 'commit', '-qm', 'delete sources')
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    detect = _deletion_code(platform_key, 'result = detect_incremental(', fixture,
+                            reference=platform_key == 'claude')
+    _run(fixture, f'exec({detect!r})')
+    if platform_key == 'claude':
+        population = _deletion_code(platform_key, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, """
+assert json.loads(Path('.graphify_incremental.json').read_text())['deleted_files']
+assert json.loads(Path('.graphify_detect.json').read_text())['total_files'] == 0
+""")
+    return fixture
+
+
+def _deletion_code(platform_key, needle, fixture, *, directed=False, reference=False):
+    block, code = _deletion_stage(platform_key, needle, reference=reference)
+    assert 'run-prepared-token' in block
+    return code.replace('INPUT_PATH', str(fixture.root)).replace('IS_DIRECTED', str(directed))
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'aider', 'devin'])
+def test_deletion_only_reset_overwrites_stale_aggregate(tmp_path, monkeypatch, platform_key):
+    from tools.skillgen import gen
+    fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform_key)
+    before = _published_bytes(fixture.output)
+    stale = dict(_chunk('old'), replacement_sources=['changed.md'])
+    _run(fixture, f"""
+Path('.graphify_extract.json').write_text(json.dumps({stale!r}))
+Path('.graphify_chunk_old.json').write_text(json.dumps({stale!r}))
+Path('.graphify_completed_chunks.json').write_text('[".graphify_chunk_old.json"]')
+""")
+    block, _ = _deletion_stage(platform_key, 'Only deletions', reference=platform_key == 'claude')
+    # Bootstrap has its own tests. Keep the actual prepared-token CLI and shell
+    # control flow, including the existence guard that originally skipped reset.
+    block = block.replace(gen._POSIX_OPERATION_GUARD, '')
+    block = block.replace('INPUT_PATH', str(fixture.root))
+    result = subprocess.run(['bash', '-e', '-c', block], cwd=fixture.root, text=True,
+                            capture_output=True, env={**os.environ,
+                                'GRAPHIFY_PYTHON': str(Path(os.sys.executable).absolute())})
+    assert result.returncode == 0, result.stdout + result.stderr
+    _run(fixture, """
+fresh = json.loads(Path('.graphify_extract.json').read_text())
+assert fresh == {'nodes': [], 'edges': [], 'hyperedges': [],
+                 'replacement_sources': [], 'input_tokens': 0, 'output_tokens': 0}
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('empty', [False, True], ids=['foreign-retained', 'prune-to-empty'])
+@pytest.mark.parametrize('directed', [False, True])
+@pytest.mark.parametrize('relative_prune', [False, True], ids=['absolute-owner', 'relative-owner'])
+def test_deletion_only_consumers_publish_graph_and_manifest_together(
+        tmp_path, monkeypatch, platform_key, empty, directed, relative_prune):
+    fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform_key, empty=empty, directed=directed)
+    before = _published_bytes(fixture.output)
+    merge = _deletion_code(platform_key, '# Load new extraction and incremental state', fixture,
+                           directed=directed, reference=platform_key == 'claude')
+    build = _deletion_code(platform_key, 'wrote = to_json(', fixture, directed=directed)
+    finish = _deletion_code(platform_key, '# Update cumulative cost tracker', fixture)
+    diff_code = _deletion_code(platform_key, 'from graphify.analyze import graph_diff', fixture,
+                               directed=directed, reference=platform_key == 'claude')
+    _run(fixture, """
+Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [],
+    'replacement_sources': []}))
+manifest_before = Path('manifest.json').read_bytes()
+""" + ("""
+incremental = json.loads(Path('.graphify_incremental.json').read_text())
+incremental['deleted_files'] = ['./' + str(Path(p).relative_to(root)) for p in incremental['deleted_files']]
+Path('.graphify_incremental.json').write_text(json.dumps(incremental))
+""" if relative_prune else '') + f"\nexec({merge!r})\n" + """
+assert Path('manifest.json').read_bytes() == manifest_before
+""")
+    assert _published_bytes(fixture.output) == before
+    _run(fixture, f'exec({diff_code!r})\nassert old_data is not None\nassert diff["removed_nodes"]')
+    _run(fixture, f'exec({build!r})')
+    assert _published_bytes(fixture.output) == before
+    _run(fixture, f'exec({finish!r})\ntx.finalize_prepared_transaction()')
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='deletion-update')
+    old_nodes = {node['id']: node for node in fixture.baseline.data['nodes']}
+    expected = {} if empty else {key: old_nodes[key] for key in ['retained', 'anchor']}
+    # Clustering recalculates community labels; retained semantic attributes
+    # must otherwise survive publication exactly.
+    def facts(nodes):
+        return {key: {k: v for k, v in node.items() if k != 'community'}
+                for key, node in nodes.items()}
+    assert facts({node['id']: node for node in current.data['nodes']}) == facts(expected)
+    assert current.data['links'] == ([] if empty else fixture.baseline.data['links'])
+    assert current.data['hyperedges'] == ([] if empty else [fixture.baseline.data['hyperedges'][0]])
+    assert current.data['directed'] == directed
+    manifest = json.loads((fixture.output / 'manifest.json').read_text())
+    assert set(manifest) == (set() if empty else {'retained.md'})
+    from graphify.detect import detect_incremental
+    again = detect_incremental(fixture.root, manifest_path=fixture.output / 'manifest.json',
+                               google_workspace=False)
+    assert again['new_total'] == 0 and again['deleted_files'] == []
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('failure', ['empty-input', 'export-refused', 'report-failed'])
+def test_deletion_update_failure_keeps_manifest_and_deletion_pending(
+        tmp_path, monkeypatch, platform_key, failure):
+    fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform_key)
+    before = _published_bytes(fixture.output)
+    merge = _deletion_code(platform_key, '# Load new extraction and incremental state', fixture,
+                           reference=platform_key == 'claude')
+    build = _deletion_code(platform_key, 'wrote = to_json(', fixture)
+    if failure == 'empty-input':
+        setup = "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'complete_empty_prune': True}))"
+    else:
+        setup = """Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [],
+            'hyperedges': [], 'replacement_sources': []}))""" + f'\nexec({merge!r})'
+        if failure == 'export-refused':
+            setup += '\nfrom unittest.mock import patch'
+            build = f"with patch('graphify.export.to_json', return_value=False):\n    exec({build!r})"
+        else:
+            setup += "\nfrom unittest.mock import patch"
+            build = f"with patch('graphify.report.generate', side_effect=RuntimeError('injected report failure')):\n    exec({build!r})"
+    with pytest.raises((SystemExit, RuntimeError)):
+        _run(fixture, setup + f'\nexec({build!r})')
+    assert _published_bytes(fixture.output) == before
+    _run(fixture, """
+from graphify.detect import detect_incremental
+incremental = detect_incremental(root, manifest_path='manifest.json', google_workspace=False)
+assert incremental['deleted_files'] and incremental['new_total'] == 0
+""")
+
+
+@pytest.mark.parametrize('platform_key', ['claude', 'aider', 'devin'])
+def test_deletion_step9_failure_does_not_finalize_and_can_retry(tmp_path, monkeypatch, platform_key):
+    from tools.skillgen import gen
+    fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform_key, empty=True)
+    before = _published_bytes(fixture.output)
+    merge = _deletion_code(platform_key, '# Load new extraction and incremental state', fixture,
+                           reference=platform_key == 'claude')
+    build = _deletion_code(platform_key, 'wrote = to_json(', fixture)
+    _run(fixture, """
+Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [],
+    'replacement_sources': []}))
+""" + f'\nexec({merge!r})\nexec({build!r})' + """
+Path('cost.json').write_text('invalid cost JSON')
+""")
+    block, _ = _deletion_stage(platform_key, '# Update cumulative cost tracker')
+    block = block.replace(gen._POSIX_OPERATION_GUARD, '').replace('INPUT_PATH', str(fixture.root))
+    result = subprocess.run(['bash', '-c', block], cwd=fixture.root, capture_output=True, text=True,
+                            env={**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable})
+    assert result.returncode != 0 and 'JSONDecodeError' in result.stderr
+    assert _published_bytes(fixture.output) == before
+    from graphify.detect import detect_incremental
+    pending = detect_incremental(fixture.root, manifest_path=fixture.output / 'manifest.json',
+                                 google_workspace=False)
+    assert pending['deleted_files']
+    _run(fixture, "Path('cost.json').unlink()")
+    result = subprocess.run(['bash', '-c', block], cwd=fixture.root, capture_output=True, text=True,
+                            env={**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable})
+    assert result.returncode == 0, result.stdout + result.stderr
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='deletion-retry')
+    assert current.data['nodes'] == [] and current.data['links'] == []
+    assert json.loads((fixture.output / 'manifest.json').read_text()) == {}

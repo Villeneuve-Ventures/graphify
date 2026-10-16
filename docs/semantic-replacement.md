@@ -99,3 +99,26 @@ Devin keeps semantic completion through its final sanitize before emitting the
 replacement declaration. Later report, export and graph-diff stages restore an
 accepted merge without interpreting retained identities again; fresh extraction
 continues through the normal build path.
+
+
+## Deletion-only runbook publication
+
+A deletion-only batch skips extraction and overwrites the current aggregate with
+empty records and `replacement_sources: []`. Prior aggregate/chunk files cannot
+establish a current replacement. The shared and inline update sections use the
+same exact prepared-token runner and private output namespace as the build.
+The merge stages its graph-diff baseline there as well.
+
+An accepted merge may explicitly mark a validated prune-to-empty result with
+`complete_empty_prune`. This is distinct from successful semantic extraction;
+the later empty-graph guard requires `accepted_merge` for that prune marker.
+Undeclared empty input still refuses. The ownership and prune precedence above
+are unchanged.
+
+Merge preparation stages completion-filtered `manifest_files` with the accepted
+graph; it does not save the manifest. Step 9 saves that manifest after successful
+graph/report generation, in the existing prepared publication. A failed Step 9
+body stops before finalization. Refused or interrupted work leaves the published
+graph and manifest unchanged, so the next update still sees pending deletions;
+a successful retry finalizes the existing prepared generation. No new recovery
+protocol is introduced.
