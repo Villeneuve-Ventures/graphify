@@ -6321,6 +6321,8 @@ def test_monolith_ownership_migration_rejects_plumbing_drift(monkeypatch, platfo
     ("extract['manifest_files'] if extract.get('accepted_merge')", "detect['files'] if extract.get('accepted_merge')"),
     ('" || exit $?\n', '"\n'),
     ("Path('.graphify_old.json').unlink(missing_ok=True)", "pass  # baseline leaked"),
+    ("file=sys.stderr)\nprint(token", "file=sys.stdout)\nprint(token"),
+    ("if merged_out['complete_empty_prune']:", "if False:"),
     ("current_transaction().output / 'manifest.json'", "'manifest.json'"),
     ("cancel_unpublished_transaction(current_transaction())", "pass  # no-op leaked"),
     ("live['\"'\"'kind'\"'\"'] != '\"'\"'update'\"'\"'", "False"),

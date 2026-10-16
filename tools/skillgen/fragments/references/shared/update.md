@@ -11,7 +11,7 @@ immutable token runner may establish local owner context.
 
 Use when you've added or modified files since the last run. Only re-extracts changed files - saves tokens and time.
 
-The first detection block starts an update handoff against the published snapshot. For a retry, retain its exported `GRAPHIFY_TRANSACTION_TOKEN`; a pending operation without that exact token must stop. Detection always compares against the published manifest until finalization. If no changes remain, the block cancels its unpublished handoff and you must stop.
+The first detection block starts an update handoff against the published snapshot and prints a shell-quoted `export GRAPHIFY_TRANSACTION_TOKEN=...` resume assignment before doing extraction work. Save that printed assignment. For a retry in a fresh shell, prepend it to this detection block and run both in the same shell invocation; the pending operation requires that exact token. Detection always compares against the published manifest until finalization. If no changes remain, the block cancels its unpublished handoff and you must stop.
 
 For an explicitly code-only update, use the public CLI through the saved interpreter:
 
@@ -161,6 +161,20 @@ merged_out = {
 }
 Path('graphify-out/.graphify_extract.json').write_text(json.dumps(merged_out, ensure_ascii=False), encoding=\"utf-8\")
 print(f'[graphify update] Merged extraction written ({len(merged_out[\"nodes\"])} nodes, {len(merged_out[\"edges\"])} edges)')
+
+# A validated deletion-only empty graph cannot retain old managed exports.
+# Invalidate in the private output before later optional export steps regenerate.
+if merged_out['complete_empty_prune']:
+    from graphify.transaction import current_transaction, unlink_prepared
+    update_owner = current_transaction()
+    stale_exports = {'graph.html', 'graph.svg', 'graph.graphml', 'cypher.txt',
+                     'graphify-callflow.html', 'GRAPH_TREE.html'}
+    prepared_output = Path('graphify-out/')
+    for directory in ('wiki', 'obsidian'):
+        stale_exports.update(path.relative_to(prepared_output).as_posix()
+                             for path in (prepared_output / directory).rglob('*') if path.is_file())
+    for name in sorted(stale_exports):
+        unlink_prepared(update_owner, name)
 
 # Step 9 saves the staged manifest only after graph/report generation succeeds.
 

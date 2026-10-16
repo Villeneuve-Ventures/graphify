@@ -117,8 +117,10 @@ Undeclared empty input still refuses. The ownership and prune precedence above
 are unchanged.
 
 The semantic update entry starts its own handoff against the certified published
-snapshot. A retry requires its retained exact token and matching operation, root
-and output; it cannot take over another pending operation. A no-op cancels its
+snapshot. Before extraction work, it prints a shell-quoted export assignment for
+that exact token. Keep the printed assignment; prepend it to the detection block
+in the same fresh-shell invocation when retrying. A retry requires the matching
+operation, root and output; it cannot take over another pending operation. A no-op cancels its
 unpublished handoff. Detection reads the published manifest even after Step 9
 has staged a new one, so a retry still sees every unpublished deletion.
 
@@ -129,3 +131,10 @@ body stops before finalization. Refused or interrupted work leaves the published
 graph and manifest unchanged, so the next update still sees pending deletions;
 a successful retry finalizes the existing prepared generation. No new recovery
 protocol is introduced.
+
+A validated deletion-only prune-to-empty also invalidates prior managed HTML,
+SVG, GraphML, Cypher, callflow/tree views and wiki/Obsidian files in the private
+output before optional exports run. The existing publication plan applies those
+removals only when finalization succeeds; a failed attempt preserves the public
+exports. Regenerated outputs can join the new generation. Unmanaged public files
+and external export destinations remain outside this invalidation.

@@ -1159,7 +1159,7 @@ def _route_incremental_transaction(body: str) -> str:
     section = _route_prepared_python_blocks(body[start:end], mutations_only=False)
     # A semantic update starts here, rather than in the full-build-only Step 1.
     # Retry only through a retained exact token; do not discover another owner.
-    handoff = r'''import os, sys
+    handoff = r'''import os, shlex, sys
 from pathlib import Path
 from graphify.paths import GRAPHIFY_OUT
 from graphify.transaction import (PendingTransactionError, begin_transaction,
@@ -1186,6 +1186,7 @@ except PendingTransactionError:
 else:
     token = stage_transaction_handoff(begin_transaction('update', root,
         output=output, expected_snapshot=snapshot)).path
+print('[graphify update] Resume with: export GRAPHIFY_TRANSACTION_TOKEN=' + shlex.quote(str(token)), file=sys.stderr)
 print(token, end='')
 '''
     prefix = (
