@@ -1105,6 +1105,16 @@ from pathlib import Path
 from graphify.build import build_merge
 from graphify.cli import _stamped_manifest_files
 
+# Every attempt starts from the published predecessor, never a failed staged graph.
+from graphify.transaction import commit_prepared_bytes, current_transaction, open_update_baseline, unlink_prepared
+update_owner = current_transaction()
+update_baseline = open_update_baseline(update_owner)
+commit_prepared_bytes(update_owner, 'graph.json', update_baseline.payload)
+if update_baseline.manifest_payload is None:
+    unlink_prepared(update_owner, 'manifest.json')
+else:
+    commit_prepared_bytes(update_owner, 'manifest.json', update_baseline.manifest_payload)
+
 # Load new extraction and incremental state
 new_extraction = json.loads(Path('.graphify_extract.json').read_text(encoding=\"utf-8\"))
 incremental = json.loads(Path('.graphify_incremental.json').read_text(encoding=\"utf-8\"))
@@ -1135,7 +1145,7 @@ G = build_merge(
 print(f'[graphify update] Merged: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges')
 
 # Keep the graph-diff baseline in the same private namespace as the merge.
-Path('.graphify_old.json').write_bytes(Path('graph.json').read_bytes())
+Path('.graphify_old.json').write_bytes(update_baseline.payload)
 
 # Write merged result back to .graphify_extract.json so Step 4 sees the full graph
 merged_out = {
@@ -1171,6 +1181,32 @@ if merged_out['complete_empty_prune']:
     for directory in ('wiki', 'obsidian'):
         stale_exports.update(path.relative_to(prepared_output).as_posix()
                              for path in (prepared_output / directory).rglob('*') if path.is_file())
+    # Custom managed vaults are identified by owned manifests, including nested
+    # vaults and vaults rooted at the output itself. Only inventory members can
+    # be invalidated; user notes and external destinations are never selected.
+    from graphify.transaction import publication_plan_from_directory
+    owned_exports = dict(update_baseline.artifacts)
+    owned_exports.update(publication_plan_from_directory(prepared_output).payloads)
+    for name, payload in owned_exports.items():
+        if Path(name).name != '.graphify_obsidian_manifest.json':
+            continue
+        vault_manifest = json.loads(payload)
+        if (not isinstance(vault_manifest, dict) or set(vault_manifest) != {'files'}
+                or not isinstance(vault_manifest['files'], list)):
+            raise ValueError('malformed managed Obsidian manifest')
+        vault = Path(name).parent
+        for member in vault_manifest['files']:
+            if (not isinstance(member, str) or not member or Path(member).is_absolute()
+                    or any(part in ('', '.', '..') for part in member.split('/'))
+                    or chr(92) in member or chr(0) in member):
+                raise ValueError('unsafe managed Obsidian manifest member')
+            scoped = (vault / member).as_posix()
+            if scoped in owned_exports:
+                stale_exports.add(scoped)
+        stale_exports.add(name)
+        canvas = (vault / 'graph.canvas').as_posix()
+        if canvas in owned_exports:
+            stale_exports.add(canvas)
     for name in sorted(stale_exports):
         unlink_prepared(update_owner, name)
 

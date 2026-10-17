@@ -107,8 +107,12 @@ A deletion-only batch skips extraction and overwrites the current aggregate with
 empty records and `replacement_sources: []`. Prior aggregate/chunk files cannot
 establish a current replacement. The shared and inline update sections use the
 same exact prepared-token runner and private output namespace as the build.
-The merge stages its graph-diff baseline there as well. Step 9 removes that
-baseline before finalization, so it cannot publish deleted records as a backup.
+Each merge attempt restores the published graph and manifest through the exact live
+update owner and existing preserved receipt. A failed attempt's staged graph
+cannot become retained input on retry. The graph-diff baseline uses that same
+published predecessor, including retries after the Step 9 body has removed its
+previous private copy. Step 9 removes that baseline before finalization, so it
+cannot publish deleted records as a backup.
 
 Only a deletion-only batch (`new_total == 0`) may explicitly mark a validated
 prune-to-empty result with `complete_empty_prune`. This is distinct from successful semantic extraction;
@@ -134,7 +138,10 @@ protocol is introduced.
 
 A validated deletion-only prune-to-empty also invalidates prior managed HTML,
 SVG, GraphML, Cypher, callflow/tree views and wiki/Obsidian files in the private
-output before optional exports run. The existing publication plan applies those
+output before optional exports run. Owned Obsidian manifests in the prior and
+prepared inventories select custom managed vault notes and canvases, including
+nested vaults and vaults at the output root; unrelated managed artifacts remain.
+The existing publication plan applies those
 removals only when finalization succeeds; a failed attempt preserves the public
 exports. Regenerated outputs can join the new generation. Unmanaged public files
 and external export destinations remain outside this invalidation.

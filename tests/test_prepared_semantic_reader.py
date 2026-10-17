@@ -1032,3 +1032,294 @@ def test_prune_to_empty_invalidates_only_managed_prior_exports(tmp_path, monkeyp
             assert current.artifacts[name] == payload
     assert current.artifacts['evidence.txt'] == b'retained unrelated artifact'
     assert {name: (fixture.output / name).read_bytes() for name in unmanaged} == unmanaged
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+def test_retry_diff_keeps_published_predecessor_after_step9(tmp_path, monkeypatch, platform):
+    fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform, empty=True)
+    before = _published_bytes(fixture.output)
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture,
+                           reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+    reset = "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+    _run(fixture, reset + f'\nexec({merge!r})\nexec({build!r})\nexec({finish!r})')
+    assert _published_bytes(fixture.output) == before
+    resumed = _update_shell(fixture, platform, 'result = detect_incremental(', token=fixture.token.path)
+    assert resumed.returncode == 0, resumed.stderr
+    _run(fixture, reset + f'\nexec({merge!r})' + "\nassert json.loads(Path('.graphify_old.json').read_text())['nodes'], 'retry diff lost published predecessor'")
+    diff = _deletion_code(platform, 'from graphify.analyze import graph_diff', fixture,
+                          reference=platform == 'claude')
+    _run(fixture, f'exec({diff!r})\nassert len(diff["removed_nodes"]) == 3')
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('directed', [False, True])
+@pytest.mark.parametrize('failpoint', ['report', 'step9'])
+def test_retry_merge_discards_failed_attempt_semantics(tmp_path, monkeypatch, platform, directed, failpoint):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch, directed=directed))
+    before = _published_bytes(fixture.output)
+    detect = _deletion_code(platform, 'result = detect_incremental(', fixture,
+                            reference=platform == 'claude', directed=directed)
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture,
+                           reference=platform == 'claude', directed=directed)
+    build = _deletion_code(platform, 'wrote = to_json(', fixture, directed=directed)
+    fresh = {'nodes': [_chunk('two')['nodes'][0], {'id': 'transient', 'source_file': 'changed.md'}],
+             'edges': [{'source': 'changed', 'target': 'transient', 'source_file': 'changed.md', 'relation': 'staged'}],
+             'hyperedges': [{'id': 'staged-group', 'nodes': ['changed', 'transient'], 'source_file': 'changed.md'}],
+             'replacement_sources': ['changed.md']}
+    _run(fixture, f'exec({detect!r})')
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, f'Path(".graphify_extract.json").write_text(json.dumps({fresh!r}))\nexec({merge!r})')
+    if failpoint == 'report':
+        with pytest.raises(RuntimeError, match='injected report failure'):
+            _run(fixture, "from unittest.mock import patch\nwith patch('graphify.report.generate', side_effect=RuntimeError('injected report failure')):\n"
+                 + f'    exec({build!r})')
+    else:
+        finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+        _run(fixture, f'exec({build!r})\nexec({finish!r})')
+    assert _published_bytes(fixture.output) == before
+    (fixture.root / 'changed.md').write_text('Mutable policy three. Extraction fails.\n')
+    resumed = _update_shell(fixture, platform, 'result = detect_incremental(', token=fixture.token.path)
+    assert resumed.returncode == 0, resumed.stderr
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})' + "\nassert next(n for n in merged_out['nodes'] if n['id'] == 'changed')['label'] == 'Mutable policy one', 'retry retained failed-attempt semantics'")
+    _run(fixture, f'exec({build!r})')
+    result = _update_shell(fixture, platform, '# Update cumulative cost tracker', token=fixture.token.path)
+    assert result.returncode == 0, result.stderr
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='retry-published-baseline')
+    semantic_nodes = lambda data: {n['id']: {k: v for k, v in n.items() if k != 'community'}
+                                   for n in data['nodes']}
+    assert semantic_nodes(current.data) == semantic_nodes(fixture.baseline.data)
+    assert current.data['links'] == fixture.baseline.data['links']
+    assert current.data['hyperedges'] == fixture.baseline.data['hyperedges']
+
+    manifest = json.loads((fixture.output / 'manifest.json').read_text())
+    assert manifest == json.loads(fixture.baseline.manifest_payload)
+    from graphify.detect import detect_incremental
+    pending = detect_incremental(fixture.root, manifest_path=fixture.output / 'manifest.json',
+                                 google_workspace=False)
+    assert str(fixture.root / 'changed.md') in pending['new_files']['document']
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('vault', ['vault', 'nested/vault', '.'])
+@pytest.mark.parametrize('outcome', ['publish', 'report-failed', 'regenerate'])
+def test_prune_to_empty_invalidates_custom_managed_vault(tmp_path, monkeypatch, platform, vault, outcome):
+    fixture = _baseline(tmp_path, monkeypatch)
+    exported = subprocess.run([os.sys.executable, '-m', 'graphify', 'export', 'obsidian',
+                               '--graph', str(fixture.output / 'graph.json'),
+                               '--dir', str(fixture.output / vault)],
+                              cwd=fixture.root, capture_output=True, text=True)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    fixture.baseline = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='custom-vault',
+                                              retain_artifacts=('*',))
+    prefix = '' if vault == '.' else vault + '/'
+    evidence = prefix + 'evidence.txt'
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    _run(fixture, f"tx.commit_prepared_bytes(tx.current_transaction(), {evidence!r}, b'unrelated managed evidence')\ntx.finalize_prepared_transaction()")
+    fixture.baseline = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='vault-with-evidence',
+                                              retain_artifacts=('*',))
+    stale = {n: b for n, b in fixture.baseline.artifacts.items()
+             if n.startswith(prefix) and n not in {'graph.json', 'manifest.json', 'cost.json', evidence}}
+    assert prefix + '.graphify_obsidian_manifest.json' in stale
+    user_note = fixture.output / vault / 'user-note.md'
+    user_note.write_text('User-owned note.\n')
+    external = tmp_path / 'external-vault'
+    external.mkdir()
+    (external / 'keep.md').write_text('External vault note.\n')
+    for name in ('changed.md', 'retained.md'):
+        (fixture.root / name).unlink()
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    before = _published_bytes(fixture.output)
+    detect = _deletion_code(platform, 'result = detect_incremental(', fixture, reference=platform == 'claude')
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture, reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    _run(fixture, f'exec({detect!r})')
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})')
+    if outcome == 'report-failed':
+        with pytest.raises(RuntimeError, match='injected report failure'):
+            _run(fixture, "from unittest.mock import patch\nwith patch('graphify.report.generate', side_effect=RuntimeError('injected report failure')):\n"
+                 + f'    exec({build!r})')
+    _run(fixture, f'exec({build!r})')
+    if outcome == 'regenerate':
+        _run(fixture, "import sys\nfrom graphify.cli import dispatch_command\nsys.argv=['graphify', 'export', 'obsidian', '--dir', VAULT]\ndispatch_command('export')".replace('VAULT', repr(vault)))
+    assert _published_bytes(fixture.output) == before
+    assert {n: (fixture.output / n).read_bytes() for n in stale} == stale
+    finished = _update_shell(fixture, platform, '# Update cumulative cost tracker', token=fixture.token.path)
+    assert finished.returncode == 0, finished.stderr
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='empty-custom-vault', retain_artifacts=('*',))
+    assert current.data['nodes'] == []
+    for name, payload in stale.items():
+        if outcome == 'regenerate' and name in current.artifacts:
+            assert b'Mutable policy one' not in current.artifacts[name]
+            assert b'Unrelated stable rule' not in current.artifacts[name]
+        else:
+            assert name not in current.artifacts, 'stale custom managed vault was published'
+            assert not (fixture.output / name).exists()
+    assert current.artifacts[evidence] == b'unrelated managed evidence'
+    assert user_note.read_text() == 'User-owned note.\n'
+    assert (external / 'keep.md').read_text() == 'External vault note.\n'
+
+
+@pytest.mark.parametrize('separate', [False, True])
+def test_update_baseline_reads_published_bytes_after_staged_write(tmp_path, monkeypatch, separate):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch, separate=separate))
+    before = _published_bytes(fixture.output)
+    _run(fixture, """
+from graphify.export import to_json
+from graphify.transaction import open_update_baseline
+fresh = {'nodes': [{'id': 'staged', 'source_file': 'changed.md'}], 'edges': []}
+graph = build_merge([fresh], Path.cwd() / 'graph.json', root=root,
+                    replacement_sources=['changed.md'])
+assert to_json(graph, {}, 'graph.json')
+private_before = Path('graph.json').read_bytes()
+baseline = open_update_baseline(tx.current_transaction())
+assert baseline.payload == (output / 'graph.json').read_bytes()
+assert baseline.manifest_payload == (output / 'manifest.json').read_bytes()
+assert {n['id'] for n in baseline.data['nodes']} == {'changed', 'retained', 'anchor'}
+assert baseline.generation == tx.current_transaction().generation - 1
+assert Path('graph.json').read_bytes() == private_before
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('damage', ['graph', 'manifest', 'receipt', 'predecessor',
+                                   'missing-predecessor', 'graph-symlink', 'size-limit'])
+def test_update_baseline_refuses_changed_published_admission(tmp_path, monkeypatch, damage):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    mutations = {
+        'graph': "(output / 'graph.json').write_text('{}')",
+        'manifest': "(output / 'manifest.json').write_text('{}')",
+        'receipt': "(output / tx.RECEIPT_FILE).write_text('{}')",
+        'predecessor': "(output / tx.PREDECESSOR_FILE).write_text('{}')",
+        'missing-predecessor': "(output / tx.PREDECESSOR_FILE).unlink()",
+        'graph-symlink': "copy = output.parent / 'graph-copy.json'; copy.write_bytes((output / 'graph.json').read_bytes()); (output / 'graph.json').unlink(); (output / 'graph.json').symlink_to(copy)",
+        'size-limit': 'pass',
+    }
+    if damage == 'size-limit':
+        monkeypatch.setenv('GRAPHIFY_MAX_GRAPH_BYTES', '10')
+    _run(fixture, """
+from graphify.transaction import open_update_baseline
+""" + mutations[damage] + """
+before = {str(p): p.read_bytes() for p in output.parent.rglob('*') if p.is_file()}
+try:
+    open_update_baseline(tx.current_transaction())
+except tx.PendingTransactionError:
+    pass
+else:
+    raise AssertionError('changed published admission was accepted')
+assert {str(p): p.read_bytes() for p in output.parent.rglob('*') if p.is_file()} == before
+""")
+
+
+def test_update_baseline_requires_exact_update_owner(tmp_path, monkeypatch):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    _run(fixture, """
+from dataclasses import replace
+from graphify.transaction import open_update_baseline
+owner = tx.current_transaction()
+for candidate in (replace(owner, id='0' * 64), replace(owner, kind='full'),
+                  replace(owner, generation=owner.generation + 1)):
+    try:
+        open_update_baseline(candidate)
+    except tx.PendingTransactionError:
+        pass
+    else:
+        raise AssertionError('forged update owner accepted')
+authority = tx._AUTHORITY.set(None)
+try:
+    try:
+        open_update_baseline(owner)
+    except tx.PendingTransactionError:
+        pass
+    else:
+        raise AssertionError('absent update owner accepted')
+finally:
+    tx._AUTHORITY.reset(authority)
+""")
+    assert _published_bytes(fixture.output) == before
+
+
+def test_update_baseline_preserves_receiptless_legacy_admission(tmp_path, monkeypatch):
+    from graphify.build import build_from_json
+    from networkx.readwrite import json_graph
+    root = tmp_path / 'legacy-corpus'
+    root.mkdir()
+    monkeypatch.chdir(root)
+    output = root / 'graphify-out'
+    output.mkdir()
+    graph = build_from_json(_chunk('one'), root=root)
+    (output / 'graph.json').write_text(json.dumps(json_graph.node_link_data(graph, edges='links')))
+    (output / 'manifest.json').write_text('{}')
+    baseline = tx.open_graph_snapshot(output / 'graph.json', purpose='legacy-update')
+    owner = tx.begin_transaction('update', root, output=output, expected_snapshot=baseline)
+    fixture = SimpleNamespace(root=root, output=output, token=tx.stage_transaction_handoff(owner))
+    before = _published_bytes(output)
+    _run(fixture, """
+from graphify.transaction import open_update_baseline
+baseline = open_update_baseline(tx.current_transaction())
+assert baseline.generation is None
+assert baseline.payload == (output / 'graph.json').read_bytes()
+assert {n['id'] for n in baseline.data['nodes']} == {'changed', 'retained', 'anchor'}
+""")
+    assert _published_bytes(output) == before
+
+
+
+def test_update_baseline_refuses_actual_full_owner(tmp_path, monkeypatch):
+    fixture = _baseline(tmp_path, monkeypatch)
+    fixture.owner = tx.begin_transaction('full', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    before = _published_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='requires an update owner'):
+        _run(fixture, 'tx.open_update_baseline(tx.current_transaction())')
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('manifest', [{'files': ['../evidence.txt']}, {'files': [42]}, {'bad': []}])
+def test_empty_prune_refuses_malformed_managed_vault_manifest(tmp_path, monkeypatch, platform, manifest):
+    fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform, empty=True)
+    before = _published_bytes(fixture.output)
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture,
+                           reference=platform == 'claude')
+    _run(fixture, f"tx.commit_prepared_bytes(tx.current_transaction(), 'vault/.graphify_obsidian_manifest.json', {json.dumps(manifest).encode()!r})")
+    with pytest.raises(ValueError, match='managed Obsidian manifest'):
+        _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+             + f'\nexec({merge!r})')
+    assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('cap', [10, 1024 * 1024 * 1024])
+def test_update_baseline_applies_graph_limit_before_payload_read(tmp_path, monkeypatch, cap):
+    fixture = _prepare(_baseline(tmp_path, monkeypatch))
+    before = _published_bytes(fixture.output)
+    original = tx._hash_relative_bytes
+    seen = []
+    def observed(capability, name, **options):
+        if name == 'graph.json' and capability.path == fixture.output:
+            seen.append(options['retain_limit'])
+        return original(capability, name, **options)
+    monkeypatch.setattr(tx, '_hash_relative_bytes', observed)
+    monkeypatch.setenv('GRAPHIFY_MAX_GRAPH_BYTES', str(cap))
+    if cap == 10:
+        with pytest.raises(tx.PendingTransactionError, match='read limit'):
+            _run(fixture, 'tx.open_update_baseline(tx.current_transaction())')
+    else:
+        _run(fixture, 'tx.open_update_baseline(tx.current_transaction())')
+    assert seen == [min(cap, 512 * 1024 * 1024)]
+    assert _published_bytes(fixture.output) == before
