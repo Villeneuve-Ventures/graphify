@@ -780,6 +780,63 @@ def _update_shell(fixture, platform, needle, *, token=None, resume_assignment=No
                           cwd=fixture.root, capture_output=True, text=True, env=environment)
 
 
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('input_spelling', ['.', 'corpus', 'corpus-alias'])
+@pytest.mark.parametrize('separate', [False, True])
+@pytest.mark.parametrize('directed', [False, True])
+def test_relative_update_input_uses_owner_root(tmp_path, monkeypatch, platform, input_spelling, separate, directed):
+    import re
+    from tools.skillgen import gen
+    fixture = _baseline(tmp_path, monkeypatch, separate=separate, directed=directed)
+    (fixture.root / 'changed.md').unlink()
+    if input_spelling == 'corpus-alias':
+        (tmp_path / input_spelling).symlink_to(fixture.root, target_is_directory=True)
+    cwd = fixture.root if input_spelling == '.' else tmp_path
+    before = _published_bytes(fixture.output)
+    def shell(needle, token=None):
+        block, _ = _deletion_stage(platform, needle,
+                                  reference=platform == 'claude' and needle != '# Update cumulative cost tracker')
+        block = block.replace(gen._POSIX_OPERATION_GUARD, '')
+        block = re.sub(r'\bINPUT_PATH\b', input_spelling, block).replace('IS_DIRECTED', str(directed))
+        environment = {**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable,
+                       'GRAPHIFY_OUT': str(fixture.output)}
+        environment.pop('GRAPHIFY_TRANSACTION_TOKEN', None)
+        if token:
+            environment['GRAPHIFY_TRANSACTION_TOKEN'] = str(token)
+        return subprocess.run(['bash', '-c', block], cwd=cwd, env=environment,
+                              capture_output=True, text=True)
+    detected = shell('result = detect_incremental(')
+    assert detected.returncode == 0, detected.stderr
+    _, token = _update_resume_assignment(detected)
+    fixture.token = SimpleNamespace(path=token)
+    _run(fixture, """
+state = json.loads(Path('.graphify_incremental.json').read_text())
+assert state['deleted_files'] == [str(root / 'changed.md')], state
+assert state['new_total'] == 0, state
+assert state['files']['document'] == [str(root / 'retained.md')], state
+""")
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    reset = shell("Only deletions -- creating empty extraction", token)
+    assert reset.returncode == 0, reset.stderr
+    merged = shell('# Load new extraction and incremental state', token)
+    assert merged.returncode == 0, merged.stderr
+    _run(fixture, """
+merged = json.loads(Path('.graphify_extract.json').read_text())
+assert {n['id'] for n in merged['nodes']} == {'retained', 'anchor'}, merged
+""")
+    build = _deletion_code(platform, 'wrote = to_json(', fixture, directed=directed)
+    _run(fixture, f'exec({build!r})')
+    assert _published_bytes(fixture.output) == before
+    finished = shell('# Update cumulative cost tracker', token)
+    assert finished.returncode == 0, finished.stderr
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='relative-update')
+    assert {n['id'] for n in current.data['nodes']} == {'retained', 'anchor'}
+    assert current.data['directed'] == directed
+    assert set(json.loads((fixture.output / 'manifest.json').read_text())) == {'retained.md'}
+
+
 def _update_resume_assignment(result):
     import shlex
     prefix = '[graphify update] Resume with: '
@@ -871,7 +928,11 @@ def test_mixed_empty_extraction_requires_completion(tmp_path, monkeypatch, platf
     merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture, reference=platform == 'claude')
     build = _deletion_code(platform, 'wrote = to_json(', fixture)
     replacement = [str(fixture.root / 'new.md')] if completed else []
-    _run(fixture, f'exec({detect!r})' + "\nassert result['new_total'] == 1\nPath('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': REPLACEMENTS}))".replace('REPLACEMENTS', repr(replacement)) + f'\nexec({merge!r})')
+    _run(fixture, f'exec({detect!r})' + "\nassert result['new_total'] == 1")
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': REPLACEMENTS}))".replace('REPLACEMENTS', repr(replacement)) + f'\nexec({merge!r})')
     if completed:
         _run(fixture, f'exec({build!r})')
     else:
@@ -893,6 +954,9 @@ def test_full_update_retry_detects_unpublished_deletion_and_finalizes(tmp_path, 
     assert _published_bytes(fixture.output) == before
     result = _update_shell(fixture, platform, 'result = detect_incremental(', token=fixture.token.path)
     assert result.returncode == 0 and 'Nothing to update' not in result.stdout, result.stdout + result.stderr
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
     _run(fixture, "assert json.loads(Path('.graphify_incremental.json').read_text())['deleted_files']\n"
          + reset + f'\nexec({merge!r})\nexec({build!r})')
     result = _update_shell(fixture, platform, '# Update cumulative cost tracker', token=fixture.token.path)
@@ -1035,6 +1099,114 @@ def test_prune_to_empty_invalidates_only_managed_prior_exports(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('destination', [None, 'custom.html', 'nested/architecture.txt'])
+@pytest.mark.parametrize('empty', [False, True])
+def test_empty_prune_invalidates_owned_callflow_destinations(tmp_path, monkeypatch, platform, destination, empty):
+    fixture = _baseline(tmp_path, monkeypatch)
+    sections = tmp_path / 'sections.json'
+    sections.write_text(json.dumps([{'id': 'rules', 'name': 'Rules', 'communities': [0]}]))
+    args = [os.sys.executable, '-m', 'graphify', 'export', 'callflow-html',
+            '--graph', str(fixture.output / 'graph.json'), '--sections', str(sections)]
+    if destination:
+        args += ['--output', str(fixture.output / destination)]
+    exported = subprocess.run(args, cwd=fixture.root, capture_output=True, text=True)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    fixture.baseline = tx.open_graph_snapshot(fixture.output / 'graph.json',
+                                              purpose='callflow-baseline', retain_artifacts=('*',))
+    flows = {name: payload for name, payload in fixture.baseline.artifacts.items()
+             if b'graphify callflow-html' in payload}
+    assert len(flows) == 1 and b'Permanent rule group' in next(iter(flows.values()))
+    if destination:
+        assert set(flows) == {destination}
+    else:
+        assert next(iter(flows)).endswith('-callflow.html')
+        assert 'graphify-callflow.html' not in flows
+    user = fixture.output / 'user-callflow.html'
+    user.write_bytes(next(iter(flows.values())))
+    external = tmp_path / 'external.html'
+    external.write_bytes(user.read_bytes())
+    for name in (('changed.md', 'retained.md') if empty else ('changed.md',)):
+        (fixture.root / name).unlink()
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    before = _published_bytes(fixture.output)
+    detect = _deletion_code(platform, 'result = detect_incremental(', fixture, reference=platform == 'claude')
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture, reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+    _run(fixture, f'exec({detect!r})')
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})')
+    assert _published_bytes(fixture.output) == before
+    assert {name: (fixture.output / name).read_bytes() for name in flows} == flows
+    _run(fixture, f'exec({build!r})\nexec({finish!r})\ntx.finalize_prepared_transaction()')
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='callflow-pruned', retain_artifacts=('*',))
+    for name, payload in flows.items():
+        if empty:
+            assert name not in current.artifacts, 'stale managed callflow was published'
+            assert not (fixture.output / name).exists()
+        else:
+            assert current.artifacts[name] == payload
+    assert user.read_bytes() == external.read_bytes() == next(iter(flows.values()))
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('failed_attempt', ['empty-prune', 'new-exports'])
+def test_retry_restores_complete_published_inventory(tmp_path, monkeypatch, platform, failed_attempt):
+    fixture = _baseline_with_exports(tmp_path, monkeypatch)
+    for name in ('changed.md', 'retained.md'):
+        (fixture.root / name).unlink()
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    detect = _deletion_code(platform, 'result = detect_incremental(', fixture, reference=platform == 'claude')
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture, reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    before = _published_bytes(fixture.output)
+    _run(fixture, f'exec({detect!r})')
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})\nexec({build!r})')
+    if failed_attempt == 'new-exports':
+        _run(fixture, """
+tx.commit_prepared_bytes(tx.current_transaction(), 'new/staged.html', b'failed attempt export')
+tx.commit_prepared_bytes(tx.current_transaction(), 'evidence.txt', b'failed attempt mutation')
+""")
+    assert _published_bytes(fixture.output) == before
+    (fixture.root / 'retained.md').write_text('Unrelated stable rule requires permanent reference.\n')
+    resumed = _update_shell(fixture, platform, 'result = detect_incremental(', token=fixture.token.path)
+    assert resumed.returncode == 0, resumed.stderr
+    # All published payloads, including optional exports and cost/evidence, are
+    # restored before the new attempt. Its detection files alone are fresh.
+    _run(fixture, """
+baseline = tx.open_update_baseline(tx.current_transaction())
+for name, payload in baseline.artifacts.items():
+    assert Path(name).read_bytes() == payload, 'retry lost published artifact: ' + name
+assert not Path('new/staged.html').exists(), 'retry retained failed export'
+assert not Path('.graphify_extract.json').exists(), 'retry retained failed extraction'
+assert not Path('.graphify_old.json').exists(), 'retry retained failed diff'
+""")
+    if platform == 'claude':
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})\nexec({build!r})')
+    finished = _update_shell(fixture, platform, '# Update cumulative cost tracker', token=fixture.token.path)
+    assert finished.returncode == 0, finished.stderr
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='retry-exports', retain_artifacts=('*',))
+    assert {n['id'] for n in current.data['nodes']} == {'retained', 'anchor'}
+    for name, payload in fixture.baseline.artifacts.items():
+        if name not in {'graph.json', 'manifest.json', 'cost.json', 'GRAPH_REPORT.md'}:
+            assert current.artifacts[name] == payload, name
+    assert 'new/staged.html' not in current.artifacts
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
 def test_retry_diff_keeps_published_predecessor_after_step9(tmp_path, monkeypatch, platform):
     fixture = _deletion_fixture(tmp_path, monkeypatch, platform_key=platform, empty=True)
     before = _published_bytes(fixture.output)
@@ -1085,6 +1257,8 @@ def test_retry_merge_discards_failed_attempt_semantics(tmp_path, monkeypatch, pl
     (fixture.root / 'changed.md').write_text('Mutable policy three. Extraction fails.\n')
     resumed = _update_shell(fixture, platform, 'result = detect_incremental(', token=fixture.token.path)
     assert resumed.returncode == 0, resumed.stderr
+    if platform == 'claude':
+        _run(fixture, f'exec({population!r})')
     _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
          + f'\nexec({merge!r})' + "\nassert next(n for n in merged_out['nodes'] if n['id'] == 'changed')['label'] == 'Mutable policy one', 'retry retained failed-attempt semantics'")
     _run(fixture, f'exec({build!r})')

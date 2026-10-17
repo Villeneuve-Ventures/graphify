@@ -31,7 +31,18 @@ from pathlib import Path
 
 from graphify.transaction import current_transaction, cancel_unpublished_transaction
 
-result = detect_incremental(Path('INPUT_PATH'), manifest_path=current_transaction().output / 'manifest.json')
+# Begin each attempt from the complete published inventory before detection.
+# Drop failed-attempt outputs and scratch inputs before collecting this batch.
+from graphify.transaction import commit_prepared_bytes, open_update_baseline, publication_plan_from_directory, unlink_prepared
+update_owner = current_transaction()
+update_baseline = open_update_baseline(update_owner)
+prepared_inventory = publication_plan_from_directory(Path.cwd()).payloads
+for name in sorted(set(prepared_inventory) - set(update_baseline.artifacts)):
+    unlink_prepared(update_owner, name)
+for name, payload in update_baseline.artifacts.items():
+    commit_prepared_bytes(update_owner, name, payload)
+
+result = detect_incremental(Path(current_transaction().root), manifest_path=current_transaction().output / 'manifest.json')
 new_total = result.get('new_total', 0)
 print(json.dumps(result, indent=2, ensure_ascii=False))
 Path('graphify-out/.graphify_incremental.json').write_text(json.dumps(result, ensure_ascii=False), encoding=\"utf-8\")
@@ -141,7 +152,7 @@ G = build_merge(
     graph_path='graphify-out/graph.json',
     prune_sources=prune,
     replacement_sources=new_extraction.get('replacement_sources', []),
-    root='INPUT_PATH',
+    root=update_owner.root,
     directed=IS_DIRECTED,
 )
 print(f'[graphify update] Merged: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges')
@@ -152,7 +163,7 @@ Path('graphify-out/.graphify_old.json').write_bytes(update_baseline.payload)
 # Write merged result back to .graphify_extract.json so Step 4 sees the full graph
 merged_out = {
     'accepted_merge': True,
-    'manifest_files': _stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')),
+    'manifest_files': _stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path(update_owner.root)),
     'complete_empty_prune': bool(prune) and incremental.get('new_total') == 0 and G.number_of_nodes() == 0,
     'nodes': [{'id': n, **d} for n, d in G.nodes(data=True)],
     'edges': [
@@ -189,6 +200,11 @@ if merged_out['complete_empty_prune']:
     from graphify.transaction import publication_plan_from_directory
     owned_exports = dict(update_baseline.artifacts)
     owned_exports.update(publication_plan_from_directory(prepared_output).payloads)
+    # Callflow supports project-derived names and arbitrary managed destinations.
+    # Select actual generated documents from the owned inventory, not a filename.
+    stale_exports.update(name for name, payload in owned_exports.items()
+                         if payload.lstrip().startswith(b'<!DOCTYPE html>')
+                         and b'graphify callflow-html</p>' in payload)
     for name, payload in owned_exports.items():
         if Path(name).name != '.graphify_obsidian_manifest.json':
             continue

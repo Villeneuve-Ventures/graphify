@@ -675,7 +675,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 from graphify.detect import save_manifest
-
+from graphify.transaction import current_transaction
 # Save manifest for --update
 detect = json.loads(Path('.graphify_detect.json').read_text(encoding=\"utf-8\"))
 # In --update mode, 'all_files' carries the full corpus; 'files' is the changed
@@ -684,7 +684,7 @@ detect = json.loads(Path('.graphify_detect.json').read_text(encoding=\"utf-8\"))
 # so the on-disk manifest is portable across clones/machines and a later --update
 # matches cached files instead of missing every one (#1417).
 extract = json.loads(Path('.graphify_extract.json').read_text(encoding=\"utf-8\"))
-save_manifest(extract['manifest_files'] if extract.get('accepted_merge') else detect.get('all_files', detect['files']), manifest_path='manifest.json', root='INPUT_PATH')
+save_manifest(extract['manifest_files'] if extract.get('accepted_merge') else detect.get('all_files', detect['files']), manifest_path='manifest.json', root=current_transaction().root if extract.get('accepted_merge') else 'INPUT_PATH')
 
 # Update cumulative cost tracker
 input_tok = extract.get('input_tokens', 0)

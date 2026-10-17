@@ -107,6 +107,14 @@ A deletion-only batch skips extraction and overwrites the current aggregate with
 empty records and `replacement_sources: []`. Prior aggregate/chunk files cannot
 establish a current replacement. The shared and inline update sections use the
 same exact prepared-token runner and private output namespace as the build.
+Detection, merge ownership and manifest stamping use that owner's canonical
+scan root. Relative inputs such as `.` and `repo`, including directory aliases,
+are resolved by the handoff before entering the prepared output.
+Before each detection attempt, the runbook restores every published artifact
+through the existing update baseline and removes private files absent from that
+inventory. This also resets prior cost/report/export mutations and extraction
+scratch files. Fresh detection and extraction then populate the new attempt;
+optional outputs omitted on retry retain their published bytes.
 Each merge attempt restores the published graph and manifest through the exact live
 update owner and existing preserved receipt. A failed attempt's staged graph
 cannot become retained input on retry. The graph-diff baseline uses that same
@@ -141,6 +149,9 @@ SVG, GraphML, Cypher, callflow/tree views and wiki/Obsidian files in the private
 output before optional exports run. Owned Obsidian manifests in the prior and
 prepared inventories select custom managed vault notes and canvases, including
 nested vaults and vaults at the output root; unrelated managed artifacts remain.
+Owned callflow documents are selected by their generated HTML signature, so
+project-derived default names and custom destinations beneath the managed output
+are covered. Unowned files with the same content are not selected.
 The existing publication plan applies those
 removals only when finalization succeeds; a failed attempt preserves the public
 exports. Regenerated outputs can join the new generation. Unmanaged public files
