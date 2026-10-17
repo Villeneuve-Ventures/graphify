@@ -5392,7 +5392,15 @@ def test_generated_runbooks_pass_root_to_save_manifest():
                 assert "root=" in ln, (
                     f"{path.relative_to(REPO_ROOT)}: save_manifest without root= (#1417): {ln.strip()!r}"
                 )
-    assert checked >= 4, f"expected save_manifest calls across the runbooks, found {checked}"
+    # #215 removes early update saves; each full-build Step 9 owns one save.
+    assert checked == 3, f"expected exactly the three final manifest saves, found {checked}"
+    for path in targets:
+        body = path.read_text(encoding="utf-8")
+        if '## For --update (incremental re-extraction)' in body:
+            update = body.split('## For --update (incremental re-extraction)', 1)[1]
+            update = update.split('## For --cluster-only', 1)[0]
+            assert 'save_manifest(' not in update
+            assert "'manifest_files': _stamped_manifest_files(" in update
 
 
 def test_devin_keeps_its_multi_field_frontmatter():
@@ -6208,10 +6216,12 @@ def test_rendered_powershell_handoff_executes_in_fresh_process(tmp_path, absolut
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="native POSIX transaction backend")
 @pytest.mark.parametrize("source", ["shared", "aider", "devin"])
 @pytest.mark.parametrize("directed", [False, True])
 @pytest.mark.parametrize("kind", ["edge", "hyperedge", "empty", "omitted"])
 def test_update_runbook_uses_explicit_replacement_and_preserves_accepted_facts(tmp_path, monkeypatch, source, directed, kind):
+    from graphify import transaction as tx
     out = tmp_path / "graphify-out"
     out.mkdir()
     retained = [{"id": "legacy_rule", "label": "Rule", "source_file": "docs/policy.md", "file_type": "document"},
@@ -6228,31 +6238,39 @@ def test_update_runbook_uses_explicit_replacement_and_preserves_accepted_facts(t
         fresh["hyperedges"] = [{"id": "new", "source_file": "evidence.md", "nodes": ["anchor"]}]
     elif kind == "omitted":
         fresh.pop("replacement_sources")
-    staging = tmp_path if source == "aider" else out
-    (staging / ".graphify_extract.json").write_text(json.dumps(fresh))
-    (staging / ".graphify_incremental.json").write_text(json.dumps({"deleted_files": [], "files": {}}))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("graphify.detect.save_manifest", lambda *a, **kw: None)
-    shared = (gen.FRAGMENTS_DIR / ("references/shared/update.md" if source == "shared"
-                                 else f"core/{source}.md")).read_text()
-    block = next(b for b in re.findall(r'```bash\n(.*?)\n```', shared, re.S) if 'G = build_merge(' in b)
-    argv = shlex.split(block)
-    code = argv[argv.index('-c') + 1].replace('INPUT_PATH', str(tmp_path)).replace('IS_DIRECTED', str(directed))
-    exec(compile(code, '<update-runbook>', 'exec'), {})
+    platform = gen.load_platforms()['claude' if source == 'shared' else source]
+    artifacts = gen.render(platform)
+    update = next(a.content for a in artifacts if a.path.endswith('/update.md')) if source == 'shared' else artifacts[0].content
+    def python_block(body, needle):
+        block = next(b for b in re.findall(r'```(?:bash|sh)\n(.*?)\n```', body, re.S) if needle in b)
+        assert 'run-prepared-token' in block
+        raw = block.rsplit('-c "\n', 1)[1].split('\n"', 1)[0]
+        return shlex.split('python -c "' + raw + '"')[-1].replace('INPUT_PATH', str(tmp_path)).replace('IS_DIRECTED', str(directed))
+    merge = python_block(update, '# Load new extraction and incremental state')
+    build = python_block(artifacts[0].content, 'G = (_graph_from_accepted_merge(').split('# Guard BEFORE any write:')[0]
+    baseline = tx.open_graph_snapshot(path, purpose='replacement-consumer-fixture')
+    owner = tx.begin_transaction('update', tmp_path, output=out, expected_snapshot=baseline)
+    token = tx.stage_transaction_handoff(owner)
+    expected_groups = {'old'} if kind == 'omitted' else {'new'} if kind == 'hyperedge' else set()
+    expected_node = {k: v for k, v in retained[0].items() if k != 'id'}
+    # Exercise the shipped private namespace and exact owner, including admission.
+    # Step 4's accepted merge must keep the established semantic identity.
+    tx.run_prepared_token(token.path, ['-c', f"""
+import json
+from pathlib import Path
+Path('.graphify_extract.json').write_text(json.dumps({fresh!r}))
+Path('.graphify_incremental.json').write_text(json.dumps({{'deleted_files': [], 'files': {{}}}}))
+Path('.graphify_detect.json').write_text('{{}}')
+exec({merge!r})
+exec({build!r})
+assert set(G) == {{'legacy_rule', 'anchor'}}
+assert G.nodes['legacy_rule'] == {expected_node!r}
+assert {{h['id'] for h in G.graph['hyperedges']}} == {expected_groups!r}
+assert G.has_edge('legacy_rule', 'anchor') is {kind == 'edge'!r}
+assert G.is_directed() is {directed!r}
+"""])
     assert path.read_bytes() == before
-    # Part C's accepted merge must not rekey an old semantic ID during Step 4.
-    core = (gen.FRAGMENTS_DIR / f"core/{'core' if source == 'shared' else source}.md").read_text()
-    block = next(b for b in re.findall(r'```bash\n(.*?)\n```', core, re.S) if 'G = (_graph_from_accepted_merge(' in b)
-    argv = shlex.split(block)
-    code = argv[argv.index('-c') + 1].split('# Guard BEFORE any write:')[0]
-    (staging / '.graphify_detect.json').write_text('{}')
-    namespace = {}
-    exec(compile(code.replace('INPUT_PATH', str(tmp_path)).replace('IS_DIRECTED', str(directed)), '<update-build>', 'exec'), namespace)
-    graph = namespace['G']
-    assert set(graph) == {'legacy_rule', 'anchor'}
-    assert graph.nodes['legacy_rule'] == {k: v for k, v in retained[0].items() if k != 'id'}
-    assert {h['id'] for h in graph.graph['hyperedges']} == ({'old'} if kind == 'omitted' else {'new'} if kind == 'hyperedge' else set())
-    assert graph.has_edge('legacy_rule', 'anchor') is (kind == 'edge')
 
 
 @pytest.mark.parametrize('source', ['shared', 'aider', 'devin'])
@@ -6304,3 +6322,50 @@ def test_monolith_ownership_migration_rejects_plumbing_drift(monkeypatch, platfo
         return artifacts
     monkeypatch.setattr(gen, 'render', drift)
     assert gen.monolith_roundtrip(platform)
+
+
+@pytest.mark.parametrize('platform_key', ['aider', 'devin'])
+@pytest.mark.parametrize('old,new', [
+    ("'complete_empty_prune': bool(prune) and incremental.get('new_total') == 0", "'complete_empty_prune': bool(prune)"),
+    ("'replacement_sources':[]", "'replacement_sources':['stale.md']"),
+    ("extract['manifest_files'] if extract.get('accepted_merge')", "detect['files'] if extract.get('accepted_merge')"),
+    ('" || exit $?\n', '"\n'),
+    ("Path('.graphify_old.json').unlink(missing_ok=True)", "pass  # baseline leaked"),
+    ("file=sys.stderr)\nprint(token", "file=sys.stdout)\nprint(token"),
+    ("if merged_out['complete_empty_prune']:", "if False:"),
+    ("open_update_baseline(update_owner)", "open_prepared_graph(update_owner, Path('graph.json'))"),
+    ("commit_prepared_bytes(update_owner, 'manifest.json', update_baseline.manifest_payload)", "pass  # staged manifest reused"),
+    ("owned_exports.update(publication_plan_from_directory(prepared_output).payloads)", "pass  # custom vaults omitted"),
+    ("root=update_owner.root", "root='INPUT_PATH'"),
+    ("for name, payload in update_baseline.artifacts.items():", "for name, payload in {}.items():"),
+    ("and b'graphify callflow-html</p>' in payload", "and False"),
+    ("root=current_transaction().root if extract.get('accepted_merge') else 'INPUT_PATH'", "root='INPUT_PATH'"),
+    ("current_transaction().output / 'manifest.json'", "'manifest.json'"),
+    ("cancel_unpublished_transaction(current_transaction())", "pass  # no-op leaked"),
+    ("live['\"'\"'kind'\"'\"'] != '\"'\"'update'\"'\"'", "False"),
+])
+def test_deletion_migration_refuses_unreviewed_consumer_drift(monkeypatch, platform_key, old, new):
+    platform = gen.load_platforms()[platform_key]
+    original = gen.render
+    def drift(selected):
+        artifacts = original(selected)
+        if selected.key == platform_key:
+            artifact = artifacts[0]
+            assert old in artifact.content
+            artifacts[0] = gen.RenderedArtifact(artifact.path, artifact.content.replace(old, new, 1))
+        return artifacts
+    monkeypatch.setattr(gen, 'render', drift)
+    assert gen.monolith_roundtrip(platform)
+
+
+@pytest.mark.parametrize('damage', ['missing-cluster', 'duplicate-update', 'duplicate-cluster'])
+def test_incremental_routing_refuses_ambiguous_fences(damage):
+    body = '## For --update (incremental re-extraction)\nbody\n## For --cluster-only\n'
+    if damage == 'missing-cluster':
+        body = body.replace('## For --cluster-only', '')
+    elif damage == 'duplicate-update':
+        body += '## For --update (incremental re-extraction)\n'
+    else:
+        body += '## For --cluster-only\n'
+    with pytest.raises(ValueError, match='incremental transaction fence'):
+        gen._route_incremental_transaction(body)

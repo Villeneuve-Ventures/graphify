@@ -347,7 +347,7 @@ detection  = json.loads(Path('graphify-out/.graphify_detect.json').read_text(enc
 G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, root='INPUT_PATH', directed=IS_DIRECTED))
 # Guard BEFORE any write: an empty extraction must not clobber a good graph.json /
 # GRAPH_REPORT.md / analysis sidecar. Check immediately after build (#1392).
-if G.number_of_nodes() == 0 and not extraction.get('complete_empty_replacement'):
+if G.number_of_nodes() == 0 and not (extraction.get('complete_empty_replacement') or extraction.get('accepted_merge') and extraction.get('complete_empty_prune')):
     print('ERROR: Graph is empty - extraction produced no nodes.')
     print('Possible causes: all files were skipped, binary-only corpus, or extraction failed.')
     raise SystemExit(1)
@@ -490,7 +490,7 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 from graphify.detect import save_manifest
-
+from graphify.transaction import current_transaction
 # Save manifest for --update
 detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text(encoding=\"utf-8\"))
 # In --update mode, 'all_files' carries the full corpus; 'files' is the changed
@@ -498,10 +498,10 @@ detect = json.loads(Path('graphify-out/.graphify_detect.json').read_text(encodin
 # root= relativizes the manifest keys to the scan root (same base as the build),
 # so the on-disk manifest is portable across clones/machines and a later --update
 # matches cached files instead of missing every one (#1417).
-save_manifest(detect.get('all_files') or detect['files'], root='INPUT_PATH')
+extract = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
+save_manifest(extract['manifest_files'] if extract.get('accepted_merge') else detect.get('all_files', detect['files']), manifest_path='graphify-out/manifest.json', root=current_transaction().root if extract.get('accepted_merge') else 'INPUT_PATH')
 
 # Update cumulative cost tracker
-extract = json.loads(Path('graphify-out/.graphify_extract.json').read_text(encoding=\"utf-8\"))
 input_tok = extract.get('input_tokens', 0)
 output_tok = extract.get('output_tokens', 0)
 
@@ -520,10 +520,10 @@ cost['runs'].append({
 cost['total_input_tokens'] += input_tok
 cost['total_output_tokens'] += output_tok
 cost_path.write_text(json.dumps(cost, indent=2, ensure_ascii=False), encoding=\"utf-8\")
-
+Path('graphify-out/.graphify_old.json').unlink(missing_ok=True)
 print(f'This run: {input_tok:,} input tokens, {output_tok:,} output tokens')
 print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_tokens\"]:,} output ({len(cost[\"runs\"])} runs)')
-"
+" || exit $?
 rm -f graphify-out/.graphify_detect.json graphify-out/.graphify_extract.json graphify-out/.graphify_ast.json graphify-out/.graphify_semantic.json graphify-out/.graphify_analysis.json
 find graphify-out -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null
 rm -f graphify-out/.needs_update 2>/dev/null || true

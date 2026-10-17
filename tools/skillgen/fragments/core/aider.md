@@ -438,7 +438,7 @@ detection  = json.loads(Path('.graphify_detect.json').read_text())
 G = (_graph_from_accepted_merge(extraction, directed=IS_DIRECTED) if extraction.get('accepted_merge') else build_from_json(extraction, directed=IS_DIRECTED))
 # Guard BEFORE any write: an empty extraction must not clobber a good graph.json /
 # GRAPH_REPORT.md / analysis sidecar. Check immediately after build (#1392).
-if G.number_of_nodes() == 0 and not extraction.get('complete_empty_replacement'):
+if G.number_of_nodes() == 0 and not (extraction.get('complete_empty_replacement') or extraction.get('accepted_merge') and extraction.get('complete_empty_prune')):
     print('ERROR: Graph is empty - extraction produced no nodes.')
     print('Possible causes: all files were skipped, binary-only corpus, or extraction failed.')
     raise SystemExit(1)
@@ -692,13 +692,14 @@ import json
 from pathlib import Path
 from datetime import datetime, timezone
 from graphify.detect import save_manifest
+from graphify.transaction import current_transaction
 
 # Save manifest for --update
 detect = json.loads(Path('.graphify_detect.json').read_text())
-save_manifest(detect['files'], root='INPUT_PATH')
+extract = json.loads(Path('.graphify_extract.json').read_text())
+save_manifest(extract['manifest_files'] if extract.get('accepted_merge') else detect.get('all_files', detect['files']), manifest_path='graphify-out/manifest.json', root=current_transaction().root if extract.get('accepted_merge') else 'INPUT_PATH')
 
 # Update cumulative cost tracker
-extract = json.loads(Path('.graphify_extract.json').read_text())
 input_tok = extract.get('input_tokens', 0)
 output_tok = extract.get('output_tokens', 0)
 
@@ -717,10 +718,11 @@ cost['runs'].append({
 cost['total_input_tokens'] += input_tok
 cost['total_output_tokens'] += output_tok
 cost_path.write_text(json.dumps(cost, indent=2))
+Path('graphify-out/.graphify_old.json').unlink(missing_ok=True)
 
 print(f'This run: {input_tok:,} input tokens, {output_tok:,} output tokens')
 print(f'All time: {cost[\"total_input_tokens\"]:,} input, {cost[\"total_output_tokens\"]:,} output ({len(cost[\"runs\"])} runs)')
-"
+" || exit $?
 rm -f .graphify_detect.json .graphify_extract.json .graphify_ast.json .graphify_semantic.json .graphify_analysis.json .graphify_labels.json; find . -maxdepth 1 -name '.graphify_chunk_*.json' -delete 2>/dev/null
 rm -f graphify-out/.needs_update 2>/dev/null || true
 ```
@@ -772,19 +774,39 @@ The graph is the map. Your job after the pipeline is to be the guide.
 
 Use when you've added or modified files since the last run. Only re-extracts changed files - saves tokens and time.
 
+The first detection block starts an update handoff against the published snapshot and prints a shell-quoted `export GRAPHIFY_TRANSACTION_TOKEN=...` resume assignment before doing extraction work. Save that printed assignment. For a retry in a fresh shell, prepend it to this detection block and run both in the same shell invocation; the pending operation requires that exact token. Detection always compares against the published manifest until finalization. If no changes remain, the block cancels its unpublished handoff and you must stop.
+
 ```bash
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import sys, json
 from graphify.detect import detect_incremental, save_manifest
 from pathlib import Path
 
-result = detect_incremental(Path('INPUT_PATH'))
+from graphify.transaction import current_transaction, cancel_unpublished_transaction
+
+# Begin each attempt from the complete published inventory before detection.
+# Drop failed-attempt outputs and scratch inputs before collecting this batch.
+from graphify.transaction import commit_prepared_bytes, open_update_baseline, publication_plan_from_directory, unlink_prepared
+update_owner = current_transaction()
+update_baseline = open_update_baseline(update_owner)
+prepared_inventory = publication_plan_from_directory(Path.cwd()).payloads
+for name in sorted(set(prepared_inventory) - set(update_baseline.artifacts)):
+    unlink_prepared(update_owner, name)
+for name, payload in update_baseline.artifacts.items():
+    commit_prepared_bytes(update_owner, name, payload)
+
+result = detect_incremental(Path(current_transaction().root), manifest_path=current_transaction().output / 'manifest.json')
 new_total = result.get('new_total', 0)
 print(json.dumps(result, indent=2))
 Path('.graphify_incremental.json').write_text(json.dumps(result))
+Path('.graphify_detect.json').write_text(json.dumps({
+    'files': result.get('new_files', {}), 'all_files': result.get('files', {}),
+    'total_files': new_total, 'total_words': result.get('total_words', 0), 'needs_graph': True,
+}))
 deleted = list(result.get('deleted_files', []))
 if new_total == 0 and not deleted:
     print('No files changed since last run. Nothing to update.')
+    cancel_unpublished_transaction(current_transaction())
     raise SystemExit(0)
 if deleted:
     print(f'{len(deleted)} deleted file(s) to prune.')
@@ -814,17 +836,15 @@ If `code_only` is True: print `[graphify update] Code-only changes detected - sk
 If `code_only` is False (any changed file is a doc/paper/image): run the full Steps 3A–3C pipeline as normal.
 
 
-If no new files exist (only deletions), create an empty extraction so the merge step can prune:
+If no new files exist (only deletions), skip Steps 3A–3C and overwrite the current extraction below, then go directly to merge. Do not reuse prior aggregates, chunks or completion declarations:
 
 ```bash
-if [ ! -f .graphify_extract.json ]; then
-    echo '[graphify update] Only deletions -- creating empty extraction for merge.'
-    "$(cat graphify-out/.graphify_python)" -E -P -B -c "
+echo '[graphify update] Only deletions -- creating empty extraction for merge.'
+"$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json
 from pathlib import Path
-Path('.graphify_extract.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
+Path('.graphify_extract.json').write_text(json.dumps({'nodes':[],'edges':[],'hyperedges':[],'replacement_sources':[],'input_tokens':0,'output_tokens':0}), encoding='utf-8')
 "
-fi
 ```
 
 
@@ -835,7 +855,17 @@ Then:
 import json
 from pathlib import Path
 from graphify.build import build_merge
-from graphify.detect import save_manifest
+from graphify.cli import _stamped_manifest_files
+
+# Every attempt starts from the published predecessor, never a failed staged graph.
+from graphify.transaction import commit_prepared_bytes, current_transaction, open_update_baseline, unlink_prepared
+update_owner = current_transaction()
+update_baseline = open_update_baseline(update_owner)
+commit_prepared_bytes(update_owner, 'graph.json', update_baseline.payload)
+if update_baseline.manifest_payload is None:
+    unlink_prepared(update_owner, 'manifest.json')
+else:
+    commit_prepared_bytes(update_owner, 'manifest.json', update_baseline.manifest_payload)
 
 # Load new extraction and incremental state
 new_extraction = json.loads(Path('.graphify_extract.json').read_text(encoding=\"utf-8\"))
@@ -861,14 +891,19 @@ G = build_merge(
     graph_path='graphify-out/graph.json',
     prune_sources=prune,
     replacement_sources=new_extraction.get('replacement_sources', []),
-    root='INPUT_PATH',
+    root=update_owner.root,
     directed=IS_DIRECTED,
 )
 print(f'[graphify update] Merged: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges')
 
+# Keep the graph-diff baseline in the same private namespace as the merge.
+Path('.graphify_old.json').write_bytes(update_baseline.payload)
+
 # Write merged result back to .graphify_extract.json so Step 4 sees the full graph
 merged_out = {
     'accepted_merge': True,
+    'manifest_files': _stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path(update_owner.root)),
+    'complete_empty_prune': bool(prune) and incremental.get('new_total') == 0 and G.number_of_nodes() == 0,
     'nodes': [{'id': n, **d} for n, d in G.nodes(data=True)],
     'edges': [
         # Explicit source/target last so they win over any stale attrs in d.
@@ -887,14 +922,53 @@ merged_out = {
 Path('.graphify_extract.json').write_text(json.dumps(merged_out, ensure_ascii=False), encoding=\"utf-8\")
 print(f'[graphify update] Merged extraction written ({len(merged_out[\"nodes\"])} nodes, {len(merged_out[\"edges\"])} edges)')
 
-# Save manifest so next --update diffs against today's state, not the
-# prior run's baseline (prevents ghost-node reports on subsequent updates).
-# root= matches the build_merge call above so the manifest keys stay relative to
-# the scan root — portable across clones/machines, so --update keeps matching
-# cached files instead of missing every one after a move (#1417).
-from graphify.cli import _stamped_manifest_files
-save_manifest(_stamped_manifest_files(incremental['files'], {'completed_sources': new_extraction.get('replacement_sources', [])}, Path('INPUT_PATH')), root='INPUT_PATH')
-print('[graphify update] Manifest saved.')
+# A validated deletion-only empty graph cannot retain old managed exports.
+# Invalidate in the private output before later optional export steps regenerate.
+if merged_out['complete_empty_prune']:
+    from graphify.transaction import current_transaction, unlink_prepared
+    update_owner = current_transaction()
+    stale_exports = {'graph.html', 'graph.svg', 'graph.graphml', 'cypher.txt',
+                     'graphify-callflow.html', 'GRAPH_TREE.html'}
+    prepared_output = Path('graphify-out/')
+    for directory in ('wiki', 'obsidian'):
+        stale_exports.update(path.relative_to(prepared_output).as_posix()
+                             for path in (prepared_output / directory).rglob('*') if path.is_file())
+    # Custom managed vaults are identified by owned manifests, including nested
+    # vaults and vaults rooted at the output itself. Only inventory members can
+    # be invalidated; user notes and external destinations are never selected.
+    from graphify.transaction import publication_plan_from_directory
+    owned_exports = dict(update_baseline.artifacts)
+    owned_exports.update(publication_plan_from_directory(prepared_output).payloads)
+    # Callflow supports project-derived names and arbitrary managed destinations.
+    # Select actual generated documents from the owned inventory, not a filename.
+    stale_exports.update(name for name, payload in owned_exports.items()
+                         if payload.lstrip().startswith(b'<!DOCTYPE html>')
+                         and b'graphify callflow-html</p>' in payload)
+    for name, payload in owned_exports.items():
+        if Path(name).name != '.graphify_obsidian_manifest.json':
+            continue
+        vault_manifest = json.loads(payload)
+        if (not isinstance(vault_manifest, dict) or set(vault_manifest) != {'files'}
+                or not isinstance(vault_manifest['files'], list)):
+            raise ValueError('malformed managed Obsidian manifest')
+        vault = Path(name).parent
+        for member in vault_manifest['files']:
+            if (not isinstance(member, str) or not member or Path(member).is_absolute()
+                    or any(part in ('', '.', '..') for part in member.split('/'))
+                    or chr(92) in member or chr(0) in member):
+                raise ValueError('unsafe managed Obsidian manifest member')
+            scoped = (vault / member).as_posix()
+            if scoped in owned_exports:
+                stale_exports.add(scoped)
+        stale_exports.add(name)
+        canvas = (vault / 'graph.canvas').as_posix()
+        if canvas in owned_exports:
+            stale_exports.add(canvas)
+    for name in sorted(stale_exports):
+        unlink_prepared(update_owner, name)
+
+# Step 9 saves the staged manifest only after graph/report generation succeeds.
+
 "
 ```
 
@@ -927,8 +1001,7 @@ if old_data:
 "
 ```
 
-Before the merge step, save the old graph: `cp graphify-out/graph.json .graphify_old.json`
-Clean up after: `rm -f .graphify_old.json`
+The merge stage saves the previous graph in its prepared output for the graph diff; do not copy or remove that baseline through public paths. Step 9 removes the private diff baseline before finalizing the prepared generation.
 
 ---
 

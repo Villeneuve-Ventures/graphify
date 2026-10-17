@@ -10484,6 +10484,100 @@ def open_external_graph_snapshot(
     )
 
 
+def open_update_baseline(transaction: Transaction) -> GraphSnapshot:
+    """Read the published predecessor for an exact live update owner.
+
+    A prepared graph can already contain a failed attempt. Admit the predecessor
+    through its preserved receipt instead of granting that staged graph authority
+    over the next merge. This does not publish or alter the prepared workspace.
+    """
+    from graphify.security import _max_graph_file_bytes
+
+    graph_limit = min(_max_graph_file_bytes(), 512 * 1024 * 1024)
+    with pin_output(transaction.output) as capability, _locked(capability):
+        _validate_authority(capability, transaction)
+        if transaction.kind != "update":
+            raise PendingTransactionError("published update baseline requires an update owner")
+        preserved = _read_predecessor_authority(capability)
+        if preserved is not None:
+            if (
+                preserved[3]["state"] != "preserved-complete"
+                or preserved[3]["successor_generation"] != transaction.generation
+                or "merge_admission" in preserved[3]
+            ):
+                raise PendingTransactionError("published update predecessor binding changed")
+            receipt, digest, artifacts = _validate_receipt_locked(
+                capability,
+                require_closed=True,
+                retain_artifacts=("*",),
+                retain_limits={"graph.json": graph_limit},
+                protocol_override=preserved[0],
+                drainer_override=preserved[1],
+            )
+            if digest != preserved[2] or receipt.get("graph_name", "graph.json") != "graph.json":
+                raise PendingTransactionError("published update receipt binding changed")
+            generation = int(receipt["generation"])
+        else:
+            # Receiptless legacy updates retain the same bounded admission used
+            # to seed their first prepared workspace. A missing certified
+            # predecessor must never fall back to this compatibility path.
+            if transaction.generation != 1 or _entry_stat(capability, RECEIPT_FILE) is not None:
+                raise PendingTransactionError("published update predecessor is missing")
+            budget = _LegacyInventoryBudget()
+            payload = _read_relative_bytes(capability, "graph.json", graph_limit)
+            budget.retain("graph.json", payload)
+            artifacts = {"graph.json": payload}
+            for name in MANAGED_PUBLICATION_PATHS:
+                if name in artifacts:
+                    continue
+                try:
+                    payload = _read_relative_bytes(
+                        capability, name, min(budget.remaining, _artifact_read_limit(name))
+                    )
+                except PendingTransactionError as exc:
+                    if isinstance(exc.__cause__, FileNotFoundError):
+                        continue
+                    raise
+                budget.retain(name, payload)
+                artifacts[name] = payload
+            artifacts.update(_legacy_owned_dynamic_inventory(
+                capability, budget=budget, existing_inventory=artifacts,
+            ))
+            generation = None
+        payload = artifacts.get("graph.json")
+        if payload is None or len(payload) > graph_limit:
+            raise PendingTransactionError("published update graph is missing or exceeds size limit")
+        try:
+            data = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PendingTransactionError("malformed published update graph") from exc
+        if not isinstance(data, dict):
+            raise PendingTransactionError("malformed published update graph")
+        metadata = data.get("graph")
+        watermark = metadata.get(GRAPH_WATERMARK_KEY) if isinstance(metadata, dict) else None
+        if preserved is not None:
+            watermark = _watermark(payload)
+            if (
+                watermark != receipt.get("watermark")
+                or watermark.get("state") != "active"
+                or watermark.get("generation") != generation
+            ):
+                raise PendingTransactionError("published update graph watermark changed")
+        elif watermark is not None:
+            raise PendingTransactionError("published update graph watermark changed")
+        return GraphSnapshot(
+            data=data,
+            generation=generation,
+            graph_path=capability.path / "graph.json",
+            payload=payload,
+            digest=hashlib.sha256(payload).hexdigest(),
+            manifest_payload=artifacts.get("manifest.json"),
+            artifacts=artifacts,
+            output_identity=capability.identity,
+            purpose="update-baseline",
+        )
+
+
 def open_prepared_graph(
     transaction: Transaction,
     path: Path | str,

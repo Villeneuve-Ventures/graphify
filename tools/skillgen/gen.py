@@ -1040,6 +1040,7 @@ def _render_saved_interpreter_commands(
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
     body = _route_full_build_transaction(body)
+    body = _route_incremental_transaction(body)
     if artifact_role == "reference":
         body = _route_reference_transaction(body, platform)
     return _render_advisory_pointer_prose(body)
@@ -1103,6 +1104,101 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
     return body
 
 
+def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) -> str:
+    """Run inline Python against the existing exact prepared capability."""
+    def route_bash(match: re.Match[str]) -> str:
+        block = match.group(1)
+        commands = (
+            '"$GRAPHIFY_PYTHON" -E -P -B -c',
+            '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
+        )
+        command = next((value for value in commands if value in block), None)
+        mutation_markers = (
+            "write_text(",
+            "write_bytes(",
+            "save_manifest(",
+            "to_json(",
+            "unlink(",
+            "> graphify-out/",
+        )
+        if command is None or (mutations_only and not any(
+            marker in block for marker in mutation_markers
+        )):
+            return match.group(0)
+        interpreter = (
+            '"$GRAPHIFY_PYTHON"'
+            if "$GRAPHIFY_PYTHON" in command
+            else '"$(cat graphify-out/.graphify_python)"'
+        )
+        runner = (
+            f"GRAPHIFY_TRANSACTION_TOKEN=$({interpreter} -E -P -B -c "
+            "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
+            "export GRAPHIFY_TRANSACTION_TOKEN; "
+            f"{interpreter} -E -P -B -m graphify.transaction run-prepared-token "
+            '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
+        )
+        routed_block = block.replace(command, "@@GRAPHIFY_RUNNER@@", 1)
+        routed_block = routed_block.replace("graphify-out/", "")
+        routed_block = routed_block.replace("@@GRAPHIFY_RUNNER@@", runner, 1)
+        return match.group(0).replace(block, routed_block, 1)
+
+    return re.sub(
+        r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
+    )
+
+
+def _route_incremental_transaction(body: str) -> str:
+    """Keep semantic-update preparation and reads in the same private output."""
+    marker = "## For --update (incremental re-extraction)"
+    if marker not in body:
+        return body
+    if body.count(marker) != 1 or body.count("## For --cluster-only") != 1:
+        raise ValueError("incremental transaction fence must have one update and cluster boundary")
+    start = body.index(marker)
+    end = body.index("## For --cluster-only", start)
+    section = _route_prepared_python_blocks(body[start:end], mutations_only=False)
+    # A semantic update starts here, rather than in the full-build-only Step 1.
+    # Retry only through a retained exact token; do not discover another owner.
+    handoff = r'''import os, shlex, sys
+from pathlib import Path
+from graphify.paths import GRAPHIFY_OUT
+from graphify.transaction import (PendingTransactionError, begin_transaction,
+    open_graph_snapshot, run_token, stage_transaction_handoff, transaction_status)
+root = Path(sys.argv[1]).resolve(strict=True)
+configured = Path(GRAPHIFY_OUT).expanduser()
+output = (configured if configured.is_absolute() else root / configured).resolve()
+try:
+    snapshot = open_graph_snapshot(output / 'graph.json', purpose='semantic-update')
+except PendingTransactionError:
+    token = os.environ.get('GRAPHIFY_TRANSACTION_TOKEN')
+    if not token:
+        raise PendingTransactionError('pending update requires its retained exact token')
+    live = transaction_status(output)['transaction']
+    if (not live or live['kind'] != 'update' or live['root'] != str(root)
+            or Path(token).absolute().parent != output):
+        raise PendingTransactionError('update handoff root, output or kind mismatch')
+    check = ("from pathlib import Path\n"
+             "from graphify.transaction import current_transaction, PendingTransactionError\n"
+             "tx = current_transaction()\n"
+             f"if tx.kind != 'update' or tx.root != {str(root)!r} or tx.output != Path({str(output)!r}):\n"
+             "    raise PendingTransactionError('update handoff root, output or kind mismatch')\n")
+    run_token(token, ['-c', check])
+else:
+    token = stage_transaction_handoff(begin_transaction('update', root,
+        output=output, expected_snapshot=snapshot)).path
+print('[graphify update] Resume with: export GRAPHIFY_TRANSACTION_TOKEN=' + shlex.quote(str(token)), file=sys.stderr)
+print(token, end='')
+'''
+    prefix = (
+        'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+        + shlex.quote(handoff) + ' INPUT_PATH) || exit $?\n'
+        'export GRAPHIFY_TRANSACTION_TOKEN\n'
+    )
+    first = section.index('GRAPHIFY_TRANSACTION_TOKEN=$(')
+    section = section[:first] + prefix + section[first:]
+    return body[:start] + section + body[end:]
+
+
 def _route_full_build_transaction(body: str) -> str:
     """Route full-build Python blocks through the exact live token runner."""
     starts = [match.start() for match in re.finditer(r"(?m)^### Step 2(?:\s|$)", body)]
@@ -1129,45 +1225,7 @@ def _route_full_build_transaction(body: str) -> str:
     if len(re.findall(r"(?m)^### Step 9(?:\s|$)", section)) != 1:
         raise ValueError("full-build transaction fence must have one Step 9 marker")
 
-    def route_bash(match: re.Match[str]) -> str:
-        block = match.group(1)
-        commands = (
-            '"$GRAPHIFY_PYTHON" -E -P -B -c',
-            '"$(cat graphify-out/.graphify_python)" -E -P -B -c',
-        )
-        command = next((value for value in commands if value in block), None)
-        mutation_markers = (
-            "write_text(",
-            "write_bytes(",
-            "save_manifest(",
-            "to_json(",
-            "unlink(",
-            "> graphify-out/",
-        )
-        if command is None or not any(
-            marker in block for marker in mutation_markers
-        ):
-            return match.group(0)
-        interpreter = (
-            '"$GRAPHIFY_PYTHON"'
-            if "$GRAPHIFY_PYTHON" in command
-            else '"$(cat graphify-out/.graphify_python)"'
-        )
-        runner = (
-            f"GRAPHIFY_TRANSACTION_TOKEN=$({interpreter} -E -P -B -c "
-            "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
-            "export GRAPHIFY_TRANSACTION_TOKEN; "
-            f"{interpreter} -E -P -B -m graphify.transaction run-prepared-token "
-            '"$GRAPHIFY_TRANSACTION_TOKEN" -- -c'
-        )
-        routed_block = block.replace(command, "@@GRAPHIFY_RUNNER@@", 1)
-        routed_block = routed_block.replace("graphify-out/", "")
-        routed_block = routed_block.replace("@@GRAPHIFY_RUNNER@@", runner, 1)
-        return match.group(0).replace(block, routed_block, 1)
-
-    section = re.sub(
-        r"```(?:bash|sh)\n(.*?)\n```", route_bash, section, flags=re.DOTALL
-    )
+    section = _route_prepared_python_blocks(section)
     export_prefix = (
         'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
         "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
@@ -2198,8 +2256,20 @@ def _normalise_issue131_monolith(text: str, platform_key: str) -> str:
     return comparable.replace("@@ISSUE131_OPERATION_GUARD@@", _POSIX_OPERATION_GUARD)
 
 
+def _normalise_issue215_monolith(text: str, platform_key: str) -> str:
+    """Undo only exact deletion-only consumer changes for the frozen-v8 audit."""
+    migrations = json.loads((SKILLGEN_DIR / "issue215-monolith-migration.json").read_text())
+    comparable = text.replace(_POSIX_OPERATION_GUARD, "@@ISSUE215_OPERATION_GUARD@@")
+    if any(comparable.count(hunk["after"]) != 1 for hunk in migrations[platform_key]):
+        return text
+    for hunk in migrations[platform_key]:
+        comparable = comparable.replace(hunk["after"], hunk["before"], 1)
+    return comparable.replace("@@ISSUE215_OPERATION_GUARD@@", _POSIX_OPERATION_GUARD)
+
+
 def _normalise_prepared_workspace_paths(text: str, platform_key: str) -> str:
     """Map only the reviewed line multiset back to pristine-v8 path spelling."""
+    text = _normalise_issue215_monolith(text, platform_key)
     text = _normalise_issue131_monolith(text, platform_key)
     normalised: list[str] = []
     remaining = _PREPARED_WORKSPACE_RELOCATIONS[platform_key].copy()
