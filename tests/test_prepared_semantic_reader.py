@@ -1779,3 +1779,154 @@ def test_update_baseline_applies_graph_limit_before_payload_read(tmp_path, monke
         _run(fixture, 'tx.open_update_baseline(tx.current_transaction())')
     assert seen == [min(cap, 512 * 1024 * 1024)]
     assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('preserved', [False, True])
+@pytest.mark.parametrize('deleted', [False, True])
+@pytest.mark.parametrize('separate', [False, True])
+def test_missing_completed_drainer_update_consumers(tmp_path, monkeypatch, platform, preserved, deleted, separate):
+    fixture = _baseline(tmp_path, monkeypatch, separate=separate)
+    (fixture.output / tx.DRAINER_FILE).unlink()
+    if not preserved:
+        (fixture.output / tx.PREDECESSOR_FILE).unlink(missing_ok=True)
+    if deleted:
+        (fixture.root / 'changed.md').unlink()
+    before = _published_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='drainer'):
+        tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='ordinary-reader')
+    result = _update_shell(fixture, platform, 'result = detect_incremental(')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _published_bytes(fixture.output) == before
+    if deleted:
+        _, token = _update_resume_assignment(result)
+        fixture.token = SimpleNamespace(path=token)
+        if platform == 'claude':
+            population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+            _run(fixture, f'exec({population!r})')
+        merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture,
+                               reference=platform == 'claude')
+        build = _deletion_code(platform, 'wrote = to_json(', fixture)
+        finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+        _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+             + f'\nexec({merge!r})\nexec({build!r})')
+        assert _published_bytes(fixture.output) == before
+        _run(fixture, f'exec({finish!r})\ntx.finalize_prepared_transaction()')
+    else:
+        assert 'Nothing to update' in result.stdout + result.stderr
+        assert tx.transaction_status(fixture.output)['transaction'] is None
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='recovered-update')
+    assert current.generation == fixture.baseline.generation + int(deleted)
+    assert {n['id'] for n in current.data['nodes']} == ({'retained', 'anchor'} if deleted else {'changed', 'retained', 'anchor'})
+    if deleted:
+        assert set(json.loads((fixture.output / 'manifest.json').read_bytes())) == {'retained.md'}
+    else:
+        assert _published_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('damage', ['graph', 'manifest', 'receipt', 'protocol', 'watermark', 'predecessor'])
+def test_missing_completed_drainer_refuses_corrupt_admission(tmp_path, monkeypatch, platform, damage):
+    fixture = _baseline(tmp_path, monkeypatch)
+    (fixture.output / tx.DRAINER_FILE).unlink()
+    (fixture.output / tx.PREDECESSOR_FILE).unlink(missing_ok=True)
+    name = {'graph': 'graph.json', 'manifest': 'manifest.json', 'receipt': tx.RECEIPT_FILE,
+            'protocol': tx.PROTOCOL_FILE, 'watermark': 'graph.json', 'predecessor': tx.PREDECESSOR_FILE}[damage]
+    path = fixture.output / name
+    if damage == 'predecessor':
+        path.write_text('{}')
+    elif damage == 'watermark':
+        data = json.loads(path.read_bytes())
+        data['graph'][tx.GRAPH_WATERMARK_KEY]['generation'] += 1
+        path.write_text(json.dumps(data))
+    else:
+        path.write_bytes(path.read_bytes() + b' ')
+        if damage == 'protocol':
+            data = json.loads(path.read_bytes())
+            data['state'] = 'INCOMPLETE'
+            path.write_text(json.dumps(data))
+    before = {str(p.relative_to(fixture.output)): p.read_bytes()
+              for p in fixture.output.rglob('*') if p.is_file()}
+    result = _update_shell(fixture, platform, 'result = detect_incremental(')
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert {str(p.relative_to(fixture.output)): p.read_bytes()
+            for p in fixture.output.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('damage', ['graph', 'receipt-identity', 'drainer', 'live'])
+def test_missing_completed_drainer_snapshot_is_revalidated_before_begin(tmp_path, monkeypatch, damage):
+    fixture = _baseline(tmp_path, monkeypatch)
+    drainer = (fixture.output / tx.DRAINER_FILE).read_bytes()
+    (fixture.output / tx.DRAINER_FILE).unlink()
+    snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='semantic-update')
+    if damage == 'graph':
+        (fixture.output / 'graph.json').write_text('{}')
+    elif damage == 'receipt-identity':
+        receipt = fixture.output / tx.RECEIPT_FILE
+        temporary = fixture.output / 'replacement-receipt'
+        temporary.write_bytes(receipt.read_bytes())
+        temporary.replace(receipt)
+    elif damage == 'drainer':
+        data = json.loads(drainer)
+        data['launch_nonce'] = '0' * 32
+        (fixture.output / tx.DRAINER_FILE).write_text(json.dumps(data))
+    else:
+        (fixture.output / tx.TRANSACTION_FILE).write_text('{}')
+    before = {str(p.relative_to(fixture.output)): p.read_bytes()
+              for p in fixture.output.rglob('*') if p.is_file()}
+    with pytest.raises(tx.PendingTransactionError):
+        tx.begin_transaction('update', fixture.root, output=fixture.output, expected_snapshot=snapshot)
+    assert {str(p.relative_to(fixture.output)): p.read_bytes()
+            for p in fixture.output.rglob('*') if p.is_file()} == before
+
+
+def test_missing_completed_drainer_native_update_preserves_baseline(tmp_path, monkeypatch):
+    fixture = _baseline(tmp_path, monkeypatch)
+    (fixture.output / tx.DRAINER_FILE).unlink()
+    (fixture.output / tx.PREDECESSOR_FILE).unlink(missing_ok=True)
+    before = _published_bytes(fixture.output)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output)
+    fixture.token = tx.stage_transaction_handoff(owner)
+    _run(fixture, """
+baseline = tx.open_update_baseline(tx.current_transaction())
+assert baseline.generation == 1
+assert baseline.payload == (output / 'graph.json').read_bytes()
+assert baseline.manifest_payload == (output / 'manifest.json').read_bytes()
+tx.cancel_unpublished_transaction(tx.current_transaction())
+""")
+    assert _published_bytes(fixture.output) == before
+    assert tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='ordinary-reader').generation == 1
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_oversized_semantic_update_snapshot_refuses_before_handoff(tmp_path, monkeypatch, platform, legacy):
+    import shlex
+    import sys
+    from dataclasses import replace
+    fixture = _baseline(tmp_path, monkeypatch)
+    if legacy:
+        data = json.loads((fixture.output / 'graph.json').read_bytes())
+        data['graph'].pop(tx.GRAPH_WATERMARK_KEY)
+        (fixture.output / 'graph.json').write_text(json.dumps(data))
+        for name in (tx.PROTOCOL_FILE, tx.RECEIPT_FILE, tx.DRAINER_FILE, tx.PREDECESSOR_FILE):
+            (fixture.output / name).unlink(missing_ok=True)
+        fixture.baseline = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='legacy-size')
+    class Oversize(bytes):
+        def __len__(self):
+            return 512 * 1024 * 1024 + 1
+    snapshot = replace(fixture.baseline, payload=Oversize(fixture.baseline.payload))
+    block, _ = _deletion_stage(platform, 'result = detect_incremental(', reference=platform == 'claude')
+    command = block[block.index('GRAPHIFY_TRANSACTION_TOKEN=$(') + len('GRAPHIFY_TRANSACTION_TOKEN=$('):]
+    handoff = shlex.split(command[:command.index(' INPUT_PATH)')])[5]
+    assert handoff.startswith('import os, shlex, sys')
+    # A size-only double avoids allocating >512MiB; execute actual generated
+    # handoff code while keeping native output/ownership checks in place.
+    monkeypatch.setattr(tx, 'open_graph_snapshot', lambda *a, **k: snapshot)
+    monkeypatch.setattr(sys, 'argv', ['-c', str(fixture.root)])
+    before = {str(p.relative_to(fixture.output)): p.read_bytes()
+              for p in fixture.output.rglob('*') if p.is_file()}
+    with pytest.raises(tx.PendingTransactionError, match='prepared read limit before handoff'):
+        exec(handoff, {})
+    assert {str(p.relative_to(fixture.output)): p.read_bytes()
+            for p in fixture.output.rglob('*') if p.is_file()} == before

@@ -6342,6 +6342,7 @@ def test_monolith_ownership_migration_rejects_plumbing_drift(monkeypatch, platfo
     ("for name, payload in update_baseline.artifacts.items():", "for name, payload in {}.items():"),
     ("and b'graphify callflow-html</p>' in payload", "and False"),
     ("and b'graphify tree viewer</title>' in payload", "and False"),
+    ("len(snapshot.payload) > 512 * 1024 * 1024", "False"),
     ("snapshot.generation is None", "False"),
     ("snapshot.coordination_absent", "True"),
     ("_validate_pristine_or_legacy_graph(capability)", "pass  # unchecked legacy"),

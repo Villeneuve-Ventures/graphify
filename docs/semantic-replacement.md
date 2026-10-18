@@ -137,6 +137,18 @@ unpublished handoff when it has a certified predecessor. A valid, uncoordinated
 receiptless legacy no-op is detected before opening a transaction and leaves the published graph
 and manifest unchanged; detection may warm its normal stat cache. A changed
 legacy corpus still starts its first update generation.
+The semantic entry may admit a completed receipt whose drainer file is missing,
+using the existing missing-drainer validation. Begin revalidates the same snapshot
+and preserves a receipt-bound complete predecessor before taking ownership. A
+no-op restores that validated completed drainer; graph and manifest bytes remain
+unchanged. Other readers and partial or live ownership states keep their existing
+refusals. This does not introduce a new recovery record or protocol.
+
+Prepared semantic updates retain their existing 512 MiB graph-read bound, even
+when `GRAPHIFY_MAX_GRAPH_BYTES` is raised for ordinary readers. The entry refuses
+an oversized admitted graph before creating a handoff, leaving publication and
+ownership bytes unchanged. The configured lower graph cap still applies first.
+
 Detection reads the published manifest even after Step 9
 has staged a new one, so a retry still sees every unpublished deletion.
 

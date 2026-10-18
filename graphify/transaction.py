@@ -4444,6 +4444,31 @@ def begin_transaction(
                         merge_supersession=merge_supersession,
                     )
                 generation = int(receipt["generation"]) + 1
+                if current_drainer is None and kind == "update":
+                    # Missing-drainer admission already validated the complete
+                    # receipt. Preserve its closed predecessor before replacing
+                    # the protocol, using the existing cancellation record.
+                    preserved = _read_predecessor_authority(capability)
+                    if preserved is not None and preserved[3]["state"] != "preserved-complete":
+                        raise PendingTransactionError("predecessor cancellation requires recovery")
+                    if (preserved is not None and preserved[0] == prior_protocol
+                            and preserved[2] == predecessor_receipt):
+                        completed_drainer = preserved[1]
+                    else:
+                        completed_drainer = _drainer_state_from_json(capability, {
+                            "schema": 1, "protocol_epoch": 1,
+                            **receipt["drainer"], "state": "complete",
+                            "receipt_digest": predecessor_receipt, "acked_ids": [],
+                            "queue_epoch": receipt["generation"],
+                            "output_identity": capability.identity.json(),
+                            "successor_generation": generation,
+                            "transaction_id": receipt["transaction_id"],
+                            "token_identity": prior_protocol["token_identity"], "inflight": None,
+                        })
+                    _write_predecessor_authority(
+                        capability, prior_protocol, completed_drainer,
+                        str(predecessor_receipt),
+                    )
                 if current_drainer is not None and current_drainer[1] == "complete":
                     if predecessor_receipt is None:
                         raise PendingTransactionError(
@@ -9607,6 +9632,11 @@ def _validate_expected_snapshot_locked(
             graph_payload=current_graph,
             retain_artifacts=(),
             admitted_receipt_digest=snapshot.receipt_digest if auxiliary_read else None,
+            allow_missing_completed_drainer=(
+                not auxiliary_read and snapshot.purpose == "semantic-update"
+                and _entry_stat(capability, DRAINER_FILE) is None
+                and _entry_stat(capability, TRANSACTION_FILE) is None
+            ),
         )
         selector = tuple(
             sorted(
@@ -10044,6 +10074,11 @@ def open_graph_snapshot(
             graph_payload=payload,
             retain_artifacts=("manifest.json", *retain),
             retain_limits=retain_limits,
+            allow_missing_completed_drainer=(
+                purpose == "semantic-update"
+                and _entry_stat(capability, DRAINER_FILE) is None
+                and _entry_stat(capability, TRANSACTION_FILE) is None
+            ),
         )
         if (
             receipt.get("generation") != generation

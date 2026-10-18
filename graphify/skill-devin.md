@@ -1038,6 +1038,8 @@ except PendingTransactionError:
              "    raise PendingTransactionError('"'"'update handoff root, output or kind mismatch'"'"')\n")
     run_token(token, ['"'"'-c'"'"', check])
 else:
+    if len(snapshot.payload) > 512 * 1024 * 1024:
+        raise PendingTransactionError('"'"'semantic update graph exceeds prepared read limit before handoff'"'"')
     if snapshot.generation is None and snapshot.coordination_absent:
         # Retain the existing begin admission without creating a generation.
         with pin_output(output) as capability, _locked(capability):
