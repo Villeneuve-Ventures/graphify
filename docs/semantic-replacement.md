@@ -156,3 +156,10 @@ The existing publication plan applies those
 removals only when finalization succeeds; a failed attempt preserves the public
 exports. Regenerated outputs can join the new generation. Unmanaged public files
 and external export destinations remain outside this invalidation.
+
+When `--wiki` is requested, prepared runbooks skip that optional export for an
+accepted, node-empty `complete_empty_prune` result owned by an update transaction.
+The invalidated managed wiki stays absent, and Step 9 can finalize the deletion.
+Nonempty wiki exports still run. Ordinary empty-community or stale-community
+refusals in the CLI and `to_wiki` are unchanged; a flag alone, a successful empty
+replacement or a full-build owner does not establish this deletion-only skip.

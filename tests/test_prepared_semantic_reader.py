@@ -1015,7 +1015,7 @@ def test_printed_update_handoff_resumes_in_a_fresh_shell(tmp_path, monkeypatch, 
     assert json.loads((fixture.output / 'manifest.json').read_text()) == {}
 
 
-def _baseline_with_exports(tmp_path, monkeypatch):
+def _baseline_with_exports(tmp_path, monkeypatch, *, directed=False):
     original = tx.finalize_prepared_transaction
     def finalize_with_exports():
         from graphify.export import to_graphml, to_html, to_obsidian, to_canvas
@@ -1034,10 +1034,138 @@ def _baseline_with_exports(tmp_path, monkeypatch):
         original()
     with monkeypatch.context() as patch:
         patch.setattr(tx, 'finalize_prepared_transaction', finalize_with_exports)
-        fixture = _baseline(tmp_path, monkeypatch)
+        fixture = _baseline(tmp_path, monkeypatch, directed=directed)
     fixture.baseline = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='prior-exports',
                                               retain_artifacts=('*',))
     return fixture
+
+
+def _run_rendered_wiki(fixture, platform, *, directed=False):
+    import re
+    from tools.skillgen import gen
+    artifacts = gen.render(gen.load_platforms()[platform])
+    artifact = next((a for a in artifacts if a.path.endswith('/references/exports.md')), artifacts[0])
+    section = artifact.content.split('### Step 6b - Wiki', 1)[1].split('### Step 7 -', 1)[0]
+    block = re.findall(r'```(?:bash|sh)\n(.*?)\n```', section, re.S)[0]
+    assert 'run-prepared-token' in block
+    block = block.replace(gen._POSIX_OPERATION_GUARD, '').replace('INPUT_PATH', str(fixture.root))
+    block = block.replace('IS_DIRECTED', str(directed))
+    return subprocess.run(['bash', '-c', block], cwd=fixture.root, capture_output=True, text=True,
+                          env={**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable,
+                               'GRAPHIFY_OUT': str(fixture.output),
+                               'GRAPHIFY_TRANSACTION_TOKEN': str(fixture.token.path)})
+
+
+@pytest.mark.parametrize('platform', ['claude', 'codex', 'opencode', 'devin'])
+@pytest.mark.parametrize('empty', [False, True], ids=['foreign-retained', 'prune-to-empty'])
+@pytest.mark.parametrize('directed', [False, True])
+def test_rendered_wiki_flag_allows_deletion_publication(tmp_path, monkeypatch, platform, empty, directed):
+    fixture = _baseline_with_exports(tmp_path, monkeypatch, directed=directed)
+    wiki_before = {n: b for n, b in fixture.baseline.artifacts.items() if n.startswith('wiki/')}
+    user_note = fixture.output / 'wiki/user-note.md'
+    user_note.write_text('User-owned wiki note.\n')
+    for name in (('changed.md', 'retained.md') if empty else ('changed.md',)):
+        (fixture.root / name).unlink()
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    common = 'devin' if platform == 'devin' else 'claude'
+    detect = _deletion_code(common, 'result = detect_incremental(', fixture, reference=common == 'claude')
+    merge = _deletion_code(common, '# Load new extraction and incremental state', fixture,
+                           reference=common == 'claude', directed=directed)
+    build = _deletion_code(common, 'wrote = to_json(', fixture, directed=directed)
+    finish = _deletion_code(common, '# Update cumulative cost tracker', fixture)
+    before = _published_bytes(fixture.output)
+    _run(fixture, f'exec({detect!r})')
+    if common == 'claude':
+        population = _deletion_code(common, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})\nexec({build!r})')
+    exported = _run_rendered_wiki(fixture, platform, directed=directed)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    if empty:
+        assert 'Skipping wiki export for accepted empty prune' in exported.stdout
+    else:
+        assert 'Skipping wiki export' not in exported.stdout
+        assert 'articles written' in exported.stdout
+    assert _published_bytes(fixture.output) == before
+    assert {n: (fixture.output / n).read_bytes() for n in wiki_before} == wiki_before
+    # Stop before finalization: optional export success must not advance public
+    # graph/manifest or remove public wiki files early.
+    _run(fixture, f'exec({finish!r})\ntx.finalize_prepared_transaction()')
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='wiki-update', retain_artifacts=('*',))
+    assert {n['id'] for n in current.data['nodes']} == (set() if empty else {'retained', 'anchor'})
+    assert current.data['directed'] == directed
+    if empty:
+        assert not any(n.startswith('wiki/') for n in current.artifacts)
+        assert not any((fixture.output / n).exists() for n in wiki_before)
+    else:
+        assert 'wiki/index.md' in current.artifacts
+        assert b'2 nodes' in current.artifacts['wiki/index.md']
+    assert user_note.read_text() == 'User-owned wiki note.\n'
+
+
+@pytest.mark.parametrize('platform', ['claude', 'devin'])
+@pytest.mark.parametrize('state', ['ordinary-empty', 'replacement-empty', 'flag-only',
+                                  'nonempty-flag', 'full-owner', 'nonempty-no-communities'])
+def test_wiki_skip_keeps_other_empty_community_refusals(tmp_path, monkeypatch, platform, state):
+    fixture = _baseline_with_exports(tmp_path, monkeypatch)
+    fixture.owner = tx.begin_transaction('full' if state == 'full-owner' else 'update',
+                                         fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    extraction = {'accepted_merge': state != 'flag-only',
+                  'complete_empty_prune': state not in {'ordinary-empty', 'replacement-empty', 'nonempty-no-communities'},
+                  'complete_empty_replacement': state == 'replacement-empty',
+                  'nodes': (_chunk('one')['nodes'] if state == 'nonempty-no-communities' else
+                            [_chunk('one')['nodes'][0]] if state == 'nonempty-flag' else []),
+                  'edges': [], 'hyperedges': []}
+    _run(fixture, f"""
+from graphify.export import to_json
+from graphify.build import build_from_json
+graph = build_from_json({_chunk('one')!r} if {state == 'nonempty-no-communities'!r} else {{'nodes': [], 'edges': []}})
+# Deliberately construct the isolated empty wiki-refusal fixture, without
+# invoking the separate shrink guard under test in the export regressions.
+assert to_json(graph, {{}}, 'graph.json', force=True)
+tx.commit_prepared_bytes(tx.current_transaction(), 'manifest.json', {fixture.baseline.manifest_payload!r})
+Path('.graphify_extract.json').write_text(json.dumps({extraction!r}))
+Path('.graphify_analysis.json').write_text(json.dumps({{'communities': {{}}, 'cohesion': {{}}}}))
+Path('.graphify_labels.json').write_text('{{}}')
+tx.commit_prepared_bytes(tx.current_transaction(), 'wiki/keep.md', b'private wiki stays intact')
+""")
+    before = _published_bytes(fixture.output)
+    result = _run_rendered_wiki(fixture, platform)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert 'Skipping wiki export' not in result.stdout
+    assert 'empty' in result.stderr or 'stale' in result.stderr
+    assert _published_bytes(fixture.output) == before
+    _run(fixture, "assert Path('wiki/keep.md').read_bytes() == b'private wiki stays intact'")
+
+
+@pytest.mark.parametrize('platform', ['claude', 'devin'])
+def test_rendered_wiki_keeps_nonempty_full_build_export(tmp_path, monkeypatch, platform):
+    fixture = _baseline_with_exports(tmp_path, monkeypatch)
+    fixture.owner = tx.begin_transaction('full', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    _run(fixture, f"""
+from graphify.export import to_json
+from graphify.build import build_from_json
+extraction = {_chunk('one')!r}
+graph = build_from_json(extraction)
+assert to_json(graph, {{0: list(graph.nodes)}}, 'graph.json')
+tx.commit_prepared_bytes(tx.current_transaction(), 'manifest.json', {fixture.baseline.manifest_payload!r})
+Path('.graphify_extract.json').write_text(json.dumps(extraction))
+Path('.graphify_analysis.json').write_text(json.dumps({{'communities': {{'0': list(graph.nodes)}}, 'cohesion': {{}}}}))
+Path('.graphify_labels.json').write_text('{{}}')
+""")
+    before = _published_bytes(fixture.output)
+    exported = _run_rendered_wiki(fixture, platform)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    assert 'articles written' in exported.stdout and 'Skipping wiki export' not in exported.stdout
+    assert _published_bytes(fixture.output) == before
+    _run(fixture, "assert b'3 nodes' in Path('wiki/index.md').read_bytes()")
 
 
 @pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])

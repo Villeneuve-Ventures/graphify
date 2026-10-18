@@ -681,8 +681,13 @@ from graphify.build import build_from_json, _graph_from_accepted_merge
 from graphify.wiki import to_wiki
 from graphify.analyze import god_nodes
 from pathlib import Path
+from graphify.transaction import current_transaction
 
 extraction = json.loads(Path('graphify-out/.graphify_extract.json').read_text())
+if (extraction.get('accepted_merge') and extraction.get('complete_empty_prune')
+        and extraction.get('nodes') == [] and current_transaction().kind == 'update'):
+    print('[graphify update] Skipping wiki export for accepted empty prune.')
+    raise SystemExit(0)
 analysis   = json.loads(Path('graphify-out/.graphify_analysis.json').read_text())
 labels_raw = json.loads(Path('graphify-out/.graphify_labels.json').read_text()) if Path('graphify-out/.graphify_labels.json').exists() else {}
 

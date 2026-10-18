@@ -12,6 +12,9 @@ transaction. Readers (including MCP) reject pending, receiptless, stale, or
 **Only run this step if `--wiki` was explicitly given in the original command.**
 
 Run this before Step 9 (cleanup) so `.graphify_labels.json` is still available.
+For an accepted deletion-only prune-to-empty result, the prepared wiki command
+skips export and leaves the invalidated managed wiki absent. Continue to Step 9
+to finalize the deletion. Other wiki exports retain their normal validation.
 
 ```@@GRAPHIFY_SHELL@@
 @@GRAPHIFY_GUARD@@

@@ -1048,6 +1048,30 @@ def _render_saved_interpreter_commands(
 
 def _route_reference_transaction(body: str, platform: Platform) -> str:
     """Route pre-finalization reference writes through the prepared capability."""
+    def export_arguments(subcommand: str) -> str:
+        if subcommand != "wiki":
+            return f"-m graphify export {subcommand}"
+        code = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "from graphify.transaction import current_transaction\n"
+            "path = Path('.graphify_extract.json')\n"
+            "extraction = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}\n"
+            "if (extraction.get('accepted_merge') and extraction.get('complete_empty_prune')\n"
+            "        and extraction.get('nodes') == [] and current_transaction().kind == 'update'):\n"
+            "    print('[graphify update] Skipping wiki export for accepted empty prune.')\n"
+            "else:\n"
+            "    from graphify.cli import dispatch_command\n"
+            "    sys.argv = ['graphify', 'export', 'wiki']\n"
+            "    dispatch_command('export')\n"
+        )
+        command = f"exec({code!r})"
+        quoted = (
+            "'" + command.replace("'", "''") + "'"
+            if platform.shell == "powershell" else shlex.quote(command)
+        )
+        return f"-c {quoted}"
+
     local_exports = r"(?:wiki|neo4j|falkordb|svg|graphml)(?![^\n]*--push)"
     if platform.shell == "powershell":
         body = re.sub(
@@ -1058,7 +1082,7 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
                 "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
                 "& $GraphifyPython -E -P -B -m graphify.transaction "
                 "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' "
-                f"-m graphify export {match.group(1)}"
+                f"{export_arguments(match.group(1))}"
             ),
             body,
         )
@@ -1071,7 +1095,7 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
                 "export GRAPHIFY_TRANSACTION_TOKEN; "
                 '"$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction '
                 'run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- '
-                f"-m graphify export {match.group(1)}"
+                f"{export_arguments(match.group(1))}"
             ),
             body,
         )
@@ -1119,6 +1143,7 @@ def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) 
             "save_manifest(",
             "to_json(",
             "unlink(",
+            "to_wiki(",
             "> graphify-out/",
         )
         if command is None or (mutations_only and not any(

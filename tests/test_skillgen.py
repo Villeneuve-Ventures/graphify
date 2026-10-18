@@ -1978,7 +1978,7 @@ def test_posix_path_shadow_flows_use_fresh_interpreter_and_ignore_pointer(tmp_pa
     ]
     write_flows = [
         _block_containing(refs["update.md"], "-m graphify update INPUT_PATH"),
-        _block_containing(refs["exports.md"], "-m graphify export wiki"),
+        _block_containing(refs["exports.md"], "Skipping wiki export for accepted empty prune"),
         _block_containing(refs["add-watch.md"], "-m graphify watch INPUT_PATH"),
         _block_containing(refs["exports.md"], "-m graphify.serve graphify-out/graph.json"),
         _block_containing(refs["hooks.md"], "-m graphify claude install"),
@@ -4838,7 +4838,7 @@ def test_powershell_path_shadow_flows_use_fresh_interpreter_not_pointer(tmp_path
         _block_containing(refs["query.md"], '-m graphify path "NODE_A"'),
         _block_containing(refs["query.md"], '-m graphify explain "NODE_NAME"'),
         _block_containing(refs["update.md"], "-m graphify update INPUT_PATH"),
-        _block_containing(refs["exports.md"], "-m graphify export wiki"),
+        _block_containing(refs["exports.md"], "Skipping wiki export for accepted empty prune"),
         _block_containing(refs["add-watch.md"], "-m graphify watch INPUT_PATH"),
         _block_containing(refs["exports.md"], "-m graphify.serve graphify-out/graph.json"),
         _block_containing(refs["hooks.md"], "-m graphify claude install"),
@@ -5831,7 +5831,9 @@ def test_split_references_route_pre_finalization_writes_through_prepared_runner(
             for _, block in _executable_blocks(exports)
             if "graphify.transaction run-prepared-token" in block
         ]
-        for name in ("wiki", "neo4j", "falkordb", "svg", "graphml"):
+        wiki = _block_containing(exports, 'Skipping wiki export for accepted empty prune')
+        assert "graphify.transaction run-prepared-token" in wiki
+        for name in ("neo4j", "falkordb", "svg", "graphml"):
             assert any(
                 f"-m graphify export {name}" in block for block in export_blocks
             )
@@ -6353,6 +6355,59 @@ def test_deletion_migration_refuses_unreviewed_consumer_drift(monkeypatch, platf
             artifact = artifacts[0]
             assert old in artifact.content
             artifacts[0] = gen.RenderedArtifact(artifact.path, artifact.content.replace(old, new, 1))
+        return artifacts
+    monkeypatch.setattr(gen, 'render', drift)
+    assert gen.monolith_roundtrip(platform)
+
+
+@pytest.mark.parametrize('platform_key', [key for key, platform in gen.load_platforms().items()
+                                         if platform.bucket != 'monolith'])
+def test_reference_wiki_skip_is_one_owned_python_argument(platform_key):
+    import ast
+    import shlex
+    platform = gen.load_platforms()[platform_key]
+    reference = next(a.content for a in gen.render(platform) if a.path.endswith('/references/exports.md'))
+    block = _block_containing(reference, 'Skipping wiki export for accepted empty prune')
+    line = next(line for line in block.splitlines()
+                if 'run-prepared-token' in line and 'Skipping wiki export' in line)
+    if platform.shell == 'powershell':
+        tail = line.split("$Env:GRAPHIFY_TRANSACTION_TOKEN '--' ", 1)[1]
+        match = re.fullmatch(r"-c '((?:[^']|'')*)'", tail)
+        assert match is not None, tail
+        arguments = ['-c', match.group(1).replace("''", "'")]
+    else:
+        arguments = shlex.split(line.rsplit('"$GRAPHIFY_TRANSACTION_TOKEN" -- ', 1)[1])
+    assert len(arguments) == 2 and arguments[0] == '-c'
+    outer = ast.parse(arguments[1]).body[0].value
+    assert isinstance(outer, ast.Call) and isinstance(outer.func, ast.Name) and outer.func.id == 'exec'
+    code = ast.literal_eval(outer.args[0])
+    compile(code, '<prepared-wiki-export>', 'exec')
+    assert "current_transaction().kind == 'update'" in code
+    assert "extraction.get('accepted_merge')" in code
+    assert "extraction.get('complete_empty_prune')" in code
+    assert "extraction.get('nodes') == []" in code
+    assert "dispatch_command('export')" in code
+
+
+@pytest.mark.parametrize('old,new', [
+    ("current_transaction().kind == 'update'", 'True'),
+    ("extraction.get('accepted_merge')", 'True'),
+    ("extraction.get('nodes') == []", 'True'),
+    ('run-prepared-token', 'run-token'),
+])
+def test_devin_wiki_migration_refuses_skip_or_owner_drift(monkeypatch, old, new):
+    platform = gen.load_platforms()['devin']
+    render = gen.render
+    def drift(selected):
+        artifacts = render(selected)
+        if selected.key == 'devin':
+            artifact = artifacts[0]
+            start = artifact.content.index('### Step 6b - Wiki')
+            end = artifact.content.index('### Step 7 -', start)
+            section = artifact.content[start:end]
+            assert old in section
+            artifacts[0] = gen.RenderedArtifact(artifact.path,
+                artifact.content[:start] + section.replace(old, new, 1) + artifact.content[end:])
         return artifacts
     monkeypatch.setattr(gen, 'render', drift)
     assert gen.monolith_roundtrip(platform)
