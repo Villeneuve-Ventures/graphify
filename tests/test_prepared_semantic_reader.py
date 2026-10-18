@@ -877,6 +877,115 @@ assert json.loads(Path('.graphify_incremental.json').read_text())['deleted_files
 
 
 @pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('change', ['no-op', 'modified', 'deleted'])
+@pytest.mark.parametrize('separate', [False, True])
+def test_receiptless_update_entry_preserves_noop_and_starts_changed_work(tmp_path, monkeypatch, platform, change, separate):
+    from graphify.build import build_from_json
+    from graphify.detect import save_manifest
+    from networkx.readwrite import json_graph
+    root = tmp_path / 'legacy-corpus'
+    root.mkdir()
+    monkeypatch.chdir(root)
+    (root / 'changed.md').write_text('Mutable policy one.\n')
+    (root / 'retained.md').write_text('Permanent reference.\n')
+    output = tmp_path / 'separate-output' if separate else root / 'graphify-out'
+    output.mkdir()
+    graph = build_from_json(_chunk('one'), root=root)
+    (output / 'graph.json').write_text(json.dumps(json_graph.node_link_data(graph, edges='links')))
+    save_manifest({'document': [str(root / 'changed.md'), str(root / 'retained.md')]},
+                  manifest_path=output / 'manifest.json', root=root)
+    if change == 'modified':
+        (root / 'changed.md').write_text('Mutable policy two with different requirements.\n')
+    elif change == 'deleted':
+        (root / 'changed.md').unlink()
+    fixture = SimpleNamespace(root=root, output=output)
+    before = {str(path.relative_to(output)): path.read_bytes()
+              for path in output.rglob('*') if path.is_file()}
+    baseline = tx.open_graph_snapshot(output / 'graph.json', purpose='legacy-entry')
+    assert baseline.generation is None
+    result = _update_shell(fixture, platform, 'result = detect_incremental(')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _published_bytes(output) == {'graph.json': before['graph.json'],
+                                        'manifest.json': before['manifest.json'], tx.RECEIPT_FILE: None}
+    if change == 'no-op':
+        assert 'Nothing to update' in result.stdout + result.stderr
+        assert 'Resume with:' not in result.stderr
+        after = {str(path.relative_to(output)): path.read_bytes()
+                 for path in output.rglob('*') if path.is_file()}
+        assert {name: after[name] for name in before} == before
+        # Normal detection may warm its existing stat cache without publishing.
+        assert set(after) - set(before) <= {'cache/stat-index.json'}
+        assert tx.transaction_status(output)['transaction'] is None
+        assert tx.open_graph_snapshot(output / 'graph.json', purpose='legacy-noop').generation is None
+    else:
+        _, token = _update_resume_assignment(result)
+        fixture.token = SimpleNamespace(path=token)
+        _run(fixture, f"""
+state = json.loads(Path('.graphify_incremental.json').read_text())
+assert state['new_total'] == {1 if change == 'modified' else 0}
+assert state['deleted_files'] == {[str(root / 'changed.md')] if change == 'deleted' else []!r}
+assert tx.open_update_baseline(tx.current_transaction()).generation is None
+""")
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('damage', ['nodes', 'links', 'metadata', 'null-watermark', 'foreign-queue'])
+def test_receiptless_noop_keeps_legacy_admission_refusals(tmp_path, monkeypatch, platform, damage):
+    from graphify.build import build_from_json
+    from graphify.detect import save_manifest
+    from networkx.readwrite import json_graph
+    root = tmp_path / 'legacy-corpus'
+    root.mkdir()
+    monkeypatch.chdir(root)
+    for name in ('changed.md', 'retained.md'):
+        (root / name).write_text('Stable policy.\n')
+    output = root / 'graphify-out'
+    output.mkdir()
+    data = json_graph.node_link_data(build_from_json(_chunk('one'), root=root), edges='links')
+    if damage in {'nodes', 'links'}:
+        data[damage] = {}
+    elif damage == 'metadata':
+        data['graph'] = []
+    elif damage == 'null-watermark':
+        data['graph'][tx.GRAPH_WATERMARK_KEY] = None
+    (output / 'graph.json').write_text(json.dumps(data))
+    save_manifest({'document': [str(root / 'changed.md'), str(root / 'retained.md')]},
+                  manifest_path=output / 'manifest.json', root=root)
+    if damage == 'foreign-queue':
+        other = tmp_path / 'other-root'
+        other.mkdir()
+        tx.queue_rebuild('update', other, output=output, changed_paths=['policy.md'],
+                         source='legacy-admission-fixture')
+    before = {str(path.relative_to(output)): path.read_bytes()
+              for path in output.rglob('*') if path.is_file()}
+    result = _update_shell(SimpleNamespace(root=root, output=output), platform, 'result = detect_incremental(')
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert 'Nothing to update' not in result.stdout + result.stderr
+    assert {str(path.relative_to(output)): path.read_bytes()
+            for path in output.rglob('*') if path.is_file()} == before
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+def test_receiptless_noop_keeps_legacy_edges_key_compatibility(tmp_path, monkeypatch, platform):
+    from graphify.detect import save_manifest
+    root = tmp_path / 'legacy-corpus'
+    root.mkdir()
+    monkeypatch.chdir(root)
+    document = root / 'policy.md'
+    document.write_text('Stable policy.\n')
+    output = root / 'graphify-out'
+    output.mkdir()
+    (output / 'graph.json').write_text(json.dumps({'nodes': [], 'edges': []}))
+    save_manifest({'document': [str(document)]}, manifest_path=output / 'manifest.json', root=root)
+    before = _published_bytes(output)
+    result = _update_shell(SimpleNamespace(root=root, output=output), platform, 'result = detect_incremental(')
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'Nothing to update' in result.stdout + result.stderr
+    assert _published_bytes(output) == before
+    assert tx.transaction_status(output)['transaction'] is None
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
 @pytest.mark.parametrize('damage', ['absent-token', 'foreign-output', 'wrong-kind', 'wrong-root'])
 def test_update_entry_refuses_mismatched_handoff_without_mutation(tmp_path, monkeypatch, platform, damage):
     fixture = _baseline(tmp_path, monkeypatch)
@@ -1280,6 +1389,51 @@ def test_empty_prune_invalidates_owned_callflow_destinations(tmp_path, monkeypat
         else:
             assert current.artifacts[name] == payload
     assert user.read_bytes() == external.read_bytes() == next(iter(flows.values()))
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('destination', ['views/tree.html', 'nested/structure.txt'])
+@pytest.mark.parametrize('empty', [False, True])
+def test_empty_prune_invalidates_only_owned_custom_tree_destinations(tmp_path, monkeypatch, platform, destination, empty):
+    fixture = _baseline(tmp_path, monkeypatch)
+    exported = subprocess.run([os.sys.executable, '-m', 'graphify', 'tree',
+        '--graph', str(fixture.output / 'graph.json'), '--output', str(fixture.output / destination)],
+        cwd=fixture.root, capture_output=True, text=True)
+    assert exported.returncode == 0, exported.stdout + exported.stderr
+    fixture.baseline = tx.open_graph_snapshot(fixture.output / 'graph.json',
+                                              purpose='tree-baseline', retain_artifacts=('*',))
+    payload = fixture.baseline.artifacts[destination]
+    assert b'changed.md' in payload and b'graphify tree viewer</title>' in payload
+    user = fixture.output / 'user-tree.html'
+    external = tmp_path / 'external-tree.html'
+    user.write_bytes(payload)
+    external.write_bytes(payload)
+    for name in (('changed.md', 'retained.md') if empty else ('changed.md',)):
+        (fixture.root / name).unlink()
+    fixture.owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                         expected_snapshot=fixture.baseline)
+    fixture.token = tx.stage_transaction_handoff(fixture.owner)
+    before = _published_bytes(fixture.output)
+    detect = _deletion_code(platform, 'result = detect_incremental(', fixture, reference=platform == 'claude')
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture, reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+    _run(fixture, f'exec({detect!r})')
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], 'hyperedges': [], 'replacement_sources': []}))"
+         + f'\nexec({merge!r})')
+    assert _published_bytes(fixture.output) == before
+    assert (fixture.output / destination).read_bytes() == payload
+    _run(fixture, f'exec({build!r})\nexec({finish!r})\ntx.finalize_prepared_transaction()')
+    current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='tree-pruned', retain_artifacts=('*',))
+    if empty:
+        assert destination not in current.artifacts, 'stale managed tree was published'
+        assert not (fixture.output / destination).exists()
+    else:
+        assert current.artifacts[destination] == payload
+    assert user.read_bytes() == external.read_bytes() == payload
 
 
 @pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])

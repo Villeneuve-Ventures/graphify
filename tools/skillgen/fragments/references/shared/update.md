@@ -13,6 +13,10 @@ Use when you've added or modified files since the last run. Only re-extracts cha
 
 The first detection block starts an update handoff against the published snapshot and prints a shell-quoted `export GRAPHIFY_TRANSACTION_TOKEN=...` resume assignment before doing extraction work. Save that printed assignment. For a retry in a fresh shell, prepend it to this detection block and run both in the same shell invocation; the pending operation requires that exact token. Detection always compares against the published manifest until finalization. If no changes remain, the block cancels its unpublished handoff and you must stop.
 
+Valid, uncoordinated receiptless legacy output is checked before starting that
+handoff. An unchanged corpus stops with its graph and manifest intact; changes
+or deletions still start an update transaction.
+
 For an explicitly code-only update, use the public CLI through the saved interpreter:
 
 ```@@GRAPHIFY_SHELL@@
@@ -205,6 +209,10 @@ if merged_out['complete_empty_prune']:
     stale_exports.update(name for name, payload in owned_exports.items()
                          if payload.lstrip().startswith(b'<!DOCTYPE html>')
                          and b'graphify callflow-html</p>' in payload)
+    stale_exports.update(name for name, payload in owned_exports.items()
+                         if payload.lstrip().startswith(b'<!DOCTYPE html>')
+                         and b'graphify tree viewer</title>' in payload
+                         and b'const initialJsonData = ' in payload)
     for name, payload in owned_exports.items():
         if Path(name).name != '.graphify_obsidian_manifest.json':
             continue

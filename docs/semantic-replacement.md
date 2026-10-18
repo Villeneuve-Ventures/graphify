@@ -133,7 +133,11 @@ snapshot. Before extraction work, it prints a shell-quoted export assignment for
 that exact token. Keep the printed assignment; prepend it to the detection block
 in the same fresh-shell invocation when retrying. A retry requires the matching
 operation, root and output; it cannot take over another pending operation. A no-op cancels its
-unpublished handoff. Detection reads the published manifest even after Step 9
+unpublished handoff when it has a certified predecessor. A valid, uncoordinated
+receiptless legacy no-op is detected before opening a transaction and leaves the published graph
+and manifest unchanged; detection may warm its normal stat cache. A changed
+legacy corpus still starts its first update generation.
+Detection reads the published manifest even after Step 9
 has staged a new one, so a retry still sees every unpublished deletion.
 
 Merge preparation stages completion-filtered `manifest_files` with the accepted
@@ -149,7 +153,7 @@ SVG, GraphML, Cypher, callflow/tree views and wiki/Obsidian files in the private
 output before optional exports run. Owned Obsidian manifests in the prior and
 prepared inventories select custom managed vault notes and canvases, including
 nested vaults and vaults at the output root; unrelated managed artifacts remain.
-Owned callflow documents are selected by their generated HTML signature, so
+Owned callflow and tree documents are selected by their generated HTML signatures, so
 project-derived default names and custom destinations beneath the managed output
 are covered. Unowned files with the same content are not selected.
 The existing publication plan applies those

@@ -13,6 +13,10 @@ Use when you've added or modified files since the last run. Only re-extracts cha
 
 The first detection block starts an update handoff against the published snapshot and prints a shell-quoted `export GRAPHIFY_TRANSACTION_TOKEN=...` resume assignment before doing extraction work. Save that printed assignment. For a retry in a fresh shell, prepend it to this detection block and run both in the same shell invocation; the pending operation requires that exact token. Detection always compares against the published manifest until finalization. If no changes remain, the block cancels its unpublished handoff and you must stop.
 
+Valid, uncoordinated receiptless legacy output is checked before starting that
+handoff. An unchanged corpus stops with its graph and manifest intact; changes
+or deletions still start an update transaction.
+
 For an explicitly code-only update, use the public CLI through a freshly discovered interpreter:
 
 ```bash
@@ -30,7 +34,8 @@ GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import os, shlex, s
 from pathlib import Path
 from graphify.paths import GRAPHIFY_OUT
 from graphify.transaction import (PendingTransactionError, begin_transaction,
-    open_graph_snapshot, run_token, stage_transaction_handoff, transaction_status)
+    open_graph_snapshot, run_token, stage_transaction_handoff, transaction_status,
+    pin_output, _locked, _validate_expected_snapshot_locked, _validate_pristine_or_legacy_graph)
 root = Path(sys.argv[1]).resolve(strict=True)
 configured = Path(GRAPHIFY_OUT).expanduser()
 output = (configured if configured.is_absolute() else root / configured).resolve()
@@ -51,11 +56,22 @@ except PendingTransactionError:
              "    raise PendingTransactionError('"'"'update handoff root, output or kind mismatch'"'"')\n")
     run_token(token, ['"'"'-c'"'"', check])
 else:
+    if snapshot.generation is None and snapshot.coordination_absent:
+        # Retain the existing begin admission without creating a generation.
+        with pin_output(output) as capability, _locked(capability):
+            _validate_expected_snapshot_locked(capability, snapshot)
+            _validate_pristine_or_legacy_graph(capability)
+        from graphify.detect import detect_incremental
+        legacy_changes = detect_incremental(root, manifest_path=output / '"'"'manifest.json'"'"')
+        if legacy_changes.get('"'"'new_total'"'"', 0) == 0 and not legacy_changes.get('"'"'deleted_files'"'"'):
+            print('"'"'No files changed since last run. Nothing to update.'"'"', file=sys.stderr)
+            raise SystemExit(0)
     token = stage_transaction_handoff(begin_transaction('"'"'update'"'"', root,
         output=output, expected_snapshot=snapshot)).path
 print('"'"'[graphify update] Resume with: export GRAPHIFY_TRANSACTION_TOKEN='"'"' + shlex.quote(str(token)), file=sys.stderr)
 print(token, end='"'"''"'"')
 ' INPUT_PATH) || exit $?
+[ -n "$GRAPHIFY_TRANSACTION_TOKEN" ] || exit 0
 export GRAPHIFY_TRANSACTION_TOKEN
 GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c 'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; export GRAPHIFY_TRANSACTION_TOKEN; "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "
 import sys, json
@@ -242,6 +258,10 @@ if merged_out['complete_empty_prune']:
     stale_exports.update(name for name, payload in owned_exports.items()
                          if payload.lstrip().startswith(b'<!DOCTYPE html>')
                          and b'graphify callflow-html</p>' in payload)
+    stale_exports.update(name for name, payload in owned_exports.items()
+                         if payload.lstrip().startswith(b'<!DOCTYPE html>')
+                         and b'graphify tree viewer</title>' in payload
+                         and b'const initialJsonData = ' in payload)
     for name, payload in owned_exports.items():
         if Path(name).name != '.graphify_obsidian_manifest.json':
             continue

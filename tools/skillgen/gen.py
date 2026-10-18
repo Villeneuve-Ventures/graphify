@@ -1188,7 +1188,8 @@ def _route_incremental_transaction(body: str) -> str:
 from pathlib import Path
 from graphify.paths import GRAPHIFY_OUT
 from graphify.transaction import (PendingTransactionError, begin_transaction,
-    open_graph_snapshot, run_token, stage_transaction_handoff, transaction_status)
+    open_graph_snapshot, run_token, stage_transaction_handoff, transaction_status,
+    pin_output, _locked, _validate_expected_snapshot_locked, _validate_pristine_or_legacy_graph)
 root = Path(sys.argv[1]).resolve(strict=True)
 configured = Path(GRAPHIFY_OUT).expanduser()
 output = (configured if configured.is_absolute() else root / configured).resolve()
@@ -1209,6 +1210,16 @@ except PendingTransactionError:
              "    raise PendingTransactionError('update handoff root, output or kind mismatch')\n")
     run_token(token, ['-c', check])
 else:
+    if snapshot.generation is None and snapshot.coordination_absent:
+        # Retain the existing begin admission without creating a generation.
+        with pin_output(output) as capability, _locked(capability):
+            _validate_expected_snapshot_locked(capability, snapshot)
+            _validate_pristine_or_legacy_graph(capability)
+        from graphify.detect import detect_incremental
+        legacy_changes = detect_incremental(root, manifest_path=output / 'manifest.json')
+        if legacy_changes.get('new_total', 0) == 0 and not legacy_changes.get('deleted_files'):
+            print('No files changed since last run. Nothing to update.', file=sys.stderr)
+            raise SystemExit(0)
     token = stage_transaction_handoff(begin_transaction('update', root,
         output=output, expected_snapshot=snapshot)).path
 print('[graphify update] Resume with: export GRAPHIFY_TRANSACTION_TOKEN=' + shlex.quote(str(token)), file=sys.stderr)
@@ -1217,6 +1228,7 @@ print(token, end='')
     prefix = (
         'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
         + shlex.quote(handoff) + ' INPUT_PATH) || exit $?\n'
+        '[ -n "$GRAPHIFY_TRANSACTION_TOKEN" ] || exit 0\n'
         'export GRAPHIFY_TRANSACTION_TOKEN\n'
     )
     first = section.index('GRAPHIFY_TRANSACTION_TOKEN=$(')
