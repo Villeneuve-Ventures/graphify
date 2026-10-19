@@ -137,6 +137,14 @@ unpublished handoff when it has a certified predecessor. A valid, uncoordinated
 receiptless legacy no-op is detected before opening a transaction and leaves the published graph
 and manifest unchanged; detection may warm its normal stat cache. A changed
 legacy corpus still starts its first update generation.
+That first update binds the legacy inventory's names, presence and content digests
+in its existing live-owner record and immutable token. Before preparing or
+retrying, it refuses changed graph, manifest or owned export bytes, including
+newly discovered owned exports. Unchanged retries still use the published
+inventory; failed prepared outputs cannot become the baseline. Older pending
+receiptless updates without this binding are refused rather than adopting their
+current public files. Full builds and receipt-backed updates keep their existing
+record shapes and admission rules; no separate recovery record is introduced.
 The semantic entry may admit a completed receipt whose drainer file is missing,
 using the existing missing-drainer validation. Begin revalidates the same snapshot
 and preserves a receipt-bound complete predecessor before taking ownership. A

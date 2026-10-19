@@ -1734,6 +1734,230 @@ assert {n['id'] for n in baseline.data['nodes']} == {'changed', 'retained', 'anc
     assert _published_bytes(output) == before
 
 
+def _receiptless_retry_fixture(tmp_path):
+    from graphify.build import build_from_json
+    from graphify.detect import save_manifest
+    from networkx.readwrite import json_graph
+    root = tmp_path / 'legacy-corpus'
+    root.mkdir()
+    output = root / 'graphify-out'
+    output.mkdir()
+    for name in ('changed.md', 'retained.md'):
+        (root / name).write_text(name + '\n')
+    graph = build_from_json(_chunk('one'), root=root)
+    (output / 'graph.json').write_text(json.dumps(json_graph.node_link_data(graph, edges='links')))
+    save_manifest({'document': [str(root / 'changed.md'), str(root / 'retained.md')]},
+                  manifest_path=output / 'manifest.json', root=root)
+    (output / 'graph.svg').write_bytes(b'original export')
+    (root / 'changed.md').unlink()
+    return SimpleNamespace(root=root, output=output)
+
+
+def _change_legacy_inventory(output, damage):
+    if damage == 'graph':
+        data = json.loads((output / 'graph.json').read_bytes())
+        data['nodes'].append({'id': 'unadmitted', 'source_file': 'retained.md'})
+        (output / 'graph.json').write_text(json.dumps(data))
+    elif damage == 'manifest':
+        (output / 'manifest.json').write_text('{}')
+    elif damage == 'missing-graph':
+        (output / 'graph.json').unlink()
+    elif damage == 'export':
+        (output / 'graph.svg').write_bytes(b'changed export')
+    elif damage == 'missing-export':
+        (output / 'graph.svg').unlink()
+    elif damage == 'added-export':
+        (output / 'graph.graphml').write_bytes(b'new export')
+    elif damage == 'added-callflow':
+        (output / 'new-callflow.html').write_bytes(b'<footer>graphify callflow-html</footer>')
+    else:
+        raise AssertionError(damage)
+
+
+def _output_bytes(output):
+    return {str(p.relative_to(output)): p.read_bytes()
+            for p in output.rglob('*') if p.is_file()}
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+@pytest.mark.parametrize('retry', [False, True], ids=['before-first-body', 'interrupted-retry'])
+@pytest.mark.parametrize('damage', ['graph', 'manifest', 'missing-graph', 'export', 'missing-export',
+                                   'added-export', 'added-callflow'])
+def test_receiptless_retry_refuses_changed_admitted_inventory(tmp_path, platform, retry, damage):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    if retry:
+        first = _update_shell(fixture, platform, 'result = detect_incremental(', fail_detection=True)
+        assert first.returncode != 0 and 'injected detection failure' in first.stderr
+        _, token = _update_resume_assignment(first)
+    else:
+        snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='semantic-update')
+        owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                     expected_snapshot=snapshot)
+        token = tx.stage_transaction_handoff(owner).path
+    _change_legacy_inventory(fixture.output, damage)
+    before = _output_bytes(fixture.output)
+    result = _update_shell(fixture, platform, 'result = detect_incremental(', token=token)
+    assert result.returncode != 0, 'unadmitted public bytes became the retry baseline'
+    assert ('graph.json' if damage == 'missing-graph' else 'legacy update inventory changed') in result.stderr
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('damage', ['graph', 'manifest', 'missing-graph', 'export', 'missing-export',
+                                   'added-export', 'added-callflow'])
+def test_receiptless_retry_binding_precedes_token_publication(tmp_path, damage):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='semantic-update')
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output,
+                                 expected_snapshot=snapshot)
+    _change_legacy_inventory(fixture.output, damage)
+    before = _output_bytes(fixture.output)
+    message = 'graph.json' if damage == 'missing-graph' else 'legacy update inventory changed'
+    with pytest.raises(tx.PendingTransactionError, match=message):
+        tx.stage_transaction_handoff(owner)
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('platform', ['claude', 'aider', 'devin'])
+def test_receiptless_retry_unchanged_inventory_publishes_deletion(tmp_path, platform):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    first = _update_shell(fixture, platform, 'result = detect_incremental(', fail_detection=True)
+    assert first.returncode != 0 and 'injected detection failure' in first.stderr
+    _, token = _update_resume_assignment(first)
+    fixture.token = SimpleNamespace(path=token)
+    before = _output_bytes(fixture.output)
+    retry = _update_shell(fixture, platform, 'result = detect_incremental(', token=token)
+    assert retry.returncode == 0, retry.stderr
+    assert _output_bytes(fixture.output) == before
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture,
+                           reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], "
+         "'hyperedges': [], 'replacement_sources': []}))" + f'\nexec({merge!r})\nexec({build!r})')
+    assert _output_bytes(fixture.output) == before
+    _run(fixture, f'exec({finish!r})\ntx.finalize_prepared_transaction()')
+    snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='completed-retry')
+    assert {n['id'] for n in snapshot.data['nodes']} == {'retained', 'anchor'}
+    assert set(json.loads((fixture.output / 'manifest.json').read_bytes())) == {'retained.md'}
+
+
+@pytest.mark.parametrize('damage', ['missing', 'null', 'malformed', 'changed'])
+def test_receiptless_retry_token_rejects_changed_live_binding(tmp_path, damage):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output)
+    token = tx.stage_transaction_handoff(owner)
+    path = fixture.output / tx.TRANSACTION_FILE
+    record = json.loads(path.read_bytes())
+    assert len(record['legacy_inventory_digest']) == 64
+    if damage == 'missing':
+        del record['legacy_inventory_digest']
+    else:
+        record['legacy_inventory_digest'] = {'null': None, 'malformed': [], 'changed': '0' * 64}[damage]
+    path.write_text(json.dumps(record))
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError):
+        tx.run_prepared_token(token.path, ['-c', "raise AssertionError('unbound owner entered')"])
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('field,value', [('kind', 'full'), ('generation', 2)])
+def test_receiptless_retry_binding_requires_first_update_owner(tmp_path, field, value):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output)
+    record = tx._transaction_json(owner, phase='building')
+    record[field] = value
+    before = _output_bytes(fixture.output)
+    with tx.pin_output(fixture.output) as capability:
+        with pytest.raises(tx.PendingTransactionError, match='legacy update inventory binding'):
+            tx._transaction_from_json(capability, record)
+    assert _output_bytes(fixture.output) == before
+
+
+def test_receiptless_retry_without_snapshot_keeps_baseline_binding(tmp_path):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output)
+    fixture.token = tx.stage_transaction_handoff(owner)
+    before = _output_bytes(fixture.output)
+    _run(fixture, "baseline = tx.open_update_baseline(tx.current_transaction())\n"
+         "assert baseline.payload == (output / 'graph.json').read_bytes()")
+    assert _published_bytes(fixture.output) == {
+        'graph.json': before['graph.json'], 'manifest.json': before['manifest.json'], tx.RECEIPT_FILE: None,
+    }
+
+
+def test_receiptless_retry_binding_does_not_change_graphless_update(tmp_path):
+    root = tmp_path / 'graphless-corpus'
+    root.mkdir()
+    output = root / 'graphify-out'
+    owner = tx.begin_transaction('update', root, output=output)
+    assert owner.legacy_inventory_digest is None
+    assert 'legacy_inventory_digest' not in tx._transaction_json(owner, phase='building')
+    fixture = SimpleNamespace(root=root, output=output, token=tx.stage_transaction_handoff(owner))
+    _run(fixture, "assert not Path('graph.json').exists()")
+
+
+@pytest.mark.parametrize('damage', ['graph', 'manifest', 'missing-graph', 'export', 'missing-export',
+                                   'added-export', 'added-callflow'])
+def test_receiptless_retry_binding_revalidates_snapshot_before_begin(tmp_path, damage):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='semantic-update')
+    _change_legacy_inventory(fixture.output, damage)
+    before = _output_bytes(fixture.output)
+    # The existing snapshot guard reports a removed graph as FileNotFoundError.
+    refusal = (tx.PendingTransactionError, FileNotFoundError) if damage == 'missing-graph' else tx.PendingTransactionError
+    with pytest.raises(refusal):
+        tx.begin_transaction('update', fixture.root, output=fixture.output,
+                             expected_snapshot=snapshot)
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_receiptless_retry_takeover_keeps_immutable_baseline_binding(tmp_path, changed):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    old_token = tx.stage_transaction_handoff(owner)
+    path = fixture.output / tx.TRANSACTION_FILE
+    if changed:
+        record = json.loads(path.read_bytes())
+        record['legacy_inventory_digest'] = '0' * 64
+        path.write_text(json.dumps(record))
+        before = _output_bytes(fixture.output)
+        with pytest.raises(tx.PendingTransactionError, match='token changed'):
+            tx.takeover_drainer(fixture.output, now=100)
+        assert _output_bytes(fixture.output) == before
+        return
+    tx.takeover_drainer(fixture.output, now=100)
+    with pytest.raises(tx.PendingTransactionError):
+        tx.run_token(old_token.path, ['-c', 'pass'])
+    fixture.token = SimpleNamespace(path=tx.active_transaction_token_path(fixture.output))
+    _run(fixture, "baseline = tx.open_update_baseline(tx.current_transaction())\n"
+         "assert baseline.payload == (output / 'graph.json').read_bytes()")
+    _change_legacy_inventory(fixture.output, 'graph')
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='legacy update inventory changed'):
+        _run(fixture, 'tx.open_update_baseline(tx.current_transaction())')
+    assert _output_bytes(fixture.output) == before
+
+
+def test_receiptless_retry_old_pending_binding_is_not_inferred(tmp_path):
+    from dataclasses import replace
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output)
+    # Reproduce the prior live/token shape, which carried no baseline digest.
+    old_owner = replace(owner, legacy_inventory_digest=None)
+    with tx.pin_output(fixture.output) as capability, tx._locked(capability):
+        tx._write_transaction(capability, old_owner)
+    tx._AUTHORITY.set(tx._authority_for(old_owner))
+    token = tx.stage_transaction_handoff(old_owner)
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='inventory binding is missing'):
+        tx.run_prepared_token(token.path, ['-c', "raise AssertionError('unbound baseline entered')"])
+    assert _output_bytes(fixture.output) == before
+
+
 
 def test_update_baseline_refuses_actual_full_owner(tmp_path, monkeypatch):
     fixture = _baseline(tmp_path, monkeypatch)

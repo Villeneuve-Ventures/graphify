@@ -324,6 +324,7 @@ class Transaction:
     token_identity: ManagedEntryIdentity | None
     drainer: DrainerTuple
     phase: str = "building"
+    legacy_inventory_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -498,6 +499,7 @@ class _Authority:
     kind: TransactionKind
     phase: str
     output: Path
+    legacy_inventory_digest: str | None = None
 
 
 _AUTHORITY = contextvars.ContextVar[_Authority | None](
@@ -2794,8 +2796,15 @@ def _transaction_from_json(
     allowed_phases: set[str] = _TRANSACTION_PHASES,
     source_io=None,
 ) -> Transaction:
-    if not isinstance(raw, dict) or set(raw) != _TRANSACTION_FIELDS:
+    if not isinstance(raw, dict) or set(raw) not in (
+        _TRANSACTION_FIELDS, _TRANSACTION_FIELDS | {"legacy_inventory_digest"},
+    ):
         raise PendingTransactionError("malformed live transaction")
+    if "legacy_inventory_digest" in raw and (
+        not _is_hex(raw["legacy_inventory_digest"])
+        or raw.get("kind") != "update" or raw.get("generation") != 1
+    ):
+        raise PendingTransactionError("malformed legacy update inventory binding")
     if (
         type(raw.get("schema")) is not int
         or raw.get("schema") != 1
@@ -2843,6 +2852,7 @@ def _transaction_from_json(
         token_identity=_managed_entry_identity_from_json(raw["token_identity"]),
         drainer=_drainer_from_json(raw["drainer"]),
         phase=raw["phase"],
+        legacy_inventory_digest=raw.get("legacy_inventory_digest"),
     )
     if tx.output_identity != capability.identity or tx.drainer.generation != tx.generation:
         raise PendingTransactionError("malformed live transaction binding")
@@ -2873,6 +2883,8 @@ def _transaction_json(tx: Transaction, *, phase: str) -> dict[str, object]:
             else tx.token_identity.json()
         ),
         "drainer": _drainer_json(tx.drainer),
+        **({"legacy_inventory_digest": tx.legacy_inventory_digest}
+           if tx.legacy_inventory_digest is not None else {}),
     }
 
 
@@ -3118,6 +3130,7 @@ def _authority_for(tx: Transaction, drainer: DrainerTuple | None = None) -> _Aut
         tx.kind,
         tx.phase,
         tx.output,
+        tx.legacy_inventory_digest,
     )
 
 
@@ -4491,6 +4504,14 @@ def begin_transaction(
                             "reserved successor lost preserved predecessor authority"
                         )
             owner_secret = secrets.token_bytes(32)
+            legacy_inventory_digest = None
+            if (kind == "update" and prior_protocol is None
+                    and _entry_stat(capability, "graph.json") is not None):
+                legacy_inventory_digest = _legacy_update_inventory_digest(
+                    _legacy_update_inventory_locked(capability)
+                )
+                if expected_snapshot is not None:
+                    _validate_expected_snapshot_locked(capability, expected_snapshot)
             token_digest = hashlib.sha256(owner_secret).hexdigest()
             if current_drainer is not None and current_drainer[1] != "complete":
                 if (
@@ -4538,6 +4559,7 @@ def begin_transaction(
                 token_digest,
                 None,
                 drainer,
+                legacy_inventory_digest=legacy_inventory_digest,
             )
             successor_protocol = dict(protocol)
             successor_protocol.update(
@@ -4813,9 +4835,15 @@ def _pin_prepared_workspace(
 ) -> PreparedWorkspaceCapability:
     """Open the exact preparation directory while the owner lock is held."""
     _validate_authority(capability, transaction)
+    marker = _load_json(capability, PREPARED_FILE)
+    if (transaction.kind == "update" and transaction.generation == 1
+            and _entry_stat(capability, RECEIPT_FILE) is None
+            and (transaction.legacy_inventory_digest is not None
+                 or _entry_stat(capability, "graph.json") is not None)
+            and (marker is None or marker.get("state") != "ready")):
+        _validate_legacy_update_inventory_locked(capability, transaction)
     transaction_id = _validated_transaction_id(transaction.id)
     workspace = transaction.output.parent / f".graphify-prepare-{transaction_id}"
-    marker = _load_json(capability, PREPARED_FILE)
     if marker is None:
         with pin_output(workspace.parent) as parent_capability:
             try:
@@ -5627,7 +5655,7 @@ def _validate_token_transition_current(
         phase="awaiting-drainer" if takeover else predecessor.phase,
     )
     if (
-        set(token_payload) != {
+        set(token_payload) != ({
             "schema",
             "id",
             "root",
@@ -5635,7 +5663,9 @@ def _validate_token_transition_current(
             "generation",
             "drainer",
             "secret",
-        }
+        } | ({"legacy_inventory_digest"}
+             if target_base.legacy_inventory_digest is not None else set()))
+        or token_payload.get("legacy_inventory_digest") != target_base.legacy_inventory_digest
         or token_payload.get("schema") != 1
         or token_payload.get("id") != target_base.id
         or token_payload.get("root") != target_base.root
@@ -6186,6 +6216,8 @@ def stage_transaction_handoff(
                 "token publication transition requires operational recovery"
             )
         live = _validate_authority(capability, transaction)
+        if live.legacy_inventory_digest is not None:
+            _validate_legacy_update_inventory_locked(capability, live)
         secret = secrets.token_hex(32)
         token_payload = {
             "schema": 1,
@@ -6195,6 +6227,8 @@ def stage_transaction_handoff(
             "generation": live.generation,
             "drainer": _drainer_json(live.drainer),
             "secret": secret,
+            **({"legacy_inventory_digest": live.legacy_inventory_digest}
+               if live.legacy_inventory_digest is not None else {}),
         }
         digest = hashlib.sha256(_json_bytes(token_payload)).hexdigest()
         target = replace(live, token_digest=digest, token_identity=None)
@@ -6251,6 +6285,7 @@ def _open_token(
             or raw.get("generation") != live.generation
             or raw.get("root") != live.root
             or raw.get("output") != str(live.output)
+            or raw.get("legacy_inventory_digest") != live.legacy_inventory_digest
             or hashlib.sha256(payload).hexdigest() != live.token_digest
             or identity != live.token_identity
             or _drainer_from_json(raw.get("drainer")) != live.drainer
@@ -6515,6 +6550,13 @@ def _validate_durable_live_binding(
             token_payload is None
             or hashlib.sha256(token_payload).hexdigest() != live.token_digest
         ):
+            raise PendingTransactionError("durable live transaction token changed")
+        try:
+            token_data = json.loads(token_payload)
+        except (ValueError, UnicodeError) as exc:
+            raise PendingTransactionError("durable live transaction token changed") from exc
+        if (not isinstance(token_data, dict)
+                or token_data.get("legacy_inventory_digest") != live.legacy_inventory_digest):
             raise PendingTransactionError("durable live transaction token changed")
     return durable_protocol, durable_drainer
 
@@ -10519,6 +10561,49 @@ def open_external_graph_snapshot(
     )
 
 
+def _legacy_update_inventory_locked(capability: OutputCapability) -> dict[str, bytes]:
+    from graphify.security import _max_graph_file_bytes
+
+    budget = _LegacyInventoryBudget()
+    payload = _read_relative_bytes(
+        capability, "graph.json", min(_max_graph_file_bytes(), 512 * 1024 * 1024)
+    )
+    budget.retain("graph.json", payload)
+    artifacts = {"graph.json": payload}
+    for name in MANAGED_PUBLICATION_PATHS:
+        if name in artifacts:
+            continue
+        try:
+            payload = _read_relative_bytes(
+                capability, name, min(budget.remaining, _artifact_read_limit(name))
+            )
+        except PendingTransactionError as exc:
+            if isinstance(exc.__cause__, FileNotFoundError):
+                continue
+            raise
+        budget.retain(name, payload)
+        artifacts[name] = payload
+    artifacts.update(_legacy_owned_dynamic_inventory(
+        capability, budget=budget, existing_inventory=artifacts,
+    ))
+    return artifacts
+
+
+def _legacy_update_inventory_digest(artifacts: Mapping[str, bytes]) -> str:
+    return hashlib.sha256(_json_bytes(dict(_inventory_selector(artifacts, artifacts)))).hexdigest()
+
+
+def _validate_legacy_update_inventory_locked(
+    capability: OutputCapability, transaction: Transaction,
+) -> dict[str, bytes]:
+    if transaction.legacy_inventory_digest is None:
+        raise PendingTransactionError("legacy update inventory binding is missing")
+    artifacts = _legacy_update_inventory_locked(capability)
+    if _legacy_update_inventory_digest(artifacts) != transaction.legacy_inventory_digest:
+        raise PendingTransactionError("legacy update inventory changed")
+    return artifacts
+
+
 def open_update_baseline(transaction: Transaction) -> GraphSnapshot:
     """Read the published predecessor for an exact live update owner.
 
@@ -10558,26 +10643,7 @@ def open_update_baseline(transaction: Transaction) -> GraphSnapshot:
             # predecessor must never fall back to this compatibility path.
             if transaction.generation != 1 or _entry_stat(capability, RECEIPT_FILE) is not None:
                 raise PendingTransactionError("published update predecessor is missing")
-            budget = _LegacyInventoryBudget()
-            payload = _read_relative_bytes(capability, "graph.json", graph_limit)
-            budget.retain("graph.json", payload)
-            artifacts = {"graph.json": payload}
-            for name in MANAGED_PUBLICATION_PATHS:
-                if name in artifacts:
-                    continue
-                try:
-                    payload = _read_relative_bytes(
-                        capability, name, min(budget.remaining, _artifact_read_limit(name))
-                    )
-                except PendingTransactionError as exc:
-                    if isinstance(exc.__cause__, FileNotFoundError):
-                        continue
-                    raise
-                budget.retain(name, payload)
-                artifacts[name] = payload
-            artifacts.update(_legacy_owned_dynamic_inventory(
-                capability, budget=budget, existing_inventory=artifacts,
-            ))
+            artifacts = _validate_legacy_update_inventory_locked(capability, transaction)
             generation = None
         payload = artifacts.get("graph.json")
         if payload is None or len(payload) > graph_limit:
@@ -13977,6 +14043,8 @@ def takeover_drainer(
                     "generation": live.generation,
                     "drainer": _drainer_json(successor),
                     "secret": secrets.token_hex(32),
+                    **({"legacy_inventory_digest": live.legacy_inventory_digest}
+                       if live.legacy_inventory_digest is not None else {}),
                 }
             )
             token_digest = hashlib.sha256(token_payload).hexdigest()
