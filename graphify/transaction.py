@@ -2570,6 +2570,11 @@ def _protocol_from_json(
         fields.update(("transaction_id", "token_identity", "receipt_digest"))
     elif state != "BOOTSTRAP_PENDING":
         raise PendingTransactionError("malformed protocol state")
+    if state == "BOOTSTRAP_PENDING" and "legacy_inventory_digest" in raw:
+        fields.add("legacy_inventory_digest")
+        if (not _is_hex(raw["legacy_inventory_digest"])
+                or raw.get("kind") != "update" or raw.get("generation") != 1):
+            raise PendingTransactionError("malformed legacy bootstrap inventory binding")
     if set(raw) != fields:
         raise PendingTransactionError("malformed protocol state")
     generation = raw.get("generation")
@@ -3044,6 +3049,13 @@ def _read_pending_transition(
             raise PendingTransactionError(
                 "malformed pending transition predecessor binding"
             )
+    prior_inventory_digest = (
+        prior_tx.legacy_inventory_digest if prior_tx is not None
+        else predecessor_protocol.get("legacy_inventory_digest")
+    )
+    if ((prior_tx is not None or "legacy_inventory_digest" in predecessor_protocol)
+            and successor.legacy_inventory_digest != prior_inventory_digest):
+        raise PendingTransactionError("pending transition legacy inventory binding changed")
     if successor.token_identity is not None:
         try:
             token_payload, token_identity = _read_managed_bytes(
@@ -4538,6 +4550,8 @@ def begin_transaction(
                 "bootstrap_nonce": secrets.token_hex(16),
                 "lease_deadline": (time.time() if now is None else now) + 30.0,
             }
+            if legacy_inventory_digest is not None:
+                protocol["legacy_inventory_digest"] = legacy_inventory_digest
             if prior_protocol is None:
                 try:
                     _create_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
@@ -4562,6 +4576,7 @@ def begin_transaction(
                 legacy_inventory_digest=legacy_inventory_digest,
             )
             successor_protocol = dict(protocol)
+            successor_protocol.pop("legacy_inventory_digest", None)
             successor_protocol.update(
                 state="INCOMPLETE",
                 transaction_id=tx.id,
@@ -4841,7 +4856,7 @@ def _pin_prepared_workspace(
             and (transaction.legacy_inventory_digest is not None
                  or _entry_stat(capability, "graph.json") is not None)
             and (marker is None or marker.get("state") != "ready")):
-        _validate_legacy_update_inventory_locked(capability, transaction)
+        _validate_legacy_update_inventory_locked(capability, transaction.legacy_inventory_digest)
     transaction_id = _validated_transaction_id(transaction.id)
     workspace = transaction.output.parent / f".graphify-prepare-{transaction_id}"
     if marker is None:
@@ -6217,7 +6232,7 @@ def stage_transaction_handoff(
             )
         live = _validate_authority(capability, transaction)
         if live.legacy_inventory_digest is not None:
-            _validate_legacy_update_inventory_locked(capability, live)
+            _validate_legacy_update_inventory_locked(capability, live.legacy_inventory_digest)
         secret = secrets.token_hex(32)
         token_payload = {
             "schema": 1,
@@ -10594,14 +10609,39 @@ def _legacy_update_inventory_digest(artifacts: Mapping[str, bytes]) -> str:
 
 
 def _validate_legacy_update_inventory_locked(
-    capability: OutputCapability, transaction: Transaction,
+    capability: OutputCapability, expected_digest: str | None,
 ) -> dict[str, bytes]:
-    if transaction.legacy_inventory_digest is None:
+    if expected_digest is None:
         raise PendingTransactionError("legacy update inventory binding is missing")
     artifacts = _legacy_update_inventory_locked(capability)
-    if _legacy_update_inventory_digest(artifacts) != transaction.legacy_inventory_digest:
+    if _legacy_update_inventory_digest(artifacts) != expected_digest:
         raise PendingTransactionError("legacy update inventory changed")
     return artifacts
+
+
+def _validate_recovery_update_baseline_locked(capability: OutputCapability) -> None:
+    """Check a legacy input before recovery can retire or replay private work.
+
+    Completed publication and receipt-backed recovery use their existing receipt
+    authority. An unbound legacy bootstrap/owner cannot adopt today's inventory.
+    """
+    protocol = _read_protocol(capability)
+    if protocol is None or protocol["state"] == "COMPLETE":
+        return
+    pending = _read_pending_transition(capability)
+    owner = pending[3] if pending is not None else _read_transaction(capability)
+    kind = protocol["kind"] if owner is None else owner.kind
+    generation = protocol["generation"] if owner is None else owner.generation
+    digest = protocol.get("legacy_inventory_digest") if owner is None else owner.legacy_inventory_digest
+    receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
+    if (kind == "update" and generation == 1
+            and (digest is not None or (
+                not receipt_present and _entry_stat(capability, "graph.json") is not None))):
+        if owner is not None and pending is None and _read_token_transition(capability) is None:
+            _validate_durable_live_binding(capability, owner, protocol=protocol)
+        if receipt_present:
+            raise PendingTransactionError("legacy update inventory acquired receipt authority")
+        _validate_legacy_update_inventory_locked(capability, digest)
 
 
 def open_update_baseline(transaction: Transaction) -> GraphSnapshot:
@@ -10643,7 +10683,7 @@ def open_update_baseline(transaction: Transaction) -> GraphSnapshot:
             # predecessor must never fall back to this compatibility path.
             if transaction.generation != 1 or _entry_stat(capability, RECEIPT_FILE) is not None:
                 raise PendingTransactionError("published update predecessor is missing")
-            artifacts = _validate_legacy_update_inventory_locked(capability, transaction)
+            artifacts = _validate_legacy_update_inventory_locked(capability, transaction.legacy_inventory_digest)
             generation = None
         payload = artifacts.get("graph.json")
         if payload is None or len(payload) > graph_limit:
@@ -13939,6 +13979,7 @@ def takeover_drainer(
                 _validate_durable_live_binding(capability, selected_live)
             _validate_successor_ready_recovery_locked(capability)
 
+        _validate_recovery_update_baseline_locked(capability)
         _recover_queue_transitions_locked(
             capability, failpoint=transition_failpoint
         )
@@ -14715,6 +14756,7 @@ def recover_selected_transaction(
             expected_transaction_id=expected_transaction_id,
         )
         if successor_ready is None:
+            _validate_recovery_update_baseline_locked(capability)
             enqueue = _read_enqueue_journal(capability)
             if enqueue is not None:
                 enqueue_item = cast(dict[str, Any], enqueue["item"])
@@ -14979,6 +15021,7 @@ def recover_transaction(
             and capability.identity != expected_output_identity
         ):
             raise PendingTransactionError("stale output identity selector")
+        _validate_recovery_update_baseline_locked(capability)
         prepared_transfer_target = _prepared_transfer_target_locked(capability)
         if prepared_transfer_target is not None:
             if (
@@ -15112,6 +15155,7 @@ def recover_transaction(
         return target
     with pin_output(output) as capability, _locked(capability):
         _validate_pending_queue_predecessor(capability)
+        _validate_recovery_update_baseline_locked(capability)
         current = _read_transaction(capability)
         pending = _read_pending_transition(capability)
         selected = current if pending is None else pending[3]
@@ -15281,8 +15325,10 @@ def recover_transaction(
                 token_digest,
                 None,
                 drainer,
+                legacy_inventory_digest=protocol.get("legacy_inventory_digest"),
             )
             successor_protocol = dict(protocol)
+            successor_protocol.pop("legacy_inventory_digest", None)
             successor_protocol.update(
                 state="INCOMPLETE",
                 transaction_id=tx.id,
@@ -15357,6 +15403,8 @@ def recover_transaction(
             raise PendingTransactionError("transaction lease has not expired")
         if current.root != str(root_path):
             raise PendingTransactionError("recovery root does not match live transaction")
+        if current.legacy_inventory_digest is not None and kind != current.kind:
+            raise PendingTransactionError("legacy update recovery kind changed")
         phase = _transaction_phase(capability)
         if phase == "awaiting-drainer":
             raise PendingTransactionError("awaiting drainer is missing its exact transition record")
@@ -15411,6 +15459,10 @@ def recover_transaction(
                     "recovery predecessor receipt authority changed"
                 )
             generation = current.generation
+        elif current.legacy_inventory_digest is not None:
+            # Recovery replaces execution authority, not the first admitted
+            # publication. Keep its generation and immutable legacy binding.
+            generation = current.generation
         else:
             generation = current.generation + 1
         queue_predecessor = _read_queue_record(capability)
@@ -15446,6 +15498,7 @@ def recover_transaction(
             hashlib.sha256(secret).hexdigest(),
             None,
             drainer,
+            legacy_inventory_digest=current.legacy_inventory_digest,
         )
         predecessor_protocol = dict(protocol)
         successor_protocol = dict(protocol)

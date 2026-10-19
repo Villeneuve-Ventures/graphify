@@ -1770,6 +1770,8 @@ def _change_legacy_inventory(output, damage):
         (output / 'graph.graphml').write_bytes(b'new export')
     elif damage == 'added-callflow':
         (output / 'new-callflow.html').write_bytes(b'<footer>graphify callflow-html</footer>')
+    elif damage == 'receipt':
+        (output / tx.RECEIPT_FILE).write_text('{}')
     else:
         raise AssertionError(damage)
 
@@ -1957,6 +1959,409 @@ def test_receiptless_retry_old_pending_binding_is_not_inferred(tmp_path):
         tx.run_prepared_token(token.path, ['-c', "raise AssertionError('unbound baseline entered')"])
     assert _output_bytes(fixture.output) == before
 
+
+
+def _recover_update_fixture(fixture, entrypoint='direct', *, failpoint=None):
+    with tx.pin_output(fixture.output) as capability:
+        pending = tx._read_pending_transition(capability)
+        owner = pending[3] if pending is not None else tx._read_transaction(capability)
+        protocol = tx._read_protocol(capability)
+        identity = capability.identity
+    selectors = dict(expected_output_identity=identity,
+                     expected_generation=protocol['generation'] if owner is None else owner.generation,
+                     expected_transaction_id=None if owner is None else owner.id)
+    if entrypoint == 'cli':
+        command = [os.sys.executable, '-B', '-m', 'graphify', 'transaction', 'recover',
+                   '--root', str(fixture.root), '--output', str(fixture.output),
+                   '--generation', str(selectors['expected_generation']),
+                   '--device', str(identity.device), '--inode', str(identity.inode)]
+        if owner is not None:
+            command += ['--transaction-id', owner.id]
+        result = subprocess.run(command, cwd=fixture.root, capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        handoff = json.loads(result.stdout)
+        fixture.token = SimpleNamespace(path=Path(handoff['token_path']))
+        return tx.resume_transaction(handoff['transaction_id'], fixture.root, output=fixture.output)
+    if entrypoint == 'direct':
+        return tx.recover_transaction('update', fixture.root, output=fixture.output, now=10**12,
+                                      transition_failpoint=failpoint, **selectors)
+    return tx.recover_selected_transaction('update', fixture.root, output=fixture.output,
+                                           now=10**12, **selectors)
+
+
+@pytest.mark.parametrize('entrypoint', ['direct', 'selected', 'cli'])
+@pytest.mark.parametrize('legacy', [False, True], ids=['certified', 'receiptless'])
+def test_update_recovery_preserves_admitted_baseline(tmp_path, monkeypatch, entrypoint, legacy):
+    fixture = _receiptless_retry_fixture(tmp_path) if legacy else _baseline(tmp_path, monkeypatch)
+    if not legacy:
+        (fixture.root / 'changed.md').unlink()
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    old_token = tx.stage_transaction_handoff(owner)
+    fixture.token = old_token
+    live = tx.resume_transaction(owner.id, fixture.root, output=fixture.output)
+    expected = dict(tx.open_update_baseline(live).artifacts)
+    _run(fixture, "tx.commit_prepared_bytes(tx.current_transaction(), 'failed-attempt.txt', b'discard me')")
+    recovered = _recover_update_fixture(fixture, entrypoint)
+    assert recovered.generation == owner.generation
+    assert recovered.legacy_inventory_digest == owner.legacy_inventory_digest
+    assert recovered.drainer.claim_epoch == owner.drainer.claim_epoch + 1
+    assert recovered.id != owner.id
+    assert all((fixture.output / name).read_bytes() == payload for name, payload in expected.items())
+    with pytest.raises(tx.PendingTransactionError):
+        tx.run_token(old_token.path, ['-c', 'pass'])
+    if entrypoint != 'cli':
+        fixture.token = tx.stage_transaction_handoff(recovered)
+    _run(fixture, f"assert dict(tx.open_update_baseline(tx.current_transaction()).artifacts) == {expected!r}\n"
+         "assert not Path('failed-attempt.txt').exists()")
+
+
+@pytest.mark.parametrize('platform,entrypoint', [('claude', 'direct'), ('aider', 'selected'), ('devin', 'cli')])
+def test_receiptless_recovery_consumers_publish_same_baseline(tmp_path, platform, entrypoint):
+    from graphify.detect import detect_incremental
+    fixture = _receiptless_retry_fixture(tmp_path)
+    graph_path = fixture.output / 'graph.json'
+    legacy_data = json.loads(graph_path.read_bytes())
+    # NetworkX's node-link fixture nests graph attributes. Public Graphify JSON
+    # carries hyperedges at the top level, where build_merge consumes them.
+    legacy_data['hyperedges'] = legacy_data['graph'].pop('hyperedges')
+    legacy_data['links'] = [{k: v for k, v in edge.items() if k not in ('_src', '_tgt')}
+                            | {'confidence_score': 1.0} for edge in legacy_data['links']]
+    graph_path.write_text(json.dumps(legacy_data))
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    tx.stage_transaction_handoff(owner)
+    recovered = _recover_update_fixture(fixture, entrypoint)
+    if entrypoint != 'cli':
+        fixture.token = tx.stage_transaction_handoff(recovered)
+    retry = _update_shell(fixture, platform, 'result = detect_incremental(', token=fixture.token.path)
+    assert retry.returncode == 0, retry.stderr
+    if platform == 'claude':
+        population = _deletion_code(platform, 'r = json.loads(', fixture, reference=True)
+        _run(fixture, f'exec({population!r})')
+    merge = _deletion_code(platform, '# Load new extraction and incremental state', fixture,
+                           reference=platform == 'claude')
+    build = _deletion_code(platform, 'wrote = to_json(', fixture)
+    finish = _deletion_code(platform, '# Update cumulative cost tracker', fixture)
+    _run(fixture, "Path('.graphify_extract.json').write_text(json.dumps({'nodes': [], 'edges': [], "
+         "'hyperedges': [], 'replacement_sources': []}))" +
+         f'\nexec({merge!r})\nexec({build!r})\nexec({finish!r})\ntx.finalize_prepared_transaction()')
+    snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='recovered-update')
+    assert snapshot.generation == 1
+    assert {n['id'] for n in snapshot.data['nodes']} == {'retained', 'anchor'}
+    assert snapshot.data['links'] == legacy_data['links']
+    assert {h['id'] for h in snapshot.data['hyperedges']} == {'retained-group'}
+    assert set(json.loads((fixture.output / 'manifest.json').read_bytes())) == {'retained.md'}
+    again = detect_incremental(fixture.root, manifest_path=fixture.output / 'manifest.json',
+                               google_workspace=False)
+    assert again['new_total'] == 0 and again['deleted_files'] == []
+
+
+@pytest.mark.parametrize('boundary', ['bootstrap', 'after_transition_record', 'after_owner_protocol',
+                                     'after_transaction', 'after_drainer_reserved',
+                                     'after_drainer_launching', 'after_drainer_claimed'])
+def test_receiptless_begin_recovery_keeps_baseline(tmp_path, boundary):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    expected = {name: (fixture.output / name).read_bytes()
+                for name in ('graph.json', 'manifest.json', 'graph.svg')}
+
+    def stop(*_args):
+        raise RuntimeError('interrupted begin')
+
+    def transition(phase):
+        if phase == boundary:
+            stop()
+
+    with pytest.raises(RuntimeError, match='interrupted begin'):
+        tx.begin_transaction('update', fixture.root, output=fixture.output, now=0,
+                             failpoint=stop if boundary == 'bootstrap' else None,
+                             transition_failpoint=transition)
+    recovered = _recover_update_fixture(fixture)
+    assert recovered.generation == 1 and recovered.legacy_inventory_digest is not None
+    fixture.token = tx.stage_transaction_handoff(recovered)
+    _run(fixture, f"assert dict(tx.open_update_baseline(tx.current_transaction()).artifacts) == {expected!r}")
+    protocol = json.loads((fixture.output / tx.PROTOCOL_FILE).read_bytes())
+    assert 'legacy_inventory_digest' not in protocol
+
+
+@pytest.mark.parametrize('boundary', ['after_transition_record', 'after_recovery_protocol',
+                                     'after_transaction', 'after_drainer_reserved',
+                                     'after_drainer_launching', 'after_drainer_claimed'])
+def test_receiptless_claimed_recovery_replays_bound_transition(tmp_path, boundary):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    tx.stage_transaction_handoff(owner)
+
+    def stop(phase):
+        if phase == boundary:
+            raise RuntimeError('interrupted recovery')
+
+    with pytest.raises(RuntimeError, match='interrupted recovery'):
+        _recover_update_fixture(fixture, failpoint=stop)
+    recovered = _recover_update_fixture(fixture, 'selected')
+    assert recovered.generation == owner.generation
+    assert recovered.legacy_inventory_digest == owner.legacy_inventory_digest
+    fixture.token = tx.stage_transaction_handoff(recovered)
+    _run(fixture, "assert tx.open_update_baseline(tx.current_transaction()).payload == (output / 'graph.json').read_bytes()")
+
+
+@pytest.mark.parametrize('phase', ['bootstrap', 'pending', 'claimed'])
+@pytest.mark.parametrize('damage', ['graph', 'manifest', 'missing-graph', 'export', 'missing-export',
+                                   'added-export', 'added-callflow', 'receipt'])
+def test_receiptless_recovery_rejects_changed_inventory_before_mutation(tmp_path, phase, damage):
+    fixture = _receiptless_retry_fixture(tmp_path)
+
+    def stop(*_args):
+        raise RuntimeError('interrupt')
+
+    if phase == 'claimed':
+        owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+        fixture.token = tx.stage_transaction_handoff(owner)
+        _run(fixture, "tx.commit_prepared_bytes(tx.current_transaction(), 'failed-attempt.txt', b'keep on refusal')")
+    else:
+        with pytest.raises(RuntimeError, match='interrupt'):
+            tx.begin_transaction('update', fixture.root, output=fixture.output, now=0,
+                                 failpoint=stop if phase == 'bootstrap' else None,
+                                 transition_failpoint=stop if phase == 'pending' else None)
+    _change_legacy_inventory(fixture.output, damage)
+    before = _output_bytes(fixture.output)
+    workspaces = {p.name: _output_bytes(p) for p in fixture.output.parent.glob('.graphify-prepare-*')}
+    with pytest.raises(tx.PendingTransactionError, match='inventory|artifact'):
+        _recover_update_fixture(fixture)
+    assert _output_bytes(fixture.output) == before
+    assert {p.name: _output_bytes(p) for p in fixture.output.parent.glob('.graphify-prepare-*')} == workspaces
+
+
+@pytest.mark.parametrize('field,value', [('legacy_inventory_digest', None),
+                                       ('legacy_inventory_digest', 'bad'),
+                                       ('kind', 'full'), ('generation', 2)])
+def test_receiptless_bootstrap_recovery_rejects_malformed_binding(tmp_path, field, value):
+    fixture = _receiptless_retry_fixture(tmp_path)
+
+    def stop(*_args):
+        raise RuntimeError('bootstrap')
+
+    with pytest.raises(RuntimeError, match='bootstrap'):
+        tx.begin_transaction('update', fixture.root, output=fixture.output, now=0, failpoint=stop)
+    path = fixture.output / tx.PROTOCOL_FILE
+    raw = json.loads(path.read_bytes())
+    raw[field] = value
+    path.write_text(json.dumps(raw))
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='legacy bootstrap inventory binding'):
+        tx.recover_transaction('update', fixture.root, output=fixture.output, now=100)
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('state', ['INCOMPLETE', 'COMPLETE'])
+def test_legacy_bootstrap_binding_cannot_extend_later_protocol_shapes(tmp_path, state):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    raw = json.loads((fixture.output / tx.PROTOCOL_FILE).read_bytes())
+    raw.update(state=state, legacy_inventory_digest='0' * 64)
+    if state == 'COMPLETE':
+        raw['receipt_digest'] = '0' * 64
+    before = _output_bytes(fixture.output)
+    with tx.pin_output(fixture.output) as capability:
+        with pytest.raises(tx.PendingTransactionError, match='malformed protocol state'):
+            tx._protocol_from_json(capability, raw)
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('phase', ['bootstrap', 'claimed'])
+def test_receiptless_recovery_does_not_infer_missing_binding(tmp_path, phase):
+    from dataclasses import replace
+    fixture = _receiptless_retry_fixture(tmp_path)
+    if phase == 'claimed':
+        owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+        old_owner = replace(owner, legacy_inventory_digest=None)
+        with tx.pin_output(fixture.output) as capability, tx._locked(capability):
+            tx._write_transaction(capability, old_owner)
+        tx._AUTHORITY.set(tx._authority_for(old_owner))
+        tx.stage_transaction_handoff(old_owner)
+    else:
+        def stop(*_args):
+            raise RuntimeError('bootstrap')
+        with pytest.raises(RuntimeError, match='bootstrap'):
+            tx.begin_transaction('update', fixture.root, output=fixture.output, now=0, failpoint=stop)
+        path = fixture.output / tx.PROTOCOL_FILE
+        raw = json.loads(path.read_bytes())
+        raw.pop('legacy_inventory_digest')
+        path.write_text(json.dumps(raw))
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='inventory binding is missing'):
+        _recover_update_fixture(fixture)
+    assert _output_bytes(fixture.output) == before
+
+
+@pytest.mark.parametrize('damage', ['missing', 'changed'])
+@pytest.mark.parametrize('phase', ['bootstrap', 'claimed'])
+def test_receiptless_recovery_refuses_transition_binding_substitution(tmp_path, phase, damage):
+    fixture = _receiptless_retry_fixture(tmp_path)
+
+    def stop(*_args):
+        raise RuntimeError('transition')
+
+    if phase == 'claimed':
+        owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+        tx.stage_transaction_handoff(owner)
+        with pytest.raises(RuntimeError, match='transition'):
+            _recover_update_fixture(fixture, failpoint=stop)
+    else:
+        with pytest.raises(RuntimeError, match='transition'):
+            tx.begin_transaction('update', fixture.root, output=fixture.output, now=0,
+                                 transition_failpoint=stop)
+    path = fixture.output / tx.TRANSITION_FILE
+    raw = json.loads(path.read_bytes())
+    successor = raw['successor_transaction']
+    if damage == 'missing':
+        successor.pop('legacy_inventory_digest')
+    else:
+        successor['legacy_inventory_digest'] = '0' * 64
+    path.write_text(json.dumps(raw))
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='transition legacy inventory binding changed'):
+        _recover_update_fixture(fixture)
+    assert _output_bytes(fixture.output) == before
+
+
+def test_receiptless_recovery_accepts_older_bound_pending_transition(tmp_path):
+    fixture = _receiptless_retry_fixture(tmp_path)
+
+    def stop(*_args):
+        raise RuntimeError('transition')
+
+    with pytest.raises(RuntimeError, match='transition'):
+        tx.begin_transaction('update', fixture.root, output=fixture.output, now=0,
+                             transition_failpoint=stop)
+    protocol_path = fixture.output / tx.PROTOCOL_FILE
+    transition_path = fixture.output / tx.TRANSITION_FILE
+    protocol = json.loads(protocol_path.read_bytes())
+    transition = json.loads(transition_path.read_bytes())
+    # The previous format already bound its pending successor, but omitted the
+    # digest on the pre-owner bootstrap protocol. Preserve that exact replay.
+    protocol.pop('legacy_inventory_digest')
+    transition['predecessor_protocol'].pop('legacy_inventory_digest')
+    protocol_path.write_text(json.dumps(protocol))
+    transition_path.write_text(json.dumps(transition))
+    recovered = _recover_update_fixture(fixture)
+    assert recovered.generation == 1 and recovered.legacy_inventory_digest is not None
+    fixture.token = tx.stage_transaction_handoff(recovered)
+    _run(fixture, "assert tx.open_update_baseline(tx.current_transaction()).payload == (output / 'graph.json').read_bytes()")
+
+
+@pytest.mark.parametrize('kind', ['full', 'update'])
+@pytest.mark.parametrize('bootstrap', [False, True], ids=['claimed', 'bootstrap'])
+def test_graphless_recovery_keeps_existing_generation_rules(tmp_path, kind, bootstrap):
+    root = tmp_path / 'empty-corpus'
+    root.mkdir()
+    output = root / 'graphify-out'
+
+    def stop(*_args):
+        raise RuntimeError('bootstrap')
+
+    if bootstrap:
+        with pytest.raises(RuntimeError, match='bootstrap'):
+            tx.begin_transaction(kind, root, output=output, now=0, failpoint=stop)
+    else:
+        tx.begin_transaction(kind, root, output=output, now=0)
+    recovered = tx.recover_transaction(kind, root, output=output, now=100)
+    assert recovered.generation == (1 if bootstrap else 2)
+    assert recovered.legacy_inventory_digest is None
+    assert 'legacy_inventory_digest' not in tx._transaction_json(recovered, phase='building')
+    assert 'legacy_inventory_digest' not in json.loads((output / tx.PROTOCOL_FILE).read_bytes())
+
+
+def test_receiptless_recovery_rotates_claims_without_advancing_publication(tmp_path):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    tx.stage_transaction_handoff(owner)
+    for epoch in range(1, 4):
+        recovered = tx.recover_transaction('update', fixture.root, output=fixture.output,
+                                            now=epoch * 100)
+        assert recovered.generation == 1 and recovered.drainer.claim_epoch == epoch
+        assert recovered.legacy_inventory_digest == owner.legacy_inventory_digest
+        fixture.token = tx.stage_transaction_handoff(recovered)
+        _run(fixture, "assert tx.open_update_baseline(tx.current_transaction()).payload == (output / 'graph.json').read_bytes()")
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.RecoverableTransactionError, match='attempt bound'):
+        tx.recover_transaction('update', fixture.root, output=fixture.output, now=400)
+    assert _output_bytes(fixture.output) == before
+
+
+def test_receiptless_recovery_cannot_drop_binding_by_changing_kind(tmp_path):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    tx.stage_transaction_handoff(owner)
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='recovery kind changed'):
+        tx.recover_transaction('full', fixture.root, output=fixture.output, now=100)
+    assert _output_bytes(fixture.output) == before
+
+
+def test_receiptless_recovery_without_handoff_keeps_native_baseline(tmp_path):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    expected = dict(tx.open_update_baseline(owner).artifacts)
+    recovered = tx.recover_transaction('update', fixture.root, output=fixture.output, now=100)
+    assert recovered.generation == 1
+    assert recovered.legacy_inventory_digest == owner.legacy_inventory_digest
+    assert dict(tx.open_update_baseline(recovered).artifacts) == expected
+
+
+@pytest.mark.parametrize('entrypoint', ['selected', 'takeover', 'cli'])
+def test_receiptless_recovery_entrypoints_preserve_rejected_workspace(tmp_path, entrypoint):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    fixture.token = tx.stage_transaction_handoff(owner)
+    _run(fixture, "tx.commit_prepared_bytes(tx.current_transaction(), 'failed-attempt.txt', b'preserve me')")
+    _change_legacy_inventory(fixture.output, 'graph')
+    before = _output_bytes(fixture.output)
+    workspaces = {p.name: _output_bytes(p) for p in fixture.output.parent.glob('.graphify-prepare-*')}
+    if entrypoint == 'cli':
+        identity = owner.output_identity
+        result = subprocess.run(
+            [os.sys.executable, '-B', '-m', 'graphify', 'transaction', 'recover',
+             '--root', str(fixture.root), '--output', str(fixture.output),
+             '--generation', str(owner.generation), '--transaction-id', owner.id,
+             '--device', str(identity.device), '--inode', str(identity.inode)],
+            cwd=fixture.root, capture_output=True, text=True,
+        )
+        assert result.returncode != 0 and 'legacy update inventory changed' in result.stderr
+    else:
+        with pytest.raises(tx.PendingTransactionError, match='legacy update inventory changed'):
+            if entrypoint == 'takeover':
+                tx.takeover_drainer(fixture.output, now=100)
+            else:
+                _recover_update_fixture(fixture, entrypoint)
+    assert _output_bytes(fixture.output) == before
+    assert {p.name: _output_bytes(p) for p in fixture.output.parent.glob('.graphify-prepare-*')} == workspaces
+
+
+def test_receiptless_partial_publication_keeps_existing_finalization_path(tmp_path):
+    fixture = _receiptless_retry_fixture(tmp_path)
+    owner = tx.begin_transaction('update', fixture.root, output=fixture.output, now=0)
+    fixture.token = tx.stage_transaction_handoff(owner)
+    with pytest.raises(RuntimeError, match='receipt committed'):
+        _run(fixture, """
+live = tx.current_transaction()
+data = json.loads(Path('graph.json').read_bytes())
+data['graph'][tx.GRAPH_WATERMARK_KEY] = {
+    'schema': 1, 'protocol_epoch': 1, 'generation': live.generation, 'state': 'active'}
+def interrupt(phase):
+    if phase == 'after_receipt':
+        raise RuntimeError('receipt committed')
+tx._commit_publication_plan(live, tx.PublicationPlan({
+    'graph.json': json.dumps(data).encode(), 'manifest.json': Path('manifest.json').read_bytes()}),
+    failpoint=interrupt)
+""")
+    before = _output_bytes(fixture.output)
+    with pytest.raises(tx.PendingTransactionError, match='inventory acquired receipt authority'):
+        _recover_update_fixture(fixture)
+    assert _output_bytes(fixture.output) == before
+    # The pending receipt does not authorize a new baseline or replacement owner.
+    # Its original exact token can still finish the already prepared publication.
+    _run(fixture, 'tx.finalize_prepared_transaction()')
+    snapshot = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='completed-first-publication')
+    assert snapshot.generation == 1
 
 
 def test_update_baseline_refuses_actual_full_owner(tmp_path, monkeypatch):

@@ -145,6 +145,18 @@ inventory; failed prepared outputs cannot become the baseline. Older pending
 receiptless updates without this binding are refused rather than adopting their
 current public files. Full builds and receipt-backed updates keep their existing
 record shapes and admission rules; no separate recovery record is introduced.
+The binding is also persisted in the existing bootstrap protocol until its live
+owner is installed. Recovery and takeover revalidate the admitted legacy inventory
+before changing ownership or discarding prepared work. A recovered bound legacy
+update keeps publication generation 1 and its original digest while rotating the
+owner and claim epoch; an execution retry does not establish a new published
+baseline. Pending-transition replay must carry that same binding. Older pending
+records with an already-bound successor remain replayable; an unbound legacy
+bootstrap cannot infer authority from the current public files. Full, graphless
+and receipt-backed recovery retain their existing generation rules and formats.
+If a receipt appears before the legacy owner's protocol is complete, recovery
+refuses to reinterpret it as a new baseline. The original exact owner can still
+finish its interrupted prepared publication through the existing finalizer.
 The semantic entry may admit a completed receipt whose drainer file is missing,
 using the existing missing-drainer validation. Begin revalidates the same snapshot
 and preserves a receipt-bound complete predecessor before taking ownership. A
