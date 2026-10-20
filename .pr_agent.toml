@@ -1,7 +1,12 @@
 # Use upstream PR-Agent settings and native command options.
-# Only the existing model connection defaults are configured locally.
+# Model connections and the free-tier token budget are configured locally.
 [config]
 model = "gemini/gemini-3.8-flash"
 fallback_models = ["gemini/gemini-3.5-flash-lite"]
 reasoning_effort = "high"
 temperature = 1.0
+# Reserve 65,536 output tokens and allow 200,000 input tokens per call.
+# This leaves 20% headroom under the shared 250,000 input tokens/minute quota.
+# Space large reviews across repositories sharing the Google project.
+max_model_tokens = 265536
+max_output_tokens = 65536
