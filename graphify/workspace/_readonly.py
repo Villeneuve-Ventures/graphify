@@ -183,13 +183,19 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
                         if key.fileobj is process.stdin:
                             try:
                                 sent += os.write(key.fd, request[sent:])
+                            except BlockingIOError:
+                                # Readiness does not guarantee the next I/O can progress.
+                                continue
                             except BrokenPipeError:
                                 sent = len(request)
                             if sent == len(request):
                                 selector.unregister(key.fileobj)
                                 process.stdin.close()
                             continue
-                        chunk = os.read(key.fd, min(65536, max_output_bytes - total + 1))
+                        try:
+                            chunk = os.read(key.fd, min(65536, max_output_bytes - total + 1))
+                        except BlockingIOError:
+                            continue
                         if not chunk:
                             selector.unregister(key.fileobj)
                             continue

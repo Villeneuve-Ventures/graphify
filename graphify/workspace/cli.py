@@ -147,13 +147,19 @@ def _run_bounded(request, deadline_ns):
                         if key.fileobj is process.stdin:
                             try:
                                 sent += os.write(key.fd, request.canonical[sent:])
+                            except BlockingIOError:
+                                # Readiness does not guarantee the next I/O can progress.
+                                continue
                             except BrokenPipeError:
                                 sent = len(request.canonical)
                             if sent == len(request.canonical):
                                 selector.unregister(key.fileobj)
                                 process.stdin.close()
                             continue
-                        chunk = os.read(key.fd, min(65536, MAX_RESPONSE_BYTES - total + 1))
+                        try:
+                            chunk = os.read(key.fd, min(65536, MAX_RESPONSE_BYTES - total + 1))
+                        except BlockingIOError:
+                            continue
                         if not chunk:
                             selector.unregister(key.fileobj)
                             continue

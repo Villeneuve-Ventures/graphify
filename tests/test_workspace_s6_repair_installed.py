@@ -85,7 +85,8 @@ def test_installed_native_preview_approved_repair_and_identity(installed_candida
     saved_lock.rename(lock)
     # Every newly consumed member must be required and its installed bytes verified.
     package = next(client.python.parent.parent.glob("lib/python*/site-packages"))
-    for member in ("graphify/workspace/repair.py", "graphify/workspace/schemas/repair-approval.schema.json"):
+    for member in ("graphify/workspace/repair.py", "graphify/workspace/schemas/repair-approval.schema.json",
+                   "graphify/workspace/cli.py", "graphify/workspace/_readonly.py"):
         assert member in client.expected["package_members"]
         helper = package / member; raw = helper.read_bytes()
         assert hashlib.sha256(raw).hexdigest() == client.expected["package_members"][member]
