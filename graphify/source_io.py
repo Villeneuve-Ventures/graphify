@@ -15,6 +15,7 @@ import hashlib
 import os
 from pathlib import Path
 import stat
+from typing import NoReturn
 
 
 class SourceError(RuntimeError):
@@ -127,7 +128,7 @@ class SourceIO:
             raise SourceUnsupported('no-follow directory descriptors unavailable')
         return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
 
-    def refuse(self, detail, error=SourceUnsupported):
+    def refuse(self, detail: str, error: type[SourceError] = SourceUnsupported) -> NoReturn:
         self.failure = self.failure or error(detail)
         raise self.failure
 

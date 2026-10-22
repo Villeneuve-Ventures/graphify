@@ -418,6 +418,12 @@ missing required language extra such as `graphifyy[sql]` for SQL. Genuine option
 metadata absence and working documented backend fallbacks remain supported.
 The separate `graphify update` command retains its own AST update behavior.
 
+For an existing receiptless legacy graph, `graphify bootstrap-legacy` can build a
+fresh `structural-v1` / `core-v1` generation from an explicit source request. It
+offers a no-write preview, preserves legacy evidence, and supports exact sealed
+replay after interruption. See [trusted legacy bootstrap](docs/legacy-bootstrap.md)
+for eligibility, request fields, coverage limits and recovery commands.
+
 ### Managed structural workspace (S5 and S6 maintenance)
 
 `graphify workspace` exposes explicit registration, source activation, structural
@@ -490,7 +496,7 @@ graphify-out/cost.json        # local only
 **Workflow:**
 1. One person runs `/graphify .` and commits `graphify-out/`.
 2. Everyone pulls. Receipt-managed output is not yet guaranteed readable in a fresh clone without an authorized local rebuild. A committed `merge_pending` graph is rejected by ordinary readers.
-3. Run `graphify hook install` to auto-rebuild after commits, checkouts, and merges (AST only, no API cost). This also sets up a git merge driver. Post-event recovery can finalize its pending union in the working tree, but does not repair an already recorded commit. On macOS/Linux, `graphify hook install --merge-guard` additionally refuses pending ordinary merge commits; it does not finalize them. It requires standalone Graphify prehooks and a repository-relative output without whitespace or attribute patterns. See [merge guard behavior and recovery](docs/hook-installation-recovery.md#optional-ordinary-merge-guards). Legacy outputs without generation receipts must be rebuilt once with `graphify update .` before Git can safely merge their graph snapshots.
+3. Run `graphify hook install` to auto-rebuild after commits, checkouts, and merges (AST only, no API cost). This also sets up a git merge driver. Post-event recovery can finalize its pending union in the working tree, but does not repair an already recorded commit. On macOS/Linux, `graphify hook install --merge-guard` additionally refuses pending ordinary merge commits; it does not finalize them. It requires standalone Graphify prehooks and a repository-relative output without whitespace or attribute patterns. See [merge guard behavior and recovery](docs/hook-installation-recovery.md#optional-ordinary-merge-guards). Legacy outputs without generation receipts need an admitted generation before Git can safely merge their graph snapshots. Use [trusted legacy bootstrap](docs/legacy-bootstrap.md) to build that generation from an explicit source request without inheriting legacy graph content.
 4. When docs or papers change, run `/graphify --update` to refresh those nodes.
 
 ---
