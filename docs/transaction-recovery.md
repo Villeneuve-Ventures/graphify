@@ -50,3 +50,45 @@ Cancellation remains limited to exact unpublished work and rejects an active
 token transfer. Public graph readers remain fail closed during partial or
 ambiguous recovery. This ordering improvement adds no background scheduler,
 new durable format, recovery bypass, or Windows mutation support.
+
+## Output identity mismatch
+
+Protocol, close-drainer, generation-receipt and preserved-predecessor records
+bind the output directory's filesystem device and inode. A well-formed identity
+that differs from the pinned directory raises `OutputIdentityMismatchError`, a
+subclass of `PendingTransactionError`. Its code is `output_identity_mismatch`;
+its `record`, `recorded_identity` and `observed_identity` attributes describe the
+failed comparison. The diagnostic includes both device/inode pairs, refuses
+admission, and gives the separate-output rebuild fallback. Malformed identity
+fields retain their malformed-state errors. A directory replaced during the
+comparison fails the directory-identity guard instead of reporting a stale pin
+as the observed identity.
+
+The diagnostic reports only the first reached failure. It does not establish
+that the rest of the record, other authority records, receipts or managed
+artifacts passed validation. Update and watch report the refusal through their
+existing rebuild error path; transaction status and selected recovery also
+refuse it. No identity fields, tokens, queues or receipts are changed to produce
+the diagnostic. Existing recovery-inspection state names and successful status
+output remain unchanged.
+
+An unchanged path or inode, matching artifact hashes, and agreement among local
+records do not establish filesystem continuity or authorize rebinding. The
+diagnostic does not attribute the mismatch to reboot or remount. A copied output
+or replacement volume can also contain internally consistent old state.
+
+Preserve the affected output and its authority records. Select the trusted
+current source corpus explicitly and build into a separately named, absent
+output; keep the original outside that build's inputs. An offline AST rebuild
+provides structural coverage, not semantic parity with the old graph. A fresh
+receipt establishes the new output's generation, not recovery of the old one.
+Canonical-output adoption or replacement requires its own design and authority.
+Do not rewrite recorded identities, regenerate receipts for old bytes, remove
+coordination files, or use `--force` to bypass admission.
+
+Ordinary-output rebinding is not supported. The receiptless predicate in
+[legacy bootstrap](legacy-bootstrap.md) does not admit current coordinated
+outputs with identity failures. Legacy five-field merge-pending recovery (#100)
+and closed outputs with missing or mismatched managed artifacts (#114) remain
+separate recovery contracts. An identity diagnostic does not establish artifact
+corruption or make either recovery path eligible.
