@@ -59,6 +59,29 @@ def _collision_check(capability, payloads, legacy):
             raise tx.PendingTransactionError(f"bootstrap would replace unmanaged artifact: {name}")
 
 
+def _provenance(request, built, binding, identity, legacy_digest):
+    return _bounded_json({
+        "schema": 1, "mode": "trusted-legacy-bootstrap", "generation": 1,
+        "bootstrap_binding": binding, "request": request,
+        "output_identity": identity.json(),
+        "source_evidence_sha256": built.evidence_digest,
+        "legacy_inventory_sha256": legacy_digest,
+        "selected": list(built.selected), "outcomes": built.outcomes,
+        "uncovered": built.uncovered,
+    })
+
+
+def _preflight_state(capability, request, built, legacy, binding, legacy_digest):
+    """Refuse unpersistable bootstrap state before acquiring generation authority."""
+    _bounded_json({"request": request, "evidence": built.evidence})
+    # The prepared marker repeats legacy paths in prior_inventory and seal
+    # deletions. Charge transaction JSON's ASCII escaping (including Unicode),
+    # reserving half the state budget for fixed owner fields and five core entries.
+    if len(tx._json_bytes(sorted(legacy))) > tx._MAX_STATE_BYTES // 4:
+        raise tx.PendingTransactionError("bootstrap legacy paths exceed state bound")
+    _provenance(request, built, binding, capability.identity, legacy_digest)
+
+
 def preview(request):
     """Read-only eligibility, complete extraction and reproducible request digest."""
     request = source.validate_request(request)
@@ -68,16 +91,17 @@ def preview(request):
         source.reobserve(request, built.evidence)
         digest = tx._legacy_update_inventory_digest(legacy)
         tx._validate_legacy_update_inventory_locked(cap, digest)
-        _bounded_json({"request": request, "evidence": built.evidence})
         _collision_check(cap, {**built.payloads, PROVENANCE: b""}, legacy)
         fingerprint = _fingerprint(request, built.evidence_digest, digest, cap.identity)
+        _preflight_state(cap, request, built, legacy, _binding(fingerprint), digest)
+        publication_names = set(built.payloads) | {PROVENANCE}
         return {
             "status": "preview", "preview_sha256": fingerprint, "generation": 1,
             "request": request, "selected": list(built.selected),
             "outcomes": built.outcomes, "uncovered": built.uncovered,
             "preserve_legacy": sorted(legacy),
-            "replace": sorted(built.payloads),
-            "delete_active": sorted(set(legacy) - set(built.payloads)),
+            "replace": sorted(publication_names),
+            "delete_active": sorted(set(legacy) - publication_names),
             "source_observation": "reobserved current; not an atomic filesystem snapshot",
         }
 
@@ -158,15 +182,8 @@ def _prepare(capability, owner, request, built, legacy, *, failpoint=None):
             "schema": 1, "protocol_epoch": 1, "generation": 1, "state": "active",
         }
         payloads["graph.json"] = _json(graph)
-        payloads[PROVENANCE] = _bounded_json({
-            "schema": 1, "mode": "trusted-legacy-bootstrap", "generation": 1,
-            "bootstrap_binding": owner.bootstrap_binding, "request": request,
-            "output_identity": capability.identity.json(),
-            "source_evidence_sha256": built.evidence_digest,
-            "legacy_inventory_sha256": owner.legacy_inventory_digest,
-            "selected": list(built.selected), "outcomes": built.outcomes,
-            "uncovered": built.uncovered,
-        })
+        payloads[PROVENANCE] = _provenance(request, built, owner.bootstrap_binding,
+                                         capability.identity, owner.legacy_inventory_digest)
         # No ambient or predecessor file can enter this complete publication.
         existing = tx.publication_plan_from_directory(prepared.output.path)
         if set(existing.payloads) - set(payloads):
@@ -419,7 +436,7 @@ def _execute(request, preview_sha256=None, *, token_path=None, now=None, failpoi
         legacy_digest = tx._legacy_update_inventory_digest(legacy)
         if _binding(_fingerprint(request, built.evidence_digest, legacy_digest, cap.identity)) != binding:
             raise tx.PendingTransactionError("bootstrap preview is stale; source or legacy inventory changed")
-        _bounded_json({"request": request, "evidence": built.evidence})
+        _preflight_state(cap, request, built, legacy, binding, legacy_digest)
         _collision_check(cap, {**built.payloads, PROVENANCE: b""}, legacy)
         tx._validate_legacy_update_inventory_locked(cap, legacy_digest)
         if protocol is None:
@@ -463,7 +480,10 @@ def run_cli(argv=None):
             payload = stream.read(tx._MAX_STATE_BYTES + 1)
         if len(payload) > tx._MAX_STATE_BYTES:
             raise ValueError("bootstrap request exceeds size bound")
-        request = json.loads(payload)
+        try:
+            request = json.loads(payload)
+        except RecursionError as exc:
+            raise ValueError("bootstrap request exceeds JSON nesting limit") from exc
         result = preview(request) if args.preview else execute(
             request, args.execute, token_path=args.resume)
         print(_json(result).decode(), end="")

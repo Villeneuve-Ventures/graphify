@@ -12,6 +12,10 @@ caches to build the successor. It preserves the old managed bytes as opaque
 evidence before replacing them. This is local generation admission; it does not
 create a portable bundle or grant authority to a fresh clone.
 
+The command requires POSIX no-follow directory descriptors (`O_NOFOLLOW`,
+`O_DIRECTORY` and `O_NONBLOCK`). It is unavailable on native Windows; source
+inspection refuses with `no-follow directory descriptors unavailable` there.
+
 ## Explicit request and preview
 
 Create a JSON request outside the selected corpus, for example:
@@ -59,7 +63,11 @@ Limits are fixed: 64 MiB per source read, 512 MiB of source reads, 100,000 evide
 units, 128 MiB of fresh core payloads, and the transaction layer's 1 MiB limit for
 each evidence/state document. The normalized preview includes the source bounds.
 Legacy preservation and publication also use the existing transaction inventory
-and byte bounds. Exceeding a bound refuses the operation.
+and byte bounds. The sorted legacy path list, serialized as ASCII-escaped JSON,
+must fit within 256 KiB. This aggregate limit leaves room for the repeated paths,
+owner metadata and publication seal in the 1 MiB prepared-state document. Preview
+and execution check this limit and the source-evidence and provenance document
+sizes before claiming output. Exceeding a bound refuses the operation.
 
 ## Execute and resume
 

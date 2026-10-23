@@ -420,6 +420,7 @@ The separate `graphify update` command retains its own AST update behavior.
 
 For an existing receiptless legacy graph, `graphify bootstrap-legacy` can build a
 fresh `structural-v1` / `core-v1` generation from an explicit source request. It
+requires POSIX no-follow directory descriptors and is unavailable on native Windows. It
 offers a no-write preview, preserves legacy evidence, and supports exact sealed
 replay after interruption. See [trusted legacy bootstrap](docs/legacy-bootstrap.md)
 for eligibility, request fields, coverage limits and recovery commands.

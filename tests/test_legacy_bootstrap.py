@@ -501,3 +501,99 @@ def test_completed_bootstrap_accepts_admitted_merge_successor(legacy):
     successor = tx.begin_transaction("update", root, output=output)
     assert successor.generation == 2
     assert successor.drainer == queued.drainer
+
+
+def test_preview_replacements_match_complete_receipt(legacy):
+    root, output = legacy
+    request = request_for(root, output)
+    before = tree_bytes(output.parent)
+    plan = bootstrap.preview(request)
+    assert tree_bytes(output.parent) == before
+    assert bootstrap.PROVENANCE in plan["replace"]
+    bootstrap.execute(request, plan["preview_sha256"])
+    receipt = json.loads((output / tx.RECEIPT_FILE).read_bytes())
+    assert plan["replace"] == receipt["required_artifacts"]
+
+
+@pytest.mark.parametrize("action", ["preview", "execute"])
+@pytest.mark.parametrize("name", ["x" * 190, "é" * 60, "😀" * 40],
+                         ids=["ascii", "escaped", "astral"])
+def test_legacy_path_state_budget_refuses_before_claim(legacy, monkeypatch, action, name):
+    root, output = legacy
+    wiki = output / "wiki"
+    wiki.mkdir()
+    for index in range(30):
+        (wiki / f"{index:02d}-{name}.md").write_text("legacy")
+    request = request_for(root, output)
+    fingerprint = bootstrap.preview(request)["preview_sha256"]
+    # Scale the byte budget, not the artifact/path limits or admission behavior.
+    monkeypatch.setattr(tx, "_MAX_STATE_BYTES", 16 * 1024)
+    before = tree_bytes(output.parent)
+    with pytest.raises(tx.PendingTransactionError, match="state bound"):
+        if action == "preview":
+            bootstrap.preview(request)
+        else:
+            bootstrap.execute(request, fingerprint)
+    assert tree_bytes(output.parent) == before
+
+
+def test_admitted_path_budget_seals_and_resumes(legacy, monkeypatch):
+    root, output = legacy
+    wiki = output / "wiki"
+    wiki.mkdir()
+    for index in range(8):
+        (wiki / f"{index:02d}-{'é' * 60}.md").write_text("legacy")
+    monkeypatch.setattr(tx, "_MAX_STATE_BYTES", 16 * 1024)
+    request = request_for(root, output)
+    plan = bootstrap.preview(request)
+
+    def cut(boundary):
+        if boundary == "after_bootstrap_seal":
+            raise RuntimeError("sealed")
+
+    with pytest.raises(RuntimeError, match="sealed"):
+        bootstrap.execute(request, plan["preview_sha256"], failpoint=cut)
+    assert (output / tx.PREPARED_FILE).stat().st_size <= tx._MAX_STATE_BYTES
+    with tx.pin_output(output, mutation=False) as cap:
+        assert "bootstrap_seal" in tx._load_json(cap, tx.PREPARED_FILE)
+    token = next(output.glob(".graphify_transaction_token.*"))
+    assert bootstrap.execute(request, token_path=token)["status"] == "complete"
+
+
+@pytest.mark.parametrize("action", ["preview", "execute"])
+def test_provenance_size_refuses_before_claim(legacy, monkeypatch, action):
+    from dataclasses import replace
+
+    root, output = legacy
+    request = request_for(root, output)
+    built = bootstrap.source.build(request)
+    built = replace(built, uncovered={"ignored": ["x" * (20 * 1024)]})
+    monkeypatch.setattr(bootstrap.source, "build", lambda *args, **kwargs: built)
+    fingerprint = bootstrap.preview(request)["preview_sha256"]
+    monkeypatch.setattr(tx, "_MAX_STATE_BYTES", 16 * 1024)
+    before = tree_bytes(output.parent)
+    with pytest.raises(tx.PendingTransactionError, match="state bound"):
+        if action == "preview":
+            bootstrap.preview(request)
+        else:
+            bootstrap.execute(request, fingerprint)
+    assert tree_bytes(output.parent) == before
+
+
+@pytest.mark.parametrize("kind", ["array", "object"])
+def test_cli_over_nested_bounded_json_is_structured_refusal(tmp_path, kind):
+    depth = (tx._MAX_STATE_BYTES - 1) // (2 if kind == "array" else 6)
+    payload = ("[" * depth + "0" + "]" * depth if kind == "array" else
+               '{"a":' * depth + "0" + "}" * depth)
+    request = tmp_path / "request.json"
+    request.write_text(payload)
+    assert request.stat().st_size <= tx._MAX_STATE_BYTES
+    before = tree_bytes(tmp_path)
+    result = subprocess.run(
+        [sys.executable, "-B", "-m", "graphify", "bootstrap-legacy",
+         "--request", str(request), "--preview"], capture_output=True, text=True,
+    )
+    assert result.returncode == 2, result.stderr
+    assert json.loads(result.stdout)["status"] == "refused"
+    assert "Traceback" not in result.stderr
+    assert tree_bytes(tmp_path) == before
