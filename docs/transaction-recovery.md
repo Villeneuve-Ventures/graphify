@@ -64,6 +64,12 @@ fields retain their malformed-state errors. A directory replaced during the
 comparison fails the directory-identity guard instead of reporting a stale pin
 as the observed identity.
 
+A mismatch encountered by `transaction.inspect_recovery(output)` is returned as
+`RecoveryInspection(state="malformed", reason=...)`, rather than raised. Its
+bounded reason contains the diagnostic text; the result does not expose the
+exception's structured attributes. This inspection covers applicable successor
+recovery only; `absent` does not establish output admission.
+
 The diagnostic reports only the first reached failure. It does not establish
 that the rest of the record, other authority records, receipts or managed
 artifacts passed validation. Update and watch report the refusal through their
