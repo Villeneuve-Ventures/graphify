@@ -132,6 +132,7 @@ _PREPARED_MARKER_FIELDS = {
     "child_nonce",
     "prior_inventory",
 }
+_PREPARED_BOOTSTRAP_FIELDS = _PREPARED_MARKER_FIELDS | {"bootstrap_seal"}
 _PREPARED_SUCCESSOR_FIELDS = _PREPARED_MARKER_FIELDS | {
     "merge_snapshot_generation",
     "graph_name",
@@ -325,6 +326,7 @@ class Transaction:
     drainer: DrainerTuple
     phase: str = "building"
     legacy_inventory_digest: str | None = None
+    bootstrap_binding: str | None = None
 
 
 @dataclass(frozen=True)
@@ -500,6 +502,7 @@ class _Authority:
     phase: str
     output: Path
     legacy_inventory_digest: str | None = None
+    bootstrap_binding: str | None = None
 
 
 _AUTHORITY = contextvars.ContextVar[_Authority | None](
@@ -2557,6 +2560,41 @@ _PROTOCOL_COMMON_FIELDS = {
 }
 
 
+_BOOTSTRAP_BINDING_PREFIX = "legacy-bootstrap-v1:structural-v1:core-v1:"
+_BOOTSTRAP_AUTHORITY = contextvars.ContextVar[str | None](
+    "graphify_legacy_bootstrap_authority", default=None
+)
+
+
+def _validate_bootstrap_binding(value: object) -> str:
+    if (type(value) is not str or not value.startswith(_BOOTSTRAP_BINDING_PREFIX)
+            or not _is_hex(value[len(_BOOTSTRAP_BINDING_PREFIX):])):
+        raise PendingTransactionError("malformed trusted bootstrap binding")
+    return value
+
+
+def _bootstrap_recovery_guard(capability: OutputCapability, binding: str | None = None) -> None:
+    """Fence generic takeover before any queue, owner or workspace mutation."""
+    protocol = _read_protocol(capability)
+    actual = None if protocol is None else protocol.get("bootstrap_binding")
+    if actual is None:
+        if binding is not None:
+            raise PendingTransactionError("trusted bootstrap request has no bound owner")
+        return
+    if (protocol is not None and protocol["state"] == "COMPLETE"
+            and _read_transaction(capability) is None
+            and _load_json(capability, PREPARED_FILE) is None):
+        drainer = _read_drainer(capability)
+        if drainer is not None and drainer[1] in {"complete", "reserved"}:
+            _validate_receipt_locked(capability, require_closed=drainer[1] == "complete")
+            return
+    if binding != actual:
+        raise PendingTransactionError("trusted bootstrap requires its original request")
+    marker = _load_json(capability, PREPARED_FILE)
+    if marker is not None and "bootstrap_seal" in marker:
+        raise PendingTransactionError("sealed bootstrap requires its exact original token")
+
+
 def _protocol_from_json(
     capability: OutputCapability, raw: object
 ) -> dict[str, Any]:
@@ -2575,6 +2613,11 @@ def _protocol_from_json(
         if (not _is_hex(raw["legacy_inventory_digest"])
                 or raw.get("kind") != "update" or raw.get("generation") != 1):
             raise PendingTransactionError("malformed legacy bootstrap inventory binding")
+    if "bootstrap_binding" in raw:
+        _validate_bootstrap_binding(raw["bootstrap_binding"])
+        if raw.get("kind") != "update" or raw.get("generation") != 1:
+            raise PendingTransactionError("malformed trusted bootstrap generation")
+        fields.add("bootstrap_binding")
     if set(raw) != fields:
         raise PendingTransactionError("malformed protocol state")
     generation = raw.get("generation")
@@ -2602,7 +2645,8 @@ def _protocol_from_json(
         raise PendingTransactionError("malformed protocol state")
     root = Path(root_value)
     try:
-        canonical_root = root.resolve(strict=True)
+        canonical_root = (Path(os.path.abspath(root)) if "bootstrap_binding" in raw
+                          else root.resolve(strict=True))
     except OSError as exc:
         raise PendingTransactionError("malformed protocol root") from exc
     if not root.is_absolute() or canonical_root != root:
@@ -2803,8 +2847,11 @@ def _transaction_from_json(
 ) -> Transaction:
     if not isinstance(raw, dict) or set(raw) not in (
         _TRANSACTION_FIELDS, _TRANSACTION_FIELDS | {"legacy_inventory_digest"},
+        _TRANSACTION_FIELDS | {"legacy_inventory_digest", "bootstrap_binding"},
     ):
         raise PendingTransactionError("malformed live transaction")
+    if "bootstrap_binding" in raw:
+        _validate_bootstrap_binding(raw["bootstrap_binding"])
     if "legacy_inventory_digest" in raw and (
         not _is_hex(raw["legacy_inventory_digest"])
         or raw.get("kind") != "update" or raw.get("generation") != 1
@@ -2830,7 +2877,9 @@ def _transaction_from_json(
     root = Path(raw["root"])
     output = Path(raw["output"])
     try:
-        if source_io is None:
+        if "bootstrap_binding" in raw:
+            canonical_root = Path(os.path.abspath(root))
+        elif source_io is None:
             canonical_root = root.resolve(strict=True)
         else:
             info = source_io.probe(root)
@@ -2858,6 +2907,7 @@ def _transaction_from_json(
         drainer=_drainer_from_json(raw["drainer"]),
         phase=raw["phase"],
         legacy_inventory_digest=raw.get("legacy_inventory_digest"),
+        bootstrap_binding=raw.get("bootstrap_binding"),
     )
     if tx.output_identity != capability.identity or tx.drainer.generation != tx.generation:
         raise PendingTransactionError("malformed live transaction binding")
@@ -2890,6 +2940,8 @@ def _transaction_json(tx: Transaction, *, phase: str) -> dict[str, object]:
         "drainer": _drainer_json(tx.drainer),
         **({"legacy_inventory_digest": tx.legacy_inventory_digest}
            if tx.legacy_inventory_digest is not None else {}),
+        **({"bootstrap_binding": tx.bootstrap_binding}
+           if tx.bootstrap_binding is not None else {}),
     }
 
 
@@ -3056,6 +3108,10 @@ def _read_pending_transition(
     if ((prior_tx is not None or "legacy_inventory_digest" in predecessor_protocol)
             and successor.legacy_inventory_digest != prior_inventory_digest):
         raise PendingTransactionError("pending transition legacy inventory binding changed")
+    if (successor.bootstrap_binding != predecessor_protocol.get("bootstrap_binding")
+            or successor.bootstrap_binding != successor_protocol.get("bootstrap_binding")
+            or (prior_tx is not None and prior_tx.bootstrap_binding != successor.bootstrap_binding)):
+        raise PendingTransactionError("pending transition trusted bootstrap binding changed")
     if successor.token_identity is not None:
         try:
             token_payload, token_identity = _read_managed_bytes(
@@ -3143,6 +3199,7 @@ def _authority_for(tx: Transaction, drainer: DrainerTuple | None = None) -> _Aut
         tx.phase,
         tx.output,
         tx.legacy_inventory_digest,
+        tx.bootstrap_binding,
     )
 
 
@@ -3264,6 +3321,7 @@ def _retire_prepared_locked(capability: OutputCapability) -> Path | None:
         not in {
             frozenset(_PREPARED_MARKER_FIELDS),
             frozenset(_PREPARED_SUCCESSOR_FIELDS),
+            frozenset(_PREPARED_BOOTSTRAP_FIELDS),
         }
         or type(marker.get("generation")) is not int
         or not _is_hex(marker.get("token_digest"))
@@ -3842,7 +3900,7 @@ class _OperationalCorpusScan:
                                 return None
                         prepared = self._read(managed, PREPARED_FILE, fingerprints)
                         if (prepared is None or set(prepared) not in (
-                                _PREPARED_MARKER_FIELDS, _PREPARED_SUCCESSOR_FIELDS)
+                                _PREPARED_MARKER_FIELDS, _PREPARED_SUCCESSOR_FIELDS, _PREPARED_BOOTSTRAP_FIELDS)
                                 or type(prepared.get("schema")) is not int or prepared["schema"] != 1
                                 or type(prepared.get("protocol_epoch")) is not int or prepared["protocol_epoch"] != 1
                                 or type(prepared.get("generation")) is not int
@@ -4358,6 +4416,7 @@ def begin_transaction(
     failpoint: Callable[[OutputCapability, dict[str, object]], None] | None = None,
     transition_failpoint: Callable[[str], None] | None = None,
     expected_snapshot: GraphSnapshot | None = None,
+    bootstrap_binding: str | None = None,
 ) -> Transaction:
     if expected_snapshot is not None and not isinstance(expected_snapshot, GraphSnapshot):
         raise TypeError("local publication requires a GraphSnapshot")
@@ -4377,6 +4436,13 @@ def begin_transaction(
     capability = pin_output(output_path, create=True)
     try:
         with _locked(capability):
+            if bootstrap_binding is not None:
+                _validate_bootstrap_binding(bootstrap_binding)
+                if kind != "update":
+                    raise PendingTransactionError("trusted bootstrap requires update generation one")
+                legacy_bootstrap_inventory(capability)
+            elif _entry_stat(capability, PREPARED_FILE) is not None:
+                _bootstrap_recovery_guard(capability)
             if expected_snapshot is not None:
                 _validate_expected_snapshot_locked(capability, expected_snapshot)
             _fence_pending_enqueue_locked(capability)
@@ -4552,6 +4618,8 @@ def begin_transaction(
             }
             if legacy_inventory_digest is not None:
                 protocol["legacy_inventory_digest"] = legacy_inventory_digest
+            if bootstrap_binding is not None:
+                protocol["bootstrap_binding"] = bootstrap_binding
             if prior_protocol is None:
                 try:
                     _create_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
@@ -4574,6 +4642,7 @@ def begin_transaction(
                 None,
                 drainer,
                 legacy_inventory_digest=legacy_inventory_digest,
+                bootstrap_binding=bootstrap_binding,
             )
             successor_protocol = dict(protocol)
             successor_protocol.pop("legacy_inventory_digest", None)
@@ -4947,6 +5016,7 @@ def _pin_prepared_workspace(
             frozenset(marker_fields),
             frozenset(legacy_fields),
             frozenset(_PREPARED_SUCCESSOR_FIELDS),
+            frozenset(_PREPARED_BOOTSTRAP_FIELDS),
         }
         or marker.get("schema") != 1
         or (not legacy_marker and marker.get("protocol_epoch") != 1)
@@ -5230,7 +5300,8 @@ def _pin_prepared_workspace(
         ):
             raise PendingTransactionError("prepared workspace owner binding changed")
         if marker_state == "workspace-created":
-            seed_inventory = prior_inventory or MANAGED_PUBLICATION_PATHS
+            seed_inventory = (() if transaction.bootstrap_binding is not None
+                              else prior_inventory or MANAGED_PUBLICATION_PATHS)
             for name in seed_inventory:
                 if merge_admission is not None and name == merge_admission.graph_name:
                     data = _read_preserved_merge_content_locked(
@@ -5679,7 +5750,9 @@ def _validate_token_transition_current(
             "drainer",
             "secret",
         } | ({"legacy_inventory_digest"}
-             if target_base.legacy_inventory_digest is not None else set()))
+             if target_base.legacy_inventory_digest is not None else set())
+           | ({"bootstrap_binding"} if target_base.bootstrap_binding is not None else set()))
+        or token_payload.get("bootstrap_binding") != target_base.bootstrap_binding
         or token_payload.get("legacy_inventory_digest") != target_base.legacy_inventory_digest
         or token_payload.get("schema") != 1
         or token_payload.get("id") != target_base.id
@@ -6222,6 +6295,9 @@ def stage_transaction_handoff(
     failpoint: Callable[[str], None] | None = None,
 ) -> TransactionToken:
     with pin_output(transaction.output) as capability, _locked(capability):
+        marker = _load_json(capability, PREPARED_FILE)
+        if marker is not None and "bootstrap_seal" in marker:
+            raise PendingTransactionError("sealed bootstrap token is immutable")
         existing = _read_token_transition(capability)
         if existing is not None:
             target = _validate_token_transition_current(capability, existing)
@@ -6244,6 +6320,8 @@ def stage_transaction_handoff(
             "secret": secret,
             **({"legacy_inventory_digest": live.legacy_inventory_digest}
                if live.legacy_inventory_digest is not None else {}),
+            **({"bootstrap_binding": live.bootstrap_binding}
+               if live.bootstrap_binding is not None else {}),
         }
         digest = hashlib.sha256(_json_bytes(token_payload)).hexdigest()
         target = replace(live, token_digest=digest, token_identity=None)
@@ -6301,6 +6379,7 @@ def _open_token(
             or raw.get("root") != live.root
             or raw.get("output") != str(live.output)
             or raw.get("legacy_inventory_digest") != live.legacy_inventory_digest
+            or raw.get("bootstrap_binding") != live.bootstrap_binding
             or hashlib.sha256(payload).hexdigest() != live.token_digest
             or identity != live.token_identity
             or _drainer_from_json(raw.get("drainer")) != live.drainer
@@ -6317,6 +6396,7 @@ def run_token(
 ) -> None:
     path = Path(token_path).absolute()
     with pin_output(path.parent) as capability, _locked(capability):
+        _bootstrap_recovery_guard(capability)
         _fence_pending_enqueue_locked(capability)
         token_transition = _read_token_transition(capability)
         if token_transition is not None:
@@ -6432,7 +6512,8 @@ def commit_prepared_bytes(
         _validate_authority(capability, transaction)
         prepared = _pin_prepared_workspace(transaction, capability)
         try:
-            if (_load_json(capability, PREPARED_FILE) or {}).get("state") == "successor-ready":
+            marker = _load_json(capability, PREPARED_FILE) or {}
+            if marker.get("state") == "successor-ready" or "bootstrap_seal" in marker:
                 raise PendingTransactionError("successor-ready preparation is immutable")
             _replace_relative_bytes(prepared.output, relative_name, payload)
         finally:
@@ -6446,7 +6527,8 @@ def unlink_prepared(transaction: Transaction, name: str) -> None:
         _validate_authority(capability, transaction)
         prepared = _pin_prepared_workspace(transaction, capability)
         try:
-            if (_load_json(capability, PREPARED_FILE) or {}).get("state") == "successor-ready":
+            marker = _load_json(capability, PREPARED_FILE) or {}
+            if marker.get("state") == "successor-ready" or "bootstrap_seal" in marker:
                 raise PendingTransactionError("successor-ready preparation is immutable")
             _unlink_relative(prepared.output, name)
         finally:
@@ -6489,6 +6571,7 @@ def _validate_authority(
         or protocol.get("transaction_id") != live.id
         or protocol.get("root") != live.root
         or protocol.get("kind") != live.kind
+        or protocol.get("bootstrap_binding") != live.bootstrap_binding
         or protocol.get("owner_capability_digest") != live.token_digest
         or _managed_entry_identity_from_json(protocol.get("token_identity"))
         != live.token_identity
@@ -6528,6 +6611,7 @@ def _validate_durable_live_binding(
         or durable_protocol.get("transaction_id") != live.id
         or durable_protocol.get("root") != live.root
         or durable_protocol.get("kind") != live.kind
+        or durable_protocol.get("bootstrap_binding") != live.bootstrap_binding
         or durable_protocol.get("owner_capability_digest") != live.token_digest
         or durable_protocol.get("token_identity") != token_identity
         or durable_protocol.get("output_identity") != capability.identity.json()
@@ -6571,7 +6655,8 @@ def _validate_durable_live_binding(
         except (ValueError, UnicodeError) as exc:
             raise PendingTransactionError("durable live transaction token changed") from exc
         if (not isinstance(token_data, dict)
-                or token_data.get("legacy_inventory_digest") != live.legacy_inventory_digest):
+                or token_data.get("legacy_inventory_digest") != live.legacy_inventory_digest
+                or token_data.get("bootstrap_binding") != live.bootstrap_binding):
             raise PendingTransactionError("durable live transaction token changed")
     return durable_protocol, durable_drainer
 
@@ -6603,6 +6688,12 @@ def closing_step(
     yield
 
 
+def _require_bootstrap_publication_context(transaction: Transaction) -> None:
+    if (transaction.bootstrap_binding is not None
+            and _BOOTSTRAP_AUTHORITY.get() != transaction.bootstrap_binding):
+        raise PendingTransactionError("trusted bootstrap requires sealed publication")
+
+
 def commit_bytes(
     transaction: Transaction,
     name: str,
@@ -6611,6 +6702,7 @@ def commit_bytes(
     capability: OutputCapability | None = None,
     failpoint: Callable[[str], None] | None = None,
 ) -> None:
+    _require_bootstrap_publication_context(transaction)
     if not isinstance(payload, bytes):
         raise TypeError("commit payload must be prepared immutable bytes")
     name = _validated_shallow_name(name)
@@ -6638,6 +6730,7 @@ def commit_relative_bytes(
     failpoint: Callable[[str], None] | None = None,
 ) -> None:
     """Commit one prepared file below the pinned output without path fallback."""
+    _require_bootstrap_publication_context(transaction)
     if not isinstance(payload, bytes):
         raise TypeError("commit payload must be prepared immutable bytes")
     relative_name = _validated_relative_name(relative_name)
@@ -6659,6 +6752,7 @@ def commit_unlink(
     capability: OutputCapability | None = None,
 ) -> None:
     """Remove one prepared managed artifact under exact live authority."""
+    _require_bootstrap_publication_context(transaction)
     name = _validated_shallow_name(name)
     owned = capability is None
     cap = pin_output(transaction.output) if owned else capability
@@ -6914,6 +7008,7 @@ def _commit_publication_plan(
     failpoint: Callable[[str], None] | None = None,
 ) -> GenerationReceipt:
     """Publish one validated inventory, its explicit deletions, and receipt last."""
+    _require_bootstrap_publication_context(transaction)
     graph_name = _validated_relative_name(graph_name)
     validated = _validated_publication_plan(plan, graph_name=graph_name)
     payloads = validated.payloads
@@ -7184,6 +7279,21 @@ def _validate_pristine_or_legacy_graph(
         )
 
 
+def legacy_bootstrap_inventory(capability: OutputCapability) -> dict[str, bytes]:
+    """Exact #103 predicate: a shaped legacy graph with no coordination authority."""
+    _reject_portable_authority(capability)
+    require_ordinary_output(capability.path)
+    entries = _list_entries(capability)
+    if any(name in _COORDINATION_FILES or name.startswith(_COORDINATION_PREFIXES)
+           for name in entries):
+        raise PendingTransactionError("legacy bootstrap refuses existing coordination state")
+    if _entry_stat(capability, "graph.json") is None:
+        raise PendingTransactionError("legacy bootstrap requires an existing legacy graph")
+    _validate_pristine_or_legacy_graph(capability)
+    # A five-field merge-pending watermark is rejected above, like all watermarks.
+    return _legacy_update_inventory_locked(capability)
+
+
 def _validated_legacy_pending_bridge(
     capability: OutputCapability,
     *,
@@ -7225,6 +7335,7 @@ def commit_generation(
     failpoint: Callable[[str], None] | None = None,
     expected_artifact_digests: Mapping[str, str] | None = None,
 ) -> GenerationReceipt:
+    _require_bootstrap_publication_context(transaction)
     graph_name = _validated_relative_name(graph_name)
     required_artifacts = tuple(
         _validated_relative_name(name) for name in required_artifacts
@@ -13964,6 +14075,7 @@ def takeover_drainer(
             transition_failpoint(alias)
 
     with pin_output(output) as capability, _locked(capability):
+        _bootstrap_recovery_guard(capability)
         if _expected_transaction is not None and (
             capability.identity != _expected_transaction.output_identity
             or _read_transaction(capability) != _expected_transaction
@@ -14636,6 +14748,7 @@ def _recover_close_pending_without_live_locked(
 
 def recover_close(output: Path | str) -> None:
     with pin_output(output) as capability, _locked(capability):
+        _bootstrap_recovery_guard(capability)
         _fence_pending_enqueue_locked(capability, recover=True)
         token_transition = _read_token_transition(capability)
         if token_transition is not None:
@@ -14724,6 +14837,7 @@ def recover_selected_transaction(
         raise RecoverableTransactionError("recovery attempt bound exhausted")
     root_path = _canonical_directory(Path(root))
     with pin_output(output) as capability, _locked(capability):
+        _bootstrap_recovery_guard(capability)
         _validate_pending_queue_predecessor(capability)
         successor_ready = _validate_selected_successor_ready_locked(
             capability,
@@ -15007,6 +15121,7 @@ def recover_transaction(
     expected_generation: int | None = None,
     expected_output_identity: OutputIdentity | None = None,
     transition_failpoint: Callable[[str], None] | None = None,
+    bootstrap_binding: str | None = None,
 ) -> Transaction:
     if type(max_attempts) is not int or max_attempts <= 0:
         raise RecoverableTransactionError("recovery attempt bound exhausted")
@@ -15015,6 +15130,7 @@ def recover_transaction(
     recovered_enqueue_generation: int | None = None
     successor_ready_recovery: Transaction | None = None
     with pin_output(output) as capability, _locked(capability):
+        _bootstrap_recovery_guard(capability, bootstrap_binding)
         _validate_pending_queue_predecessor(capability)
         if (
             expected_output_identity is not None
@@ -15326,6 +15442,7 @@ def recover_transaction(
                 None,
                 drainer,
                 legacy_inventory_digest=protocol.get("legacy_inventory_digest"),
+                bootstrap_binding=protocol.get("bootstrap_binding"),
             )
             successor_protocol = dict(protocol)
             successor_protocol.pop("legacy_inventory_digest", None)
@@ -15499,6 +15616,7 @@ def recover_transaction(
             None,
             drainer,
             legacy_inventory_digest=current.legacy_inventory_digest,
+            bootstrap_binding=current.bootstrap_binding,
         )
         predecessor_protocol = dict(protocol)
         successor_protocol = dict(protocol)
@@ -16749,6 +16867,8 @@ def _finalize_prepared_transaction(
     close: bool = True,
 ) -> GenerationReceipt | None:
     """Capability-commit an owner-prepared generation and optionally close it."""
+    if transaction.bootstrap_binding is not None:
+        raise PendingTransactionError("trusted bootstrap requires its dedicated finalizer")
     with pin_output(transaction.output) as capability, _locked(capability):
         _validate_authority(capability, transaction)
         prepared_capability = _pin_prepared_workspace(transaction, capability)

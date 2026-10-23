@@ -142,7 +142,7 @@ def _load_legacy_exports():
     _LEGACY_EXPORTS_LOADED = True
 
 
-if not (len(sys.argv) > 1 and sys.argv[1] == "workspace"):
+if not (len(sys.argv) > 1 and sys.argv[1] in {"workspace", "bootstrap-legacy"}):
     _load_legacy_exports()
 
 
@@ -508,6 +508,10 @@ def _run_cli() -> None:
         from graphify.workspace.cli import run_workspace_cli
         raise SystemExit(run_workspace_cli(sys.argv[2:]))
 
+    if len(sys.argv) > 1 and sys.argv[1] == "bootstrap-legacy":
+        from graphify.legacy_bootstrap import run_cli
+        raise SystemExit(run_cli(sys.argv[2:]))
+
     _load_legacy_exports()
 
     # Check all known skill install locations for a stale version stamp.
@@ -548,6 +552,8 @@ def _run_cli() -> None:
         print("                             raw extraction with no flag defaults directed)")
         print("    --extract-path PATH     extractor source for suppression scan")
         print("  workspace <command> --request FILE  bounded structural workspace commands")
+        print("  bootstrap-legacy --request FILE --preview  preview a fresh trusted legacy bootstrap")
+        print("    --execute SHA256 | --resume TOKEN  publish or resume that exact request")
         print("  transaction status --output DIR  inspect validated coordination state")
         print("  transaction recover --output DIR --generation N --device D --inode I --root PATH")
         print("                            [--transaction-id ID] recover one exact generation")
