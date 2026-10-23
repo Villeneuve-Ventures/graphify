@@ -616,6 +616,242 @@ def test_transaction_status_is_read_only_and_omits_capability_material(tmp_path)
     assert before == after
 
 
+def _identity_diagnostic_record(output: Path, record: str, identity: object) -> None:
+    from graphify import transaction as tx
+
+    name = {
+        "protocol": tx.PROTOCOL_FILE,
+        "close drainer": tx.DRAINER_FILE,
+        "generation receipt": tx.RECEIPT_FILE,
+        "preserved predecessor": tx.PREDECESSOR_FILE,
+    }[record]
+    path = output / name
+    raw = json.loads(path.read_bytes())
+    raw["output_identity"] = identity
+    payload = json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(payload)
+    if record == "generation receipt":
+        for control_name in (tx.PROTOCOL_FILE, tx.DRAINER_FILE):
+            control = json.loads((output / control_name).read_bytes())
+            control["receipt_digest"] = hashlib.sha256(payload).hexdigest()
+            (output / control_name).write_text(json.dumps(control))
+
+
+def _read_identity_diagnostic_record(capability, record: str):
+    from graphify import transaction as tx
+
+    return {
+        "protocol": tx._read_protocol,
+        "close drainer": tx._read_drainer,
+        "generation receipt": tx._validate_receipt_locked,
+        "preserved predecessor": tx._read_predecessor_authority,
+    }[record](capability)
+
+
+@pytest.mark.parametrize("record", [
+    "protocol", "close drainer", "generation receipt", "preserved predecessor",
+])
+@pytest.mark.parametrize("changed", ["device", "inode", "both"])
+def test_output_identity_diagnostic_refuses_each_record_without_mutation(
+    tmp_path, record, changed,
+):
+    from graphify import transaction as tx
+
+    _root, output, owner, _token = _owner(tmp_path)
+    _commit_owner_generation(output, owner)
+    finish_transaction(owner)
+    observed = owner.output_identity
+    recorded = OutputIdentity(
+        observed.device + (changed in {"device", "both"}),
+        observed.inode + (changed in {"inode", "both"}),
+    )
+    _identity_diagnostic_record(output, record, recorded.json())
+    before = _file_bytes(tmp_path)
+    with pin_output(output, mutation=False) as capability, tx._locked(capability):
+        with pytest.raises(PendingTransactionError) as stopped:
+            _read_identity_diagnostic_record(capability, record)
+    error = stopped.value
+    assert getattr(error, "code", None) == "output_identity_mismatch"
+    assert isinstance(error, tx.OutputIdentityMismatchError)
+    assert error.record == record
+    assert error.recorded_identity == recorded
+    assert error.observed_identity == observed
+    message = str(error)
+    assert f"recorded device/inode={recorded.device}/{recorded.inode}" in message
+    assert f"observed device/inode={observed.device}/{observed.inode}" in message
+    assert "admission refused" in message
+    assert "cause undetermined" in message
+    assert "separate output" in message
+    assert "rebinding is not supported" in message
+    assert owner.token_digest not in message
+    assert owner.drainer.launch_nonce not in message
+    assert _file_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("record", [
+    "protocol", "close drainer", "generation receipt", "preserved predecessor",
+])
+@pytest.mark.parametrize("identity", [
+    None, {}, {"device": True, "inode": 1}, {"device": 1, "inode": False},
+    {"device": -1, "inode": 1}, {"device": 1, "inode": 0},
+    {"device": 2**64, "inode": 1}, {"device": 1, "inode": 2**64},
+    {"device": 1, "inode": 1, "extra": 1},
+])
+def test_output_identity_diagnostic_keeps_malformed_identity_errors(
+    tmp_path, record, identity,
+):
+    from graphify import transaction as tx
+
+    _root, output, owner, _token = _owner(tmp_path)
+    _commit_owner_generation(output, owner)
+    finish_transaction(owner)
+    _identity_diagnostic_record(output, record, identity)
+    before = _file_bytes(tmp_path)
+    with pin_output(output, mutation=False) as capability, tx._locked(capability):
+        with pytest.raises(PendingTransactionError, match="malformed output identity") as stopped:
+            _read_identity_diagnostic_record(capability, record)
+    assert getattr(stopped.value, "code", None) != "output_identity_mismatch"
+    assert _file_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("entrypoint", [
+    "snapshot", "status", "selected", "direct", "begin", "queue",
+    "watch", "watch-changed", "cli-update", "cli-status", "cli-recover",
+])
+def test_output_identity_diagnostic_public_entrypoints_preserve_state(
+    tmp_path, monkeypatch, capsys, entrypoint,
+):
+    from graphify import cli, transaction as tx, watch
+
+    root, output, owner, _token = _owner(tmp_path, root=tmp_path)
+    _commit_owner_generation(output, owner)
+    finish_transaction(owner)
+    recorded = OutputIdentity(owner.output_identity.device + 1, owner.output_identity.inode)
+    _identity_diagnostic_record(output, "protocol", recorded.json())
+    (root / "main.py").write_text("def untouched(): pass\n")
+    before = _file_bytes(root)
+    entries = {str(p.relative_to(root)): p.lstat().st_ino for p in root.rglob("*")}
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("identity mismatch must not start publication or recovery mutation")
+
+    for name in ("_replace_bytes", "_create_bytes", "_unlink", "_transition_queue"):
+        monkeypatch.setattr(tx, name, forbidden)
+    monkeypatch.setattr(watch, "_GRAPHIFY_OUT", "graphify-out")
+
+    if entrypoint in {"watch", "watch-changed"}:
+        assert watch._rebuild_code(
+            root, changed_paths=[root / "main.py"] if entrypoint == "watch-changed" else None,
+            force=True, no_cluster=True,
+        ) is False
+        message = capsys.readouterr().out
+    elif entrypoint == "cli-update":
+        monkeypatch.setattr(sys, "argv", [
+            "graphify", "update", str(root), "--force", "--no-cluster",
+        ])
+        with pytest.raises(SystemExit) as stopped:
+            cli.dispatch_command("update")
+        assert stopped.value.code == 1
+        captured = capsys.readouterr()
+        message = captured.out
+        assert "Code graph updated" not in message
+        assert "failed" in captured.err
+    else:
+        with pytest.raises(tx.OutputIdentityMismatchError) as stopped:
+            if entrypoint == "snapshot":
+                open_graph_snapshot(output / "graph.json", purpose="query")
+            elif entrypoint == "status":
+                transaction_status(output)
+            elif entrypoint == "selected":
+                recover_selected_transaction(
+                    None, root, output=output, expected_generation=owner.generation,
+                    expected_output_identity=owner.output_identity,
+                    expected_transaction_id=owner.id,
+                )
+            elif entrypoint == "direct":
+                recover_transaction("runtime", root, output=output)
+            elif entrypoint == "begin":
+                begin_transaction("runtime", root, output=output)
+            elif entrypoint == "queue":
+                queue_rebuild("full", root, output=output)
+            else:
+                args = ["graphify", "transaction", entrypoint.removeprefix("cli-"),
+                        "--output", str(output)]
+                if entrypoint == "cli-recover":
+                    args += ["--root", str(root), "--generation", str(owner.generation),
+                             "--device", str(owner.output_identity.device),
+                             "--inode", str(owner.output_identity.inode),
+                             "--transaction-id", owner.id]
+                monkeypatch.setattr(sys, "argv", args)
+                cli.dispatch_command("transaction")
+        assert stopped.value.record == "protocol"
+        message = str(stopped.value)
+    assert "output identity mismatch" in message
+    assert f"recorded device/inode={recorded.device}/{recorded.inode}" in message
+    assert "separate output" in message
+    assert _file_bytes(root) == before
+    assert {str(p.relative_to(root)): p.lstat().st_ino for p in root.rglob("*")} == entries
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_output_identity_diagnostic_refuses_byte_identical_copied_state(tmp_path, replacement):
+    import shutil
+    from graphify import transaction as tx
+
+    _root, output, owner, _token = _owner(tmp_path)
+    _commit_owner_generation(output, owner)
+    finish_transaction(owner)
+    if replacement:
+        retained = output.with_name("retained-original")
+        output.rename(retained)
+        shutil.copytree(retained, output)
+        selected = output
+    else:
+        selected = output.with_name("copied-output")
+        shutil.copytree(output, selected)
+    before = _file_bytes(tmp_path)
+    with pytest.raises(tx.OutputIdentityMismatchError) as stopped:
+        transaction_status(selected)
+    assert stopped.value.recorded_identity == owner.output_identity
+    info = selected.stat()
+    assert stopped.value.observed_identity == OutputIdentity(info.st_dev, info.st_ino)
+    assert _file_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("record", [
+    "protocol", "close drainer", "generation receipt", "preserved predecessor",
+])
+def test_output_identity_diagnostic_rejects_retarget_before_reporting_observation(
+    tmp_path, monkeypatch, record,
+):
+    from graphify import transaction as tx
+
+    _root, output, owner, _token = _owner(tmp_path)
+    _commit_owner_generation(output, owner)
+    finish_transaction(owner)
+    recorded = OutputIdentity(owner.output_identity.device + 1, owner.output_identity.inode)
+    _identity_diagnostic_record(output, record, recorded.json())
+    before = _file_bytes(output)
+    retained = output.with_name("retained-original")
+    parse_identity = tx._identity_from_json
+
+    def retarget(value):
+        identity = parse_identity(value)
+        if identity == recorded:
+            output.rename(retained)
+            output.mkdir()
+            (output / "sentinel").write_bytes(b"replacement must stay untouched")
+        return identity
+
+    with pytest.raises(PendingTransactionError, match="output directory identity changed") as stopped:
+        with pin_output(output, mutation=False) as capability, tx._locked(capability):
+            monkeypatch.setattr(tx, "_identity_from_json", retarget)
+            _read_identity_diagnostic_record(capability, record)
+    assert not isinstance(stopped.value, tx.OutputIdentityMismatchError)
+    assert _file_bytes(retained) == before
+    assert _file_bytes(output) == {"sentinel": b"replacement must stay untouched"}
+
+
 def test_windows_read_adapter_admits_safe_legacy_snapshot_but_mutation_stays_blocked(
     tmp_path, monkeypatch
 ):

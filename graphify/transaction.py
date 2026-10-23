@@ -231,6 +231,32 @@ class OutputIdentity:
         return {"device": self.device, "inode": self.inode}
 
 
+class OutputIdentityMismatchError(PendingTransactionError):
+    """A record names a different output; this observation grants no authority."""
+
+    code = "output_identity_mismatch"
+
+    def __init__(
+        self,
+        record: str,
+        recorded_identity: OutputIdentity,
+        observed_identity: OutputIdentity,
+        context: str,
+    ) -> None:
+        self.record = record
+        self.recorded_identity = recorded_identity
+        self.observed_identity = observed_identity
+        super().__init__(
+            f"{context}: output identity mismatch "
+            f"(record={record}; "
+            f"recorded device/inode={recorded_identity.device}/{recorded_identity.inode}; "
+            f"observed device/inode={observed_identity.device}/{observed_identity.inode}); "
+            "admission refused; cause undetermined. Preserve this output and rebuild "
+            "selected trusted corpus into a separate output. "
+            "Ordinary-output rebinding is not supported."
+        )
+
+
 @dataclass(frozen=True)
 class ManagedEntryIdentity:
     """Stable incarnation identity for one managed regular-file entry.
@@ -2638,9 +2664,12 @@ def _protocol_from_json(
         or type(raw.get("bootstrap_nonce")) is not str
         or len(raw["bootstrap_nonce"]) < 16
         or type(lease_deadline) not in {int, float}
-        or _identity_from_json(raw.get("output_identity")) != capability.identity
     ):
         raise PendingTransactionError("malformed protocol state")
+    _require_output_identity(
+        capability, raw.get("output_identity"),
+        record="protocol", context="malformed protocol state",
+    )
     if not math.isfinite(float(cast(int | float, lease_deadline))):
         raise PendingTransactionError("malformed protocol state")
     root = Path(root_value)
@@ -2683,6 +2712,16 @@ def _identity_from_json(value: object) -> OutputIdentity:
     ):
         raise PendingTransactionError("malformed output identity")
     return OutputIdentity(value["device"], value["inode"])
+
+
+def _require_output_identity(
+    capability: OutputCapability, value: object, *, record: str, context: str
+) -> None:
+    recorded = _identity_from_json(value)
+    if recorded != capability.identity:
+        # Do not describe a stale pin as the observed identity after a retarget.
+        capability.validate()
+        raise OutputIdentityMismatchError(record, recorded, capability.identity, context)
 
 
 def _managed_entry_identity_from_json(
@@ -7483,9 +7522,18 @@ def _validate_receipt_locked(
         or protocol.get("generation") != receipt.get("generation")
         or protocol.get("transaction_id") != receipt.get("transaction_id")
         or protocol.get("owner_capability_digest") != receipt.get("token_digest")
-        or _identity_from_json(protocol.get("output_identity")) != capability.identity
-        or _identity_from_json(receipt.get("output_identity")) != capability.identity
-        or not isinstance(required, list)
+    ):
+        raise PendingTransactionError("generation receipt does not match protocol")
+    _require_output_identity(
+        capability, protocol.get("output_identity"),
+        record="protocol", context="generation receipt does not match protocol",
+    )
+    _require_output_identity(
+        capability, receipt.get("output_identity"),
+        record="generation receipt", context="generation receipt does not match protocol",
+    )
+    if (
+        not isinstance(required, list)
         or not required
         or len(required) > _MAX_RECEIPT_ARTIFACTS
         or not all(isinstance(name, str) for name in required)
@@ -12716,11 +12764,13 @@ def _drainer_state_from_json(
             or raw["successor_generation"] != drainer.generation + 1
         ):
             raise PendingTransactionError("close successor generation is malformed")
-        if (
-            not _is_hex(raw.get("receipt_digest"))
-            or _identity_from_json(raw.get("output_identity")) != capability.identity
-            or not _is_hex(raw.get("transaction_id"))
-        ):
+        if not _is_hex(raw.get("receipt_digest")):
+            raise PendingTransactionError("malformed close drainer binding")
+        _require_output_identity(
+            capability, raw.get("output_identity"),
+            record="close drainer", context="malformed close drainer binding",
+        )
+        if not _is_hex(raw.get("transaction_id")):
             raise PendingTransactionError("malformed close drainer binding")
     if state in {"CLOSE_PENDING", "complete"}:
         acked_ids = raw.get("acked_ids")
@@ -12780,9 +12830,13 @@ def _predecessor_authority_from_json(
         or raw.get("schema") != 1
         or raw.get("protocol_epoch") != 1
         or raw.get("state") not in states
-        or _identity_from_json(raw.get("output_identity")) != capability.identity
-        or not _is_hex(raw.get("receipt_digest"))
     ):
+        raise PendingTransactionError("preserved predecessor authority is malformed")
+    _require_output_identity(
+        capability, raw.get("output_identity"),
+        record="preserved predecessor", context="preserved predecessor authority is malformed",
+    )
+    if not _is_hex(raw.get("receipt_digest")):
         raise PendingTransactionError("preserved predecessor authority is malformed")
     protocol = _protocol_from_json(capability, raw.get("protocol"))
     drainer = _drainer_state_from_json(capability, raw.get("drainer"))
