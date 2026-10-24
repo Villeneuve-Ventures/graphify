@@ -2963,7 +2963,7 @@ _TRANSACTION_PHASES = {"awaiting-drainer", "building", "bootstrap-recovered"}
 
 
 def _transaction_from_json(
-    capability: OutputCapability,
+    capability: OutputCapability | _ScopedCorpusDirectory,
     raw: object,
     *,
     allowed_phases: set[str] = _TRANSACTION_PHASES,
@@ -3823,7 +3823,9 @@ class _OperationalCorpusScan:
             self.unavailable = True
 
     @contextlib.contextmanager
-    def _directory(self, path: Path, parent: OutputCapability | None = None) -> Iterator[OutputCapability]:
+    def _directory(
+        self, path: Path, parent: OutputCapability | _ScopedCorpusDirectory | None = None,
+    ) -> Iterator[OutputCapability | _ScopedCorpusDirectory]:
         if self.source_io is not None:
             directory = _ScopedCorpusDirectory(self.source_io, path)
             directory.validate()
@@ -3833,6 +3835,7 @@ class _OperationalCorpusScan:
                 directory.validate()
             return
         # Close even when fstat, canonicalization, or initial validation fails.
+        assert parent is None or isinstance(parent, OutputCapability)
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
         fd = os.open(path if parent is None else path.name, flags,
                      dir_fd=None if parent is None else parent.fd)
@@ -3867,7 +3870,7 @@ class _OperationalCorpusScan:
     def _error(self, path: Path, error: object) -> None:
         self.errors.append(f"{path}: incomplete operational workspace observation ({error})")
 
-    def _read(self, directory: OutputCapability, name: str,
+    def _read(self, directory: OutputCapability | _ScopedCorpusDirectory, name: str,
               fingerprints: dict[str, str]) -> dict[str, Any] | None:
         if _PLATFORM == "windows":
             raise _IncompleteCorpusRecognition("nonblocking marker admission unavailable")
@@ -3892,6 +3895,7 @@ class _OperationalCorpusScan:
             except (ValueError, UnicodeError):
                 return None
             return value if isinstance(value, dict) else None
+        assert isinstance(directory, OutputCapability)
         try:
             before = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -3932,7 +3936,7 @@ class _OperationalCorpusScan:
             return None
         return value if isinstance(value, dict) else None
 
-    def _runner_binding(self, managed: OutputCapability,
+    def _runner_binding(self, managed: OutputCapability | _ScopedCorpusDirectory,
                         fingerprints: dict[str, str]) -> Transaction | None:
         if self._context() != self.context:
             raise _IncompleteCorpusRecognition("output selection context changed")
@@ -3968,7 +3972,9 @@ class _OperationalCorpusScan:
             return False
 
     @classmethod
-    def _owner_valid(cls, owner: dict[str, Any] | None, workspace: OutputCapability) -> bool:
+    def _owner_valid(
+        cls, owner: dict[str, Any] | None, workspace: OutputCapability | _ScopedCorpusDirectory,
+    ) -> bool:
         fields = {"schema", "protocol_epoch", "state", "transaction_id", "generation",
                   "token_digest", "ownership_nonce", "child_nonce", "workspace_name",
                   "identity", "output_identity"}
