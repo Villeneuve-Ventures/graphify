@@ -512,6 +512,10 @@ def _run_cli() -> None:
         from graphify.legacy_bootstrap import run_cli
         raise SystemExit(run_cli(sys.argv[2:]))
 
+    if len(sys.argv) > 1 and sys.argv[1] == "checkpoint":
+        from graphify.checkpoint_restore import run_cli
+        raise SystemExit(run_cli(sys.argv[2:]))
+
     _load_legacy_exports()
 
     # Check all known skill install locations for a stale version stamp.
@@ -554,6 +558,12 @@ def _run_cli() -> None:
         print("  workspace <command> --request FILE  bounded structural workspace commands")
         print("  bootstrap-legacy --request FILE --preview  preview a fresh trusted legacy bootstrap")
         print("    --execute SHA256 | --resume TOKEN  publish or resume that exact request")
+        print("  checkpoint <capture|revoke|preview|restore|resume>  administrator-approved checkpoints")
+        print("    capture: --source-id ID --root PATH --output DIR --expected-head HASH|absent (administrator)")
+        print("    revoke: --source-id ID --expected-head HASH (administrator)")
+        print("    preview|restore|resume: --request FILE  select a new output for restoration")
+        print("    --preview-sha256 HASH    required for restore and resume")
+        print("    --device D --inode I --owner-id ID  required for exact resume")
         print("  transaction status --output DIR  inspect validated coordination state")
         print("  transaction recover --output DIR --generation N --device D --inode I --root PATH")
         print("                            [--transaction-id ID] recover one exact generation")
