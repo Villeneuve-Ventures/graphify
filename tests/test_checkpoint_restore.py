@@ -388,7 +388,7 @@ def test_native_full_administrator_store_qualification_is_not_modeled():
     from tools.checkpoint_qualification import execute_spec, opt_in_spec
     spec = opt_in_spec()
     if spec is None:
-        pytest.skip("A14 opt-in requires GRAPHIFY_A14_SPEC and a separately provisioned disposable macOS/APFS VM with root-owned installed Python/candidate and an existing reader account")
+        pytest.skip("A14 opt-in requires GRAPHIFY_A14_SPEC and a separately provisioned disposable macOS/APFS VM with root-owned installed Python/candidate and an existing non-admin reader account without passwordless sudo")
     execute_spec(spec)
 
 

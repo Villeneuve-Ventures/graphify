@@ -22,8 +22,17 @@ the dependencies needed by the checkpoint entry point in the same protected
 runtime. A user-owned Homebrew Python, editable checkout or shared development
 environment cannot qualify administrator capture.
 
-Create or select one ordinary guest account and its group. Record their numeric
-UID and GID. The runner drops real child-process credentials to these values;
+An installer signature does not establish safe filesystem permissions. For
+example, the Python 3.14.9 macOS installer creates group-writable runtime files
+and directories. The guest administrator must remove group/other write access
+from that new runtime and its protected ancestors before qualification. Record
+the exact provisioning changes; do not bypass the runtime refusal checks or
+apply broad permission changes to the host.
+
+Create or select one ordinary guest account and its group. The reader must be
+outside the administrator group and must not have passwordless elevation.
+Record its numeric UID and GID. The runner drops real child-process credentials
+to these values;
 it does not model `getuid`, ACL checks, the fixed trust root or administrator
 runtime checks. The administrator and reader use the same installed candidate.
 

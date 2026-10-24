@@ -37,7 +37,7 @@ REQUIRED_CHECKS = frozenset({
     "capture", "preview", "restore", "snapshot", "direct_writes_denied",
     "reader_capture_denied", "reader_revoke_denied", "unsafe_mode_denied",
     "unsafe_acl_denied", "malformed_head_denied", "tampered_artifact_denied",
-    "stale_preview_denied",
+    "stale_preview_denied", "reader_privilege_denied",
 })
 
 
@@ -92,6 +92,12 @@ def validate_spec(value: Any):
                 and re.fullmatch("[0-9a-f]{" + str(length) + "}", item) is not None,
                 "invalid " + field)
     return value
+
+
+def validate_reader_policy(uid, gid, groups):
+    require(type(uid) is int and type(gid) is int and 0 < uid < 2**32 and 0 < gid < 2**32
+            and gid in groups, "reader must be a pre-existing account/member of the reader group")
+    require(80 not in groups, "reader must not belong to the macOS admin group (GID 80)")
 
 
 def bounded_file(path, limit):
@@ -481,6 +487,14 @@ class Trial:
         finally:
             os.close(fd)
 
+    def reader_privilege_probe(self):
+        stdout, stderr = self.run("reader_privilege_denied", ["/usr/bin/sudo", "-n", "/usr/bin/true"],
+                                  reader=True, expected=1)
+        require(not stdout and "sudo:" in stderr and any(reason in stderr for reason in (
+            "a password is required", "not allowed", "not in the sudoers file")),
+            "reader sudo refusal did not establish an authentication/policy denial")
+        self.checks.add("reader_privilege_denied")
+
     def preflight(self):
         require(self.args.disposable, "--disposable is required")
         require(sys.platform == "darwin" and os.getuid() == os.geteuid() == 0,
@@ -501,9 +515,8 @@ class Trial:
         import pwd
         account = pwd.getpwuid(self.args.reader_uid)
         grp.getgrgid(self.args.reader_gid)
-        require(0 < self.args.reader_uid < 2**32 and 0 < self.args.reader_gid < 2**32
-                and self.args.reader_gid in os.getgrouplist(account.pw_name, account.pw_gid),
-                "reader must be a pre-existing account/member of the reader group")
+        reader_groups = os.getgrouplist(account.pw_name, account.pw_gid)
+        validate_reader_policy(self.args.reader_uid, self.args.reader_gid, reader_groups)
         for path in (self.workspace.parent, CONFIG.parent if CONFIG.parent.exists() else CONFIG.parent.parent,
                      Path(__file__), Path(sys.executable).resolve(strict=True), Path(self.args.wheel)):
             protected(path)
@@ -521,7 +534,7 @@ class Trial:
         self.report["environment"] = {"platform": platform.platform(), "uname": list(platform.uname()),
                                       "python": sys.version, "executable": sys.executable,
                                       "runtime_sha256": sha(Path(sys.executable)),
-                                      "reader_account": account.pw_name}
+                                      "reader_account": account.pw_name, "reader_account_groups": reader_groups}
         for reader in (False, True):
             identity = self.python("reader_identity" if reader else "administrator_identity",
                                    IDENTITY, reader=reader)
@@ -531,6 +544,7 @@ class Trial:
                     "child role identity differs")
             self.python("network_reader" if reader else "network_admin", NETWORK, reader=reader)
             self.checks.add("network_reader" if reader else "network_admin")
+        self.reader_privilege_probe()
         fs, _ = self.run("APFS volume", ["/usr/sbin/diskutil", "info", "-plist", str(self.workspace.parent)])
         import plistlib
         volume = plistlib.loads(fs.encode())

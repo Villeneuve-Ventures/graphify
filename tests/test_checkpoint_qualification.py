@@ -247,3 +247,55 @@ def test_reader_evidence_failure_keeps_original_exception(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="primary failure"):
         trial.reader_operation("unit sentinel", operation)
     assert trial.report["preservation"][0]["snapshot_error"] == "evidence read failure"
+
+
+@pytest.mark.parametrize("groups", [[20, 80], [80, 20, 12]])
+def test_reader_policy_rejects_actual_admin_membership(groups):
+    with pytest.raises(harness.QualificationError, match="admin group"):
+        harness.validate_reader_policy(501, 20, groups)
+
+
+def test_reader_policy_accepts_standard_account_and_rejects_missing_membership():
+    harness.validate_reader_policy(61047, 20, [12, 20])
+    with pytest.raises(harness.QualificationError, match="member"):
+        harness.validate_reader_policy(61047, 20, [12])
+    with pytest.raises(harness.QualificationError, match="member"):
+        harness.validate_reader_policy(0, 20, [20])
+
+
+@pytest.mark.parametrize("reason", ["sudo: a password is required\n",
+                                     "sudo: reader is not allowed to execute this command\n",
+                                     "sudo: reader is not in the sudoers file\n"])
+def test_reader_privilege_probe_requires_real_sudo_denial(tmp_path, monkeypatch, reason):
+    trial = harness.Trial(trial_args(tmp_path))
+    calls = []
+    def run(name, command, **kwargs):
+        calls.append((name, command, kwargs))
+        return "", reason
+    monkeypatch.setattr(trial, "run", run)
+    trial.reader_privilege_probe()
+    assert calls == [("reader_privilege_denied", ["/usr/bin/sudo", "-n", "/usr/bin/true"],
+                      {"reader": True, "expected": 1})]
+    assert "reader_privilege_denied" in trial.checks
+    assert "reader_privilege_denied" in harness.REQUIRED_CHECKS
+
+
+@pytest.mark.parametrize("stdout,stderr", [("", "sudo: Operation not permitted\n"),
+                                           ("", ""), ("unexpected", "sudo: a password is required")])
+def test_reader_privilege_probe_rejects_unrelated_failure(tmp_path, monkeypatch, stdout, stderr):
+    trial = harness.Trial(trial_args(tmp_path))
+    monkeypatch.setattr(trial, "run", lambda *a, **k: (stdout, stderr))
+    with pytest.raises(harness.QualificationError, match="policy denial"):
+        trial.reader_privilege_probe()
+    assert "reader_privilege_denied" not in trial.checks
+
+
+def test_reader_privilege_probe_does_not_accept_passwordless_success(tmp_path, monkeypatch):
+    trial = harness.Trial(trial_args(tmp_path))
+    def run(*args, **kwargs):
+        assert kwargs["expected"] == 1
+        raise harness.QualificationError("reader_privilege_denied: unexpected exit 0")
+    monkeypatch.setattr(trial, "run", run)
+    with pytest.raises(harness.QualificationError, match="unexpected exit 0"):
+        trial.reader_privilege_probe()
+    assert "reader_privilege_denied" not in trial.checks
