@@ -512,6 +512,10 @@ def _run_cli() -> None:
         from graphify.legacy_bootstrap import run_cli
         raise SystemExit(run_cli(sys.argv[2:]))
 
+    if len(sys.argv) > 1 and sys.argv[1] == "checkpoint":
+        from graphify.checkpoint_restore import run_cli
+        raise SystemExit(run_cli(sys.argv[2:]))
+
     _load_legacy_exports()
 
     # Check all known skill install locations for a stale version stamp.
