@@ -397,7 +397,7 @@ print(json.dumps({"status":"verified","generation":snap.generation,
  "graph_sha256":__import__("hashlib").sha256((output/"graph.json").read_bytes()).hexdigest()}))
 '''
 WRITE_OPEN_CONTROL = '''import json,os,stat,sys
-fd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW)
+fd=os.open(sys.argv[1],os.O_WRONLY|os.O_NOFOLLOW)
 try:
     info=os.fstat(fd)
     assert stat.S_ISREG(info.st_mode)
