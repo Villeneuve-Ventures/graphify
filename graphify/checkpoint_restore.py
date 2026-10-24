@@ -177,18 +177,23 @@ def _head(store, source_id):
     return raw, authority.digest(HEAD_SCHEMA, payload)
 
 
+@contextlib.contextmanager
+def _capture_source(output):
+    # Qualify installed code/config before source access. Keep the source pinned,
+    # but release the store lock before taking its output lock.
+    with contextlib.ExitStack() as stack:
+        with authority.open_store(write=True) as store:
+            cap = stack.enter_context(tx.pin_output(output, mutation=False))
+            _require(not store.overlaps(cap.fd), "capture source overlaps authority store")
+        yield cap
+
+
 def capture(source_id, root, output, expected_head, *, failpoint=None):
     """Approve a healthy generation. Only the installed administrator tool may write."""
     _require(_hex(source_id) and (expected_head == "absent" or _hex(expected_head)), "invalid capture selector")
-    # Qualify installed administrator code/config before any source access,
-    # release this lock, then reacquire after capture for head CAS.
-    with authority.open_store(write=True) as preflight_store:
-        store_path = preflight_store.path
-    root, _root_id = _canonical_directory(str(root))
     deadline = time.monotonic() + 120
-    with tx.pin_output(output, mutation=False) as cap, _locked(cap, deadline):
-        _require(not store_path.is_relative_to(cap.path) and not cap.path.is_relative_to(store_path),
-                 "capture source overlaps authority store")
+    with _capture_source(output) as cap, _locked(cap, deadline):
+        root, _root_id = _canonical_directory(str(root))
         protocol = tx._read_protocol(cap)
         _require(protocol is not None and protocol["root"] == str(root)
                  and "restore_binding" not in protocol and "bootstrap_binding" not in protocol,
@@ -358,8 +363,7 @@ def _plan(store, request, deadline, *, require_absent):
     request, root_id, parent_id = _request(request)
     with tx.pin_output(Path(request["output"]).parent, mutation=False) as parent:
         authority.qualify_destination(parent.fd)
-        _require(not parent.path.is_relative_to(store.path) and not store.path.is_relative_to(parent.path),
-                 "restore destination overlaps authority store")
+        _require(not store.overlaps(parent.fd), "restore destination overlaps authority store")
         if require_absent:
             _require(tx._entry_nofollow_stat(parent, Path(request["output"]).name) is None,
                      "restore requires an absent destination")

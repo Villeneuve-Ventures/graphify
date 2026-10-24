@@ -451,3 +451,53 @@ def test_capture_source_inside_store_refuses_without_authority_write(fixture):
     with pytest.raises(tx.PendingTransactionError, match="overlaps"):
         recovery.capture("9" * 64, root, inside, "absent")
     assert before == tree(store)
+
+
+def test_capture_case_aliased_store_refuses_without_authority_write(fixture):
+    store, root, _, _, _ = fixture
+    alias = store.with_name(store.name.upper())
+    if not alias.exists() or not alias.samefile(store):
+        pytest.skip("Requires a case-insensitive filesystem")
+    inside = store / "mistaken-source"
+    publish(root, inside)
+    config_path = store.parent / "config.json"
+    config = json.loads(config_path.read_bytes())
+    config["store_path"] = str(alias)
+    config_path.write_bytes(authority.canonical_bytes(config))
+    before = tree(store), tree(root)
+    with pytest.raises(tx.PendingTransactionError, match="overlaps"):
+        recovery.capture("9" * 64, root, inside, "absent")
+    assert before == (tree(store), tree(root))
+
+
+def test_restore_case_aliased_store_parent_refuses_before_creation(fixture):
+    store, _, original, request, _ = fixture
+    alias = store.with_name(store.name.upper())
+    if not alias.exists() or not alias.samefile(store):
+        pytest.skip("Requires a case-insensitive filesystem")
+    parent = store / "private-reader-directory"
+    parent.mkdir(mode=0o700)
+    config_path = store.parent / "config.json"
+    config = json.loads(config_path.read_bytes())
+    config["store_path"] = str(alias)
+    config_path.write_bytes(authority.canonical_bytes(config))
+    request = {**request, "output": str(parent / "restored")}
+    before = tree(store), tree(original)
+    with pytest.raises(tx.PendingTransactionError, match="overlaps"):
+        recovery.preview(request)
+    assert not Path(request["output"]).exists()
+    assert before == (tree(store), tree(original))
+
+
+def test_top_level_help_discovers_checkpoint_commands_and_options(tmp_path):
+    result = subprocess.run([sys.executable, "-B", "-m", "graphify", "--help"],
+                            cwd=tmp_path, capture_output=True, text=True,
+                            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1])})
+    assert result.returncode == 0, result.stderr
+    assert "checkpoint" in result.stdout
+    for action in ("capture", "revoke", "preview", "restore", "resume"):
+        assert action in result.stdout
+    for option in ("--source-id", "--expected-head", "--request", "--preview-sha256",
+                   "--device", "--inode", "--owner-id"):
+        assert option in result.stdout
+    assert not list(tmp_path.iterdir())

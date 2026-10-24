@@ -346,6 +346,38 @@ class Store:
             raise RecoveryAuthorityError("Authority store is closed or read-only")
         self._revalidate()
 
+    def overlaps(self, directory_fd):
+        """Compare pinned directory ancestry, including case aliases, in both directions."""
+        self._check()
+        selected = os.fstat(directory_fd)
+        if not stat.S_ISDIR(selected.st_mode):
+            raise RecoveryAuthorityError("Authority overlap requires a directory")
+        if any(_same(selected, os.fstat(fd)) for _, _, fd in self._chain.entries):
+            return True
+        store = os.fstat(self._chain.fd)
+        current = os.dup(directory_fd)
+        try:
+            # More components than any accepted 4096-byte absolute path can contain.
+            for _ in range(4096):
+                parent = os.open("..", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 dir_fd=current)
+                os.close(current)
+                current = parent
+                ancestor = os.fstat(current)
+                if _same(store, ancestor):
+                    overlap = True
+                    break
+                if _same(selected, ancestor):
+                    overlap = False
+                    break
+                selected = ancestor
+            else:
+                raise RecoveryAuthorityError("Directory ancestry exceeds authority overlap bound")
+        finally:
+            os.close(current)
+        self._check()
+        return overlap
+
     @contextmanager
     def _parent(self, name, create=False):
         parts = _parts(name)

@@ -14413,6 +14413,8 @@ def takeover_drainer(
                     "secret": secrets.token_hex(32),
                     **({"legacy_inventory_digest": live.legacy_inventory_digest}
                        if live.legacy_inventory_digest is not None else {}),
+                    **({"restore_binding": live.restore_binding}
+                       if live.restore_binding is not None else {}),
                 }
             )
             token_digest = hashlib.sha256(token_payload).hexdigest()

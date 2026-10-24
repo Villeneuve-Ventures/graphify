@@ -157,6 +157,22 @@ def test_modeled_reader_never_writes(modeled):
     assert sorted(root.iterdir()) == before
 
 
+@pytest.mark.parametrize("relation", ["equal", "ancestor", "descendant", "sibling"])
+def test_store_overlap_checks_pinned_directory_identity(modeled, relation):
+    root, _, _ = modeled
+    child = root / "child"
+    child.mkdir()
+    sibling = root.parent / "authority-sibling"
+    sibling.mkdir()
+    selected = {"equal": root, "ancestor": root.parent, "descendant": child, "sibling": sibling}[relation]
+    fd = os.open(selected, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with authority.open_store() as store:
+            assert store.overlaps(fd) is (relation != "sibling")
+    finally:
+        os.close(fd)
+
+
 def test_modeled_oversized_read_and_write(modeled, monkeypatch):
     with authority.open_store(write=True) as store:
         store.write_new("value", b"12345")
