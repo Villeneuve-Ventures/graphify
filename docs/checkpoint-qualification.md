@@ -91,9 +91,10 @@ GRAPHIFY_A14_SPEC=<ROOT_OWNED_SPEC.json> <trusted-python> -I -B -c 'import runpy
 ```
 
 This path runs the real native matrix and validates its report. See the
-[current close-recovery binding receipt and complete reports](qualification/issue147-restore-binding-20261024.md)
-for the candidate identities and native process-exit check. The
-[previous repair requalification](qualification/issue147-a14-requalification-20261024.md)
+[current root-lifecycle receipt and complete reports](qualification/issue147-root-lifecycle-20261024.md)
+for the candidate identities and seven native root cases. The
+[binding-fix receipt](qualification/issue147-restore-binding-20261024.md),
+[earlier repair requalification](qualification/issue147-a14-requalification-20261024.md)
 and [initial receipt](qualification/issue147-a14-20261024.md) remain historical.
 A repeat needs a fresh
 guest with no authority configuration; do not clear a failed trial to retry.
