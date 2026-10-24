@@ -91,8 +91,10 @@ GRAPHIFY_A14_SPEC=<ROOT_OWNED_SPEC.json> <trusted-python> -I -B -c 'import runpy
 ```
 
 This path runs the real native matrix and validates its report. See the
-[2026-10-24 receipt and complete report](qualification/issue147-a14-20261024.md)
-for the tested input identities and observed result. A repeat needs a fresh
+[2026-10-24 requalification receipt and complete reports](qualification/issue147-a14-requalification-20261024.md)
+for the repaired input identities and native supplemental checks. The
+[initial receipt](qualification/issue147-a14-20261024.md) remains historical.
+A repeat needs a fresh
 guest with no authority configuration; do not clear a failed trial to retry.
 
 ## Scope of the proof
