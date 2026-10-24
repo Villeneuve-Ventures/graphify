@@ -87,8 +87,13 @@ def complete_report(value):
             "checks": sorted(harness.REQUIRED_CHECKS), "harness_sha256": value["harness_sha256"],
             "inputs": {key: value[key] for key in ("workspace", "reader_uid", "reader_gid",
                        "wheel", "wheel_sha256", "source_revision")},
-            "network_policy": harness.PROFILE,
-            "commands": [{"argv": [harness.SANDBOX, "-p", harness.PROFILE, "fixture"]}],
+            "network_policy": harness.PROFILE, "network_policy_scope": harness.NETWORK_SCOPE,
+            "commands": [{"argv": [harness.SANDBOX, "-p", harness.PROFILE, "fixture"]},
+                         {"name": "reader_privilege_denied", "purpose": "environment_privilege_probe",
+                          "argv": harness.PRIVILEGE_PROBE.copy(), "returncode": 1, "timed_out": False,
+                          "role": {"uid": value["reader_uid"], "gid": value["reader_gid"],
+                                   "groups": [value["reader_gid"]]},
+                          "stdout": "", "stderr": "sudo: a password is required"}],
             "preservation": [{"before": {"sha": "same"}, "after": {"sha": "same"}}]}
 
 
@@ -275,7 +280,7 @@ def test_reader_privilege_probe_requires_real_sudo_denial(tmp_path, monkeypatch,
     monkeypatch.setattr(trial, "run", run)
     trial.reader_privilege_probe()
     assert calls == [("reader_privilege_denied", ["/usr/bin/sudo", "-n", "/usr/bin/true"],
-                      {"reader": True, "expected": 1})]
+                      {"reader": True, "expected": 1, "environment_privilege_probe": True})]
     assert "reader_privilege_denied" in trial.checks
     assert "reader_privilege_denied" in harness.REQUIRED_CHECKS
 
@@ -328,3 +333,34 @@ def test_administrator_identity_rejects_extra_kernel_group():
                 "credential_groups": [0, 80], "access_groups": [0, 1, 2, 3, 80, 20]}
     with pytest.raises(harness.QualificationError, match="kernel credential"):
         harness.validate_child_identity(identity, 0, 0)
+
+
+@pytest.mark.parametrize("mutation", ["argv", "name", "role", "exit", "reason", "duplicate", "missing"])
+def test_report_rejects_broadened_unsandboxed_privilege_probe(tmp_path, mutation):
+    value = spec(tmp_path)
+    report = complete_report(value)
+    probe = report["commands"][1]
+    if mutation == "argv": probe["argv"] = ["/usr/bin/id"]
+    elif mutation == "name": probe["name"] = "arbitrary command"
+    elif mutation == "role": probe["role"]["uid"] = 0
+    elif mutation == "exit": probe["returncode"] = 0
+    elif mutation == "reason": probe["stderr"] = "sudo: Operation not permitted"
+    elif mutation == "duplicate": report["commands"].append(probe.copy())
+    else: report["commands"].pop()
+    with pytest.raises(harness.QualificationError):
+        harness.validate_report(report, value)
+
+
+@pytest.mark.parametrize("mutation", ["argv", "name", "role", "expected", "provisioned", "duplicate"])
+def test_unsandboxed_probe_dispatch_refuses_any_broader_command(tmp_path, monkeypatch, mutation):
+    trial = harness.Trial(trial_args(tmp_path))
+    name, command, reader, expected = "reader_privilege_denied", harness.PRIVILEGE_PROBE, True, 1
+    if mutation == "argv": command = ["/usr/bin/id"]
+    elif mutation == "name": name = "other"
+    elif mutation == "role": reader = False
+    elif mutation == "expected": expected = 0
+    elif mutation == "provisioned": trial.provisioned = True
+    else: trial.report["commands"].append({"purpose": "environment_privilege_probe"})
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("unexpected dispatch"))
+    with pytest.raises(harness.QualificationError, match="only the fixed"):
+        trial.run(name, command, reader=reader, expected=expected, environment_privilege_probe=True)

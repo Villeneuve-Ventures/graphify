@@ -49,6 +49,14 @@ the host's production configuration or an existing authority store. Disable
 network access for the trial commands; successful setup downloads do not prove
 that the qualification itself is offline.
 
+macOS refuses to execute the set-ID `sudo` binary inside the command sandbox.
+The runner therefore makes one explicit pre-provisioning environment probe:
+the reader's fixed `sudo -n /usr/bin/true` invocation must return an actual
+authentication or policy denial. That OS-only probe runs outside the command
+sandbox and imports no candidate code. Isolate the guest's network transport
+for the trial as well. Every candidate and fixture command remains inside the
+network-denying sandbox; a sandbox exec failure is not sudo-policy evidence.
+
 ## Run and retain the result
 
 Invoke the reviewed installed interpreter directly with isolated imports and

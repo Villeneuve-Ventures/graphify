@@ -29,6 +29,8 @@ from typing import Any
 CONFIG = Path("/private/etc/graphify/recovery-authority.json")
 SANDBOX = "/usr/bin/sandbox-exec"
 PROFILE = "(version 1)(allow default)(deny network*)"
+NETWORK_SCOPE = "candidate and fixture commands, including network probes; excludes fixed local OS privilege probe"
+PRIVILEGE_PROBE = ["/usr/bin/sudo", "-n", "/usr/bin/true"]
 SOURCE = hashlib.sha256(b"graphify A14 disposable qualification source v1").hexdigest()
 MAX_OUTPUT = 64 * 1024
 MAX_TREE_BYTES = 32 * 1024 * 1024
@@ -147,6 +149,12 @@ def command_for_spec(spec):
             "--expected-source-revision", spec["source_revision"]]
 
 
+def validate_privilege_denial(stdout, stderr):
+    require(not stdout and "sudo:" in stderr and any(reason in stderr for reason in (
+        "a password is required", "not allowed", "not in the sudoers file")),
+        "reader sudo refusal did not establish an authentication/policy denial")
+
+
 def validate_report(report: Any, spec: dict[str, Any]):
     require(isinstance(report, dict) and report.get("schema") == "graphify.a14.v1"
             and report.get("status") == "passed", "A14 did not pass")
@@ -155,11 +163,22 @@ def validate_report(report: Any, spec: dict[str, Any]):
         "workspace", "reader_uid", "reader_gid", "wheel", "wheel_sha256", "source_revision")},
         "A14 report does not bind expected inputs")
     require(report.get("harness_sha256") == spec["harness_sha256"], "A14 report harness differs")
-    require(report.get("network_policy") == PROFILE and report.get("commands")
+    require(report.get("network_policy") == PROFILE and report.get("network_policy_scope") == NETWORK_SCOPE
+            and report.get("commands")
             and report.get("preservation"), "A14 evidence incomplete")
     require(all(item.get("before") == item.get("after") for item in report["preservation"]),
             "A14 preservation evidence differs")
-    require(all(item.get("argv", [])[:3] == [SANDBOX, "-p", PROFILE]
+    probes = [item for item in report["commands"]
+              if item.get("purpose") == "environment_privilege_probe"]
+    require(len(probes) == 1, "A14 requires exactly one local environment privilege probe")
+    probe = probes[0]
+    require(probe.get("name") == "reader_privilege_denied" and probe.get("argv") == PRIVILEGE_PROBE
+            and probe.get("role") == {"uid": spec["reader_uid"], "gid": spec["reader_gid"],
+                                      "groups": [spec["reader_gid"]]}
+            and probe.get("returncode") == 1 and probe.get("timed_out") is False,
+            "A14 local environment privilege probe differs")
+    validate_privilege_denial(probe.get("stdout"), probe.get("stderr", ""))
+    require(all(item is probe or item.get("argv", [])[:3] == [SANDBOX, "-p", PROFILE]
                 for item in report["commands"]), "A14 command escaped network denial")
     return report
 
@@ -404,6 +423,7 @@ class Trial:
         self.checks = set()
         self.report = {"schema": "graphify.a14.v1", "status": "running", "checks": [],
                        "commands": [], "preservation": [], "network_policy": PROFILE,
+                       "network_policy_scope": NETWORK_SCOPE,
                        "inputs": {"workspace": args.workspace, "reader_uid": args.reader_uid,
                                   "reader_gid": args.reader_gid, "wheel": args.wheel,
                                   "wheel_sha256": args.expected_wheel_sha256,
@@ -411,11 +431,20 @@ class Trial:
                        "harness_sha256": sha(Path(__file__)), "started_ns": time.time_ns()}
         self.provisioned = False
 
-    def run(self, name, command, *, reader=False, expected=0):
+    def run(self, name, command, *, reader=False, expected=0, environment_privilege_probe=False):
         role = {"uid": self.args.reader_uid if reader else 0,
                 "gid": self.args.reader_gid if reader else 0,
                 "groups": [self.args.reader_gid] if reader else []}
-        argv = [SANDBOX, "-p", PROFILE, *command]
+        if environment_privilege_probe:
+            require(name == "reader_privilege_denied" and command == PRIVILEGE_PROBE
+                    and reader and expected == 1 and not self.provisioned
+                    and not os.path.lexists(self.workspace) and not os.path.lexists(CONFIG)
+                    and not any(item.get("purpose") == "environment_privilege_probe"
+                                for item in self.report["commands"]),
+                    "only the fixed preprovision reader OS privilege probe may run outside sandbox")
+            argv = list(PRIVILEGE_PROBE)
+        else:
+            argv = [SANDBOX, "-p", PROFILE, *command]
         # File-backed capture avoids an unbounded pipe buffer from a broken child.
         with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
             start = time.monotonic()
@@ -436,6 +465,7 @@ class Trial:
             stdout, stderr = (stream.read(MAX_OUTPUT + 1).decode("utf-8", "replace")
                               for stream in (out, err))
         record = {"name": name, "role": role, "argv": argv, "returncode": returncode,
+                  "purpose": "environment_privilege_probe" if environment_privilege_probe else "sandboxed_command",
                   "timed_out": timeout_error is not None, "stdout": stdout[:MAX_OUTPUT], "stderr": stderr[:MAX_OUTPUT],
                   "output_sizes": sizes, "seconds": time.monotonic() - start}
         self.report["commands"].append(record)
@@ -511,11 +541,11 @@ class Trial:
             os.close(fd)
 
     def reader_privilege_probe(self):
-        stdout, stderr = self.run("reader_privilege_denied", ["/usr/bin/sudo", "-n", "/usr/bin/true"],
-                                  reader=True, expected=1)
-        require(not stdout and "sudo:" in stderr and any(reason in stderr for reason in (
-            "a password is required", "not allowed", "not in the sudoers file")),
-            "reader sudo refusal did not establish an authentication/policy denial")
+        # macOS Seatbelt refuses SUID exec. This exact local OS policy probe runs
+        # before private fixture/config creation; it receives no candidate data.
+        stdout, stderr = self.run("reader_privilege_denied", PRIVILEGE_PROBE,
+                                  reader=True, expected=1, environment_privilege_probe=True)
+        validate_privilege_denial(stdout, stderr)
         self.checks.add("reader_privilege_denied")
 
     def preflight(self):
