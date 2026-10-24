@@ -299,3 +299,32 @@ def test_reader_privilege_probe_does_not_accept_passwordless_success(tmp_path, m
     with pytest.raises(harness.QualificationError, match="unexpected exit 0"):
         trial.reader_privilege_probe()
     assert "reader_privilege_denied" not in trial.checks
+
+
+@pytest.mark.parametrize("reader", [False, True])
+def test_child_identity_accepts_observed_darwin_access_and_kernel_groups(reader):
+    uid, gid = (61047, 20) if reader else (0, 0)
+    access = [20, 12, 61, 701, 100] if reader else [0, 1, 2, 3, 80, 20]
+    identity = {"uid": uid, "euid": uid, "gid": gid, "egid": gid,
+                "credential_groups": [gid], "access_groups": access}
+    harness.validate_child_identity(identity, uid, gid, access if reader else None)
+
+
+@pytest.mark.parametrize("field,value", [("uid", 0), ("euid", 0), ("gid", 0), ("egid", 0),
+                                         ("credential_groups", [20, 80]),
+                                         ("credential_groups", [0]),
+                                         ("access_groups", [20, 80]),
+                                         ("access_groups", [20])])
+def test_reader_identity_rejects_changed_ids_or_groups(field, value):
+    identity = {"uid": 61047, "euid": 61047, "gid": 20, "egid": 20,
+                "credential_groups": [20], "access_groups": [20, 12, 61, 701, 100]}
+    identity[field] = value
+    with pytest.raises(harness.QualificationError):
+        harness.validate_child_identity(identity, 61047, 20, [20, 12, 61, 701, 100])
+
+
+def test_administrator_identity_rejects_extra_kernel_group():
+    identity = {"uid": 0, "euid": 0, "gid": 0, "egid": 0,
+                "credential_groups": [0, 80], "access_groups": [0, 1, 2, 3, 80, 20]}
+    with pytest.raises(harness.QualificationError, match="kernel credential"):
+        harness.validate_child_identity(identity, 0, 0)

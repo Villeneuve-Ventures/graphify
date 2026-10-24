@@ -297,9 +297,32 @@ print(json.dumps({"version":d.version,"site":str(pathlib.Path(d.locate_file(""))
 '''
 
 
-IDENTITY = '''import json, os, sys
+def validate_child_identity(identity, uid, gid, reader_account_groups=None):
+    require(identity["uid"] == identity["euid"] == uid
+            and identity["gid"] == identity["egid"] == gid,
+            "child role identity differs")
+    require(sorted(set(identity["credential_groups"])) == [gid],
+            "child kernel credential groups differ")
+    if reader_account_groups is not None:
+        require(set(identity["access_groups"]) == set(reader_account_groups)
+                and gid in identity["access_groups"] and 80 not in identity["access_groups"],
+                "reader account access groups differ or include macOS admin")
+
+
+IDENTITY = '''import ctypes,json,os,sys
+# On Darwin os.getgroups() reports directory-service access groups. Read the
+# kernel credential groups independently to verify the actual setgroups drop.
+libc=ctypes.CDLL(None,use_errno=True)
+libc.getgroups.argtypes=(ctypes.c_int,ctypes.POINTER(ctypes.c_uint32))
+libc.getgroups.restype=ctypes.c_int
+count=libc.getgroups(0,None)
+assert 0<=count<=1024, ("invalid kernel group count",count,ctypes.get_errno())
+values=(ctypes.c_uint32*count)()
+actual=libc.getgroups(count,values)
+assert 0<=actual<=count, ("cannot inspect kernel groups",actual,ctypes.get_errno())
 print(json.dumps({"uid":os.getuid(),"euid":os.geteuid(),"gid":os.getgid(),
-                  "egid":os.getegid(),"groups":os.getgroups(),"python":sys.executable}))
+                  "egid":os.getegid(),"access_groups":os.getgroups(),
+                  "credential_groups":list(values[:actual]),"python":sys.executable}))
 '''
 NETWORK = '''import errno, json, socket
 s=socket.socket()
@@ -538,10 +561,9 @@ class Trial:
         for reader in (False, True):
             identity = self.python("reader_identity" if reader else "administrator_identity",
                                    IDENTITY, reader=reader)
-            require(identity["uid"] == identity["euid"] == (self.args.reader_uid if reader else 0)
-                    and identity["gid"] == identity["egid"] == (self.args.reader_gid if reader else 0)
-                    and identity["groups"] == ([self.args.reader_gid] if reader else []),
-                    "child role identity differs")
+            validate_child_identity(identity, self.args.reader_uid if reader else 0,
+                                    self.args.reader_gid if reader else 0,
+                                    reader_groups if reader else None)
             self.python("network_reader" if reader else "network_admin", NETWORK, reader=reader)
             self.checks.add("network_reader" if reader else "network_admin")
         self.reader_privilege_probe()
