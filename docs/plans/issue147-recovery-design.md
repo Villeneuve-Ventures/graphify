@@ -1,7 +1,7 @@
 # #147 recovery design: independent checkpoint restoration
 
 Status: accepted for implementation by the operator; candidate implemented,
-native administrator-store qualification pending.
+[native A14 passed in the recorded environment](../qualification/issue147-a14-20261024.md).
 Base: v8 commit `53becfa9819dda39c660553794d03132b9a0e7c8`.
 Design authority: the operator's 2026-10-23 request to define recovery authority
 and acceptance criteria. This proposal does not approve itself, implement a

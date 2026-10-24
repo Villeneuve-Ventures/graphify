@@ -32,8 +32,7 @@ apply broad permission changes to the host.
 Create or select one ordinary guest account and its group. The reader must be
 outside the administrator group and must not have passwordless elevation.
 Record its numeric UID and GID. The runner drops real child-process credentials
-to these values;
-it does not model `getuid`, ACL checks, the fixed trust root or administrator
+to these values. It does not model `getuid`, ACL checks, the fixed trust root or administrator
 runtime checks. The administrator and reader use the same installed candidate.
 
 Review the standalone runner and install an exact root-owned copy outside the
@@ -79,6 +78,22 @@ reviewed installed runner. Enabled mode must fail for a missing or invalid
 specification or unmet native prerequisites. It must not turn those failures
 into skips. Run privileged qualification only from the reviewed installed
 environment, not from a user-writable pytest installation.
+
+The strict specification has these fields: `schema` (1), `disposable` (true),
+absolute `python`, `harness`, `wheel` and absent `workspace` paths, `reader_uid`,
+`reader_gid`, `harness_sha256`, `wheel_sha256` and `source_revision`. The hashes
+are lowercase SHA-256; the revision is a full lowercase 40-character Git ID.
+Keep the spec in a new root-owned regular file. To exercise the same opt-in
+dispatch without installing pytest as root, use the reviewed standalone runner:
+
+```text
+GRAPHIFY_A14_SPEC=<ROOT_OWNED_SPEC.json> <trusted-python> -I -B -c 'import runpy; h=runpy.run_path("<root-owned-runner>/checkpoint_qualification.py",run_name="a14_dispatch"); h["execute_spec"](h["opt_in_spec"]())'
+```
+
+This path runs the real native matrix and validates its report. See the
+[2026-10-24 receipt and complete report](qualification/issue147-a14-20261024.md)
+for the tested input identities and observed result. A repeat needs a fresh
+guest with no authority configuration; do not clear a failed trial to retry.
 
 ## Scope of the proof
 

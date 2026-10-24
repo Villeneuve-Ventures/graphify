@@ -5,10 +5,11 @@ a **new, absent output**. It preserves an approved graph without provider calls
 and creates new generation-1 authority. It does not rebind the old output or
 establish that its device ID changed because of reboot/remount.
 
-**Qualification is incomplete.** A14 still requires a real separately
-provisioned administrator-owned store and trusted installed runtime. Modeled
-ownership tests and native APFS/ACL helper tests do not qualify that boundary.
-Keep the feature in draft until this proof is supplied. The
+**Native A14 passed** for the recorded macOS 15.7.7/APFS, CPython 3.14.9
+installation: 17 required checks, real administrator/reader separation and
+unchanged protected bytes. The [native receipt and complete report](qualification/issue147-a14-20261024.md)
+bind that result to the tested source, wheel, harness and runtime. PR #222 stays
+draft; this bounded result does not establish general platform readiness. The
 [native opt-in qualification guide](checkpoint-qualification.md) describes the
 disposable-guest harness and its evidence requirements. Retained outputs are
 not qualification inputs.
@@ -169,14 +170,17 @@ as proof of administrator isolation.
 | A8 | Two cooperating restore writers have one winner; parent retarget refuses before writing to a foreign destination. This is not arbitrary-writer fencing. |
 | A9–A10 | Safe names/types/links/limits, metadata preflight and read-only preview/preservation checks. |
 | A11–A13 | Publication failpoints, actual process exits, fsync failure, exact resume, generic-path fencing and origin retention. Exhaustive storage/power-loss qualification remains outside this result. |
-| A14 | Real protected installed runtime/store with separate administrator and unprivileged reader. The explicit opt-in harness fails on missing prerequisites when enabled; its native result, not its unit tests or the default opt-out skip, determines qualification. See the [qualification guide](checkpoint-qualification.md). |
+| A14 | **Passed in the recorded native environment:** real protected installed runtime/store, separate administrator and reader, actual permission/ACL and stale-head controls. The enabled harness fails on missing prerequisites; unit tests and the default opt-out skip do not qualify it. See the [receipt](qualification/issue147-a14-20261024.md) and [guide](checkpoint-qualification.md). |
 | A15 | Native disposable filesystem/process checks and synthetic identity mismatches. Observed remount renumbering and reboot causation remain unproved. |
 
-Keep #147 open. Draft delivery establishes a reviewable implementation; native
-backend qualification and broader continuity evidence remain required before a
-supported operational recovery claim.
+Keep #147 open. Native A14 evidence covers the recorded backend boundary;
+broader continuity evidence remains unresolved. Draft delivery is not a merge
+or general operational readiness claim.
 
-## Local candidate validation
+## Initial implementation validation (before native A14)
+
+The following checks describe the initial implementation at `73e7a610`, before
+the later [native A14 receipt](qualification/issue147-a14-20261024.md).
 
 On native macOS/APFS with Python 3.14.9, the scoped transaction/bootstrap,
 malformed-identity, portable-output, README-policy and recovery batch passed
