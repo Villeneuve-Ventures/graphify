@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from graphify import checkpoint_restore as recovery
 from graphify import transaction as tx
 from tests.test_checkpoint_restore import fixture, tree  # noqa: F401 -- shared restore fixture
@@ -47,5 +49,41 @@ def test_later_restore_generation_takeover_keeps_usable_owner(fixture):
     ])])
     assert tx.open_graph_snapshot(output / "graph.json", purpose="test").generation == 2
     assert tx.transaction_status(output)["protocol_state"] == "COMPLETE"
+    assert (output / recovery.PROVENANCE).read_bytes() == provenance
+    assert before == (tree(original), tree(store))
+
+
+def test_restore_binding_survives_close_recovery_after_live_owner_retirement(fixture):
+    store, root, original, request, _ = fixture
+    before = tree(original), tree(store)
+    preview = recovery.preview(request)
+    recovery.execute(request, preview["preview_sha256"])
+    output = Path(request["output"])
+    provenance = (output / recovery.PROVENANCE).read_bytes()
+    graph = json.loads((output / "graph.json").read_bytes())
+    owner = tx.begin_transaction("full", root, output=output)
+    assert owner.generation == 2 and owner.restore_binding is not None
+    graph["graph"][tx.GRAPH_WATERMARK_KEY]["generation"] = 2
+
+    def interrupt(phase):
+        if phase == "after_live_remove":
+            raise RuntimeError(phase)
+
+    with recovery._owner(owner, owner.restore_binding):
+        tx.commit_publication_plan(owner, tx.PublicationPlan({
+            "graph.json": json.dumps(graph).encode(), "manifest.json": b"{}",
+        }))
+        with pytest.raises(RuntimeError, match="after_live_remove"):
+            tx._finish_transaction(owner, failpoint=interrupt)
+    assert not (output / tx.TRANSACTION_FILE).exists()
+    assert json.loads((output / tx.DRAINER_FILE).read_bytes())["state"] == "CLOSE_PENDING"
+    recovered = tx.recover_selected_transaction(
+        "full", root, output=output, expected_transaction_id=owner.id,
+        expected_generation=2, expected_output_identity=owner.output_identity,
+    )
+    assert isinstance(recovered, tx.CompletedRecovery)
+    assert recovered.restore_binding == owner.restore_binding
+    assert tx.transaction_status(output)["protocol_state"] == "COMPLETE"
+    assert tx.open_graph_snapshot(output / "graph.json", purpose="test").generation == 2
     assert (output / recovery.PROVENANCE).read_bytes() == provenance
     assert before == (tree(original), tree(store))

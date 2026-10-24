@@ -14933,6 +14933,9 @@ def _recover_close_pending_without_live_locked(
 ) -> CompletedRecovery:
     """Resume an exact close after its token and live owner were already retired."""
     _validate_close_pending_protocol_locked(capability, protocol, drainer)
+    restore_binding = protocol.get("restore_binding")
+    if restore_binding is not None:
+        restore_binding = _validate_restore_binding(restore_binding)
     pending = drainer[2]
     _finish_close_locked(capability, pending)
     completed = _read_drainer(capability)
@@ -14952,7 +14955,7 @@ def _recover_close_pending_without_live_locked(
         token_identity=_managed_entry_identity_from_json(protocol.get("token_identity")),
         drainer=completed[0],
         phase="complete",
-        restore_binding=protocol.get("restore_binding"),
+        restore_binding=restore_binding,
     )
     return _finish_completed_recovery_locked(
         capability,
