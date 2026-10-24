@@ -540,6 +540,23 @@ class Trial:
         finally:
             os.close(fd)
 
+    def qualify_volume(self):
+        device_output, stderr = self.run("APFS containing device", ["/usr/bin/stat", "-f", "%Sd",
+                                                                   str(self.workspace.parent)])
+        device = device_output.strip()
+        require(not stderr and re.fullmatch(r"disk[0-9]+(?:s[0-9]+)*", device) is not None,
+                "cannot resolve a strict containing disk identifier")
+        node = "/dev/" + device
+        payload, stderr = self.run("APFS volume", ["/usr/sbin/diskutil", "info", "-plist", node])
+        require(not stderr, "diskutil emitted unexpected stderr")
+        import plistlib
+        volume = plistlib.loads(payload.encode())
+        require(isinstance(volume, dict) and volume.get("DeviceIdentifier") == device
+                and volume.get("DeviceNode") == node and volume.get("FilesystemType") == "apfs"
+                and volume.get("GlobalPermissionsEnabled") is True,
+                "resolved trial device must match APFS with ownership enabled")
+        return {"device": device, "record": volume}
+
     def reader_privilege_probe(self):
         # macOS Seatbelt refuses SUID exec. This exact local OS policy probe runs
         # before private fixture/config creation; it receives no candidate data.
@@ -597,12 +614,9 @@ class Trial:
             self.python("network_reader" if reader else "network_admin", NETWORK, reader=reader)
             self.checks.add("network_reader" if reader else "network_admin")
         self.reader_privilege_probe()
-        fs, _ = self.run("APFS volume", ["/usr/sbin/diskutil", "info", "-plist", str(self.workspace.parent)])
-        import plistlib
-        volume = plistlib.loads(fs.encode())
-        require(volume.get("FilesystemType") == "apfs" and volume.get("GlobalPermissionsEnabled") is True,
-                "trial volume must be APFS with ownership enabled")
-        self.report["environment"]["volume"] = volume
+        volume = self.qualify_volume()
+        self.report["environment"]["volume_device"] = volume["device"]
+        self.report["environment"]["volume"] = volume["record"]
         # This uses the unchanged installed product's actual runtime qualification.
         candidate = self.python("installed administrator runtime", CANDIDATE_PROBE)
         site = Path(candidate["site"])

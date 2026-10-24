@@ -364,3 +364,50 @@ def test_unsandboxed_probe_dispatch_refuses_any_broader_command(tmp_path, monkey
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("unexpected dispatch"))
     with pytest.raises(harness.QualificationError, match="only the fixed"):
         trial.run(name, command, reader=reader, expected=expected, environment_privilege_probe=True)
+
+
+
+def test_volume_qualification_queries_resolved_device_and_checks_record(tmp_path, monkeypatch):
+    import plistlib
+    trial = harness.Trial(trial_args(tmp_path))
+    volume = {"DeviceIdentifier": "disk2s5", "DeviceNode": "/dev/disk2s5",
+              "FilesystemType": "apfs", "GlobalPermissionsEnabled": True,
+              "MountPoint": "/System/Volumes/Data"}
+    calls = []
+    def run(name, command, **kwargs):
+        calls.append((name, command))
+        return ("disk2s5\n", "") if len(calls) == 1 else (plistlib.dumps(volume).decode(), "")
+    monkeypatch.setattr(trial, "run", run)
+    assert trial.qualify_volume() == {"device": "disk2s5", "record": volume}
+    assert calls == [("APFS containing device", ["/usr/bin/stat", "-f", "%Sd", str(tmp_path)]),
+                     ("APFS volume", ["/usr/sbin/diskutil", "info", "-plist", "/dev/disk2s5"])]
+
+
+@pytest.mark.parametrize("device", ["", "disk2s5\ndisk3s1", "../disk2s5", "/dev/disk2s5", "disk2; id", "disk2s"])
+def test_volume_qualification_refuses_non_disk_tokens_before_diskutil(tmp_path, monkeypatch, device):
+    trial = harness.Trial(trial_args(tmp_path))
+    calls = []
+    def run(name, command, **kwargs):
+        calls.append(command)
+        return device, ""
+    monkeypatch.setattr(trial, "run", run)
+    with pytest.raises(harness.QualificationError, match="containing disk"):
+        trial.qualify_volume()
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("field,value", [("DeviceIdentifier", "disk3s1"),
+                                         ("DeviceNode", "/dev/disk3s1"),
+                                         ("FilesystemType", "hfs"),
+                                         ("GlobalPermissionsEnabled", False)])
+def test_volume_qualification_requires_matching_apfs_ownership_record(tmp_path, monkeypatch, field, value):
+    import plistlib
+    trial = harness.Trial(trial_args(tmp_path))
+    volume = {"DeviceIdentifier": "disk2s5", "DeviceNode": "/dev/disk2s5",
+              "FilesystemType": "apfs", "GlobalPermissionsEnabled": True}
+    volume[field] = value
+    def run(name, command, **kwargs):
+        return ("disk2s5\n", "") if "stat" in command[0] else (plistlib.dumps(volume).decode(), "")
+    monkeypatch.setattr(trial, "run", run)
+    with pytest.raises(harness.QualificationError, match="must match APFS"):
+        trial.qualify_volume()
