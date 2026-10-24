@@ -97,19 +97,40 @@ def _canonical_directory(value):
         return path, cap.identity.json()
 
 
-def _request(raw):
+def _request_fields(raw):
     _require(isinstance(raw, dict) and set(raw) == {"schema", "source_id", "root", "output"}
              and type(raw["schema"]) is int and raw["schema"] == 1 and _hex(raw["source_id"]),
              "invalid restore request")
-    root, root_id = _canonical_directory(raw["root"])
+    root_value = raw["root"]
+    _require(type(root_value) is str and len(root_value.encode()) <= 4096,
+             "invalid checkpoint directory")
+    root = Path(root_value)
+    _require(root.is_absolute() and str(root) == root_value
+             and os.path.abspath(root) == root_value, "invalid checkpoint directory")
     value = raw["output"]
     _require(type(value) is str and len(value.encode()) <= 4096, "invalid restore destination")
     output = Path(value)
     _require(output.is_absolute() and str(output) == value and output.name not in {"", ".", ".."},
              "invalid restore destination")
-    parent, parent_id = _canonical_directory(str(output.parent))
     _require(output != root and output not in root.parents, "restore destination contains source root")
-    return dict(raw), root_id, parent_id
+    return dict(raw)
+
+
+def _request(raw):
+    request = _request_fields(raw)
+    _root, root_id = _canonical_directory(request["root"])
+    _parent, parent_id = _canonical_directory(str(Path(request["output"]).parent))
+    return request, root_id, parent_id
+
+
+@contextlib.contextmanager
+def _pinned_root(plan):
+    with tx.pin_output(plan["request"]["root"], mutation=False) as root:
+        _require(root.identity.json() == plan["root_identity"], "restore source root identity changed")
+        expected_root = Path(plan["request"]["root"])
+        tx._validate_root_capability(root, expected_root)
+        yield root
+        tx._validate_root_capability(root, expected_root)
 
 
 @contextlib.contextmanager
@@ -437,7 +458,9 @@ def _owner(owner, binding):
         tx._RESTORE_AUTHORITY.reset(context)
 
 
-def _publish(cap, claim, payloads, deadline, failpoint):
+def _publish(cap, claim, payloads, deadline, failpoint, root_capability):
+    root_path = Path(claim["request"]["root"])
+    tx._validate_root_capability(root_capability, root_path)
     binding = claim["binding"]
     with contextlib.ExitStack() as stack:
         context = tx._RESTORE_AUTHORITY.set(binding)
@@ -491,8 +514,11 @@ def _publish(cap, claim, payloads, deadline, failpoint):
                         _require(tx._read_relative_bytes(prepared.output, name) == body, "restore staged bytes changed")
                 finally:
                     prepared.close()
+                tx._validate_root_capability(root_capability, root_path)
                 tx._commit_publication_plan(owner, tx.PublicationPlan(payloads), failpoint=failpoint)
+                tx._validate_root_capability(root_capability, root_path)
                 tx._finish_transaction(owner, failpoint=failpoint)
+        tx._validate_root_capability(root_capability, root_path)
         _tick(deadline)
         tx._validate_receipt_locked(cap, require_closed=True)
         tx._retire_prepared_locked(cap)
@@ -512,37 +538,42 @@ def execute(request, preview_sha256, *, failpoint=None):
         with tx.pin_output(output.parent, mutation=False) as parent, _locked(parent, deadline):
             plan, fingerprint, checkpoint, payloads = _plan(store, request, deadline, require_absent=True)
             _require(fingerprint == preview_sha256, "restore preview changed")
-            parent.validate()
-            os.mkdir(output.name, mode=0o700, dir_fd=parent.fd)
-            os.fsync(parent.fd)
-            created = os.stat(output.name, dir_fd=parent.fd, follow_symlinks=False)
-            parent.validate()
-            if failpoint:
-                failpoint("after_restore_directory")
-            with tx.pin_output(output) as cap, _locked(cap, deadline):
+            with _pinned_root(plan) as root_capability:
                 parent.validate()
-                _require(cap.identity == tx.OutputIdentity(created.st_dev, created.st_ino),
-                         "new restore directory replaced before claim")
-                proof = _encode(_proof(plan, fingerprint, checkpoint, payloads, cap.identity.json()), tx._MAX_STATE_BYTES)
-                payloads = {**payloads, PROVENANCE: proof}
-                tx._validated_publication_plan(tx.PublicationPlan(payloads))
-                binding = tx.RESTORE_BINDING_PREFIX + _sha(proof)
-                context = tx._RESTORE_AUTHORITY.set(binding)
-                try:
-                    owner = tx.begin_transaction("full", request["root"], output=output, restore_binding=binding)
-                    with _owner(owner, binding):
-                        tx.stage_transaction_handoff(owner)
-                    owner = tx._read_transaction(cap)
-                    owner = _present(owner, "restore handoff owner missing")
-                    claim = {"schema": 1, "request": request, "plan": plan,
-                             "preview_sha256": fingerprint, "output_identity": cap.identity.json(),
-                             "binding": binding, "owner": tx._transaction_json(owner, phase=owner.phase)}
-                    tx._create_bytes(cap, CLAIM, _encode(claim, tx._MAX_STATE_BYTES))
-                    if failpoint:
-                        failpoint("after_restore_claim")
-                    return _publish(cap, claim, payloads, deadline, failpoint)
-                finally:
-                    tx._RESTORE_AUTHORITY.reset(context)
+                os.mkdir(output.name, mode=0o700, dir_fd=parent.fd)
+                os.fsync(parent.fd)
+                created = os.stat(output.name, dir_fd=parent.fd, follow_symlinks=False)
+                parent.validate()
+                if failpoint:
+                    failpoint("after_restore_directory")
+                with tx.pin_output(output) as cap, _locked(cap, deadline):
+                    parent.validate()
+                    _require(cap.identity == tx.OutputIdentity(created.st_dev, created.st_ino),
+                             "new restore directory replaced before claim")
+                    proof = _encode(_proof(plan, fingerprint, checkpoint, payloads, cap.identity.json()), tx._MAX_STATE_BYTES)
+                    payloads = {**payloads, PROVENANCE: proof}
+                    tx._validated_publication_plan(tx.PublicationPlan(payloads))
+                    binding = tx.RESTORE_BINDING_PREFIX + _sha(proof)
+                    context = tx._RESTORE_AUTHORITY.set(binding)
+                    try:
+                        owner = tx.begin_transaction(
+                            "full", request["root"], output=output, restore_binding=binding,
+                            root_capability=root_capability,
+                        )
+                        with _owner(owner, binding):
+                            tx.stage_transaction_handoff(owner)
+                        tx._validate_root_capability(root_capability, Path(request["root"]))
+                        owner = tx._read_transaction(cap)
+                        owner = _present(owner, "restore handoff owner missing")
+                        claim = {"schema": 1, "request": request, "plan": plan,
+                                 "preview_sha256": fingerprint, "output_identity": cap.identity.json(),
+                                 "binding": binding, "owner": tx._transaction_json(owner, phase=owner.phase)}
+                        tx._create_bytes(cap, CLAIM, _encode(claim, tx._MAX_STATE_BYTES))
+                        if failpoint:
+                            failpoint("after_restore_claim")
+                        return _publish(cap, claim, payloads, deadline, failpoint, root_capability)
+                    finally:
+                        tx._RESTORE_AUTHORITY.reset(context)
 
 
 def _claim(cap, request, preview_sha256, expected_identity, expected_owner):
@@ -563,7 +594,7 @@ def _claim(cap, request, preview_sha256, expected_identity, expected_owner):
 def resume(request, preview_sha256, output_identity, owner_id, *, failpoint=None):
     _require(_hex(preview_sha256) and _hex(owner_id), "invalid restore resume selector")
     tx._identity_from_json(output_identity)
-    request, _, _ = _request(request)
+    request = _request_fields(request)
     output = Path(request["output"])
     deadline = time.monotonic() + 120
     # Observe completed exact retries without relying on a still-enabled head.
@@ -583,12 +614,13 @@ def resume(request, preview_sha256, output_identity, owner_id, *, failpoint=None
         with tx.pin_output(output.parent, mutation=False) as parent, _locked(parent, deadline):
             plan, fingerprint, checkpoint, payloads = _plan(store, request, deadline, require_absent=False)
             _require(fingerprint == preview_sha256, "restore approved head or preview changed")
-            with tx.pin_output(output) as cap, _locked(cap, deadline):
+            with (_pinned_root(plan) as root_capability,
+                  tx.pin_output(output) as cap, _locked(cap, deadline)):
                 claim = _claim(cap, request, preview_sha256, output_identity, owner_id)
                 _require(claim["plan"] == plan, "restore claim plan changed")
                 proof = _encode(_proof(plan, fingerprint, checkpoint, payloads, cap.identity.json()), tx._MAX_STATE_BYTES)
                 _require(claim["binding"] == tx.RESTORE_BINDING_PREFIX + _sha(proof), "restore provenance changed")
-                return _publish(cap, claim, {**payloads, PROVENANCE: proof}, deadline, failpoint)
+                return _publish(cap, claim, {**payloads, PROVENANCE: proof}, deadline, failpoint, root_capability)
 
 
 def _read_request(path):

@@ -547,6 +547,12 @@ def _canonical_directory(path: Path) -> Path:
     return path.expanduser().resolve(strict=True)
 
 
+def _validate_root_capability(capability: OutputCapability, root: Path) -> None:
+    capability.validate()
+    if capability.path != root or _canonical_directory(root) != root:
+        raise PendingTransactionError("transaction root capability path changed")
+
+
 def _directory_entry_identity(
     capability: OutputCapability, name: str
 ) -> OutputIdentity | None:
@@ -2750,7 +2756,10 @@ def _protocol_from_json(
         raise PendingTransactionError("malformed protocol state")
     root = Path(root_value)
     try:
-        canonical_root = (Path(os.path.abspath(root)) if "bootstrap_binding" in raw
+        # A completed restore describes a historical source; live admission
+        # still requires the current directory and its selected capability.
+        canonical_root = (Path(os.path.abspath(root)) if ("bootstrap_binding" in raw
+                          or (state == "COMPLETE" and "restore_binding" in raw))
                           else root.resolve(strict=True))
     except OSError as exc:
         raise PendingTransactionError("malformed protocol root") from exc
@@ -4547,10 +4556,15 @@ def begin_transaction(
     expected_snapshot: GraphSnapshot | None = None,
     bootstrap_binding: str | None = None,
     restore_binding: str | None = None,
+    root_capability: OutputCapability | None = None,
 ) -> Transaction:
     if expected_snapshot is not None and not isinstance(expected_snapshot, GraphSnapshot):
         raise TypeError("local publication requires a GraphSnapshot")
     root_path = _canonical_directory(Path(root))
+    if root_capability is not None:
+        if not isinstance(root_capability, OutputCapability):
+            raise TypeError("transaction root requires an OutputCapability")
+        _validate_root_capability(root_capability, root_path)
     output_path = Path(output).expanduser().absolute()
     _reject_portable_path(output_path)
     try:
@@ -4566,6 +4580,8 @@ def begin_transaction(
     capability = pin_output(output_path, create=True)
     try:
         with _locked(capability):
+            if root_capability is not None:
+                _validate_root_capability(root_capability, root_path)
             _restore_recovery_guard(capability)
             if restore_binding is not None:
                 _validate_restore_binding(restore_binding)
@@ -4746,6 +4762,8 @@ def begin_transaction(
                 drainer = current_drainer[0]
             else:
                 drainer = DrainerTuple(generation, 0, secrets.token_hex(16))
+            if root_capability is not None:
+                _validate_root_capability(root_capability, root_path)
             _retire_prepared_locked(capability)
             protocol: dict[str, object] = {
                 "schema": 1,
@@ -4854,6 +4872,8 @@ def begin_transaction(
             )
             _write_transaction(capability, tx, phase="building")
             _unlink(capability, TRANSITION_FILE)
+            if root_capability is not None:
+                _validate_root_capability(root_capability, root_path)
             _AUTHORITY.set(_authority_for(tx))
             return tx
     finally:
