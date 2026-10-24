@@ -323,7 +323,10 @@ the actual backend provisioning procedure. Missing native ACL/custody evidence
 blocks backend qualification and any supported-recovery claim. A draft may
 expose such a gap; it cannot report the feature ready. Implementation and a draft
 PR are authorized by the subsequent operator request; native provisioning or
-live recovery is not performed by this candidate.
+live recovery is not performed by product commands. A later operator request
+authorizes the [A14 qualification harness](../checkpoint-qualification.md) in a
+fresh disposable macOS/APFS environment. That trial does not authorize recovery
+of retained historical outputs.
 
 Run focused acceptance tests first, then the repository's applicable local
 pre-push gates at the implementation revision; inspect the live gate composition

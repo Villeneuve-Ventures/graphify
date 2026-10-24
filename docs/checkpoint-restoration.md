@@ -8,8 +8,10 @@ establish that its device ID changed because of reboot/remount.
 **Qualification is incomplete.** A14 still requires a real separately
 provisioned administrator-owned store and trusted installed runtime. Modeled
 ownership tests and native APFS/ACL helper tests do not qualify that boundary.
-Keep the feature in draft until this proof is supplied. No system provisioning
-or restoration of retained outputs was performed during implementation.
+Keep the feature in draft until this proof is supplied. The
+[native opt-in qualification guide](checkpoint-qualification.md) describes the
+disposable-guest harness and its evidence requirements. Retained outputs are
+not qualification inputs.
 
 The [accepted design](plans/issue147-recovery-design.md) defines the authority
 model and A1–A15 matrix. The [existing identity refusal and trusted-corpus
@@ -167,7 +169,7 @@ as proof of administrator isolation.
 | A8 | Two cooperating restore writers have one winner; parent retarget refuses before writing to a foreign destination. This is not arbitrary-writer fencing. |
 | A9–A10 | Safe names/types/links/limits, metadata preflight and read-only preview/preservation checks. |
 | A11–A13 | Publication failpoints, actual process exits, fsync failure, exact resume, generic-path fencing and origin retention. Exhaustive storage/power-loss qualification remains outside this result. |
-| A14 | **Blocking qualification gap:** real protected installed runtime/store with separate administrator and unprivileged reader. The explicit skipped test records this gap; helpers/mocks do not satisfy it. |
+| A14 | Real protected installed runtime/store with separate administrator and unprivileged reader. The explicit opt-in harness fails on missing prerequisites when enabled; its native result, not its unit tests or the default opt-out skip, determines qualification. See the [qualification guide](checkpoint-qualification.md). |
 | A15 | Native disposable filesystem/process checks and synthetic identity mismatches. Observed remount renumbering and reboot causation remain unproved. |
 
 Keep #147 open. Draft delivery establishes a reviewable implementation; native

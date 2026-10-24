@@ -385,7 +385,11 @@ def test_malformed_ordinary_protocol_keeps_structured_refusal(tmp_path):
 
 
 def test_native_full_administrator_store_qualification_is_not_modeled():
-    pytest.skip("A14 requires separately provisioned UID0 installed runtime/store; no privileged provisioning authorized by this test")
+    from tools.checkpoint_qualification import execute_spec, opt_in_spec
+    spec = opt_in_spec()
+    if spec is None:
+        pytest.skip("A14 opt-in requires GRAPHIFY_A14_SPEC and a separately provisioned disposable macOS/APFS VM with root-owned installed Python/candidate and an existing reader account")
+    execute_spec(spec)
 
 
 @pytest.mark.parametrize("kind", ["ordinary", "fifo", "symlink", "hardlink", "oversized"])
