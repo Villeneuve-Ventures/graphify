@@ -7,9 +7,10 @@ establish that its device ID changed because of reboot/remount.
 
 **Native A14 passed** for the recorded macOS 15.7.7/APFS, CPython 3.14.9
 installation: 17 required checks, real administrator/reader separation and
-unchanged protected bytes. The [requalification receipt and complete reports](qualification/issue147-a14-requalification-20261024.md)
+unchanged protected bytes. The [current binding-fix receipt and complete reports](qualification/issue147-restore-binding-20261024.md)
 bind the repaired source, wheel, harness and runtime, including native generation-2
-takeover, case-alias isolation and CLI-help checks. This bounded result does not
+close recovery after process exit. The [previous receipt](qualification/issue147-a14-requalification-20261024.md)
+retains the takeover, case-alias isolation and CLI-help results for its candidate. This bounded result does not
 establish general platform readiness. The
 [native opt-in qualification guide](checkpoint-qualification.md) describes the
 disposable-guest harness and its evidence requirements. Retained outputs are
@@ -171,7 +172,7 @@ as proof of administrator isolation.
 | A8 | Two cooperating restore writers have one winner; parent retarget refuses before writing to a foreign destination. This is not arbitrary-writer fencing. |
 | A9–A10 | Safe names/types/links/limits, metadata preflight and read-only preview/preservation checks. |
 | A11–A13 | Publication failpoints, actual process exits, fsync failure, exact resume, generic-path fencing and origin retention. Exhaustive storage/power-loss qualification remains outside this result. |
-| A14 | **Requalified after the review repairs:** real protected installed runtime/store, separate administrator and reader, actual permission/ACL and stale-head controls. The enabled harness fails on missing prerequisites; unit tests and the default opt-out skip do not qualify it. See the [receipt](qualification/issue147-a14-requalification-20261024.md) and [guide](checkpoint-qualification.md). |
+| A14 | **Requalified after the close-recovery binding fix:** real protected installed runtime/store, separate administrator and reader, actual permission/ACL and stale-head controls. The enabled harness fails on missing prerequisites; unit tests and the default opt-out skip do not qualify it. See the [receipt](qualification/issue147-restore-binding-20261024.md) and [guide](checkpoint-qualification.md). |
 | A15 | Native disposable filesystem/process checks and synthetic identity mismatches. Observed remount renumbering and reboot causation remain unproved. |
 
 Keep #147 open. Native A14 evidence covers the recorded backend boundary;
