@@ -411,3 +411,35 @@ def test_volume_qualification_requires_matching_apfs_ownership_record(tmp_path, 
     monkeypatch.setattr(trial, "run", run)
     with pytest.raises(harness.QualificationError, match="must match APFS"):
         trial.qualify_volume()
+
+
+
+def test_reader_acl_descriptor_uses_validated_account_short_name():
+    assert harness.reader_acl_entry("graphify_a14_reader") == "user:graphify_a14_reader allow read,write"
+    assert harness.reader_acl_entry("admin") == "user:admin allow read,write"
+
+
+@pytest.mark.parametrize("name", ["501", "", "user:admin", "reader allow write", "reader\nadmin",
+                                  "reader\x00", "reader:" , "a" * 65, ".reader"])
+def test_reader_acl_descriptor_rejects_numeric_or_grammar_injection(name):
+    with pytest.raises(harness.QualificationError, match="short name"):
+        harness.reader_acl_entry(name)
+
+
+def test_write_open_control_succeeds_without_writing_or_replacing_file(tmp_path):
+    path = tmp_path / "disposable-config-unit-fixture"
+    path.write_bytes(b"preserve exact config bytes")
+    path.chmod(0o600)
+    def frozen():
+        info = path.stat()
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns, path.read_bytes())
+    before = frozen()
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", harness.WRITE_OPEN_CONTROL, str(path)],
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0 and not result.stderr
+    opened = json.loads(result.stdout)
+    assert opened["status"] == "write_open_permitted"
+    assert (opened["device"], opened["inode"]) == before[:2]
+    assert opened["uid"] == opened["euid"] == os.getuid()
+    assert before == frozen()

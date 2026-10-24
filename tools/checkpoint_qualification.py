@@ -102,6 +102,13 @@ def validate_reader_policy(uid, gid, groups):
     require(80 not in groups, "reader must not belong to the macOS admin group (GID 80)")
 
 
+def reader_acl_entry(account_name):
+    require(type(account_name) is str
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", account_name) is not None,
+            "reader account short name is unsafe for an ACL descriptor")
+    return "user:" + account_name + " allow read,write"
+
+
 def bounded_file(path, limit):
     """Read one regular descriptor without following a replaced link or FIFO."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -389,6 +396,16 @@ print(json.dumps({"status":"verified","generation":snap.generation,
  "output_identity":{"device":output.stat().st_dev,"inode":output.stat().st_ino},
  "graph_sha256":__import__("hashlib").sha256((output/"graph.json").read_bytes()).hexdigest()}))
 '''
+WRITE_OPEN_CONTROL = '''import json,os,stat,sys
+fd=os.open(sys.argv[1],os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW)
+try:
+    info=os.fstat(fd)
+    assert stat.S_ISREG(info.st_mode)
+finally:
+    os.close(fd)
+print(json.dumps({"status":"write_open_permitted","device":info.st_dev,"inode":info.st_ino,
+                  "uid":os.getuid(),"euid":os.geteuid(),"gid":os.getgid(),"egid":os.getegid()}))
+'''
 DENIED_WRITES = '''import errno,json,os,sys
 results=[]
 for path in sys.argv[1:-1]:
@@ -584,6 +601,7 @@ class Trial:
         import grp
         import pwd
         account = pwd.getpwuid(self.args.reader_uid)
+        self.reader_acl = reader_acl_entry(account.pw_name)
         grp.getgrgid(self.args.reader_gid)
         reader_groups = os.getgrouplist(account.pw_name, account.pw_gid)
         validate_reader_policy(self.args.reader_uid, self.args.reader_gid, reader_groups)
@@ -763,8 +781,17 @@ class Trial:
         self.control_restored(control, CONFIG)
         control = self.control_start("unsafe config ACL", CONFIG)
         self.run("add unsafe config ACL", ["/bin/chmod", "+a#", "0",
-                                          "user:" + str(self.args.reader_uid) + " allow read,write", str(CONFIG)])
+                                          self.reader_acl, str(CONFIG)])
         self.control_injected(control, CONFIG)
+        opened = self.reader_operation("unsafe ACL write-open control", lambda: self.python(
+            "unsafe ACL write-open control", WRITE_OPEN_CONTROL, CONFIG, reader=True))
+        config_info = CONFIG.stat()
+        require(opened.get("status") == "write_open_permitted"
+                and opened.get("device") == config_info.st_dev and opened.get("inode") == config_info.st_ino
+                and opened.get("uid") == opened.get("euid") == self.args.reader_uid
+                and opened.get("gid") == opened.get("egid") == self.args.reader_gid,
+                "injected ACL did not grant reader write-open on the exact disposable config")
+        self.report["acl_write_open_control"] = opened
         refusal("unsafe_acl_denied", "Unsafe authority owner, mode, type, links or ACL")
         self.run("remove injected config ACL", ["/bin/chmod", "-a#", "0", str(CONFIG)])
         protected(CONFIG)
