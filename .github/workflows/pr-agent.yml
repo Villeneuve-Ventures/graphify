@@ -34,8 +34,8 @@ jobs:
           esac
 
       - name: Run upstream PR-Agent command
-        # v0.48.0, source 981344be2755e303df501e18e3f60b848a188a80.
-        uses: docker://pragent/pr-agent@sha256:80edef71baa3df28c129d858d4b53784abfc14704c235efb32b6c461d5399a6d
+        # Corrected v0.48.0 build; upstream source 981344be2755e303df501e18e3f60b848a188a80.
+        uses: docker://ghcr.io/villeneuve-ventures/pr-agent-corrected@sha256:3bcccc82790c8dff4b58f3ea9805b225a79023cc6a69f3efab34c3e8ae53a36b
         # Route inside the container: GitHub recreates event.json for each step.
         with:
           entrypoint: python
