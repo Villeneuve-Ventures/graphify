@@ -1023,6 +1023,217 @@ def _watchdog_available() -> bool:
 
 
 @pytest.fixture
+def dispatch_watch_event(monkeypatch):
+    """Drive one real handler/debounce cycle without starting observer threads."""
+    from types import SimpleNamespace
+    from graphify import watch as watch_module
+    import watchdog.observers
+    import watchdog.observers.polling
+
+    def dispatch(root, event, *, publish=False):
+        rebuilds, notifications = [], []
+        real_notify = watch_module._notify_only
+
+        class Observer:
+            def schedule(self, handler, _path, *, recursive):
+                assert recursive
+                self.handler = handler
+
+            def start(self):
+                self.handler.on_any_event(event)
+
+            def stop(self):
+                pass
+
+            def join(self):
+                pass
+
+        def notify(path, batch):
+            notifications.append(set(batch))
+            if publish:
+                real_notify(path, batch)
+
+        sleep_calls = 0
+
+        def sleep(_seconds):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls > 1:
+                raise KeyboardInterrupt
+
+        monkeypatch.setattr(watchdog.observers, "Observer", Observer)
+        monkeypatch.setattr(watchdog.observers.polling, "PollingObserver", Observer)
+        monkeypatch.setattr(watch_module, "_rebuild_code", lambda path: rebuilds.append(path))
+        monkeypatch.setattr(watch_module, "_notify_only", notify)
+        monkeypatch.setattr(watch_module, "time", SimpleNamespace(
+            sleep=sleep, monotonic=time.monotonic,
+        ))
+        watch_module.watch(root, debounce=0)
+        return rebuilds, notifications
+
+    return dispatch
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+@pytest.mark.parametrize(
+    ("source", "destination", "ignore", "admitted"),
+    [
+        ("old.md", "new.md", "", ("old.md", "new.md")),
+        ("old.md", "new.md", "old.md\n", ("new.md",)),
+        ("old.md", "new.md", "new.md\n", ("old.md",)),
+        ("old.md", "new.md", "*.md\n", ()),
+        ("old.log", "new.md", "", ("new.md",)),
+        ("old.md", "new.log", "", ("old.md",)),
+        (".hidden/old.md", "new.md", "", ("new.md",)),
+        ("old.md", ".hidden/new.md", "", ("old.md",)),
+        ("graphify-out/old.md", "new.md", "", ("new.md",)),
+        ("old.md", "graphify-out/new.md", "", ("old.md",)),
+        ("../old.md", "new.md", "", ("new.md",)),
+        ("old.md", "../new.md", "", ("old.md",)),
+        ("old.md", "old.md", "", ("old.md",)),
+        ("old.py", "new.py", "", ("old.py", "new.py")),
+        ("old.log", "new.py", "", ("new.py",)),
+        ("old.py", "new.md", "", ("old.py", "new.md")),
+    ],
+)
+def test_watch_move_admits_each_endpoint(
+    tmp_path, dispatch_watch_event, source, destination, ignore, admitted,
+):
+    from watchdog.events import FileMovedEvent
+
+    root = tmp_path / "corpus"
+    root.mkdir()
+    (root / ".graphifyignore").write_text(ignore)
+    event = FileMovedEvent(str(root / source), str(root / destination))
+    rebuilds, notifications = dispatch_watch_event(root, event)
+
+    assert rebuilds == ([root] if any(path.endswith(".py") for path in admitted) else [])
+    documents = any(path.endswith(".md") for path in admitted)
+    assert notifications == ([{root / path for path in admitted}] if documents else [])
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+@pytest.mark.parametrize("event_type", ["modified", "deleted", "directory"])
+def test_watch_move_fix_preserves_other_events(tmp_path, dispatch_watch_event, event_type):
+    from watchdog.events import DirMovedEvent, FileDeletedEvent, FileModifiedEvent
+
+    source, destination = tmp_path / "old.md", tmp_path / "new.md"
+    if event_type == "directory":
+        event = DirMovedEvent(str(source), str(destination))
+    elif event_type == "deleted":
+        event = FileDeletedEvent(str(source))
+    else:
+        event = FileModifiedEvent(str(source))
+    rebuilds, notifications = dispatch_watch_event(tmp_path, event)
+
+    assert rebuilds == []
+    assert notifications == ([] if event_type == "directory" else [{source}])
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+def test_watch_move_with_relative_root(tmp_path, monkeypatch, dispatch_watch_event):
+    from watchdog.events import FileMovedEvent
+
+    monkeypatch.chdir(tmp_path)
+    root = Path("corpus")
+    root.mkdir()
+    (root / ".graphifyignore").write_text("old.md\n")
+    event = FileMovedEvent(str(root / "old.md"), str(root / "new.md"))
+    rebuilds, notifications = dispatch_watch_event(root, event)
+
+    assert rebuilds == []
+    assert notifications == [{root.resolve() / "new.md"}]
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+def test_watch_move_with_symlink_root(tmp_path, dispatch_watch_event):
+    from watchdog.events import FileMovedEvent
+
+    target = tmp_path / "corpus"
+    target.mkdir()
+    (target / ".graphifyignore").write_text("old.md\n")
+    root = tmp_path / "alias"
+    try:
+        root.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    event = FileMovedEvent(str(root / "old.md"), str(root / "new.md"))
+    rebuilds, notifications = dispatch_watch_event(root, event)
+
+    assert rebuilds == []
+    assert notifications == [{root / "new.md"}]
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+def test_watch_move_preserves_symlink_parent_queue_identity(tmp_path, dispatch_watch_event):
+    from watchdog.events import FileMovedEvent
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    external = tmp_path / "external"
+    (external / "subdir").mkdir(parents=True)
+    actual_root = external / "docs"
+    actual_root.mkdir()
+    link = repo / "link"
+    try:
+        link.symlink_to(external / "subdir", target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    root = link / ".." / "docs"
+    output = _managed_watch_graph(actual_root)
+    (actual_root / ".graphifyignore").write_text("old.md\n")
+    (actual_root / "old.md").write_text("# Notes\n")
+    (actual_root / "old.md").rename(actual_root / "new.md")
+    decoy = repo / "docs"
+    decoy.mkdir()
+    (decoy / "new.md").write_text("Unrelated document\n")
+
+    _, notifications = dispatch_watch_event(
+        root, FileMovedEvent(str(root / "old.md"), str(root / "new.md")), publish=True,
+    )
+    assert notifications and {path.resolve() for path in notifications[0]} == {
+        actual_root / "new.md",
+    }
+    queued = [json.loads(line) for line in
+              (output / ".graphify_rebuild_queue.jsonl").read_text().splitlines()]
+    assert any(item["semantic"] is True and
+               any(Path(path).resolve() == actual_root / "new.md"
+                   for path in item["changed_paths"]) for item in queued)
+    assert (decoy / "new.md").read_text() == "Unrelated document\n"
+    assert not (decoy / "graphify-out").exists()
+
+
+@pytest.mark.skipif(not _watchdog_available(), reason="watchdog not installed")
+@pytest.mark.parametrize("ignored_source", [False, True])
+def test_watch_move_publishes_destination_intent_and_receipted_marker(
+    tmp_path, dispatch_watch_event, ignored_source,
+):
+    from watchdog.events import FileMovedEvent
+    from graphify.transaction import open_graph_snapshot
+
+    output = _managed_watch_graph(tmp_path)
+    source, destination = tmp_path / "old.md", tmp_path / "new.md"
+    source.write_text("# Notes\n")
+    source.rename(destination)
+    if ignored_source:
+        (tmp_path / ".graphifyignore").write_text("old.md\n")
+
+    _, notifications = dispatch_watch_event(
+        tmp_path, FileMovedEvent(str(source), str(destination)), publish=True,
+    )
+    assert notifications == [{destination} if ignored_source else {source, destination}]
+    assert (output / "needs_update").read_bytes() == b"1"
+    receipt = json.loads((output / ".graphify_generation.json").read_bytes())
+    assert receipt["artifact_digests"]["needs_update"] == hashlib.sha256(b"1").hexdigest()
+    snapshot = open_graph_snapshot(output / "graph.json", purpose="watch-prepare")
+    assert snapshot.generation == receipt["generation"]
+    queued = [json.loads(line) for line in
+              (output / ".graphify_rebuild_queue.jsonl").read_text().splitlines()]
+    assert any(item["semantic"] is True and str(destination) in item["changed_paths"]
+               for item in queued)
+
+
+@pytest.fixture
 def running_watch(monkeypatch):
     """Wait for observer startup and join watchers before test state disappears."""
     import threading

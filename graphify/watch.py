@@ -1636,6 +1636,8 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
     # (Time Machine writes, Docker/Colima VM I/O, Spotlight indexing, …) —
     # without this short-circuit a busy volume can saturate a CPU core
     # discarding events one extension at a time. (gh-928)
+    watch_cwd = None if watch_path.is_absolute() else Path.cwd()
+    watch_root_for_events = watch_path if watch_cwd is None else watch_cwd / watch_path
     watch_root_for_ignore = watch_path.resolve()
     ignore_patterns = _load_graphifyignore(watch_root_for_ignore)
 
@@ -1644,27 +1646,39 @@ def watch(watch_path: Path, debounce: float = 3.0) -> None:
             nonlocal last_trigger, pending
             if event.is_directory:
                 return
-            path = Path(os.fsdecode(event.src_path))
-            # Check .graphifyignore BEFORE the extension/dotfile/out filters so
-            # the cheapest short-circuit for users with broad ignore patterns
-            # (node_modules/, .venv/, build/, …) fires first. _is_ignored
-            # tolerates absolute paths outside watch_root via its internal
-            # relative_to guard, so a stray symlinked event won't raise.
-            if ignore_patterns and _is_ignored(path, watch_root_for_ignore, ignore_patterns):
-                return
-            if path.suffix.lower() not in _WATCHED_EXTENSIONS:
-                return
-            try:
-                filter_parts = path.relative_to(watch_root_for_ignore).parts
-            except ValueError:
-                filter_parts = path.parts
-            if any(part.startswith(".") for part in filter_parts):
-                return
-            if _GRAPHIFY_OUT in filter_parts:
-                return
-            last_trigger = time.monotonic()
-            pending = True
-            changed.add(path)
+            # A move can enter scope from an ignored source. Filter each endpoint
+            # independently so the old name cannot hide an admitted destination.
+            admitted: set[Path] = set()
+            for raw_path in (event.src_path, getattr(event, "dest_path", None)):
+                if not raw_path:
+                    continue
+                path = Path(os.fsdecode(raw_path))
+                if not path.is_absolute():
+                    path = (watch_cwd if watch_cwd is not None else Path.cwd()) / path
+                try:
+                    relative = path.relative_to(watch_root_for_events)
+                except ValueError:
+                    try:
+                        relative = path.relative_to(watch_root_for_ignore)
+                    except ValueError:
+                        continue
+                # Match ignore rules at the resolved root even when the observer
+                # reports the lexical path of a watched directory symlink.
+                ignored_path = watch_root_for_ignore / relative
+                if ignore_patterns and _is_ignored(ignored_path, watch_root_for_ignore, ignore_patterns):
+                    continue
+                if path.suffix.lower() not in _WATCHED_EXTENSIONS:
+                    continue
+                filter_parts = relative.parts
+                if any(part.startswith(".") for part in filter_parts):
+                    continue
+                if _GRAPHIFY_OUT in filter_parts:
+                    continue
+                admitted.add(path)
+            if admitted:
+                last_trigger = time.monotonic()
+                pending = True
+                changed.update(admitted)
 
     handler = Handler()
     # Use polling observer on macOS — FSEvents can miss rapid saves in some editors
