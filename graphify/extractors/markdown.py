@@ -17,6 +17,43 @@ _MD_WIKILINK_RE = re.compile(r'(?<!\!)\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]')
 
 _MD_LINKABLE_EXTS = {".md", ".mdx", ".qmd", ".markdown", ".rst", ".txt"}
 
+_MD_CODE_SPAN_RE = re.compile(r'(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)')
+_MD_PATH_MENTION_RE = re.compile(
+    r'^([A-Za-z0-9_./\-]+\.[A-Za-z0-9]+)::([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)(?:\(\))?$'
+)
+_MD_BARE_MENTION_RE = re.compile(r'^(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)(?:\(\))?$')
+
+
+def _code_span_mention(span: str) -> "tuple[str | None, list[str]] | None":
+    """Classify a symbol citation without guessing a defining file or node."""
+    from graphify.detect import CODE_EXTENSIONS, DOC_EXTENSIONS
+
+    text = span.strip()
+    if not text or " " in text:
+        return None
+    match = _MD_PATH_MENTION_RE.fullmatch(text)
+    if match:
+        return match.group(1), match.group(2).split("::")
+    match = _MD_BARE_MENTION_RE.fullmatch(text)
+    if not match:
+        return None
+    if "." in text:
+        suffix = "." + match.group(1)
+        if suffix in CODE_EXTENSIONS or suffix in DOC_EXTENSIONS:
+            return None
+        return None, text.removesuffix("()").split(".")
+    return None, [match.group(1)]
+
+
+def _mention_body_start(lines: list[str]) -> int:
+    """Exclude bounded leading frontmatter from new mention scanning only."""
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for index, line in enumerate(lines[1:201], 1):
+        if line.strip() in {"---", "..."}:
+            return index + 1
+    return 0
+
 def _resolve_markdown_link(raw: str, source_dir: Path) -> "Path | None":
     """Resolve a markdown link target to the absolute path of a sibling document.
 
@@ -86,7 +123,30 @@ def extract_markdown(path: Path) -> dict:
     str_path = str(path)
     nodes: list[dict] = []
     edges: list[dict] = []
+    raw_calls: list[dict] = []
     seen_ids: set[str] = set()
+    seen_mentions: set[tuple[str, str | None, tuple[str, ...], bool]] = set()
+
+    def add_mention(caller: str, span: str, line: int) -> None:
+        mention = _code_span_mention(span)
+        if mention is None:
+            return
+        cited_path, names = mention
+        # An explicit () is stronger evidence than a preceding bare word.
+        key = (caller, cited_path, tuple(names), "(" in span)
+        if key in seen_mentions:
+            return
+        seen_mentions.add(key)
+        raw_call = {
+            "caller_nid": caller, "callee": names[-1], "is_member_call": False,
+            "language": "markdown", "context": span.strip(), "source_file": str_path,
+            "source_location": f"L{line}",
+        }
+        if cited_path is not None:
+            raw_call["path"] = cited_path
+        if len(names) > 1:
+            raw_call["qualifiers"] = names[:-1]
+        raw_calls.append(raw_call)
 
     def add_node(nid: str, label: str, line: int, file_type: str = "document") -> None:
         if nid not in seen_ids:
@@ -125,6 +185,7 @@ def extract_markdown(path: Path) -> dict:
 
     # Track heading stack for nesting: [(level, nid), ...]
     heading_stack: list[tuple[int, str]] = []
+    heading_owners: dict[int, str] = {}
     in_code_block = False
 
     lines = source.splitlines()
@@ -172,6 +233,29 @@ def extract_markdown(path: Path) -> dict:
             add_edge(parent, h_nid, "contains", line_num)
 
             heading_stack.append((level, h_nid))
-            continue
+            heading_owners[line_num_0] = h_nid
 
-    return {"nodes": nodes, "edges": edges, "input_tokens": 0, "output_tokens": 0}
+    # New mentions use full fence delimiters independently of v8's heading and
+    # document-link scan. A shorter or different fence cannot close a block.
+    mention_body_start = _mention_body_start(lines)
+    mention_fence: tuple[str, int] | None = None
+    owner = file_nid
+    for index, line_text in enumerate(lines):
+        if index < mention_body_start:
+            continue
+        fence = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line_text)
+        if mention_fence is not None:
+            if (fence and fence.group(1)[0] == mention_fence[0]
+                    and len(fence.group(1)) >= mention_fence[1]
+                    and not fence.group(2).strip()):
+                mention_fence = None
+            continue
+        if fence and (fence.group(1)[0] != '`' or '`' not in fence.group(2)):
+            mention_fence = (fence.group(1)[0], len(fence.group(1)))
+            continue
+        owner = heading_owners.get(index, owner)
+        for match in _MD_CODE_SPAN_RE.finditer(line_text):
+            add_mention(owner, match.group(2), index + 1)
+
+    return {"nodes": nodes, "edges": edges, "raw_calls": raw_calls,
+            "input_tokens": 0, "output_tokens": 0}

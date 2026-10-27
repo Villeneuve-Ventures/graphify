@@ -27,10 +27,10 @@ from graphify.storage_guard import (
 # are only valid for the version that wrote them: keying purely on file
 # content means extractor fixes shipped in a new release keep serving stale
 # pre-fix results. The AST cache is therefore namespaced by package version
-# (cache/ast/v{version}/), with entries from other versions removed on first
-# use. The semantic cache is deliberately NOT versioned — its entries are
-# produced by the LLM from file contents, and invalidating them on every
-# release would re-bill extraction for unchanged files.
+# and payload format (cache/ast/v{version}-f{format}/), with older namespaces
+# removed on first use. The semantic cache is deliberately NOT versioned — its
+# entries are produced by the LLM from file contents, and invalidating them on
+# every release would re-bill extraction for unchanged files.
 try:
     from importlib.metadata import version as _pkg_version
 
@@ -38,7 +38,11 @@ try:
 except Exception:
     _EXTRACTOR_VERSION = "unknown"
 
-# Version dirs already swept this process — cleanup runs once per (base, version).
+# Markdown mentions and class markers require new per-file payload evidence even
+# when a checkout keeps the same distribution version. Epoch 1 was unformatted.
+_AST_CACHE_FORMAT = 2
+
+# Namespaces already swept this process — cleanup runs once per namespace.
 _cleaned_ast_dirs: set[str] = set()
 
 
@@ -109,7 +113,7 @@ def _remove_ordinary_cache_tree(root: Path) -> None:
 
 
 def _cleanup_stale_ast_entries(ast_base: Path, current_dir: Path) -> None:
-    """Remove AST cache entries left behind by other graphify versions.
+    """Remove AST cache entries left behind by older versions or payload formats.
 
     Sweeps sibling ``v*/`` directories and unversioned ``*.json`` entries
     (the pre-versioning layout) under ``cache/ast/``. Best-effort: failures
@@ -408,18 +412,18 @@ def cache_dir(root: Path = Path("."), kind: str = "ast") -> Path:
     "semantic-deep" (#1894). Separate subdirectories prevent semantic cache
     entries from overwriting AST cache entries for the same source_file (#582).
 
-    AST entries live in graphify-out/cache/ast/v{version}/ — namespaced by
-    graphify version because they depend on extractor code, not just file
-    contents. Semantic entries live unversioned in graphify-out/cache/semantic/
-    (re-extraction costs LLM calls); deep-mode entries live beside them in
-    graphify-out/cache/semantic-deep/.
+    AST entries live in graphify-out/cache/ast/v{version}-f{format}/ — namespaced
+    by graphify version and payload format because they depend on extractor code,
+    not just file contents. Semantic entries live unversioned in
+    graphify-out/cache/semantic/ (re-extraction costs LLM calls); deep-mode entries
+    live beside them in graphify-out/cache/semantic-deep/.
     """
     _out = Path(_GRAPHIFY_OUT)
     base = _out if _out.is_absolute() else Path(root).resolve() / _out
     d = base / "cache" / kind
     require_ordinary_output(d)
     if kind == "ast":
-        d = d / f"v{_EXTRACTOR_VERSION}"
+        d = d / f"v{_EXTRACTOR_VERSION}-f{_AST_CACHE_FORMAT}"
         _cleanup_stale_ast_entries(d.parent, d)
     require_ordinary_output(d)
     return ordinary_mkdir(d)
@@ -440,8 +444,9 @@ def load_cached(path: Path, root: Path = Path("."), kind: str = "ast",
     When ``cache_root`` is None the location falls back to ``root`` (unchanged
     behavior for existing callers).
 
-    AST entries written by other graphify versions — including the legacy
-    flat cache/ layout (pre-0.5.3) and the unversioned cache/ast/ layout —
+    AST entries written by other graphify versions or payload formats — including
+    the legacy flat cache/ layout (pre-0.5.3), unversioned cache/ast/ layout,
+    and version-only cache/ast/v{version}/ layout —
     are deliberately not consulted: they were produced by a different
     extractor and may be stale.
     Returns None if no cache entry or file has changed.

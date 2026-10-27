@@ -24,6 +24,7 @@ from .resolver_registry import (
 )
 from .ruby_resolution import resolve_ruby_member_calls
 from .pascal_resolution import resolve_pascal_inherited_calls
+from .markdown_resolution import MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions
 
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
 from graphify.extractors.base import (  # noqa: F401
@@ -2888,12 +2889,16 @@ register_language_resolver(
         resolve_pascal_inherited_calls,
     )
 )
+register_language_resolver(
+    LanguageResolver("markdown_mentions", MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions)
+)
 
 
 _SCOPED_RESOLVERS = frozenset({
     _resolve_swift_member_calls, _resolve_python_member_calls, resolve_ruby_member_calls,
     _resolve_typescript_member_calls, _resolve_cpp_member_calls, _resolve_objc_member_calls,
     _resolve_csharp_member_calls, _resolve_java_member_calls, resolve_pascal_inherited_calls,
+    resolve_markdown_mentions,
 })
 
 
@@ -4471,6 +4476,7 @@ def _extract_impl(
     report_outcomes: bool = False,
     use_cache: bool = True,
     input_outcomes: list[dict] | None = None,
+    _markdown_context_only: bool = False,
 ) -> dict:
     """Extract AST nodes and edges from a list of code files.
 
@@ -4666,6 +4672,10 @@ def _extract_impl(
         all_nodes.extend(result.get("nodes", []))
         all_edges.extend(result.get("edges", []))
         all_raw_calls.extend(result.get("raw_calls", []))
+    if any(path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES for path in paths):
+        for path, result in zip(paths, per_file):
+            if result is not None:
+                result["_markdown_source_file"] = str(source_resolve(path))
     # Function / method / class def ids for the cross-file indirect_call callable
     # guard. Built from the `_callable` node marker AFTER the id-remap / disambiguation
     # passes below (which rewrite node ids), so it can never go stale — see the
@@ -4960,6 +4970,8 @@ def _extract_impl(
     _JS_TS_CALL_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
     for rc in all_raw_calls:
         callee = rc.get("callee", "")
+        if rc.get("language") == "markdown":
+            continue
         if not callee:
             continue
         if callee in _LANGUAGE_BUILTIN_GLOBALS:
@@ -5127,8 +5139,22 @@ def _extract_impl(
     # receiver-typed/qualified calls the shared pass skipped) with its own
     # single-definition god-node guard. Registered in graphify.resolver_registry so
     # a new language plugs in without editing this body (#1356 Swift, #1446 Python).
-    run_language_resolvers(paths, per_file, all_nodes, all_edges, strict=strict,
+    # Dispatch accepts mixed-case Markdown suffixes. Normalize only this new
+    # resolver's activation paths, keeping other language gates unchanged.
+    resolver_paths = [path.with_suffix(path.suffix.lower())
+                      if path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES else path
+                      for path in paths]
+    run_language_resolvers(resolver_paths, per_file, all_nodes, all_edges, strict=strict,
                            scoped_resolvers=_SCOPED_RESOLVERS)
+
+    if _markdown_context_only:
+        # Scratch evidence stays in memory. Ordinary results below retain v8's
+        # private-marker stripping and never publish the unresolved mentions.
+        return {"nodes": all_nodes, "edges": all_edges,
+                "raw_calls": [call for call in all_raw_calls
+                              if call.get("language") == "markdown"],
+                "outcomes": outcomes,
+                "source_files": [str(source_resolve(path)) for path in paths]}
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash
@@ -5192,6 +5218,7 @@ def _extract_impl(
     for n in all_nodes:
         n.pop("origin_file", None)
         n.pop("_callable", None)  # internal indirect_call marker — never ships to graph.json
+        n.pop("_callable_class", None)
 
     # Tag AST provenance so the incremental watch rebuild can distinguish
     # AST-extracted nodes from semantic/LLM nodes. On a full re-extraction
@@ -5212,6 +5239,44 @@ def _extract_impl(
         "output_tokens": 0,
         **({"outcomes": outcomes} if report_outcomes else {}),
     }
+
+
+def _extract_markdown_context(paths: list[Path], *, root: Path) -> dict:
+    """Capture fresh scratch evidence without publishing internal type markers.
+
+    This ordinary-watch helper bypasses caches, including their stat fast path.
+    Source observations bracket extraction; scoped/certified extraction uses
+    its existing complete-input path instead of borrowing external context.
+    """
+    scope = current_source_io()
+    if scope is not None:
+        scope.refuse("ordinary Markdown context cannot enter scoped extraction")
+
+    def observe() -> dict:
+        observed = {}
+        for path in paths:
+            info = path.stat()
+            payload = source_read_bytes(path)
+            after = path.stat()
+            identity = (info.st_dev, info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)
+            if identity != (after.st_dev, after.st_ino, after.st_size,
+                            after.st_mtime_ns, after.st_ctime_ns):
+                raise RuntimeError(f"Markdown context source changed: {path}")
+            observed[str(path)] = (*identity, hashlib.sha256(payload).hexdigest())
+        return observed
+
+    before = observe()
+    result = _extract_impl(paths, root, source_root=root, use_cache=False,
+                           _markdown_context_only=True)
+    def validate_inputs() -> None:
+        if observe() != before:
+            raise RuntimeError("Markdown context inputs changed during extraction")
+
+    validate_inputs()
+    result["observations"] = before
+    result["validate_inputs"] = validate_inputs
+    return result
 
 
 def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | None = None) -> list[Path]:

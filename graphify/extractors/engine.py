@@ -2078,7 +2078,7 @@ _RUBY_CLASS_FACTORIES = frozenset({("Struct", "new"), ("Class", "new"), ("Data",
 def _ruby_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                      nodes: list, edges: list, seen_ids: set, function_bodies: list,
                      parent_class_nid: str | None, add_node, add_edge, walk,
-                     callable_def_nids: set) -> bool:
+                     callable_def_nids: set, callable_class_nids: set) -> bool:
     """Ruby: a constant assignment whose RHS is ``Struct.new(...)``,
     ``Class.new(Super)`` or ``Data.define(...)`` defines a class named after the
     constant (#1640). Synthesize the class node, attach block-defined methods via
@@ -2105,6 +2105,7 @@ def _ruby_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: st
     class_nid = _make_id(stem, const_name)
     add_node(class_nid, const_name, line)
     callable_def_nids.add(class_nid)  # a class is callable (its constructor)
+    callable_class_nids.add(class_nid)
     # Mirror the generic class branch: containment always hangs off the file node.
     add_edge(file_nid, class_nid, "contains", line)
 
@@ -2202,6 +2203,7 @@ def _extract_generic(
     # when it names one of these callable defs — never an arbitrary same-named
     # node — so `process(config)` can't manufacture an edge to a non-callable.
     callable_def_nids: set[str] = set()
+    callable_class_nids: set[str] = set()
     # Python only: per-function set of locally-bound names (params + local
     # assignment / for / with-as / comprehension targets). The indirect-dispatch
     # guard skips any call-argument identifier in the enclosing function's set,
@@ -2365,6 +2367,7 @@ def _extract_generic(
                 metadata = {"is_nested_type": True}
             add_node(class_nid, class_name, line, metadata=metadata)
             callable_def_nids.add(class_nid)  # a class is callable (constructor)
+            callable_class_nids.add(class_nid)
             add_edge(file_nid, class_nid, "contains", line)
 
             # TS/JS decorators on the class and its members (@Component, @Injectable,
@@ -3543,7 +3546,7 @@ def _extract_generic(
             if _ruby_extra_walk(node, source, file_nid, stem, str_path,
                                 nodes, edges, seen_ids, function_bodies,
                                 parent_class_nid, add_node, add_edge, walk,
-                                callable_def_nids):
+                                callable_def_nids, callable_class_nids):
                 return
 
         # Python's `@property` / `@staticmethod` / `@classmethod` wrap the
@@ -4422,6 +4425,8 @@ def _extract_generic(
         for n in nodes:
             if n["id"] in callable_def_nids:
                 n["_callable"] = True
+                if n["id"] in callable_class_nids:
+                    n["_callable_class"] = True
     if swift_extensions:
         result["swift_extensions"] = swift_extensions
     # TS/JS: augment the constructor-injection type table with local `new`

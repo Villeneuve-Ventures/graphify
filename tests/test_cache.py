@@ -396,6 +396,57 @@ def test_semantic_cache_survives_version_bump(tmp_path, monkeypatch):
     )
 
 
+def test_ast_cache_format_change_invalidates_same_package_version(tmp_path, monkeypatch):
+    """Unchanged source and package versions cannot admit older AST payload shapes."""
+    import graphify.cache as cache_mod
+
+    source = tmp_path / "doc.md"
+    source.write_text("# Guide\n\nUse `Widget`.\n")
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 1, raising=False)
+    save_cached(source, {"nodes": [{"id": "old"}], "edges": []}, root=tmp_path)
+    old_dir = cache_dir(tmp_path)
+
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 2, raising=False)
+    assert load_cached(source, root=tmp_path) is None
+    assert cache_dir(tmp_path) != old_dir
+    payload = {"nodes": [{"id": "new"}], "edges": [], "raw_calls": []}
+    save_cached(source, payload, root=tmp_path)
+    assert load_cached(source, root=tmp_path) == payload
+
+
+def test_same_version_ast_cache_without_format_epoch_is_not_served(tmp_path):
+    import graphify.cache as cache_mod
+
+    source = tmp_path / "mod.py"
+    source.write_text("class Widget:\n    pass\n")
+    legacy = tmp_path / cache_mod._GRAPHIFY_OUT / "cache" / "ast" / f"v{cache_mod._EXTRACTOR_VERSION}"
+    legacy.mkdir(parents=True)
+    (legacy / f"{file_hash(source, tmp_path)}.json").write_text(
+        '{"nodes":[{"id":"legacy"}],"edges":[]}'
+    )
+
+    assert load_cached(source, root=tmp_path) is None
+
+
+def test_semantic_namespaces_survive_ast_format_change(tmp_path, monkeypatch):
+    import graphify.cache as cache_mod
+
+    source = tmp_path / "doc.md"
+    source.write_text("# Guide\n\nBody.\n")
+    payload = {"nodes": [{"id": "semantic"}], "edges": []}
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 1, raising=False)
+    locations = {}
+    for kind in ("semantic", "semantic-deep"):
+        save_cached(source, payload, root=tmp_path, kind=kind)
+        locations[kind] = cache_dir(tmp_path, kind)
+
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 2, raising=False)
+    cache_dir(tmp_path, "ast")
+    for kind, location in locations.items():
+        assert cache_dir(tmp_path, kind) == location
+        assert load_cached(source, root=tmp_path, kind=kind) == payload
+
+
 def test_save_cached_in_root_symlink_keeps_symlink_name(tmp_path):
     """``source_file`` for an in-root symlink must be stored under the
     symlink's own name, not the resolved target. Lower-impact than the
