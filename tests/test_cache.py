@@ -428,6 +428,35 @@ def test_same_version_ast_cache_without_format_epoch_is_not_served(tmp_path):
     assert load_cached(source, root=tmp_path) is None
 
 
+def test_markdown_scanner_fixes_do_not_reuse_epoch_two_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / "widget.py"
+    code.write_text("class Hidden:\n    pass\n\nclass Visible:\n    pass\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text("# Guide\n\n<!-- obsolete: `Hidden` -->\n\nUse `Visible\n` now.\n")
+    old = extract_markdown(doc)
+    owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
+    # Epoch 2 scanned the hidden symbol and missed the wrapped visible span.
+    old["raw_calls"] = [{
+        "caller_nid": owner, "callee": "Hidden", "language": "markdown",
+        "context": "Hidden", "source_file": str(doc), "source_location": "L3",
+    }]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, "_AST_CACHE_FORMAT", 2)
+        save_cached(doc, old, root=tmp_path)
+
+    semantic = {"nodes": [{"id": "retained_semantic"}], "edges": []}
+    save_cached(doc, semantic, root=tmp_path, kind="semantic")
+    result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                     parallel=False, quiet=True)
+    assert {edge["context"] for edge in result["edges"]
+            if edge.get("_markdown_mention")} == {"Visible"}
+    assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
+
+
 def test_semantic_namespaces_survive_ast_format_change(tmp_path, monkeypatch):
     import graphify.cache as cache_mod
 

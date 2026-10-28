@@ -723,3 +723,96 @@ def test_mixed_case_markdown_suffix_resolves_mentions(tmp_path, suffix, scoped):
     assert not [edge for edge in result['edges']
                 if edge['source'] in documents
                 and edge['relation'] in {'calls', 'indirect_call'}]
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('<!-- `Hidden` -->\nUse `Visible`.\n', [('Visible', 'L2')]),
+    ('Before `Before` <!-- `Hidden` --> after `After`.\n',
+     [('Before', 'L1'), ('After', 'L1')]),
+    ('<!--\n# Hidden heading\n~~~\n`Hidden`\n-->\nUse `Visible`.\n',
+     [('Visible', 'L6')]),
+    ('Use `<!-- Widget -->` and `Visible`.\n', [('Visible', 'L1')]),
+    ('Use `<!--` then `Visible`.\n', [('Visible', 'L1')]),
+    ('Use `Wid<!-- hidden -->get` and `Visible`.\n', [('Visible', 'L1')]),
+    ('<!-- `Hidden`\nnever closed\n`AlsoHidden`\n', []),
+], ids=['same-line-comment', 'inline-comment', 'multiline-comment',
+        'literal-comment-span', 'literal-opener-span', 'no-mask-created-symbol',
+        'unclosed-comment'])
+def test_mentions_respect_html_comments(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text(body)
+    result = extract_markdown(doc)
+    assert [(call['context'], call['source_location'])
+            for call in result['raw_calls']] == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('    `Hidden`\n\t`AlsoHidden`\n\nUse `Visible`.\n', [('Visible', 'L4')]),
+    ('Paragraph\n    `Continued`\n', [('Continued', 'L2')]),
+    ('Paragraph\n\n    `Hidden`\n', []),
+    ('- Use `Visible`.\n    and `Continued`.\n',
+     [('Visible', 'L1'), ('Continued', 'L2')]),
+    ('- First paragraph.\n\n    Use `Visible`.\n', [('Visible', 'L3')]),
+    ('    <!--\n\nUse `Visible`.\n', [('Visible', 'L3')]),
+    ('```text\n<!--\n```\nUse `Visible`.\n', [('Visible', 'L4')]),
+], ids=['space-and-tab-blocks', 'paragraph-continuation', 'paragraph-separation',
+        'list-continuation', 'list-paragraph', 'indented-literal-comment',
+        'fenced-literal-comment'])
+def test_mentions_respect_indented_code_and_prose(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text(body)
+    result = extract_markdown(doc)
+    assert [(call['context'], call['source_location'])
+            for call in result['raw_calls']] == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('Use `\nWidget\n` here.\n', [('Widget', 'L1')]),
+    ('Use ``\nWidget\n`` and `Later`.\n', [('Widget', 'L1'), ('Later', 'L3')]),
+    ('Use `Widget\n` here.\n', [('Widget', 'L1')]),
+    ('Use `Wid\nget` here.\n', []),
+    ('Use ``\nWidget`\n`` here.\n', []),
+    ('Use `\n\nWidget` here.\n', []),
+    ('Use `\n# Widget`\n', []),
+    ('Use `\n~~~\nWidget`\n~~~\n', []),
+    ('Use `\n- Widget`\n', []),
+    ('Use `\n> Widget`\n', []),
+    ('Use `\n---\nWidget`\n', []),
+    ('Use `\n<!-- Widget` -->\n', []),
+], ids=['soft-lines', 'double-delimiter', 'trailing-soft-line', 'internal-space',
+        'exact-delimiter', 'blank-boundary', 'heading-boundary', 'fence-boundary',
+        'list-boundary', 'quote-boundary', 'thematic-boundary', 'html-boundary'])
+def test_mentions_support_bounded_multiline_code_spans(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text(body)
+    result = extract_markdown(doc)
+    assert [(call['context'], call['source_location'])
+            for call in result['raw_calls']] == expected
+
+
+def test_comment_headings_do_not_take_mention_ownership_or_change_legacy_links(tmp_path):
+    result = _extract(tmp_path, {
+        'widget.py': _WIDGET_PY,
+        'other.md': '# Other\n',
+        'doc.md': ('# Guide\n\n<!--\n# Hidden\n`Widget.render()`\n'
+                   '[Other](./other.md)\n-->\nUse `\nWidget\n`.\n'),
+    })
+    guide = _node(result, 'Guide', 'doc.md')
+    widget = _node(result, 'Widget', 'widget.py')
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    assert [(edge['source'], edge['target'], edge['context'], edge['source_location'])
+            for edge in mentions] == [(guide['id'], widget['id'], 'Widget', 'L8')]
+    # Legacy structural and link outputs deliberately still include comment text.
+    assert _node(result, 'Hidden', 'doc.md')
+    assert (_node(result, 'doc.md')['id'], _node(result, 'other.md')['id']) in _references(result)
+
+
+def test_multiline_span_keeps_its_opening_heading_and_source_location(tmp_path):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\nUse ``\nWidget\n``.\n\n## Next\n\nUse `Other`.\n')
+    result = extract_markdown(doc)
+    headings = {node['label']: node['id'] for node in result['nodes']}
+    assert [(call['context'], call['caller_nid'], call['source_location'])
+            for call in result['raw_calls']] == [
+        ('Widget', headings['Guide'], 'L3'), ('Other', headings['Next'], 'L9'),
+    ]

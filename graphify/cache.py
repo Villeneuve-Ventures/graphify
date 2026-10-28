@@ -39,8 +39,9 @@ except Exception:
     _EXTRACTOR_VERSION = "unknown"
 
 # Markdown mentions and class markers require new per-file payload evidence even
-# when a checkout keeps the same distribution version. Epoch 1 was unformatted.
-_AST_CACHE_FORMAT = 2
+# when a checkout keeps the same distribution version. Epoch 1 was unformatted;
+# epoch 3 invalidates Markdown mentions parsed from comments or literal blocks.
+_AST_CACHE_FORMAT = 3
 
 # Namespaces already swept this process — cleanup runs once per namespace.
 _cleaned_ast_dirs: set[str] = set()

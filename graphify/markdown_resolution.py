@@ -153,6 +153,22 @@ def resolve_markdown_mentions(
     if not mentions:
         return
 
+    # Extraction admits both the selected input spelling and its canonical
+    # identity. Use only those aliases: a result can also contain imported
+    # foreign nodes, whose source files must not inherit the selected identity.
+    source_aliases = {
+        _posix(os.path.normpath(str(result["_markdown_source_alias"]))):
+        _posix(os.path.normpath(str(result["_markdown_source_file"])))
+        for result in per_file
+        if result.get("_markdown_source_alias") and result.get("_markdown_source_file")
+    }
+
+    def _source_identity(value: object) -> str:
+        if not value:
+            return ""
+        source = _posix(os.path.normpath(str(value)))
+        return source_aliases.get(source, source)
+
     code_nodes = [
         n for n in all_nodes
         if n.get("id") and n.get("file_type") == "code" and not _is_file_node(n)
@@ -165,7 +181,7 @@ def resolve_markdown_mentions(
             continue
         if n.get("_callable"):
             by_label.setdefault(label, []).append(n["id"])
-        source_file = _posix(str(n.get("source_file", "")))
+        source_file = _source_identity(n.get("source_file", ""))
         if source_file:
             by_file.setdefault(source_file, {}).setdefault(label, []).append(n["id"])
     # Empty or failed selected files still participate in cited-file ambiguity.
@@ -174,7 +190,7 @@ def resolve_markdown_mentions(
                        for result in per_file)
     for result in per_file:
         if source_file := result.get("_markdown_source_file"):
-            by_file.setdefault(_posix(str(source_file)), {})
+            by_file.setdefault(_source_identity(source_file), {})
     source_files = set(by_file)
 
     parents: dict[str, set[str]] = {}
@@ -208,7 +224,7 @@ def resolve_markdown_mentions(
         cited = rc.get("path")
         if cited:
             source_file = _match_cited_file(
-                str(cited), _posix(str(rc.get("source_file", ""))), source_files
+                str(cited), _source_identity(rc.get("source_file", "")), source_files
             )
             if source_file is None:
                 return None, "EXTRACTED", 1.0
@@ -216,7 +232,7 @@ def resolve_markdown_mentions(
         callee = names[-1]
         if not complete:
             return None, "INFERRED", 0.95
-        if callee in _LANGUAGE_BUILTIN_GLOBALS:
+        if len(names) == 1 and callee in _LANGUAGE_BUILTIN_GLOBALS:
             return None, "INFERRED", 0.95
         qualifiers = set(names[:-1])
         candidates = [
@@ -240,7 +256,7 @@ def resolve_markdown_mentions(
         caller = str(rc.get("caller_nid", ""))
         if target is None or target == caller:
             return
-        doc = _posix(str(rc.get("source_file", "")))
+        doc = _source_identity(rc.get("source_file", ""))
         if (caller, target) in existing:
             # The edge is already in the graph, but this document still CITES that
             # target, so it stays on record as owner evidence for a later method
@@ -295,6 +311,6 @@ def resolve_markdown_mentions(
     # link to `Cache.redis` unless the document names `Cache`;
     # `successWithWarnings` survives because `HandlerResult` is cited next to it.
     for rc, target, confidence, score in method_mentions:
-        doc = _posix(str(rc.get("source_file", "")))
+        doc = _source_identity(rc.get("source_file", ""))
         if _method_owner(target) in cited_targets.get(doc, ()):
             _add(rc, target, confidence, score)

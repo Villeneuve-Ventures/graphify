@@ -4676,6 +4676,7 @@ def _extract_impl(
         for path, result in zip(paths, per_file):
             if result is not None:
                 result["_markdown_source_file"] = str(source_resolve(path))
+                result["_markdown_source_alias"] = str(path)
     # Function / method / class def ids for the cross-file indirect_call callable
     # guard. Built from the `_callable` node marker AFTER the id-remap / disambiguation
     # passes below (which rewrite node ids), so it can never go stale — see the

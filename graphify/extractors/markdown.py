@@ -17,7 +17,12 @@ _MD_WIKILINK_RE = re.compile(r'(?<!\!)\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]')
 
 _MD_LINKABLE_EXTS = {".md", ".mdx", ".qmd", ".markdown", ".rst", ".txt"}
 
-_MD_CODE_SPAN_RE = re.compile(r'(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)')
+_MD_MENTION_FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+_MD_MENTION_LIST_RE = re.compile(r'^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+')
+_MD_MENTION_BREAK_RE = re.compile(
+    r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|<!--|'
+    r'(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|\[[^\]]+\]:)'
+)
 _MD_PATH_MENTION_RE = re.compile(
     r'^([A-Za-z0-9_./\-]+\.[A-Za-z0-9]+)::([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)(?:\(\))?$'
 )
@@ -53,6 +58,114 @@ def _mention_body_start(lines: list[str]) -> int:
         if line.strip() in {"---", "..."}:
             return index + 1
     return 0
+
+
+def _mention_span_end(lines: list[str], index: int, start: int, width: int,
+                      multiline: bool) -> tuple[int, int] | None:
+    """Find an equal-length closing run without crossing a prose block."""
+    for end_index in range(index, len(lines)):
+        line = lines[end_index]
+        if end_index != index:
+            if (not multiline or not line.strip() or _MD_MENTION_FENCE_RE.match(line)
+                    or _MD_MENTION_LIST_RE.match(line) or _MD_MENTION_BREAK_RE.match(line)):
+                return None
+            start = 0
+        for run in re.finditer(r'`+', line[start:]):
+            if len(run.group()) == width:
+                return end_index, start + run.start()
+    return None
+
+
+def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
+                           file_nid: str):
+    """Scan new citations independently of the legacy heading/link output.
+
+    Block state takes precedence over inline syntax. Within prose, a valid
+    code span takes precedence over comment delimiters in its literal content.
+    """
+    index = _mention_body_start(lines)
+    fence: tuple[str, int] | None = None
+    in_comment = False
+    paragraph = False
+    list_indent: int | None = None
+    owner = file_nid
+    while index < len(lines):
+        line = lines[index]
+        fence_match = _MD_MENTION_FENCE_RE.match(line)
+        if fence is not None:
+            if (fence_match and fence_match.group(1)[0] == fence[0]
+                    and len(fence_match.group(1)) >= fence[1]
+                    and not fence_match.group(2).strip()):
+                fence = None
+            index += 1
+            continue
+
+        block_line = False
+        if not in_comment:
+            if not line.strip():
+                paragraph = False
+                index += 1
+                continue
+            expanded = line.expandtabs(4)
+            indent = len(expanded) - len(expanded.lstrip(' '))
+            list_match = _MD_MENTION_LIST_RE.match(line)
+            if list_match:
+                list_indent = len(list_match.group().expandtabs(4))
+            elif list_indent is not None and indent < list_indent:
+                list_indent = None
+            # An indented line cannot interrupt a paragraph. List content has
+            # its own indentation baseline, including after a blank line.
+            code_indent = (list_indent or 0) + 4
+            if indent >= code_indent and not paragraph:
+                index += 1
+                continue
+            if (fence_match and (fence_match.group(1)[0] != '`'
+                                 or '`' not in fence_match.group(2))):
+                fence = (fence_match.group(1)[0], len(fence_match.group(1)))
+                paragraph = False
+                index += 1
+                continue
+            owner = heading_owners.get(index, owner)
+            block_line = bool(_MD_MENTION_BREAK_RE.match(line))
+            paragraph = not block_line
+
+        position = 0
+        while position < len(line):
+            if in_comment:
+                end = line.find('-->', position)
+                if end < 0:
+                    break
+                in_comment = False
+                position = end + 3
+                continue
+            token = re.search(r'<!--|`+', line[position:])
+            if token is None:
+                if line[position:].strip() and not block_line:
+                    paragraph = True
+                break
+            start = position + token.start()
+            if token.group() == '<!--':
+                in_comment = True
+                position = start + 4
+                continue
+            width = len(token.group())
+            end = _mention_span_end(lines, index, start + width, width, not block_line)
+            if end is None:
+                position = start + width
+                continue
+            end_index, end_position = end
+            parts = [line[start + width:end_position]] if end_index == index else [
+                line[start + width:], *lines[index + 1:end_index],
+                lines[end_index][:end_position],
+            ]
+            # CommonMark normalizes soft line endings in code spans to spaces.
+            yield owner, ' '.join(parts), index + 1
+            index = end_index
+            line = lines[index]
+            position = end_position + width
+        if block_line:
+            paragraph = False
+        index += 1
 
 def _resolve_markdown_link(raw: str, source_dir: Path) -> "Path | None":
     """Resolve a markdown link target to the absolute path of a sibling document.
@@ -235,27 +348,8 @@ def extract_markdown(path: Path) -> dict:
             heading_stack.append((level, h_nid))
             heading_owners[line_num_0] = h_nid
 
-    # New mentions use full fence delimiters independently of v8's heading and
-    # document-link scan. A shorter or different fence cannot close a block.
-    mention_body_start = _mention_body_start(lines)
-    mention_fence: tuple[str, int] | None = None
-    owner = file_nid
-    for index, line_text in enumerate(lines):
-        if index < mention_body_start:
-            continue
-        fence = re.match(r'^ {0,3}(`{3,}|~{3,})(.*)$', line_text)
-        if mention_fence is not None:
-            if (fence and fence.group(1)[0] == mention_fence[0]
-                    and len(fence.group(1)) >= mention_fence[1]
-                    and not fence.group(2).strip()):
-                mention_fence = None
-            continue
-        if fence and (fence.group(1)[0] != '`' or '`' not in fence.group(2)):
-            mention_fence = (fence.group(1)[0], len(fence.group(1)))
-            continue
-        owner = heading_owners.get(index, owner)
-        for match in _MD_CODE_SPAN_RE.finditer(line_text):
-            add_mention(owner, match.group(2), index + 1)
+    for owner, span, line in _markdown_mention_spans(lines, heading_owners, file_nid):
+        add_mention(owner, span, line)
 
     return {"nodes": nodes, "edges": edges, "raw_calls": raw_calls,
             "input_tokens": 0, "output_tokens": 0}
