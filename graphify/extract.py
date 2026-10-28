@@ -4165,6 +4165,19 @@ def _safe_extract_with_xaml_root(extractor, path: Path, root: Path, *, strict: b
         _XAML_ACTIVE_EXTRACT_ROOT = previous_root
 
 
+def _cached_markdown_matches_source(path: Path, cached: dict) -> bool:
+    """Keep path-dependent Markdown fragments owned by the selected input."""
+    if path.suffix.lower() not in MARKDOWN_MENTION_SUFFIXES:
+        return True
+    selected_origin = os.path.abspath(path)
+    return not any(
+        item.get("source_file")
+        and os.path.abspath(str(item["source_file"])) != selected_origin
+        for bucket in ("nodes", "edges", "raw_calls")
+        for item in cached.get(bucket, []) if isinstance(item, dict)
+    )
+
+
 def _extract_single_file(args: tuple) -> tuple[int, dict]:
     """Worker function for parallel extraction. Runs in a subprocess.
 
@@ -4197,7 +4210,7 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     # Check cache first (avoid re-extraction)
     if not bypass_cache:
         cached = load_cached(path, root, cache_root=cache_location)
-        if cached is not None:
+        if cached is not None and _cached_markdown_matches_source(path, cached):
             return idx, cached
 
     extractor = _get_extractor(path, strict=strict)
@@ -4556,17 +4569,7 @@ def _extract_impl(
         bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
-            if cached is not None and path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES:
-                # Content/cache identity may be shared by two symlink aliases,
-                # but Markdown IDs, links and citation origins belong to the
-                # selected location. Do not borrow another alias's fragment.
-                selected_origin = os.path.abspath(path)
-                if any(item.get("source_file")
-                       and os.path.abspath(str(item["source_file"])) != selected_origin
-                       for bucket in ("nodes", "edges", "raw_calls")
-                       for item in cached.get(bucket, []) if isinstance(item, dict)):
-                    cached = None
-            if cached is not None:
+            if cached is not None and _cached_markdown_matches_source(path, cached):
                 per_file[i] = cached
                 continue
         uncached_work.append((i, path))
@@ -4598,10 +4601,11 @@ def _extract_impl(
                       or not isinstance(result.get("edges"), list) for result in per_file):
         raise RuntimeError("AST extraction incomplete: missing or failed source result")
 
-    # Fill any remaining None slots (shouldn't happen, but defensive)
+    # Keep failed workers distinct from successful empty extraction so resolvers
+    # cannot infer uniqueness from an incomplete selected corpus.
     for i in range(total):
         if per_file[i] is None:
-            per_file[i] = {"nodes": [], "edges": []}
+            per_file[i] = {"nodes": [], "edges": [], "error": "missing extraction result"}
 
     # #1666: surface any source file an extractor accepted but that produced zero
     # nodes (not even a file node). Such a file is silently absent from the graph,

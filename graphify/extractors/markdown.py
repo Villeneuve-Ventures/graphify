@@ -6,6 +6,7 @@ import re
 import os
 import string
 
+from bisect import bisect_right
 from pathlib import Path
 from graphify.extractors.base import _file_stem, _make_id
 
@@ -25,8 +26,10 @@ _MD_MENTION_BREAK_RE = re.compile(
     r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|<!--|'
     r'(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$)'
 )
-_MD_MENTION_REFERENCE_RE = re.compile(r'^ {0,3}\[((?:\\.|[^\[\]\\]){1,999})\]:')
+_MD_MENTION_REFERENCE_RE = re.compile(r' {0,3}\[((?:\\.|[^\[\]\\]){1,999})\]:')
 _MD_MENTION_WHITESPACE_RE = re.compile(r'[ \t]*(?:\n[ \t]*)?')
+_MD_MENTION_TOKEN_RE = re.compile(r'\\|<!--|<|!?\[|\]|`+')
+_MD_MENTION_TICK_RE = re.compile(r'`+')
 _MD_MENTION_AUTOLINK_RE = re.compile(
     r'<(?:[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\x00-\x20\x7f<>]*|'
     r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~\-]+@"
@@ -166,9 +169,9 @@ def _mention_span_end(lines: list[str], index: int, start: int, width: int,
                     or _mention_html_block_end(line, paragraph=True) is not None):
                 return None
             start = 0
-        for run in re.finditer(r'`+', line[start:]):
+        for run in _MD_MENTION_TICK_RE.finditer(line, start):
             if len(run.group()) == width:
-                return end_index, start + run.start()
+                return end_index, run.start()
     return None
 
 
@@ -214,8 +217,10 @@ def _mention_prose_text(lines: list[str], index: int, first_line: str,
     """Logical lines available to one inline construct, bounded by its prose block."""
     parts = [first_line]
     if multiline:
-        for raw in lines[index + 1:]:
-            line, continued, _ = _mention_container_content(raw, containers, extend=False)
+        for end_index in range(index + 1, len(lines)):
+            line, continued, _ = _mention_container_content(
+                lines[end_index], containers, extend=False,
+            )
             if (not line.strip() or continued != containers
                     or _MD_MENTION_FENCE_RE.match(line) or _MD_MENTION_LIST_RE.match(line)
                     or _MD_MENTION_BREAK_RE.match(line)
@@ -225,9 +230,48 @@ def _mention_prose_text(lines: list[str], index: int, first_line: str,
     return '\n'.join(parts)
 
 
-def _mention_text_position(text: str, end: int, index: int) -> tuple[int, int]:
-    prefix = text[:end]
-    return index + prefix.count('\n'), len(prefix.rsplit('\n', 1)[-1])
+class _MentionProse:
+    """Reuse one normalized prose block and map offsets without copying its tail."""
+
+    def __init__(self, lines: list[str], index: int, first_line: str,
+                 containers: tuple[tuple[str, int], ...], *, multiline: bool):
+        self.index = index
+        self.containers = containers
+        self.text = _mention_prose_text(lines, index, first_line, containers,
+                                        multiline=multiline)
+        self.line_starts = [0, *(match.end() for match in re.finditer('\n', self.text))]
+        # Bare destinations stop at ASCII whitespace/control characters. Pair
+        # their unescaped parentheses once, so repeated malformed openers do
+        # not each scan the remaining paragraph to discover an unmatched pair.
+        self.parenthesis_ends: dict[int, int] = {}
+        openings: list[int] = []
+        position = 0
+        while position < len(self.text):
+            character = self.text[position]
+            if (character == '\\' and position + 1 < len(self.text)
+                    and self.text[position + 1] in string.punctuation):
+                position += 2
+                continue
+            if character == ' ' or ord(character) < 32 or ord(character) == 127:
+                openings.clear()
+            elif character == '(':
+                openings.append(position)
+            elif character == ')' and openings:
+                self.parenthesis_ends[openings.pop()] = position
+            position += 1
+
+    def contains(self, index: int, containers: tuple[tuple[str, int], ...],
+                 multiline: bool) -> bool:
+        return (self.index <= index < self.index + len(self.line_starts)
+                and self.containers == containers
+                and (multiline or len(self.line_starts) == 1))
+
+    def offset(self, index: int, position: int = 0) -> int:
+        return self.line_starts[index - self.index] + position
+
+    def position(self, offset: int) -> tuple[int, int]:
+        relative_index = bisect_right(self.line_starts, offset) - 1
+        return self.index + relative_index, offset - self.line_starts[relative_index]
 
 
 def _mention_whitespace_end(text: str, start: int) -> int:
@@ -235,13 +279,13 @@ def _mention_whitespace_end(text: str, start: int) -> int:
     return match.end() if match is not None else start
 
 
-def _mention_destination_end(text: str, start: int) -> int | None:
+def _mention_destination_end(text: str, start: int,
+                             parenthesis_ends: dict[int, int]) -> int | None:
     """Parse a link destination without interpreting its contents as Markdown."""
     position = start
     angle = text.startswith('<', position)
     if angle:
         position += 1
-    depth = 0
     while position < len(text):
         character = text[position]
         if (character == '\\' and position + 1 < len(text)
@@ -257,13 +301,15 @@ def _mention_destination_end(text: str, start: int) -> int | None:
             if character == ' ' or ord(character) < 32 or ord(character) == 127:
                 break
             if character == '(':
-                depth += 1
+                closing = parenthesis_ends.get(position)
+                if closing is None:
+                    return None
+                position = closing + 1
+                continue
             elif character == ')':
-                if not depth:
-                    break
-                depth -= 1
+                break
         position += 1
-    return position if not angle and not depth and position > start else None
+    return position if not angle and position > start else None
 
 
 def _mention_title_end(text: str, start: int) -> int | None:
@@ -285,11 +331,12 @@ def _mention_title_end(text: str, start: int) -> int | None:
     return None
 
 
-def _mention_inline_destination_end(text: str, start: int) -> int | None:
+def _mention_inline_destination_end(text: str, start: int,
+                                    parenthesis_ends: dict[int, int]) -> int | None:
     position = _mention_whitespace_end(text, start)
     if position < len(text) and text[position] == ')':
         return position + 1
-    end = _mention_destination_end(text, position)
+    end = _mention_destination_end(text, position, parenthesis_ends)
     if end is not None:
         after = _mention_whitespace_end(text, end)
         if after > end:
@@ -301,12 +348,13 @@ def _mention_inline_destination_end(text: str, start: int) -> int | None:
     return None
 
 
-def _mention_reference_end(text: str) -> int | None:
-    reference = _MD_MENTION_REFERENCE_RE.match(text)
+def _mention_reference_end(text: str, parenthesis_ends: dict[int, int],
+                           start: int = 0) -> int | None:
+    reference = _MD_MENTION_REFERENCE_RE.match(text, start)
     if reference is None or not reference.group(1).strip():
         return None
     start = _mention_whitespace_end(text, reference.end())
-    end = _mention_destination_end(text, start)
+    end = _mention_destination_end(text, start, parenthesis_ends)
     if end is None:
         return None
     same_line = end
@@ -343,6 +391,14 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
     paragraph = False
     brackets: list[tuple[bool, bool]] = []  # (image, active link opener)
     owner = file_nid
+    prose: _MentionProse | None = None
+
+    def prose_context(*, multiline: bool = True) -> _MentionProse:
+        nonlocal prose
+        if prose is None or not prose.contains(index, containers, multiline):
+            prose = _MentionProse(lines, index, line, containers, multiline=multiline)
+        return prose
+
     while index < len(lines):
         raw_line = lines[index]
         if fence is not None:
@@ -404,10 +460,12 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 index += 1
                 continue
             if not paragraph and re.match(r'^ {0,3}\[', line):
-                text = _mention_prose_text(lines, index, line, containers)
-                reference_end = _mention_reference_end(text)
+                context = prose_context()
+                reference_end = _mention_reference_end(
+                    context.text, context.parenthesis_ends, context.offset(index),
+                )
                 if reference_end is not None:
-                    index, _ = _mention_text_position(text, reference_end, index)
+                    index, _ = context.position(reference_end)
                     index += 1
                     brackets.clear()
                     continue
@@ -426,12 +484,12 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 in_comment = False
                 position = end + 3
                 continue
-            token = re.search(r'\\|<!--|<|!?\[|\]|`+', line[position:])
+            token = _MD_MENTION_TOKEN_RE.search(line, position)
             if token is None:
                 if line[position:].strip() and not block_line:
                     paragraph = True
                 break
-            start = position + token.start()
+            start = token.start()
             if token.group() == '\\':
                 position = start + 1
                 if position < len(line) and line[position] in string.punctuation:
@@ -445,13 +503,15 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 opener = brackets.pop() if brackets else None
                 position = start + 1
                 if opener is not None and opener[1] and line[position:position + 1] == '(':
-                    text = _mention_prose_text(lines, index, line, containers,
-                                               multiline=not block_line)
-                    link_end = _mention_inline_destination_end(text, position + 1)
+                    context = prose_context(multiline=not block_line)
+                    link_end = _mention_inline_destination_end(
+                        context.text, context.offset(index, position + 1),
+                        context.parenthesis_ends,
+                    )
                     if link_end is not None:
                         if not opener[0]:
                             brackets = [(image, active and image) for image, active in brackets]
-                        end_index, end_position = _mention_text_position(text, link_end, index)
+                        end_index, end_position = context.position(link_end)
                         if end_index != index:
                             line = _mention_container_content(lines[end_index], containers,
                                                               extend=False)[0]

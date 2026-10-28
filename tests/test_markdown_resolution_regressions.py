@@ -592,3 +592,130 @@ def test_stronger_mention_only_promotes_owned_references(origin, marker):
                             "context": "src/widget.py::Widget::render", "source_location": "L7"}
     else:
         assert edges[1] == previous
+
+
+_WATCH_OWNER_DOC = ("# Old\n`A.run()`\n# New\n`B.run()`\n"
+                    "# Pinned old\n`model.js::A::run`\n"
+                    "# Pinned new\n`model.js::B::run`\n")
+
+
+def test_watch_owner_move_withholds_unpublished_current_method(tmp_path):
+    from graphify.watch import _refresh_markdown_mentions
+
+    files = {"model.js": "class A { run() {} } class B {}\n",
+             "guide.md": _WATCH_OWNER_DOC}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    assert {edge["context"] for edge in _mentions(result)} == {
+        "A.run()", "model.js::A::run",
+    }
+    (tmp_path / "model.js").write_text("class A {} class B { run() {} }\n")
+    before = _snapshot(tmp_path)
+    refreshed = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert _mentions(refreshed) == []
+    assert _snapshot(tmp_path) == before
+    _assert_private_markers_stripped(refreshed)
+    control = extract(paths, source_root=tmp_path, parallel=False,
+                      ambient_output=False, quiet=True)
+    assert {edge["context"] for edge in _mentions(control)} == {
+        "B.run()", "model.js::B::run",
+    }
+
+
+@pytest.mark.parametrize("origin", ["semantic", "ast"])
+@pytest.mark.parametrize("relation", ["contains", "method"])
+def test_watch_retained_ownership_is_not_current_ast_evidence(tmp_path, origin, relation):
+    import json
+
+    from graphify.watch import _refresh_markdown_mentions
+
+    files = {"model.js": "class A {} class B { run() {} }\n",
+             "guide.md": _WATCH_OWNER_DOC}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    owner = next(node["id"] for node in result["nodes"] if node["label"] == "A")
+    method = next(node["id"] for node in result["nodes"] if node["label"] == ".run()")
+    retained = {"source": owner, "target": method, "relation": relation,
+                "_origin": origin, "confidence": "INFERRED", "confidence_score": 0.61,
+                "source_file": "notes.md", "context": "Retained ownership"}
+    result["edges"].append(retained)
+    retained_bytes = json.dumps(retained, sort_keys=True).encode()
+    refreshed = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert retained in refreshed["edges"]
+    assert json.dumps(retained, sort_keys=True).encode() == retained_bytes
+    contexts = {edge["context"] for edge in _mentions(refreshed)}
+    assert not contexts & {"A.run()", "model.js::A::run"}
+    if origin == "semantic":
+        assert contexts == {"B.run()", "model.js::B::run"}
+    # Contradictory retained AST ancestry cannot prove a published declaration.
+    else:
+        assert contexts == set()
+
+
+def test_watch_namespace_move_withholds_stale_same_line_endpoint(tmp_path):
+    from graphify.watch import _refresh_markdown_mentions
+
+    files = {
+        "Widget.cs": "namespace Acme { public class Widget { public void Run() {} } }",
+        "guide.md": ("# Old\n`Acme.Widget.Run()`\n# New\n`Other.Widget.Run()`\n"
+                     "# Pinned\n`Widget.cs::Widget::Run`\n"),
+    }
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    assert len(_mentions(result)) == 2
+    (tmp_path / "Widget.cs").write_text(files["Widget.cs"].replace("Acme", "Other"))
+    refreshed = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert _mentions(refreshed) == []
+
+
+def test_watch_endpoint_matching_does_not_require_scratch_ids(tmp_path):
+    from graphify.watch import _refresh_markdown_mentions
+
+    files = {"model.js": "class A { run() {} } class B {}\n",
+             "guide.md": _WATCH_OWNER_DOC}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    expected = {(edge["context"], edge["confidence"], edge["confidence_score"])
+                for edge in _mentions(result)}
+    remap = {node["id"]: node["id"] + "_collision_salt" for node in result["nodes"]}
+    for node in result["nodes"]:
+        node["id"] = remap[node["id"]]
+    for edge in result["edges"]:
+        edge["source"], edge["target"] = remap[edge["source"]], remap[edge["target"]]
+    refreshed = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert {(edge["context"], edge["confidence"], edge["confidence_score"])
+            for edge in _mentions(refreshed)} == expected
+    assert all(edge["source"] in remap.values() and edge["target"] in remap.values()
+               for edge in _mentions(refreshed))
+    _assert_private_markers_stripped(refreshed)
+
+
+def test_native_watch_owner_move_doc_event_then_code_event(tmp_path):
+    from tests.test_markdown_code_spans import _native_mentions, _native_rebuild
+
+    corpus = tmp_path / "corpus"
+    _write_files(corpus, {"model.js": "class A { run() {} } class B {}\n",
+                          "guide.md": _WATCH_OWNER_DOC})
+    initial = _native_rebuild(corpus)
+    assert {edge["context"] for edge in _native_mentions(initial)} == {
+        "A.run()", "model.js::A::run",
+    }
+    source, doc = corpus / "model.js", corpus / "guide.md"
+    source.write_text("class A {} class B { run() {} }\n")
+    doc.write_text(_WATCH_OWNER_DOC + "\nAn ordinary document event.\n")
+    doc_only = _native_rebuild(corpus, [doc])
+    assert _native_mentions(doc_only) == []
+    assert any(node["id"] == "model_a_run" for node in doc_only["nodes"])
+    code_followup = _native_rebuild(corpus, [source])
+    mentions = _native_mentions(code_followup)
+    assert {edge["context"] for edge in mentions} == {"B.run()", "model.js::B::run"}
+    assert {edge["target"] for edge in mentions} == {"model_b_run"}
+    assert {edge["confidence"] for edge in mentions} == {"INFERRED", "EXTRACTED"}

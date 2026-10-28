@@ -1223,3 +1223,160 @@ def test_unowned_records_revoke_complete_cache_without_discarding_scoped_claims(
     claims = check_semantic_cache([str(source)], root=tmp_path)
     assert claims[3] == []
     assert [node['id'] for node in claims[0]] == ['scoped']
+
+
+@pytest.mark.parametrize('cached_owner, selected_owner', [('a', 'b'), ('b', 'a')])
+@pytest.mark.parametrize('suffix', ['.md', '.MD'])
+def test_parallel_markdown_cache_rechecks_selected_origin(
+        tmp_path, monkeypatch, cached_owner, selected_owner, suffix):
+    from graphify import extract as extraction
+
+    shared = tmp_path / 'shared.md'
+    shared.write_text('# Guide\n\n`./model.py::Widget`\n')
+    models, documents = {}, {}
+    for owner in ('a', 'b'):
+        folder = tmp_path / owner
+        folder.mkdir()
+        models[owner] = folder / 'model.py'
+        models[owner].write_text('class Widget:\n    pass\n')
+        documents[owner] = folder / ('guide' + suffix)
+        try:
+            documents[owner].symlink_to(shared)
+        except OSError as exc:
+            pytest.skip(f'symlinks unavailable: {exc}')
+    cache = tmp_path / 'cache'
+    extraction.extract([*models.values(), documents[cached_owner]], source_root=tmp_path,
+                       cache_root=cache, parallel=False, quiet=True)
+    fillers = []
+    for index in range(extraction._PARALLEL_THRESHOLD - 1):
+        source = tmp_path / f'filler{index}.md'
+        source.write_text(f'# Filler {index}\n')
+        fillers.append(source)
+
+    parallel_calls = []
+    real_parallel = extraction._extract_parallel
+
+    def observed_parallel(work, *args, **kwargs):
+        ran = real_parallel(work, *args, **kwargs)
+        parallel_calls.append((len(work), ran))
+        return ran
+
+    monkeypatch.setattr(extraction, '_extract_parallel', observed_parallel)
+    result = extraction.extract([*models.values(), documents[selected_owner], *fillers],
+                                source_root=tmp_path, cache_root=cache,
+                                parallel=True, max_workers=2, quiet=True)
+    assert parallel_calls == [(extraction._PARALLEL_THRESHOLD, True)]
+    nodes = {node['id']: node for node in result['nodes']}
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    assert len(mentions) == 1
+    assert mentions[0]['source_file'] == f'{selected_owner}/guide{suffix}'
+    assert nodes[mentions[0]['source']]['source_file'] == f'{selected_owner}/guide{suffix}'
+    assert nodes[mentions[0]['target']]['source_file'] == f'{selected_owner}/model.py'
+    assert mentions[0]['confidence'] == 'EXTRACTED'
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])
+
+
+def test_worker_keeps_matching_markdown_cache_hit(tmp_path, monkeypatch):
+    from graphify import extract as extraction
+    from graphify.extractors.markdown import extract_markdown
+
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n\n`Widget`\n')
+    payload = extract_markdown(doc)
+    save_cached(doc, payload, root=tmp_path)
+
+    def unexpected_extractor(*args, **kwargs):
+        raise AssertionError('matching-owner fragment should remain a cache hit')
+
+    monkeypatch.setattr(extraction, '_get_extractor', unexpected_extractor)
+    index, actual = extraction._extract_single_file((0, str(doc), str(tmp_path), str(tmp_path)))
+    assert index == 0
+    assert actual == payload
+
+
+@pytest.mark.parametrize('failure', ['exception', 'error', 'none'])
+def test_parallel_missing_result_cannot_authorize_markdown_uniqueness(
+        tmp_path, monkeypatch, failure):
+    import concurrent.futures
+    from graphify import extract as extraction
+
+    good = tmp_path / 'good.py'
+    good.write_text('class Widget:\n    pass\n')
+    failed = tmp_path / 'failed.py'
+    failed.write_text('class Other:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guess\n\n`Widget`\n\n# Pinned\n\n`good.py::Widget`\n')
+    fillers = []
+    for index in range(extraction._PARALLEL_THRESHOLD - 3):
+        source = tmp_path / f'filler{index}.md'
+        source.write_text(f'# Filler {index}\n')
+        fillers.append(source)
+    submitted = []
+
+    class CompletedPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, function, arguments):
+            submitted.append(arguments[1])
+            future = concurrent.futures.Future()
+            if Path(arguments[1]) == failed and failure == 'exception':
+                future.set_exception(RuntimeError('injected worker failure'))
+            elif Path(arguments[1]) == failed and failure == 'error':
+                future.set_result((arguments[0], {
+                    'nodes': [], 'edges': [], 'error': 'injected worker failure',
+                }))
+            else:
+                future.set_result(function(arguments))
+            return future
+
+    monkeypatch.setattr(concurrent.futures, 'ProcessPoolExecutor', CompletedPool)
+    result = extraction.extract([good, failed, doc, *fillers], source_root=tmp_path,
+                                parallel=True, max_workers=2, ambient_output=False,
+                                report_outcomes=True, quiet=True)
+    assert len(submitted) == extraction._PARALLEL_THRESHOLD
+    outcome = next(item for item in result['outcomes'] if item['path'] == str(failed))
+    assert outcome['status'] == ('success' if failure == 'none' else 'failed_extraction')
+    contexts = {edge['context'] for edge in result['edges'] if edge.get('_markdown_mention')}
+    assert contexts == ({'Widget', 'good.py::Widget'} if failure == 'none'
+                        else {'good.py::Widget'})
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])
+
+
+def test_parallel_missing_result_still_fails_strict_extraction(tmp_path, monkeypatch):
+    import concurrent.futures
+    from graphify import extract as extraction
+
+    sources = []
+    for index in range(extraction._PARALLEL_THRESHOLD):
+        path = tmp_path / f'source{index}.md'
+        path.write_text(f'# Source {index}\n')
+        sources.append(path)
+
+    class FailedPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, *args):
+            future = concurrent.futures.Future()
+            future.set_exception(RuntimeError('injected worker failure'))
+            return future
+
+    monkeypatch.setattr(concurrent.futures, 'ProcessPoolExecutor', FailedPool)
+    with pytest.raises(RuntimeError, match='AST worker failed'):
+        extraction.extract(sources, source_root=tmp_path, parallel=True,
+                           strict=True, ambient_output=False, quiet=True)

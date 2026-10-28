@@ -993,13 +993,17 @@ def test_inline_html_attributes_do_not_publish_false_references(tmp_path):
     ('[manual]( "hover `Visible`")\n', ['Visible']),
     ('[manual](<> "hover `Hidden`") and `Visible`.\n', ['Visible']),
     ('[manual]("`Hidden`") and `Visible`.\n', ['Visible']),
+    (r'[manual](https://host/a\(b/`Hidden`) and `Visible`.' + '\n', ['Visible']),
+    ('[manual](https://host/(a(b/`Hidden`))) and `Visible`.\n', ['Visible']),
+    ('[manual](https://host/a(b/`Visible` space))\n', ['Visible']),
 ], ids=['destination', 'angle-destination', 'balanced-destination', 'title',
         'multiline-link', 'definition', 'multiline-definition', 'definition-label',
         'uri-autolink', 'email-autolink', 'visible-label', 'literal-code',
         'definition-in-paragraph', 'invalid-title', 'missing-opener', 'escaped-label-close',
         'invalid-nested-link', 'image-in-link', 'invalid-definition',
         'invalid-title-only', 'invalid-spaced-title-only', 'empty-destination-title',
-        'quoted-destination'])
+        'quoted-destination', 'escaped-url-parenthesis', 'nested-url-parentheses',
+        'unbalanced-url-before-space'])
 def test_link_metadata_does_not_create_symbol_mentions(tmp_path, body, expected):
     doc = tmp_path / 'doc.md'
     doc.write_text('# Guide\n\n' + body)
@@ -1063,3 +1067,74 @@ def test_scanner_repairs_publish_only_visible_references(tmp_path, mode):
     assert mentions[0]['context'] == r'src\widget.py::Visible'
     assert all('_callable' not in node and '_callable_class' not in node
                for node in result['nodes'])
+
+
+@pytest.mark.parametrize('shape', [
+    'complete', 'same-line', 'malformed', 'multiline', 'malformed-multiline',
+    'quote', 'list', 'malformed-nesting', 'reference',
+])
+def test_link_lookahead_normalizes_proportionate_input(tmp_path, monkeypatch, shape):
+    import graphify.extractors.markdown as markdown
+
+    normalize = markdown._mention_container_content
+    prose_text = markdown._mention_prose_text
+    work = 0
+
+    class CountedProse(str):
+        def __getitem__(self, key):
+            nonlocal work
+            result = super().__getitem__(key)
+            work += len(result)
+            return result
+
+    def counted_normalize(line, *args, **kwargs):
+        nonlocal work
+        work += len(line) + 1
+        return normalize(line, *args, **kwargs)
+
+    def counted_prose(*args, **kwargs):
+        nonlocal work
+        text = prose_text(*args, **kwargs)
+        work += len(text)
+        return CountedProse(text)
+
+    monkeypatch.setattr(markdown, '_mention_container_content', counted_normalize)
+    monkeypatch.setattr(markdown, '_mention_prose_text', counted_prose)
+    for count in (24, 48):
+        rows = []
+        for index in range(count):
+            visible = f'Widget{index}'
+            if shape == 'malformed':
+                row = f'See [manual](https://host/ `{visible}`) here.'
+            elif shape == 'multiline':
+                row = ('See [manual](\nhttps://host/`Hidden` "hover\n'
+                       f'`AlsoHidden`"\n) and `{visible}`.')
+            elif shape == 'malformed-multiline':
+                row = f'See [manual](https://host/ "hover\n`{visible}`'
+            elif shape == 'reference':
+                row = (f'[manual{index}]:\n  https://host/`Hidden{index}`\n'
+                       f'  "hover `AlsoHidden{index}`"')
+            else:
+                row = f'See [manual](https://host/`Hidden`) and `{visible}`.'
+            if shape == 'quote':
+                row = '> ' + row
+            elif shape == 'list':
+                row = ('- ' if index == 0 else '  ') + row
+            rows.append(row)
+        body = (' ' if shape == 'same-line' else '\n').join(rows) + '\n'
+        expected = [f'Widget{i}' for i in range(count)]
+        if shape == 'malformed-nesting':
+            body = '[manual](' * count + ' `Widget`.\n'
+            expected = ['Widget']
+        elif shape == 'reference':
+            body += '\nUse `Widget`.\n'
+            expected = ['Widget']
+        doc = tmp_path / 'doc.md'
+        doc.write_text(body)
+        work = 0
+        calls = markdown.extract_markdown(doc)['raw_calls']
+        assert [call['context'] for call in calls] == expected
+        # Count characters normalized/read for lookahead, rather than elapsed
+        # time or a prescribed number of helper calls. Rebuilding suffixes of
+        # one paragraph exceeds this input-proportional budget.
+        assert work <= 8 * len(body), (shape, count, work, len(body))

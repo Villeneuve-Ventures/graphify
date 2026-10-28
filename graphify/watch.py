@@ -385,15 +385,52 @@ def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[
         path = Path(str(value))
         return os.path.abspath(path if path.is_absolute() else root / path)
 
-    def key(node: dict) -> tuple:
+    structural_relations = {"contains", "method"}
+
+    def physical_key(node: dict) -> tuple:
+        metadata = node.get("metadata")
+        namespace = metadata.get("namespace") if isinstance(metadata, dict) else None
         return (source_identity(node.get("source_file", "")), node.get("label"),
-                node.get("source_location"), node.get("type"), node.get("file_type"))
+                node.get("source_location"), node.get("type"), node.get("file_type"),
+                namespace if isinstance(namespace, str) else None)
+
+    def declaration_keys(nodes: list[dict], edges: list[dict], *, published: bool) -> dict[str, tuple]:
+        # Public nodes have no private callable markers. Verify their physical
+        # declaration and every coherent AST owner route instead of comparing IDs,
+        # which can carry different collision salts after a partial rebuild.
+        by_id: dict[str, dict] = {
+            node["id"]: node for node in nodes
+            if node.get("source_file") and (not published or node.get("_origin") == "ast")
+        }
+        parents: dict[str, set[str]] = defaultdict(set)
+        for edge in edges:
+            if (edge.get("relation") in structural_relations
+                    and (not published or edge.get("_origin") == "ast")
+                    and edge.get("source") in by_id and edge.get("target") in by_id):
+                parents[edge["target"]].add(edge["source"])
+        keys: dict[str, tuple] = {}
+        for node_id, node in by_id.items():
+            routes: set[tuple] = set()
+            frontier: list[tuple[str, tuple, frozenset[str]]] = [(node_id, (), frozenset())]
+            while frontier:
+                current, route, seen = frontier.pop()
+                if current in seen:
+                    continue
+                owners = parents.get(current, set())
+                if not owners:
+                    routes.add(route)
+                for owner in owners:
+                    frontier.append((owner, (physical_key(by_id[owner]),) + route,
+                                     seen | {current}))
+            if routes:
+                keys[node_id] = (physical_key(node), frozenset(routes))
+        return keys
 
     actual_ids = {node["id"] for node in result["nodes"]}
-    destinations = defaultdict(set)
-    for node in result["nodes"]:
-        if node.get("_origin") == "ast" and node.get("source_file"):
-            destinations[key(node)].add(node["id"])
+    destinations: dict[tuple, set[str]] = defaultdict(set)
+    for node_id, key in declaration_keys(result["nodes"], result["edges"], published=True).items():
+        destinations[key].add(node_id)
+    current_keys = declaration_keys(context["nodes"], context["edges"], published=False)
 
     # Scratch normalization can salt IDs differently from a partial rebuild.
     # Match physical declarations, retaining unmapped candidates for ambiguity
@@ -403,7 +440,8 @@ def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[
     used = set(actual_ids)
     for index, original in enumerate(context["nodes"]):
         node = dict(original)
-        matches = destinations.get(key(node), set())
+        declaration = current_keys.get(node["id"])
+        matches = destinations.get(declaration, set()) if declaration is not None else set()
         target = next(iter(matches)) if len(matches) == 1 else f"_markdown_context_{index}"
         if len(matches) != 1:
             while target in used:
@@ -419,9 +457,12 @@ def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[
     kept_edges = [edge for edge in result["edges"] if not (
         edge.get("_origin") == "ast" and edge.get("_markdown_mention") == 1
         and source_identity(edge.get("source_file", "")) in document_ids)]
-    scratch_edges = list(kept_edges)
+    # Retained edges remain publication data, but neither semantic nor old AST
+    # ownership can license a citation. Only fresh scratch structure is evidence.
+    scratch_edges = [edge for edge in kept_edges
+                     if edge.get("relation") not in structural_relations]
     for edge in context["edges"]:
-        if edge.get("relation") not in {"contains", "method"}:
+        if edge.get("relation") not in structural_relations:
             continue
         if edge.get("source") in remap and edge.get("target") in remap:
             scratch_edges.append({**edge, "source": remap[edge["source"]],
