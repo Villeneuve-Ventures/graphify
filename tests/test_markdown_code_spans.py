@@ -769,7 +769,7 @@ def test_mentions_respect_indented_code_and_prose(tmp_path, body, expected):
 @pytest.mark.parametrize(('body', 'expected'), [
     ('Use `\nWidget\n` here.\n', [('Widget', 'L1')]),
     ('Use ``\nWidget\n`` and `Later`.\n', [('Widget', 'L1'), ('Later', 'L3')]),
-    ('Use `Widget\n` here.\n', [('Widget', 'L1')]),
+    ('Use `Widget\n` here.\n', []),
     ('Use `Wid\nget` here.\n', []),
     ('Use ``\nWidget`\n`` here.\n', []),
     ('Use `\n\nWidget` here.\n', []),
@@ -1071,7 +1071,8 @@ def test_scanner_repairs_publish_only_visible_references(tmp_path, mode):
 
 @pytest.mark.parametrize('shape', [
     'complete', 'same-line', 'malformed', 'multiline', 'malformed-multiline',
-    'quote', 'list', 'malformed-nesting', 'reference',
+    'quote', 'list', 'malformed-nesting', 'reference', 'full-reference',
+    'full-reference-comment', 'unclosed-inline-comments',
 ])
 def test_link_lookahead_normalizes_proportionate_input(tmp_path, monkeypatch, shape):
     import graphify.extractors.markdown as markdown
@@ -1114,6 +1115,12 @@ def test_link_lookahead_normalizes_proportionate_input(tmp_path, monkeypatch, sh
             elif shape == 'reference':
                 row = (f'[manual{index}]:\n  https://host/`Hidden{index}`\n'
                        f'  "hover `AlsoHidden{index}`"')
+            elif shape == 'full-reference':
+                row = f'See [manual][`Hidden`] and `{visible}`.'
+            elif shape == 'full-reference-comment':
+                row = f'See [manual][`Hidden` <!--] and `{visible}`.'
+            elif shape == 'unclosed-inline-comments':
+                row = f'See <!-- and `{visible}`.'
             else:
                 row = f'See [manual](https://host/`Hidden`) and `{visible}`.'
             if shape == 'quote':
@@ -1129,6 +1136,10 @@ def test_link_lookahead_normalizes_proportionate_input(tmp_path, monkeypatch, sh
         elif shape == 'reference':
             body += '\nUse `Widget`.\n'
             expected = ['Widget']
+        elif shape == 'full-reference':
+            body += '\n[`hidden`]: https://host/\n'
+        elif shape == 'full-reference-comment':
+            body += '\n[`hidden` <!--]: https://host/\n'
         doc = tmp_path / 'doc.md'
         doc.write_text(body)
         work = 0
@@ -1138,3 +1149,197 @@ def test_link_lookahead_normalizes_proportionate_input(tmp_path, monkeypatch, sh
         # time or a prescribed number of helper calls. Rebuilding suffixes of
         # one paragraph exceeds this input-proportional budget.
         assert work <= 8 * len(body), (shape, count, work, len(body))
+
+
+@pytest.mark.parametrize(('span', 'expected'), [
+    ('Widget', (None, ['Widget'])),
+    (' Widget ', (None, ['Widget'])),
+    ('  Widget  ', None),
+    (' Widget', None),
+    ('Widget ', None),
+    ('  Widget ', None),
+    (' Widget  ', None),
+    ('\tWidget\t', None),
+    ('\u00a0Widget\u00a0', None),
+    ('   ', None),
+])
+def test_code_span_classification_preserves_rendered_whitespace(span, expected):
+    assert _code_span_mention(span) == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('Use `Widget`.\n', ['Widget']),
+    ('Use ` Widget `.\n', ['Widget']),
+    ('Use `  Widget  `.\n', []),
+    ('Use ` Widget`.\n', []),
+    ('Use `Widget `.\n', []),
+    ('Use `\u00a0Widget\u00a0`.\n', []),
+    ('Use ` \tWidget\t `.\n', []),
+    ('Use `\nWidget\n`.\n', ['Widget']),
+    ('Use `Widget\n`.\n', []),
+    ('Use `\nWidget`.\n', []),
+    ('Use `` `Widget` `` and `Visible`.\n', ['Visible']),
+])
+def test_mentions_use_rendered_code_span_whitespace(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n' + body)
+    assert [call['context'] for call in extract_markdown(doc)['raw_calls']] == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('[manual][`Widget`]\n\n[`widget`]: /url\n', []),
+    ('[`widget`]: /url\n\n[manual][`Widget`]\n', []),
+    ('[manual][ first  `Widget` last ]\n\n[FIRST\t`widget` LAST]: /url\n', []),
+    ('[manual][Straße `Widget`]\n\n[STRASSE `widget`]: /url\n', []),
+    ('[manual][prefix\n`Widget`]\n\n[PREFIX `widget`]: /url\n', []),
+    ('[manual][`Widget`]\n', ['Widget']),
+    ('[manual][`Widget`]\n\n[`widget`]: /url trailing\n', ['Widget', 'widget']),
+    ('[manual][`Widget`]\n\n```text\n[`widget`]: /url\n```\n', ['Widget']),
+    ('[manual][`Widget`]\n\n<div>\n[`widget`]: /url\n</div>\n', ['Widget']),
+    ('[manual][`Widget`]\n\n<!--\n[`widget`]: /url\n-->\n', ['Widget']),
+    ('[manual][`Widget`]\n\nParagraph\n[`widget`]: /url\n', ['Widget', 'widget']),
+    ('[`Widget`][manual]\n\n[manual]: /url\n', ['Widget']),
+    ('[`Widget`][]\n\n[`widget`]: /url\n', ['Widget']),
+    ('[manual] [`Widget`]\n\n[`widget`]: /url\n', ['Widget']),
+    ('![manual][`Widget`]\n\n[`widget`]: /url\n', []),
+    ('Use ``[manual][`Widget`]``.\n\n[`widget`]: /url\n', []),
+    ('[manual][`Widget` [nested]]\n\n[`widget` [nested]]: /url\n',
+     ['Widget', 'widget']),
+], ids=['forward', 'backward', 'whitespace-casefold', 'unicode-casefold',
+        'multiline-label', 'unresolved', 'invalid-definition', 'fenced-definition',
+        'html-definition', 'comment-definition', 'definition-in-paragraph',
+        'visible-first-label', 'collapsed-first-label', 'spaced-brackets',
+        'image-label', 'literal-code', 'invalid-nested-label'])
+def test_full_reference_metadata_requires_matching_definition(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n' + body)
+    assert [call['context'] for call in extract_markdown(doc)['raw_calls']] == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('Use `  Widget  ` and `Visible`.\n', ['Visible']),
+    ('[manual][`Widget`] and `Visible`.\n\n[`widget`]: /url\n', ['Visible']),
+    ('[manual][`Widget`] and `Visible`.\n', ['Widget', 'Visible']),
+    ('[`Widget`][manual] and `Visible`.\n\n[manual]: /url\n', ['Widget', 'Visible']),
+])
+def test_whitespace_and_reference_metadata_publish_only_visible_symbols(tmp_path, body, expected):
+    result = _extract(tmp_path, {
+        'widget.py': 'class Widget:\n    pass\n\nclass Visible:\n    pass\n',
+        'doc.md': '# Guide\n\n' + body,
+    })
+    nodes = {node['id']: node for node in result['nodes']}
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    assert [nodes[edge['target']]['label'] for edge in mentions] == expected
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('ab`\tFoo\t`\n', ['\tFoo\t']),
+    ('> ab`\tFoo\t`\n', ['\tFoo\t']),
+    ('- ab`\tFoo\t`\n', ['\tFoo\t']),
+    ('Use `\n\tFoo\t\n`.\n', [' \tFoo\t ']),
+    ('> Use `\n> \tFoo\t\n> `.\n', [' \tFoo\t ']),
+    ('- Use `\n  \tFoo\t\n  `.\n', [' \tFoo\t ']),
+    ('Use ``\t`Foo`\t``.\n', ['\t`Foo`\t']),
+    ('- Use `\n\tFoo\n\t`.\n', ['   Foo   ']),
+])
+def test_code_span_source_tabs_survive_logical_line_mapping(body, expected):
+    import graphify.extractors.markdown as markdown
+
+    spans = list(markdown._markdown_mention_spans(body.splitlines(), {}, 'doc'))
+    assert [span for _, span, _ in spans] == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('ab`\tFoo\t` and `Visible`.\n', ['Visible']),
+    ('\t`Foo`\n\nUse `Visible`.\n', ['Visible']),
+    ('- Intro\n\tUse `Foo`.\n\nUse `Visible`.\n', ['Foo', 'Visible']),
+    ('>\tUse `Foo`.\n\nUse `Visible`.\n', ['Foo', 'Visible']),
+    ('Use ``\t`Foo`\t`` and `Visible`.\n', ['Visible']),
+])
+def test_tab_fidelity_and_container_controls_publish_expected_symbols(tmp_path, body, expected):
+    result = _extract(tmp_path, {
+        'foo.py': 'class Foo:\n    pass\n\nclass Visible:\n    pass\n',
+        'doc.md': '# Guide\n\n' + body,
+    })
+    nodes = {node['id']: node for node in result['nodes']}
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    assert [nodes[edge['target']]['label'] for edge in mentions] == expected
+
+
+def test_tabbed_span_source_mapping_reads_proportionate_input(tmp_path, monkeypatch):
+    import graphify.extractors.markdown as markdown
+
+    work = 0
+
+    class CountedLine(str):
+        def __contains__(self, item):
+            nonlocal work
+            work += len(self)
+            return super().__contains__(item)
+
+        def __iter__(self):
+            nonlocal work
+            for character in super().__iter__():
+                work += 1
+                yield character
+
+        def __getitem__(self, key):
+            nonlocal work
+            result = super().__getitem__(key)
+            work += len(result)
+            return result
+
+    class CountedSource(str):
+        def splitlines(self, keepends=False):
+            return [CountedLine(line) for line in super().splitlines(keepends)]
+
+    for count in (24, 48):
+        body = ' '.join(f'ab`\tFoo\t` and `Widget{i}`.' for i in range(count)) + '\n'
+        monkeypatch.setattr(markdown, 'source_read_text',
+                            lambda *args, **kwargs: CountedSource(body))
+        work = 0
+        calls = markdown.extract_markdown(tmp_path / 'doc.md')['raw_calls']
+        assert [call['context'] for call in calls] == [f'Widget{i}' for i in range(count)]
+        # Count source characters mapped or copied. Re-reading the raw line
+        # for each span would exceed this input-proportional budget.
+        assert work <= 4 * len(body), (count, work, len(body))
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('[manual][`Hidden` <!--]\n\n[`Hidden` <!--]: /url\n\nUse `Visible`.\n',
+     ['Visible']),
+    ('[`Hidden` <!--]: /url\n\n[manual][`Hidden` <!--]\n\nUse `Visible`.\n',
+     ['Visible']),
+    ('[manual][<!-- `Hidden`]\n\n[<!-- `Hidden`]: /url\n\nUse `Visible`.\n',
+     ['Visible']),
+    ('[manual][<!-- `Hidden` -->]\n\n[<!-- `Hidden` -->]: /url\n\nUse `Visible`.\n',
+     ['Visible']),
+    ('[manual][`Hidden` <!--]\n\nUse `Visible`.\n', ['Hidden', 'Visible']),
+    ('[manual][<!-- `Hidden` -->]\n\nUse `Visible`.\n', ['Visible']),
+    ('[manual][`Hidden`]\n\nIntro <!--\n[`Hidden`]: /url\n-->\n\nUse `Visible`.\n',
+     ['Hidden', 'Visible']),
+    ('[manual][`Hidden`]\n\n<!--\n\n[`Hidden`]: /url\n-->\n\nUse `Visible`.\n',
+     ['Hidden', 'Visible']),
+    ('[manual][`Hidden`]\n\n<!--\n[`Hidden`]: /url\n\nUse `Visible`.\n', ['Hidden']),
+], ids=['forward-comment-after-code', 'backward-comment-after-code',
+        'forward-comment-before-code', 'closed-comment-label',
+        'unresolved-literal-opener', 'unresolved-genuine-comment',
+        'inline-comment-definition', 'block-comment-definition', 'unclosed-block-comment'])
+def test_reference_label_definition_collection_is_literal_and_order_independent(
+        tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n' + body)
+    assert [call['context'] for call in extract_markdown(doc)['raw_calls']] == expected
+
+
+def test_forward_comment_label_publishes_only_visible_reference(tmp_path):
+    result = _extract(tmp_path, {
+        'widget.py': 'class Hidden:\n    pass\n\nclass Visible:\n    pass\n',
+        'doc.md': ('# Guide\n\n[manual][`Hidden` <!--]\n\n'
+                   '[`Hidden` <!--]: /url\n\nUse `Visible`.\n'),
+    })
+    nodes = {node['id']: node for node in result['nodes']}
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    assert [nodes[edge['target']]['label'] for edge in mentions] == ['Visible']

@@ -436,7 +436,7 @@ def test_markdown_scanner_fixes_do_not_reuse_epoch_two_mentions(tmp_path, monkey
     code = tmp_path / "widget.py"
     code.write_text("class Hidden:\n    pass\n\nclass Visible:\n    pass\n")
     doc = tmp_path / "guide.md"
-    doc.write_text("# Guide\n\n<!-- obsolete: `Hidden` -->\n\nUse `Visible\n` now.\n")
+    doc.write_text("# Guide\n\n<!-- obsolete: `Hidden` -->\n\nUse `\nVisible\n` now.\n")
     old = extract_markdown(doc)
     owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
     # Epoch 2 scanned the hidden symbol and missed the wrapped visible span.
@@ -1380,3 +1380,40 @@ def test_parallel_missing_result_still_fails_strict_extraction(tmp_path, monkeyp
     with pytest.raises(RuntimeError, match='AST worker failed'):
         extraction.extract(sources, source_root=tmp_path, parallel=True,
                            strict=True, ambient_output=False, quiet=True)
+
+
+@pytest.mark.parametrize('hidden', [
+    '`  Hidden  `',
+    '[manual][`Hidden`]\n\n[`hidden`]: /url',
+])
+def test_rendered_citation_fixes_reject_epoch_six_mentions(tmp_path, monkeypatch, hidden):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'widget.py'
+    code.write_text('class Hidden:\n    pass\n\nclass Visible:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n\n' + hidden + '\n\nUse `Visible`.\n')
+    stale = extract_markdown(doc)
+    owner = next(node['id'] for node in stale['nodes'] if node['label'] == 'Guide')
+    # Epoch 6 stored these hidden/rendered-space spans as exact citations.
+    stale['raw_calls'] = [{
+        'caller_nid': owner, 'callee': name, 'language': 'markdown',
+        'context': name, 'source_file': str(doc), 'source_location': 'L3',
+    } for name in ('Hidden', 'Visible')]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 6)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    save_cached(doc, semantic, root=tmp_path, kind='semantic')
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert {edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')} == {'Visible'}
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    assert load_cached(doc, root=tmp_path, kind='semantic') == semantic

@@ -27,9 +27,9 @@ to the code node that defines it:
   function, method or class, never on a same-named data symbol such as a
   JSON key. A dotted mention (``pkg.Widget``, ``Widget.render``) keeps its
   qualifiers, and a candidate survives only when they match an ordered suffix
-  of its owner chain, declared namespace, or corpus-relative module/package
-  path, optionally followed by its owners. ``time.sleep`` never lands on a
-  repo's own ``sleep``, and
+  of its owner chain, or of its declared namespace or corpus-relative
+  module/package path followed by its complete owner chain. ``time.sleep``
+  never lands on a repo's own ``sleep``, and
   ``Widget.render`` picks the ``render`` that ``Widget`` owns. No other
   tie-breaking: an ambiguous name is a guess, and a guess is not an edge.
   A bare, parenthesis-less method name is held to one more test: a word like
@@ -114,21 +114,21 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
     """Coherent ordered qualifier sequences for ``node_id``.
 
     Keep each actual owner chain, declared namespace and admitted module or
-    package path separate. A namespace can prefix its declaration's owners;
-    a module/package path can prefix an owner chain. Their unrelated segments
-    cannot be spliced together, reordered or repeated to license a citation.
+    package path separate. Namespace and module/package prefixes retain the
+    declaration's complete non-file owner chain; a member cannot masquerade as
+    an unowned callable. Their unrelated segments cannot be spliced together,
+    reordered or repeated to license a citation.
     """
     evidence: set[tuple[str, ...]] = set()
-    owner_chains: set[tuple[str, ...]] = {()}
-    frontier: list[tuple[str, tuple[str, ...], frozenset[str]]] = [(node_id, (), frozenset())]
+    owner_chains: set[tuple[str, ...]] = set()
+    frontier: list[tuple[str, tuple[str, ...], frozenset[tuple[str, ...]], frozenset[str]]] = [
+        (node_id, (), frozenset(), frozenset()),
+    ]
     while frontier:
-        nid, chain, seen = frontier.pop()
+        nid, chain, namespaces, seen = frontier.pop()
         if nid in seen:
             continue
         seen = seen | {nid}
-        if chain:
-            owner_chains.add(chain)
-            evidence.add(chain)
         declaration = nodes_by_id.get(nid, {})
         metadata = declaration.get("metadata")
         if (declaration.get("file_type") == "code" and declaration.get("_callable")
@@ -137,14 +137,21 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
             if isinstance(namespace, str):
                 segments = tuple(segment for segment in namespace.split(".") if segment)
                 if segments:
-                    evidence.add(segments)
-                    evidence.add(segments + chain)
+                    namespaces = namespaces | {segments}
+        owners: list[tuple[str, str]] = []
         for owner in parents.get(nid, ()):
             node = nodes_by_id.get(owner)
             if node is not None and not _is_file_node(node):
                 label = _symbol_label(node)
                 if label:
-                    frontier.append((owner, (label,) + chain, seen))
+                    owners.append((owner, label))
+        if not owners:
+            owner_chains.add(chain)
+            if chain:
+                evidence.add(chain)
+            evidence.update(namespace + chain for namespace in namespaces)
+        for owner, label in owners:
+            frontier.append((owner, (label,) + chain, namespaces, seen))
     if source_path:
         parts = source_path.split("/")
         module = (*parts[:-1], os.path.splitext(parts[-1])[0])
@@ -241,8 +248,10 @@ def resolve_markdown_mentions(
             by_file.setdefault(source_file, {}).setdefault(label, []).append(n["id"])
     # Empty or failed selected files still participate in cited-file ambiguity.
     # An incomplete corpus cannot justify a unique inferred symbol match.
+    # Explicit zero-node results cannot prove absence, even when extraction
+    # accepts them. Metadata-only and raw-call fixtures have no nodes field.
     complete = not any(result.get("error") or result.get("_unsupported")
-                       for result in per_file)
+                       or result.get("nodes") == [] for result in per_file)
     for result in per_file:
         if source_file := result.get("_markdown_source_file"):
             by_file.setdefault(_source_identity(source_file), {})

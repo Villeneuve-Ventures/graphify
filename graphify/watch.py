@@ -475,8 +475,9 @@ def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[
         if caller in actual_ids:
             calls.append({**original, "caller_nid": caller,
                           "source_file": source_identity(original["source_file"])})
-    incomplete = any(item["status"] not in {"success", "empty"}
-                     for item in context["outcomes"])
+    # Empty extraction remains an admitted outcome, but cannot prove that a
+    # selected source contains no competing definition for an inferred cite.
+    incomplete = any(item["status"] != "success" for item in context["outcomes"])
     if incomplete:
         print("[graphify watch] Markdown inferred references withheld: incomplete AST context")
     per_file = [{"raw_calls": calls, "_unsupported": incomplete}]

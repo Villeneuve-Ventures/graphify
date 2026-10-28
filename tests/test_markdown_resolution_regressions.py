@@ -719,3 +719,172 @@ def test_native_watch_owner_move_doc_event_then_code_event(tmp_path):
     assert {edge["context"] for edge in mentions} == {"B.run()", "model.js::B::run"}
     assert {edge["target"] for edge in mentions} == {"model_b_run"}
     assert {edge["confidence"] for edge in mentions} == {"INFERRED", "EXTRACTED"}
+
+
+@pytest.mark.parametrize("mode", ["public", "scoped", "watch"])
+def test_empty_selected_extraction_cannot_prove_inferred_uniqueness(tmp_path, monkeypatch, mode):
+    import importlib
+
+    from graphify.watch import _refresh_markdown_mentions
+
+    extraction = importlib.import_module("graphify.extract")
+    files = {"good.py": "class Widget:\n    pass\n",
+             "omitted.py": "class Widget:\n    pass\n",
+             "guide.md": "# Bare\n`Widget`\n# Pinned\n`good.py::Widget`\n"}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    baseline = extract(paths, source_root=tmp_path, parallel=False,
+                       ambient_output=False, quiet=True)
+    real_extract = extraction._safe_extract_with_xaml_root
+
+    def anomalous_empty(extractor, path, root, **kwargs):
+        result = real_extract(extractor, path, root, **kwargs)
+        if path.name == "omitted.py":
+            assert any(node["label"] == "Widget" for node in result["nodes"])
+            return {"nodes": [], "edges": [], "raw_calls": []}
+        return result
+
+    monkeypatch.setattr(extraction, "_safe_extract_with_xaml_root", anomalous_empty)
+    before = _snapshot(tmp_path)
+    if mode == "scoped":
+        with SourceIO(tmp_path) as inputs:
+            result = extract(paths, source_root=tmp_path, source_io=inputs,
+                             parallel=False, ambient_output=False, quiet=True)
+            assert {item["path"] for item in inputs.evidence
+                    if item["operation"] == "read"} >= set(files)
+    elif mode == "watch":
+        result = _refresh_markdown_mentions(baseline, paths, [tmp_path / "guide.md"], root=tmp_path)
+    else:
+        result = extract(paths, source_root=tmp_path, parallel=False, strict=True,
+                         ambient_output=False, report_outcomes=True, quiet=True)
+    assert {edge["context"] for edge in _mentions(result)} == {"good.py::Widget"}
+    assert [(edge["confidence"], edge["confidence_score"]) for edge in _mentions(result)] == [
+        ("EXTRACTED", 1.0),
+    ]
+    if mode != "watch":
+        assert next(item for item in result["outcomes"]
+                    if Path(item["path"]).name == "omitted.py")["status"] == "empty"
+    assert _snapshot(tmp_path) == before
+    _assert_private_markers_stripped(result)
+
+
+@pytest.mark.parametrize("payload, inferred", [
+    ({}, True), ({"nodes": []}, False), ({"_unsupported": True}, False),
+])
+def test_inference_distinguishes_empty_results_from_metadata_only_payloads(payload, inferred):
+    nodes = [
+        {"id": "guide", "label": "Guide", "file_type": "document", "source_file": "guide.md"},
+        {"id": "widget", "label": "Widget", "file_type": "code", "source_file": "model.py",
+         "_callable": True},
+    ]
+    per_file = [{"raw_calls": [{"caller_nid": "guide", "callee": "Widget",
+                                "context": "Widget", "language": "markdown",
+                                "source_file": "guide.md"}]},
+                {"_markdown_source_file": "other.py", **payload}]
+    edges = []
+    resolve_markdown_mentions(per_file, nodes, edges)
+    assert bool(_mentions({"edges": edges})) is inferred
+
+
+@pytest.mark.parametrize("mode", ["public", "scoped", "watch"])
+def test_empty_source_bytes_with_file_node_preserve_inference(tmp_path, mode):
+    files = {"model.py": "class Widget:\n    pass\n", "empty.py": "",
+             "guide.md": "# Guide\n`Widget`\n"}
+    result = _reference_case(tmp_path, files, mode)
+    assert [edge["context"] for edge in _mentions(result)] == ["Widget"]
+    assert any(node["source_file"] == "empty.py" for node in result["nodes"])
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+def test_prefixed_method_qualifiers_require_complete_actual_owners(tmp_path, mode):
+    valid = ["Acme.Tools.Widget.Render()", "Widget.Render()", "Acme.Tools.Widget",
+             "Gizmo.Widget.Render()", "src.Widget.Render()"]
+    invalid = ["Acme.Tools.Render()", "Tools.Render()", "Gizmo.Render()", "src.Render()"]
+    files = {
+        "src/Gizmo.cs": "namespace Acme.Tools { public class Widget { public void Render() {} } }",
+        "guide.md": "\n".join(f"# Case{i}\n`{span}`" for i, span in enumerate(valid + invalid)),
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == set(valid)
+
+
+@pytest.mark.parametrize("namespace_on", ["method", "class", "both"])
+def test_namespace_evidence_includes_owners_wherever_metadata_is_recorded(namespace_on):
+    from graphify.markdown_resolution import _evidence
+
+    nodes: dict[str, dict] = {
+        "widget": {"id": "widget", "label": "Widget", "file_type": "code",
+                   "_callable": True, "_callable_class": True},
+        "render": {"id": "render", "label": ".Render()", "file_type": "code",
+                   "_callable": True},
+    }
+    for node_id in ({"method": ["render"], "class": ["widget"],
+                     "both": ["render", "widget"]}[namespace_on]):
+        nodes[node_id]["metadata"] = {"namespace": "Acme.Tools"}
+    evidence = _evidence("render", nodes, {"render": {"widget"}}, source_path="src/Gizmo.cs")
+    assert ("Acme", "Tools", "Widget") in evidence
+    assert ("Widget",) in evidence
+    assert ("Acme", "Tools") not in evidence
+    assert ("src",) not in evidence
+    assert ("src", "Gizmo") not in evidence
+
+
+def test_unowned_namespace_callable_keeps_namespace_and_module_qualifiers():
+    from graphify.markdown_resolution import _evidence
+
+    node = {"id": "render", "label": "Render()", "file_type": "code", "_callable": True,
+            "metadata": {"namespace": "Acme.Tools"}}
+    assert _evidence("render", {"render": node}, {}, source_path="src/Gizmo.cs") == {
+        ("Acme", "Tools"), ("src", "Gizmo"), ("src",),
+    }
+
+
+def test_native_empty_watch_context_withholds_inference_but_keeps_explicit_cite(tmp_path,
+                                                                              monkeypatch):
+    import importlib
+
+    from tests.test_markdown_code_spans import _native_mentions, _native_rebuild
+
+    extraction = importlib.import_module("graphify.extract")
+    corpus = tmp_path / "corpus"
+    _write_files(corpus, {"good.py": "class Widget:\n    pass\n",
+                          "omitted.py": "class Widget:\n    pass\n",
+                          "guide.md": "# Bare\n`Widget`\n# Pinned\n`good.py::Widget`\n"})
+    initial = _native_rebuild(corpus)
+    assert {edge["context"] for edge in _native_mentions(initial)} == {"good.py::Widget"}
+    real_extract = extraction._safe_extract_with_xaml_root
+
+    def anomalous_empty(extractor, path, root, **kwargs):
+        result = real_extract(extractor, path, root, **kwargs)
+        if path.name == "omitted.py":
+            assert any(node["label"] == "Widget" for node in result["nodes"])
+            return {"nodes": [], "edges": [], "raw_calls": []}
+        return result
+
+    monkeypatch.setattr(extraction, "_safe_extract_with_xaml_root", anomalous_empty)
+    doc = corpus / "guide.md"
+    doc.write_text(doc.read_text() + "\nAn ordinary document event.\n")
+    refreshed = _native_rebuild(corpus, [doc])
+    mentions = _native_mentions(refreshed)
+    assert {edge["context"] for edge in mentions} == {"good.py::Widget"}
+    assert {(edge["confidence"], edge["confidence_score"]) for edge in mentions} == {
+        ("EXTRACTED", 1.0),
+    }
+
+
+@pytest.mark.parametrize("namespace_on", ["method", "outer", "inner"])
+def test_prefixed_evidence_preserves_complete_recorded_nested_owner_route(namespace_on):
+    from graphify.markdown_resolution import _evidence
+
+    # Exercise recorded ownership. The current C# extractor does not record
+    # Outer -> Inner for a nested class, so the helper must not invent it.
+    nodes: dict[str, dict] = {
+        "outer": {"id": "outer", "label": "Outer", "file_type": "code", "_callable": True},
+        "inner": {"id": "inner", "label": "Inner", "file_type": "code", "_callable": True},
+        "method": {"id": "method", "label": ".Draw()", "file_type": "code", "_callable": True},
+    }
+    nodes[namespace_on]["metadata"] = {"namespace": "Acme.Tools"}
+    parents = {"method": {"inner"}, "inner": {"outer"}}
+    evidence = _evidence("method", nodes, parents, source_path="src/Gizmo.cs")
+    assert evidence == {("Outer", "Inner"), ("Acme", "Tools", "Outer", "Inner"),
+                        ("src", "Gizmo", "Outer", "Inner"), ("src", "Outer", "Inner")}
