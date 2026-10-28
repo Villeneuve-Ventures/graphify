@@ -28,7 +28,7 @@ to the code node that defines it:
   JSON key. A dotted mention (``pkg.Widget``, ``Widget.render``) keeps its
   qualifiers, and a candidate survives only when every qualifier is a label
   on its ``contains`` / ``method`` owner chain or a segment (or stem) of its
-  source path: ``time.sleep`` never lands on a repo's own ``sleep``, and
+  corpus-relative source path: ``time.sleep`` never lands on a repo's own ``sleep``, and
   ``Widget.render`` picks the ``render`` that ``Widget`` owns. No other
   tie-breaking: an ambiguous name is a guess, and a guess is not an edge.
   A bare, parenthesis-less method name is held to one more test: a word like
@@ -103,12 +103,13 @@ def _match_cited_file(cited: str, doc_file: str, source_files: set[str]) -> str 
 
 
 def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
-              parents: dict[str, set[str]]) -> set[str]:
+              parents: dict[str, set[str]], *, source_path: str) -> set[str]:
     """Labels a dotted mention may qualify ``node_id`` with.
 
     The labels of every node on its ``contains`` / ``method`` owner chain
     (``Widget`` for ``Widget.render``) plus each segment and stem of its
-    source path (``pkg`` and ``mod`` for ``pkg.mod.Widget``).
+    corpus-relative source path (``pkg`` and ``mod`` for ``pkg.mod.Widget``).
+    Host ancestors and the checkout directory are not symbol evidence.
     """
     evidence: set[str] = set()
     frontier = {node_id}
@@ -124,8 +125,7 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
             if node is not None:
                 evidence.add(_symbol_label(node))
         frontier |= owners
-    node = nodes_by_id.get(node_id, {})
-    for segment in _posix(str(node.get("source_file", ""))).split("/"):
+    for segment in source_path.split("/"):
         if segment:
             evidence.add(segment)
             evidence.add(os.path.splitext(segment)[0])
@@ -168,6 +168,23 @@ def resolve_markdown_mentions(
             return ""
         source = _posix(os.path.normpath(str(value)))
         return source_aliases.get(source, source)
+
+    # These paths come from the extraction's explicit logical root. Never infer
+    # that root from a common prefix: a selected subset can live in one package.
+    source_paths = {
+        _source_identity(result["_markdown_source_file"]):
+        _posix(os.path.normpath(str(result["_markdown_source_relative"])))
+        for result in per_file
+        if result.get("_markdown_source_file") and result.get("_markdown_source_relative")
+    }
+
+    def _qualifier_path(node: dict) -> str:
+        source = _source_identity(node.get("source_file", ""))
+        relative = source_paths.get(source, source)
+        if (relative.startswith("/") or re.match(r"^[A-Za-z]:", relative)
+                or relative == ".." or relative.startswith("../")):
+            return ""
+        return relative
 
     code_nodes = [
         n for n in all_nodes
@@ -237,7 +254,8 @@ def resolve_markdown_mentions(
         qualifiers = set(names[:-1])
         candidates = [
             c for c in by_label.get(callee, [])
-            if qualifiers <= _evidence(c, nodes_by_id, parents)
+            if qualifiers <= _evidence(c, nodes_by_id, parents,
+                                       source_path=_qualifier_path(nodes_by_id[c]))
         ]
         return (candidates[0] if len(candidates) == 1 else None), "INFERRED", 0.95
 

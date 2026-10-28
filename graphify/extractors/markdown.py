@@ -18,15 +18,37 @@ _MD_WIKILINK_RE = re.compile(r'(?<!\!)\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]')
 _MD_LINKABLE_EXTS = {".md", ".mdx", ".qmd", ".markdown", ".rst", ".txt"}
 
 _MD_MENTION_FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
-_MD_MENTION_LIST_RE = re.compile(r'^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]+')
+_MD_MENTION_LIST_RE = re.compile(r'^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)')
+_MD_MENTION_QUOTE_RE = re.compile(r'^ {0,3}>[ \t]?')
 _MD_MENTION_BREAK_RE = re.compile(
     r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|<!--|'
     r'(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|\[[^\]]+\]:)'
 )
-_MD_PATH_MENTION_RE = re.compile(
-    r'^([A-Za-z0-9_./\-]+\.[A-Za-z0-9]+)::([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)(?:\(\))?$'
+_MD_MENTION_RAW_HTML_START_RE = re.compile(r'^<(?:pre|script|style|textarea)(?:[ \t>]|$)', re.I)
+_MD_MENTION_RAW_HTML_END_RE = re.compile(r'</(?:pre|script|style|textarea)>', re.I)
+_MD_MENTION_BLOCK_HTML_RE = re.compile(
+    r'^</?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|'
+    r'colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|'
+    r'frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|'
+    r'menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|'
+    r'tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>]|/?>|$)', re.I,
 )
-_MD_BARE_MENTION_RE = re.compile(r'^(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*)(?:\(\))?$')
+_MD_MENTION_HTML_ATTRIBUTE = (
+    r'''[A-Za-z_:][A-Za-z0-9_.:\-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?'''
+)
+_MD_MENTION_HTML_TAG_RE = re.compile(
+    r'^(?:</([A-Za-z][A-Za-z0-9\-]*)[ \t]*>|<([A-Za-z][A-Za-z0-9\-]*)'
+    r'(?:[ \t]+' + _MD_MENTION_HTML_ATTRIBUTE + r')*[ \t]*/?>)[ \t]*$'
+)
+_MD_MENTION_HTML_BLANK_END_RE = re.compile(r'^[ \t]*$')
+_MD_MENTION_SYMBOL = r'[A-Za-z_$][\w$]*[!?]?'
+_MD_PATH_MENTION_RE = re.compile(
+    r'^([A-Za-z0-9_./\-]+\.[A-Za-z0-9]+)::('
+    + _MD_MENTION_SYMBOL + r'(?:::' + _MD_MENTION_SYMBOL + r')*)(?:\(\))?$'
+)
+_MD_BARE_MENTION_RE = re.compile(
+    r'^(?:' + _MD_MENTION_SYMBOL + r'\.)*(' + _MD_MENTION_SYMBOL + r')(?:\(\))?$'
+)
 
 
 def _code_span_mention(span: str) -> "tuple[str | None, list[str]] | None":
@@ -60,14 +82,77 @@ def _mention_body_start(lines: list[str]) -> int:
     return 0
 
 
+def _mention_container_content(line: str, previous: tuple[tuple[str, int], ...],
+                               *, extend: bool = True
+                               ) -> tuple[str, tuple[tuple[str, int], ...], bool]:
+    """Remove continuing quote/list prefixes, then admit new nested containers."""
+    content = line.expandtabs(4)
+    containers: list[tuple[str, int]] = []
+    for kind, width in previous:
+        if kind == 'quote':
+            marker = _MD_MENTION_QUOTE_RE.match(content)
+            if marker is None:
+                break
+            content = content[marker.end():]
+        elif not content.strip():
+            content = ''  # Blank lines may continue a list without indentation.
+        elif content.startswith(' ' * width):
+            content = content[width:]
+        else:
+            break
+        containers.append((kind, width))
+    added = False
+    while extend:
+        quote = _MD_MENTION_QUOTE_RE.match(content)
+        marker = quote or _MD_MENTION_LIST_RE.match(content)
+        if marker is None:
+            break
+        width = marker.end()
+        # Five or more spaces after a list marker use one separator space;
+        # the remainder belongs to the content (possibly indented code).
+        if quote is None and len(marker.group(1)) > 4:
+            width = marker.start(1) + 1
+        containers.append(('quote', 0) if quote else ('list', width))
+        content = content[width:]
+        added = True
+    return content, tuple(containers), added
+
+
+def _mention_html_block_end(line: str, paragraph: bool) -> re.Pattern[str] | None:
+    """Identify raw HTML leaf blocks; inline HTML remains ordinary prose."""
+    if len(line) - len(line.lstrip(' ')) > 3:
+        return None
+    text = line.lstrip(' ')
+    if _MD_MENTION_RAW_HTML_START_RE.match(text):
+        return _MD_MENTION_RAW_HTML_END_RE
+    if text.startswith('<?'):
+        return re.compile(r'\?>')
+    if text.startswith('<![CDATA['):
+        return re.compile(r'\]\]>')
+    if re.match(r'<![A-Za-z]', text):
+        return re.compile('>')
+    if _MD_MENTION_BLOCK_HTML_RE.match(text):
+        return _MD_MENTION_HTML_BLANK_END_RE
+    if not paragraph and (tag := _MD_MENTION_HTML_TAG_RE.fullmatch(text)):
+        if tag.group(1) or tag.group(2).lower() not in {'pre', 'script', 'style', 'textarea'}:
+            return _MD_MENTION_HTML_BLANK_END_RE
+    return None
+
+
 def _mention_span_end(lines: list[str], index: int, start: int, width: int,
-                      multiline: bool) -> tuple[int, int] | None:
+                      multiline: bool, first_line: str,
+                      containers: tuple[tuple[str, int], ...]) -> tuple[int, int] | None:
     """Find an equal-length closing run without crossing a prose block."""
     for end_index in range(index, len(lines)):
-        line = lines[end_index]
+        line = first_line
         if end_index != index:
+            line, continued, _ = _mention_container_content(
+                lines[end_index], containers, extend=False,
+            )
             if (not multiline or not line.strip() or _MD_MENTION_FENCE_RE.match(line)
-                    or _MD_MENTION_LIST_RE.match(line) or _MD_MENTION_BREAK_RE.match(line)):
+                    or continued != containers or _MD_MENTION_LIST_RE.match(line)
+                    or _MD_MENTION_BREAK_RE.match(line)
+                    or _mention_html_block_end(line, paragraph=True) is not None):
                 return None
             start = 0
         for run in re.finditer(r'`+', line[start:]):
@@ -84,21 +169,42 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
     code span takes precedence over comment delimiters in its literal content.
     """
     index = _mention_body_start(lines)
-    fence: tuple[str, int] | None = None
+    containers: tuple[tuple[str, int], ...] = ()
+    fence: tuple[str, int, tuple[tuple[str, int], ...]] | None = None
+    html_block: tuple[re.Pattern[str], tuple[tuple[str, int], ...]] | None = None
     in_comment = False
     paragraph = False
-    list_indent: int | None = None
     owner = file_nid
     while index < len(lines):
-        line = lines[index]
-        fence_match = _MD_MENTION_FENCE_RE.match(line)
+        raw_line = lines[index]
         if fence is not None:
-            if (fence_match and fence_match.group(1)[0] == fence[0]
-                    and len(fence_match.group(1)) >= fence[1]
-                    and not fence_match.group(2).strip()):
-                fence = None
-            index += 1
-            continue
+            line, continued, _ = _mention_container_content(raw_line, fence[2], extend=False)
+            if continued == fence[2]:
+                fence_match = _MD_MENTION_FENCE_RE.match(line)
+                if (fence_match and fence_match.group(1)[0] == fence[0]
+                        and len(fence_match.group(1)) >= fence[1]
+                        and not fence_match.group(2).strip()):
+                    fence = None
+                index += 1
+                continue
+            # An unclosed fence ends with its containing quote or list item.
+            fence = None
+            paragraph = False
+        if html_block is not None:
+            line, continued, _ = _mention_container_content(raw_line, html_block[1], extend=False)
+            if continued == html_block[1]:
+                if html_block[0].search(line):
+                    html_block = None
+                index += 1
+                continue
+            html_block = None
+            paragraph = False
+
+        line, current_containers, added = _mention_container_content(raw_line, containers)
+        if current_containers != containers or added:
+            paragraph = False
+        containers = current_containers
+        fence_match = _MD_MENTION_FENCE_RE.match(line)
 
         block_line = False
         if not in_comment:
@@ -106,22 +212,21 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 paragraph = False
                 index += 1
                 continue
-            expanded = line.expandtabs(4)
-            indent = len(expanded) - len(expanded.lstrip(' '))
-            list_match = _MD_MENTION_LIST_RE.match(line)
-            if list_match:
-                list_indent = len(list_match.group().expandtabs(4))
-            elif list_indent is not None and indent < list_indent:
-                list_indent = None
+            indent = len(line) - len(line.lstrip(' '))
             # An indented line cannot interrupt a paragraph. List content has
             # its own indentation baseline, including after a blank line.
-            code_indent = (list_indent or 0) + 4
-            if indent >= code_indent and not paragraph:
+            if indent >= 4 and not paragraph:
                 index += 1
                 continue
             if (fence_match and (fence_match.group(1)[0] != '`'
                                  or '`' not in fence_match.group(2))):
-                fence = (fence_match.group(1)[0], len(fence_match.group(1)))
+                fence = (fence_match.group(1)[0], len(fence_match.group(1)), containers)
+                paragraph = False
+                index += 1
+                continue
+            if html_end := _mention_html_block_end(line, paragraph):
+                if not html_end.search(line):
+                    html_block = (html_end, containers)
                 paragraph = False
                 index += 1
                 continue
@@ -149,19 +254,23 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 position = start + 4
                 continue
             width = len(token.group())
-            end = _mention_span_end(lines, index, start + width, width, not block_line)
+            end = _mention_span_end(lines, index, start + width, width,
+                                    not block_line, line, containers)
             if end is None:
                 position = start + width
                 continue
             end_index, end_position = end
+            continued_lines = [_mention_container_content(text, containers, extend=False)[0]
+                               for text in lines[index + 1:end_index + 1]]
             parts = [line[start + width:end_position]] if end_index == index else [
-                line[start + width:], *lines[index + 1:end_index],
-                lines[end_index][:end_position],
+                line[start + width:], *continued_lines[:-1],
+                continued_lines[-1][:end_position],
             ]
             # CommonMark normalizes soft line endings in code spans to spaces.
             yield owner, ' '.join(parts), index + 1
+            if end_index != index:
+                line = _mention_container_content(lines[end_index], containers, extend=False)[0]
             index = end_index
-            line = lines[index]
             position = end_position + width
         if block_line:
             paragraph = False

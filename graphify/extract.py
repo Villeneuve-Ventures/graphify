@@ -4529,6 +4529,7 @@ def _extract_impl(
         root = cache_root
     if source_root is not None:
         root = source_root
+    logical_root = Path(os.path.abspath(root))
     root = source_resolve(root)
 
     # #1774: the cache is an OUTPUT, so when no explicit cache_root is given it is
@@ -4675,8 +4676,19 @@ def _extract_impl(
     if any(path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES for path in paths):
         for path, result in zip(paths, per_file):
             if result is not None:
-                result["_markdown_source_file"] = str(source_resolve(path))
+                source = source_resolve(path)
+                selected = Path(os.path.abspath(path))
+                if selected.is_relative_to(logical_root):
+                    relative_source = selected.relative_to(logical_root).as_posix()
+                else:
+                    # Resolve an aliased checkout directory while retaining the
+                    # selected leaf name when that file is itself a symlink.
+                    selected = source_resolve(path.parent) / path.name
+                    relative_source = (selected.relative_to(root).as_posix()
+                                       if selected.is_relative_to(root) else "")
+                result["_markdown_source_file"] = str(source)
                 result["_markdown_source_alias"] = str(path)
+                result["_markdown_source_relative"] = relative_source
     # Function / method / class def ids for the cross-file indirect_call callable
     # guard. Built from the `_callable` node marker AFTER the id-remap / disambiguation
     # passes below (which rewrite node ids), so it can never go stale — see the
@@ -5155,7 +5167,9 @@ def _extract_impl(
                 "raw_calls": [call for call in all_raw_calls
                               if call.get("language") == "markdown"],
                 "outcomes": outcomes,
-                "source_files": [str(source_resolve(path)) for path in paths]}
+                "source_files": [str(source_resolve(path)) for path in paths],
+                "source_relative_paths": [result.get("_markdown_source_relative", "")
+                                          if result is not None else "" for result in per_file]}
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash

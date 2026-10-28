@@ -816,3 +816,107 @@ def test_multiline_span_keeps_its_opening_heading_and_source_location(tmp_path):
             for call in result['raw_calls']] == [
         ('Widget', headings['Guide'], 'L3'), ('Other', headings['Next'], 'L9'),
     ]
+
+
+@pytest.mark.parametrize(('body', 'visible_line'), [
+    ('<script>const api = `Hidden`;</script>\nUse `Visible`.\n', 2),
+    ('<pre>\n`Hidden`\n</pre>\nUse `Visible`.\n', 4),
+    ('<STYLE>\n\n`Hidden`\n</STYLE>\nUse `Visible`.\n', 5),
+    ('<textarea>\n`Hidden`\n</pre>\nUse `Visible`.\n', 4),
+    ('<div>\n`Hidden`\n</div>\n`AlsoHidden`\n\nUse `Visible`.\n', 6),
+    ('<custom-element title="example">\n`Hidden`\n</custom-element>\n\nUse `Visible`.\n', 5),
+    ('<?processing\n`Hidden`\n?>\nUse `Visible`.\n', 4),
+    ('<!DOCTYPE\n`Hidden`\n>\nUse `Visible`.\n', 4),
+    ('<![CDATA[\n`Hidden`\n]]>\nUse `Visible`.\n', 4),
+    ('> <pre>\n> `Hidden`\nUse `Visible`.\n', 3),
+    ('- <pre>\n  `Hidden`\n\nUse `Visible`.\n', 4),
+], ids=['script', 'pre', 'style-blank-line', 'raw-tag-close', 'block-tag-blank-end',
+        'custom-tag', 'processing', 'declaration', 'cdata', 'quote-end', 'list-end'])
+def test_mentions_exclude_raw_html_blocks(tmp_path, body, visible_line):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n' + body)
+    result = extract_markdown(doc)
+    guide = next(node['id'] for node in result['nodes'] if node['label'] == 'Guide')
+    assert [(call['context'], call['caller_nid'], call['source_location'])
+            for call in result['raw_calls']] == [('Visible', guide, f'L{visible_line + 2}')]
+
+
+@pytest.mark.parametrize('body', [
+    'Use <span>`Visible`</span>.\n',
+    'Use `<pre>` and `Visible`.\n',
+    'Paragraph\n<custom-element>\nUse `Visible`.\n',
+    '<span>`Visible`</span>\n',
+])
+def test_inline_html_and_code_literals_keep_visible_mentions(tmp_path, body):
+    doc = tmp_path / 'doc.md'
+    doc.write_text(body)
+    assert [call['context'] for call in extract_markdown(doc)['raw_calls']] == ['Visible']
+
+
+@pytest.mark.parametrize('block', [
+    '> ```python\n> `Hidden`\n> ```',
+    '- ```python\n  `Hidden`\n  ```',
+    '1. ~~~python\n   `Hidden`\n   ~~~',
+    '> > ````python\n> > `Hidden`\n> > ```\n> > `AlsoHidden`\n> > ````',
+    '> - ```python\n>   `Hidden`\n>   ```',
+    '- > ```python\n  > `Hidden`\n  > ```',
+    '- Item\n  - ```python\n    `Hidden`\n    ```',
+    '> ```python\n> `Hidden`',
+    '- ```python\n  `Hidden`',
+], ids=['quote', 'list', 'ordered-list', 'nested-quotes', 'quoted-list',
+        'listed-quote', 'nested-list', 'unclosed-quote', 'unclosed-list'])
+def test_mentions_respect_container_fences_and_their_lifetime(tmp_path, block):
+    body = '# Guide\n\n' + block + '\n\nUse `Visible`.\n'
+    doc = tmp_path / 'doc.md'
+    doc.write_text(body)
+    result = extract_markdown(doc)
+    guide = next(node['id'] for node in result['nodes'] if node['label'] == 'Guide')
+    assert [(call['context'], call['caller_nid'], call['source_location'])
+            for call in result['raw_calls']] == [
+        ('Visible', guide, f'L{len(body.splitlines())}'),
+    ]
+
+
+def test_container_prose_is_scanned_and_literal_fence_content_stays_literal(tmp_path):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('> Use `Quoted`.\n- Use `Listed`.\n\n'
+                   '```text\n> ```\n`Hidden`\n```\nUse `Visible`.\n')
+    assert [call['context'] for call in extract_markdown(doc)['raw_calls']] == [
+        'Quoted', 'Listed', 'Visible',
+    ]
+
+
+@pytest.mark.parametrize(('span', 'expected'), [
+    ('ready?()', (None, ['ready?'])),
+    ('save!()', (None, ['save!'])),
+    ('Widget.ready?()', (None, ['Widget', 'ready?'])),
+    ('stream$()', (None, ['stream$'])),
+    ('$stream()', (None, ['$stream'])),
+    ('pkg.stream$pipe()', (None, ['pkg', 'stream$pipe'])),
+    ('api.rb::Widget::ready?()', ('api.rb', ['Widget', 'ready?'])),
+    ('api.js::stream$()', ('api.js', ['stream$'])),
+])
+def test_language_specific_symbol_punctuation_is_classified(span, expected):
+    assert _code_span_mention(span) == expected
+    for prose in ('ready??()', 'save!!()', 'ready? now', 'a!=b', 'file.rb', 'file.js'):
+        assert _code_span_mention(prose) is None
+
+
+@pytest.mark.parametrize(('filename', 'source', 'symbol'), [
+    ('api.rb', 'def ready?\n  true\nend\n', 'ready?'),
+    ('api.rb', 'def save!\nend\n', 'save!'),
+    ('api.js', 'function stream$() {}\n', 'stream$'),
+])
+def test_language_specific_symbol_punctuation_resolves_real_callables(tmp_path, filename,
+                                                                   source, symbol):
+    result = _extract(tmp_path, {
+        filename: source,
+        'doc.md': f'# Bare\n\nUse `{symbol}()`.\n\n# Pinned\n\nUse `{filename}::{symbol}()`.\n',
+    })
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    nodes = {node['id']: node for node in result['nodes']}
+    assert {edge['context'] for edge in mentions} == {f'{symbol}()', f'{filename}::{symbol}()'}
+    assert {edge['confidence'] for edge in mentions} == {'INFERRED', 'EXTRACTED'}
+    assert {nodes[edge['target']]['label'] for edge in mentions} == {f'{symbol}()'}
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])
