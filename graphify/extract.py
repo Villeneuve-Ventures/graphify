@@ -5282,30 +5282,60 @@ def _extract_markdown_context(paths: list[Path], *, root: Path) -> dict:
     This ordinary-watch helper bypasses caches, including their stat fast path.
     Source observations bracket extraction; scoped/certified extraction uses
     its existing complete-input path instead of borrowing external context.
+    Initially unavailable inputs supply no citation evidence. A later change
+    to observed bytes or availability still rejects the context.
     """
     scope = current_source_io()
     if scope is not None:
         scope.refuse("ordinary Markdown context cannot enter scoped extraction")
 
-    def observe() -> dict:
+    def observe() -> tuple[dict, dict[str, str]]:
         observed = {}
+        failures = {}
         for path in paths:
-            info = path.stat()
-            payload = source_read_bytes(path)
-            after = path.stat()
+            try:
+                info = path.stat()
+                payload = source_read_bytes(path)
+                after = path.stat()
+            except OSError as exc:
+                observed[str(path)] = None
+                failures[str(path)] = f"{type(exc).__name__}: {exc}"
+                continue
             identity = (info.st_dev, info.st_ino, info.st_size,
                         info.st_mtime_ns, info.st_ctime_ns)
             if identity != (after.st_dev, after.st_ino, after.st_size,
                             after.st_mtime_ns, after.st_ctime_ns):
                 raise RuntimeError(f"Markdown context source changed: {path}")
             observed[str(path)] = (*identity, hashlib.sha256(payload).hexdigest())
-        return observed
+        return observed, failures
 
-    before = observe()
+    before, failures = observe()
     result = _extract_impl(paths, root, source_root=root, use_cache=False,
                            _markdown_context_only=True)
+    if failures:
+        # Extraction may read text even when the observation read failed.
+        # Such nodes and callers have no byte-bound evidence and cannot license
+        # even an explicit citation. Keep every selected source in the metadata
+        # arrays so failed inputs still participate in cited-file ambiguity.
+        unavailable = {
+            os.path.abspath(alias)
+            for index, path in enumerate(paths) if str(path) in failures
+            for alias in (path, result["source_files"][index], result["source_origins"][index])
+            if alias
+        }
+        for field in ("nodes", "raw_calls"):
+            result[field] = [item for item in result[field]
+                             if os.path.abspath(item.get("source_file", "")) not in unavailable]
+        node_ids = {node["id"] for node in result["nodes"]}
+        result["edges"] = [edge for edge in result["edges"]
+                           if edge.get("source") in node_ids and edge.get("target") in node_ids]
+        for item in result["outcomes"]:
+            if item["path"] in failures:
+                item.update(status="failed_observation", detail=failures[item["path"]])
+
     def validate_inputs() -> None:
-        if observe() != before:
+        current, _failures = observe()
+        if current != before:
             raise RuntimeError("Markdown context inputs changed during extraction")
 
     validate_inputs()

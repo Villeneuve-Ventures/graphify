@@ -91,10 +91,10 @@ def _code_span_mention(span: str) -> "tuple[str | None, list[str]] | None":
 
 def _mention_body_start(lines: list[str]) -> int:
     """Exclude bounded leading frontmatter from new mention scanning only."""
-    if not lines or lines[0].strip() != "---":
+    if not lines or lines[0].rstrip(' \t\r\n') != "---":
         return 0
     for index, line in enumerate(lines[1:201], 1):
-        if line.strip() in {"---", "..."}:
+        if line.rstrip(' \t\r\n') in {"---", "..."}:
             return index + 1
     return 0
 

@@ -490,11 +490,12 @@ def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[
                         context["source_relative_paths"]))
     boundary = len(scratch_edges)
     resolve_markdown_mentions(per_file, scratch_nodes, scratch_edges)
-    result["edges"] = kept_edges + [
+    refreshed_edges = kept_edges + [
         {**edge, "_origin": "ast"} for edge in scratch_edges[boundary:]
         if edge["source"] in actual_ids and edge["target"] in actual_ids
     ]
     context["validate_inputs"]()
+    result["edges"] = refreshed_edges
     return result
 
 

@@ -117,10 +117,14 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
     package path separate. Namespace and module/package prefixes retain the
     declaration's complete non-file owner chain; a member cannot masquerade as
     an unowned callable. Their unrelated segments cannot be spliced together,
-    reordered or repeated to license a citation.
+    reordered or repeated to license a citation. A filename stem is omitted
+    only when it is the exact recorded name of the outermost type.
     """
     evidence: set[tuple[str, ...]] = set()
     owner_chains: set[tuple[str, ...]] = set()
+    filename_type_chains: set[tuple[str, ...]] = set()
+    parts = source_path.split("/") if source_path else []
+    module = (*parts[:-1], os.path.splitext(parts[-1])[0]) if parts else ()
     frontier: list[tuple[str, tuple[str, ...], frozenset[tuple[str, ...]], frozenset[str]]] = [
         (node_id, (), frozenset(), frozenset()),
     ]
@@ -147,17 +151,20 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
                     owners.append((owner, label))
         if not owners:
             owner_chains.add(chain)
+            if (module and declaration.get("_callable_class")
+                    and _symbol_label(declaration) == module[-1]):
+                filename_type_chains.add(chain)
             if chain:
                 evidence.add(chain)
             evidence.update(namespace + chain for namespace in namespaces)
         for owner, label in owners:
             frontier.append((owner, (label,) + chain, namespaces, seen))
-    if source_path:
-        parts = source_path.split("/")
-        module = (*parts[:-1], os.path.splitext(parts[-1])[0])
-        for prefix in (module, module[:-1]):
-            if prefix:
-                evidence.update(prefix + chain for chain in owner_chains)
+    if module:
+        evidence.update(module + chain for chain in owner_chains)
+        # A same-named type can represent the filename in a citation. A free
+        # function, or a differently named owner, cannot stand in for its module.
+        if module[:-1]:
+            evidence.update(module[:-1] + chain for chain in filename_type_chains)
     return evidence
 
 

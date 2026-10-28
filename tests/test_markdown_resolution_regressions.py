@@ -515,12 +515,12 @@ def _reference_case(root: Path, files: dict[str, str], mode: str) -> dict:
 @pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
 def test_dotted_qualifiers_preserve_path_and_owner_order(tmp_path, mode):
     valid = ["acme.tools.Widget", "tools.Widget", "Widget.render()",
-             "acme.tools.Widget.render()", "pkg.Worker.run()",
+             "acme.tools.Widget.render()",
              "worker.Worker.run()", "pkg.worker.Worker.run()",
              "repeated.repeated.tools.Repeated"]
     invalid = ["tools.acme.Widget", "acme.acme.tools.Widget",
                "Widget.acme.tools.render()", "tools.Widget.acme.render()",
-               "repeated.tools.repeated.Repeated", "Wrong.tools.Widget"]
+               "repeated.tools.repeated.Repeated", "Wrong.tools.Widget", "pkg.Worker.run()"]
     files = {
         "acme/tools.py": "class Widget:\n    def render(self):\n        pass\n",
         "pkg/worker.py": "class Worker:\n    def run(self):\n        pass\n",
@@ -798,8 +798,9 @@ def test_empty_source_bytes_with_file_node_preserve_inference(tmp_path, mode):
 @pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
 def test_prefixed_method_qualifiers_require_complete_actual_owners(tmp_path, mode):
     valid = ["Acme.Tools.Widget.Render()", "Widget.Render()", "Acme.Tools.Widget",
-             "Gizmo.Widget.Render()", "src.Widget.Render()"]
-    invalid = ["Acme.Tools.Render()", "Tools.Render()", "Gizmo.Render()", "src.Render()"]
+             "Gizmo.Widget.Render()"]
+    invalid = ["Acme.Tools.Render()", "Tools.Render()", "Gizmo.Render()", "src.Render()",
+               "src.Widget.Render()"]
     files = {
         "src/Gizmo.cs": "namespace Acme.Tools { public class Widget { public void Render() {} } }",
         "guide.md": "\n".join(f"# Case{i}\n`{span}`" for i, span in enumerate(valid + invalid)),
@@ -835,7 +836,7 @@ def test_unowned_namespace_callable_keeps_namespace_and_module_qualifiers():
     node = {"id": "render", "label": "Render()", "file_type": "code", "_callable": True,
             "metadata": {"namespace": "Acme.Tools"}}
     assert _evidence("render", {"render": node}, {}, source_path="src/Gizmo.cs") == {
-        ("Acme", "Tools"), ("src", "Gizmo"), ("src",),
+        ("Acme", "Tools"), ("src", "Gizmo"),
     }
 
 
@@ -887,4 +888,230 @@ def test_prefixed_evidence_preserves_complete_recorded_nested_owner_route(namesp
     parents = {"method": {"inner"}, "inner": {"outer"}}
     evidence = _evidence("method", nodes, parents, source_path="src/Gizmo.cs")
     assert evidence == {("Outer", "Inner"), ("Acme", "Tools", "Outer", "Inner"),
-                        ("src", "Gizmo", "Outer", "Inner"), ("src", "Outer", "Inner")}
+                        ("src", "Gizmo", "Outer", "Inner")}
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+@pytest.mark.parametrize("closer", ["---", "...", "--- \t", "... \t"])
+def test_frontmatter_delimiters_preserve_column_zero(tmp_path, mode, closer):
+    files = {
+        "model.py": "class Hidden:\n    pass\nclass Visible:\n    pass\n",
+        "guide.md": ("--- \t\nnested:\n  ---\napi: \"`Hidden`\"\n"
+                     + closer + "\n# Body\n`Visible`\n"),
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == {"Visible"}
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+@pytest.mark.parametrize("indent", ["  ", "\t"])
+def test_indented_frontmatter_opener_keeps_visible_mentions(tmp_path, mode, indent):
+    files = {
+        "model.py": "class Widget:\n    pass\n",
+        "guide.md": indent + "---\n# Visible\n`Widget`\n---\n",
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == {"Widget"}
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+@pytest.mark.parametrize("stem", ["renderer", "render"])
+def test_free_callable_qualifiers_retain_the_defining_module(tmp_path, mode, stem):
+    valid = [f"{stem}.render()", f"src.{stem}.render()", "render()",
+             f"src/{stem}.py::render"]
+    files = {
+        f"src/{stem}.py": "def render():\n    return 1\n",
+        "guide.md": "\n".join(f"# Case{i}\n`{span}`" for i, span in
+                               enumerate(valid + ["src.render()"])),
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == set(valid)
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+@pytest.mark.parametrize("stem", ["Widget", "widget"])
+def test_filename_type_qualifiers_require_the_recorded_type_name(tmp_path, mode, stem):
+    valid = [f"src.{stem}.Widget", f"{stem}.Widget", "Widget", "Widget.render()",
+             f"src.{stem}.Widget.render()"]
+    if stem == "Widget":
+        valid += ["src.Widget", "src.Widget.render()"]
+    invalid = [] if stem == "Widget" else ["src.Widget", "src.Widget.render()"]
+    files = {
+        f"src/{stem}.py": "class Widget:\n    def render(self):\n        pass\n",
+        "guide.md": "\n".join(f"# Case{i}\n`{span}`" for i, span in enumerate(valid + invalid)),
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == set(valid)
+
+
+@pytest.mark.parametrize("failure", ["missing", "stat", "read"])
+@pytest.mark.parametrize("unavailable", ["unrelated.md", "other.py", "guide.md"])
+def test_watch_unavailable_observations_exclude_unbound_evidence(tmp_path, monkeypatch,
+                                                               failure, unavailable):
+    import importlib
+
+    from graphify.watch import _refresh_markdown_mentions
+
+    extraction = importlib.import_module("graphify.extract")
+    files = {
+        "good.py": "class Widget:\n    pass\n",
+        "other.py": "class Widget:\n    pass\n",
+        "guide.md": "# Bare\n`Widget`\n# Good\n`good.py::Widget`\n# Other\n`other.py::Widget`\n",
+        "unrelated.md": "# Notes\n`good.py::Widget`\n",
+    }
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    target = tmp_path / unavailable
+    if failure == "missing":
+        target.unlink()
+    elif failure == "stat":
+        real_stat = Path.stat
+
+        def stat(path, *args, **kwargs):
+            if path == target:
+                raise PermissionError("controlled observation stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", stat)
+    else:
+        real_read = extraction.source_read_bytes
+
+        def read(path):
+            if path == target:
+                raise PermissionError("controlled observation read failure")
+            return real_read(path)
+
+        monkeypatch.setattr(extraction, "source_read_bytes", read)
+    context = extraction._extract_markdown_context(paths, root=tmp_path)
+    outcome = next(item for item in context["outcomes"] if item["path"] == str(target))
+    assert outcome["status"] == "failed_observation"
+    assert all(node.get("source_file") != str(target) for node in context["nodes"])
+    assert all(call.get("source_file") != str(target) for call in context["raw_calls"])
+    refreshed = _refresh_markdown_mentions(
+        result, paths, [tmp_path / "guide.md", tmp_path / "unrelated.md"], root=tmp_path,
+    )
+    expected = {(name, span) for name, span in [
+        ("guide.md", "good.py::Widget"), ("guide.md", "other.py::Widget"),
+        ("unrelated.md", "good.py::Widget"),
+    ] if name != unavailable and not (unavailable == "other.py" and span.startswith("other.py"))}
+    assert {(Path(edge["source_file"]).name, edge["context"])
+            for edge in _mentions(refreshed)} == expected
+    assert all(edge["confidence"] == "EXTRACTED" for edge in _mentions(refreshed))
+    _assert_private_markers_stripped(refreshed)
+
+
+@pytest.mark.parametrize("phase", ["extraction", "resolution"])
+def test_watch_changed_observed_source_still_rejects_refresh(tmp_path, monkeypatch, phase):
+    import copy
+    import importlib
+
+    from graphify.watch import _refresh_markdown_mentions
+
+    extraction = importlib.import_module("graphify.extract")
+    resolution = importlib.import_module("graphify.markdown_resolution")
+    files = {"model.py": "class Widget:\n    pass\n",
+             "guide.md": "# Pinned\n`model.py::Widget`\n"}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    before = copy.deepcopy(result)
+    owner, function = ((extraction, "_extract_impl") if phase == "extraction"
+                       else (resolution, "resolve_markdown_mentions"))
+    original = getattr(owner, function)
+
+    def change(*args, **kwargs):
+        returned = original(*args, **kwargs)
+        (tmp_path / "model.py").write_text("class Gadget:\n    pass\n")
+        return returned
+
+    monkeypatch.setattr(owner, function, change)
+    with pytest.raises(RuntimeError, match="Markdown context inputs changed"):
+        _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert result == before
+
+
+def test_native_watch_unavailable_context_publishes_stable_explicit_mentions(tmp_path, monkeypatch):
+    import importlib
+
+    from tests.test_markdown_code_spans import _native_mentions, _native_rebuild
+
+    extraction = importlib.import_module("graphify.extract")
+    corpus = tmp_path / "corpus"
+    _write_files(corpus, {"good.py": "class Widget:\n    pass\n",
+                          "guide.md": "# Bare\n`Widget`\n# Pinned\n`good.py::Widget`\n",
+                          "unrelated.md": "# Notes\nOrdinary prose.\n"})
+    initial = _native_rebuild(corpus)
+    assert {edge["context"] for edge in _native_mentions(initial)} == {
+        "Widget", "good.py::Widget",
+    }
+    real_read = extraction.source_read_bytes
+
+    def read(path):
+        if path == corpus / "unrelated.md":
+            raise PermissionError("controlled unreadable context document")
+        return real_read(path)
+
+    monkeypatch.setattr(extraction, "source_read_bytes", read)
+    doc = corpus / "guide.md"
+    doc.write_text(doc.read_text() + "\nAn ordinary document event.\n")
+    refreshed = _native_rebuild(corpus, [doc])
+    assert {edge["context"] for edge in _native_mentions(refreshed)} == {"good.py::Widget"}
+    assert all(edge["confidence"] == "EXTRACTED" for edge in _native_mentions(refreshed))
+
+
+@pytest.mark.parametrize("initially_unavailable", [False, True])
+def test_watch_context_availability_changes_still_reject(tmp_path, monkeypatch,
+                                                        initially_unavailable):
+    import importlib
+
+    extraction = importlib.import_module("graphify.extract")
+    _write_files(tmp_path, {"model.py": "class Widget:\n    pass\n",
+                            "guide.md": "# Guide\n`model.py::Widget`\n"})
+    paths = [tmp_path / "model.py", tmp_path / "guide.md"]
+    real_read = extraction.source_read_bytes
+    real_extract = extraction._extract_impl
+    unavailable = initially_unavailable
+
+    def read(path):
+        if path == paths[0] and unavailable:
+            raise PermissionError("controlled availability transition")
+        return real_read(path)
+
+    def change(*args, **kwargs):
+        nonlocal unavailable
+        result = real_extract(*args, **kwargs)
+        unavailable = not unavailable
+        return result
+
+    monkeypatch.setattr(extraction, "source_read_bytes", read)
+    monkeypatch.setattr(extraction, "_extract_impl", change)
+    with pytest.raises(RuntimeError, match="Markdown context inputs changed"):
+        extraction._extract_markdown_context(paths, root=tmp_path)
+
+
+def test_watch_unavailable_source_remains_cited_file_ambiguity(tmp_path, monkeypatch):
+    import importlib
+
+    from graphify.watch import _refresh_markdown_mentions
+
+    extraction = importlib.import_module("graphify.extract")
+    files = {"a/widget.py": "class Widget:\n    pass\n",
+             "b/widget.py": "class Other:\n    pass\n",
+             "guide.md": "# Suffix\n`widget.py::Widget`\n# Exact\n`a/widget.py::Widget`\n"}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    result = extract(paths, source_root=tmp_path, parallel=False,
+                     ambient_output=False, quiet=True)
+    real_read = extraction.source_read_bytes
+
+    def read(path):
+        if path == tmp_path / "b/widget.py":
+            raise PermissionError("controlled unavailable competing file")
+        return real_read(path)
+
+    monkeypatch.setattr(extraction, "source_read_bytes", read)
+    refreshed = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert {edge["context"] for edge in _mentions(refreshed)} == {"a/widget.py::Widget"}

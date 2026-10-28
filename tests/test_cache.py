@@ -1417,3 +1417,35 @@ def test_rendered_citation_fixes_reject_epoch_six_mentions(tmp_path, monkeypatch
         assert all('_callable' not in node and '_callable_class' not in node
                    for node in result['nodes'])
     assert load_cached(doc, root=tmp_path, kind='semantic') == semantic
+
+
+def test_column_zero_frontmatter_rejects_epoch_seven_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'model.py'
+    code.write_text('class Hidden:\n    pass\nclass Visible:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('---\nnested:\n  ---\napi: "`Hidden`"\n---\n# Body\n`Visible`\n')
+    stale = extract_markdown(doc)
+    page = next(node['id'] for node in stale['nodes'] if node['label'] == 'guide.md')
+    stale['raw_calls'].append({
+        'caller_nid': page, 'callee': 'Hidden', 'language': 'markdown',
+        'context': 'Hidden', 'source_file': str(doc), 'source_location': 'L4',
+    })
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 7)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    save_cached(doc, semantic, root=tmp_path, kind='semantic')
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert {edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')} == {'Visible'}
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    assert load_cached(doc, root=tmp_path, kind='semantic') == semantic
