@@ -27,8 +27,8 @@ to the code node that defines it:
   function, method or class, never on a same-named data symbol such as a
   JSON key. A dotted mention (``pkg.Widget``, ``Widget.render``) keeps its
   qualifiers, and a candidate survives only when every qualifier is a label
-  on its ``contains`` / ``method`` owner chain or a segment (or stem) of its
-  corpus-relative source path: ``time.sleep`` never lands on a repo's own ``sleep``, and
+  on its ``contains`` / ``method`` owner chain, in its declared namespace, or
+  in its corpus-relative source path: ``time.sleep`` never lands on a repo's own ``sleep``, and
   ``Widget.render`` picks the ``render`` that ``Widget`` owns. No other
   tie-breaking: an ambiguous name is a guess, and a guess is not an edge.
   A bare, parenthesis-less method name is held to one more test: a word like
@@ -77,7 +77,8 @@ def _posix(path: str) -> str:
     return path.replace("\\", "/")
 
 
-def _match_cited_file(cited: str, doc_file: str, source_files: set[str]) -> str | None:
+def _match_cited_file(cited: str, doc_file: str, source_files: set[str], *,
+                      source_aliases: dict[str, str] | None = None) -> str | None:
     """The scanned source file a ``path::Name`` mention names, or None.
 
     Tries the path relative to the citing document first (``../src/mod.py``
@@ -85,21 +86,26 @@ def _match_cited_file(cited: str, doc_file: str, source_files: set[str]) -> str 
     segment-aligned suffix (``src/mod.py`` naming ``/repo/src/mod.py``). A
     cite that is explicitly relative (``./x`` or ``../x``) stops after the
     first step: it names one location, and a suffix match elsewhere would be a
-    different file.
+    different file. Admitted aliases map that location to canonical source
+    identity; they do not change the citing document's selected directory.
     """
     cited_posix = _posix(cited)
+    aliases = source_aliases or {}
     doc_dir = os.path.dirname(doc_file)
     relative = _posix(os.path.normpath(os.path.join(doc_dir, cited_posix)))
+    relative = aliases.get(relative, relative)
     if relative in source_files:
         return relative
     if cited_posix.startswith(("./", "../")):
         return None
-    if cited_posix in source_files:
-        return cited_posix
+    exact = aliases.get(cited_posix, cited_posix)
+    if exact in source_files:
+        return exact
     stripped = _RELATIVE_PREFIX_RE.sub("", cited_posix)
-    matches = [sf for sf in source_files
-               if sf == stripped or sf.endswith("/" + stripped)]
-    return matches[0] if len(matches) == 1 else None
+    matches = {aliases.get(sf, sf) for sf in source_files | aliases.keys()
+               if (sf == stripped or sf.endswith("/" + stripped))
+               and aliases.get(sf, sf) in source_files}
+    return next(iter(matches)) if len(matches) == 1 else None
 
 
 def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
@@ -108,7 +114,7 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
 
     The labels of every node on its ``contains`` / ``method`` owner chain
     (``Widget`` for ``Widget.render``) plus each segment and stem of its
-    corpus-relative source path (``pkg`` and ``mod`` for ``pkg.mod.Widget``).
+    corpus-relative source path and recorded declaration namespace.
     Host ancestors and the checkout directory are not symbol evidence.
     """
     evidence: set[str] = set()
@@ -119,6 +125,13 @@ def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
         if nid in seen:
             continue
         seen.add(nid)
+        declaration = nodes_by_id.get(nid, {})
+        metadata = declaration.get("metadata")
+        if (declaration.get("file_type") == "code" and declaration.get("_callable")
+                and isinstance(metadata, dict)):
+            namespace = metadata.get("namespace")
+            if isinstance(namespace, str):
+                evidence.update(segment for segment in namespace.split(".") if segment)
         owners = parents.get(nid, set())
         for owner in owners:
             node = nodes_by_id.get(owner)
@@ -157,11 +170,27 @@ def resolve_markdown_mentions(
     # identity. Use only those aliases: a result can also contain imported
     # foreign nodes, whose source files must not inherit the selected identity.
     source_aliases = {
-        _posix(os.path.normpath(str(result["_markdown_source_alias"]))):
+        _posix(os.path.normpath(str(alias))):
         _posix(os.path.normpath(str(result["_markdown_source_file"])))
         for result in per_file
-        if result.get("_markdown_source_alias") and result.get("_markdown_source_file")
+        if result.get("_markdown_source_file")
+        for alias in (result.get("_markdown_source_alias"), result.get("_markdown_source_origin"))
+        if alias
     }
+
+    # Citation origin is the selected document location, even when its bytes
+    # come from a symlink target. Canonical identities still match code sources.
+    source_origins = {
+        _posix(os.path.normpath(str(alias))):
+        _posix(os.path.normpath(str(result.get("_markdown_source_origin") or alias)))
+        for result in per_file
+        for alias in (result.get("_markdown_source_alias"), result.get("_markdown_source_origin"))
+        if alias
+    }
+
+    def _document_origin(value: object) -> str:
+        origin = _posix(os.path.normpath(str(value or "")))
+        return source_origins.get(origin, origin)
 
     def _source_identity(value: object) -> str:
         if not value:
@@ -241,7 +270,8 @@ def resolve_markdown_mentions(
         cited = rc.get("path")
         if cited:
             source_file = _match_cited_file(
-                str(cited), _source_identity(rc.get("source_file", "")), source_files
+                str(cited), _document_origin(rc.get("source_file", "")), source_files,
+                source_aliases=source_aliases,
             )
             if source_file is None:
                 return None, "EXTRACTED", 1.0
@@ -274,7 +304,7 @@ def resolve_markdown_mentions(
         caller = str(rc.get("caller_nid", ""))
         if target is None or target == caller:
             return
-        doc = _source_identity(rc.get("source_file", ""))
+        doc = _document_origin(rc.get("source_file", ""))
         if (caller, target) in existing:
             # The edge is already in the graph, but this document still CITES that
             # target, so it stays on record as owner evidence for a later method
@@ -329,6 +359,6 @@ def resolve_markdown_mentions(
     # link to `Cache.redis` unless the document names `Cache`;
     # `successWithWarnings` survives because `HandlerResult` is cited next to it.
     for rc, target, confidence, score in method_mentions:
-        doc = _source_identity(rc.get("source_file", ""))
+        doc = _document_origin(rc.get("source_file", ""))
         if _method_owner(target) in cited_targets.get(doc, ()):
             _add(rc, target, confidence, score)

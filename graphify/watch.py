@@ -439,9 +439,13 @@ def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[
     if incomplete:
         print("[graphify watch] Markdown inferred references withheld: incomplete AST context")
     per_file = [{"raw_calls": calls, "_unsupported": incomplete}]
-    per_file.extend({"_markdown_source_file": source_identity(path),
+    per_file.extend({"_markdown_source_file": source,
+                     "_markdown_source_alias": str(path),
+                     "_markdown_source_origin": origin,
                      "_markdown_source_relative": relative}
-                    for path, relative in zip(paths, context["source_relative_paths"]))
+                    for path, source, origin, relative in zip(
+                        paths, context["source_files"], context["source_origins"],
+                        context["source_relative_paths"]))
     boundary = len(scratch_edges)
     resolve_markdown_mentions(per_file, scratch_nodes, scratch_edges)
     result["edges"] = kept_edges + [

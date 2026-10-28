@@ -920,3 +920,49 @@ def test_language_specific_symbol_punctuation_resolves_real_callables(tmp_path, 
     assert {nodes[edge['target']]['label'] for edge in mentions} == {f'{symbol}()'}
     assert all('_callable' not in node and '_callable_class' not in node
                for node in result['nodes'])
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('<span title="Use `Hidden`">text</span> and `Visible`.\n', ['Visible']),
+    ("Use <span title='Use `Hidden`'>text</span> and `Visible`.\n", ['Visible']),
+    ('Use <span title=" > `Hidden`">text</span> and `Visible`.\n', ['Visible']),
+    ('Use <span title="`Hidden`" data-note=\'`AlsoHidden`\'>text</span> and `Visible`.\n',
+     ['Visible']),
+    ('Use <span title="Use\n`Hidden`">text</span> and `Visible`.\n', ['Visible']),
+    ('Use <span\ntitle="`Hidden`">text</span> and `Visible`.\n', ['Visible']),
+    ('> Use <span title="Use\n> `Hidden`">text</span> and `Visible`.\n', ['Visible']),
+    ('Use <span title="`Hidden`">`Visible`</span><em title="`AlsoHidden`">text</em>.\n',
+     ['Visible']),
+    ('Use \\<span title="`Visible`">text</span>.\n', ['Visible']),
+    ('Use <span title=`Visible`>text</span>.\n', ['Visible']),
+    ('Use <9span title="`Visible`">text</span>.\n', ['Visible']),
+    ('Use <span title="`First`\n\nUse `Visible`.\n', ['First', 'Visible']),
+    ('Use ``<span title="`Hidden`">`` and `Visible`.\n', ['Visible']),
+    ('Use <span title="<!-- `Hidden` -->">text</span> and `Visible`.\n', ['Visible']),
+    ('<!-- <span title="`Hidden`"> --> Use `Visible`.\n', ['Visible']),
+], ids=['double-quoted', 'single-quoted', 'quoted-gt', 'multiple-attributes',
+        'multiline-value', 'multiline-attribute', 'quoted-container', 'visible-content',
+        'escaped-tag', 'invalid-unquoted', 'invalid-name', 'incomplete-paragraph',
+        'code-before-tag', 'comment-in-attribute', 'comment-before-tag'])
+def test_inline_html_attributes_are_not_mentions(tmp_path, body, expected):
+    source = '# Guide\n\n' + body
+    doc = tmp_path / 'doc.md'
+    doc.write_text(source)
+    result = extract_markdown(doc)
+    guide = next(node['id'] for node in result['nodes'] if node['label'] == 'Guide')
+    locations = {context: next(f'L{index}' for index, line in enumerate(source.splitlines(), 1)
+                               if f'`{context}`' in line) for context in expected}
+    assert [(call['context'], call['caller_nid'], call['source_location'])
+            for call in result['raw_calls']] == [
+        (context, guide, locations[context]) for context in expected
+    ]
+
+
+def test_inline_html_attributes_do_not_publish_false_references(tmp_path):
+    result = _extract(tmp_path, {
+        'widget.py': 'class Hidden:\n    pass\n\nclass Visible:\n    pass\n',
+        'doc.md': '# Guide\n\n<span title="Use `Hidden`">text</span> and `Visible`.\n',
+    })
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    nodes = {node['id']: node for node in result['nodes']}
+    assert [nodes[edge['target']]['label'] for edge in mentions] == ['Visible']

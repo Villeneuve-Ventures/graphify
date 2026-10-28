@@ -4556,6 +4556,16 @@ def _extract_impl(
         bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
+            if cached is not None and path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES:
+                # Content/cache identity may be shared by two symlink aliases,
+                # but Markdown IDs, links and citation origins belong to the
+                # selected location. Do not borrow another alias's fragment.
+                selected_origin = os.path.abspath(path)
+                if any(item.get("source_file")
+                       and os.path.abspath(str(item["source_file"])) != selected_origin
+                       for bucket in ("nodes", "edges", "raw_calls")
+                       for item in cached.get(bucket, []) if isinstance(item, dict)):
+                    cached = None
             if cached is not None:
                 per_file[i] = cached
                 continue
@@ -4678,6 +4688,7 @@ def _extract_impl(
             if result is not None:
                 source = source_resolve(path)
                 selected = Path(os.path.abspath(path))
+                result["_markdown_source_origin"] = str(selected)
                 if selected.is_relative_to(logical_root):
                     relative_source = selected.relative_to(logical_root).as_posix()
                 else:
@@ -4762,6 +4773,9 @@ def _extract_impl(
                 e["source"] = id_remap[e["source"]]
             if e.get("target") in id_remap:
                 e["target"] = id_remap[e["target"]]
+        for rc in all_raw_calls:
+            if rc.get("caller_nid") in id_remap:
+                rc["caller_nid"] = id_remap[rc["caller_nid"]]
     if prefix_remap:
         sym_remap: dict[str, str] = {}
         for n in all_nodes:
@@ -5169,7 +5183,9 @@ def _extract_impl(
                 "outcomes": outcomes,
                 "source_files": [str(source_resolve(path)) for path in paths],
                 "source_relative_paths": [result.get("_markdown_source_relative", "")
-                                          if result is not None else "" for result in per_file]}
+                                          if result is not None else "" for result in per_file],
+                "source_origins": [result.get("_markdown_source_origin", "")
+                                   if result is not None else "" for result in per_file]}
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash

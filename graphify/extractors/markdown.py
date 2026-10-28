@@ -34,12 +34,14 @@ _MD_MENTION_BLOCK_HTML_RE = re.compile(
     r'tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t>]|/?>|$)', re.I,
 )
 _MD_MENTION_HTML_ATTRIBUTE = (
-    r'''[A-Za-z_:][A-Za-z0-9_.:\-]*(?:[ \t]*=[ \t]*(?:[^ \t"'=<>`]+|'[^']*'|"[^"]*"))?'''
+    r'''[A-Za-z_:][A-Za-z0-9_.:\-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n"'=<>`]+|'[^']*'|"[^"]*"))?'''
 )
-_MD_MENTION_HTML_TAG_RE = re.compile(
-    r'^(?:</([A-Za-z][A-Za-z0-9\-]*)[ \t]*>|<([A-Za-z][A-Za-z0-9\-]*)'
-    r'(?:[ \t]+' + _MD_MENTION_HTML_ATTRIBUTE + r')*[ \t]*/?>)[ \t]*$'
+_MD_MENTION_HTML_TAG = (
+    r'(?:</([A-Za-z][A-Za-z0-9\-]*)[ \t\n]*>|<([A-Za-z][A-Za-z0-9\-]*)'
+    r'(?:[ \t\n]+' + _MD_MENTION_HTML_ATTRIBUTE + r')*[ \t\n]*/?>)'
 )
+_MD_MENTION_HTML_TAG_RE = re.compile('^' + _MD_MENTION_HTML_TAG + r'[ \t]*$')
+_MD_MENTION_INLINE_HTML_TAG_RE = re.compile(_MD_MENTION_HTML_TAG)
 _MD_MENTION_HTML_BLANK_END_RE = re.compile(r'^[ \t]*$')
 _MD_MENTION_SYMBOL = r'[A-Za-z_$][\w$]*[!?]?'
 _MD_PATH_MENTION_RE = re.compile(
@@ -161,12 +163,49 @@ def _mention_span_end(lines: list[str], index: int, start: int, width: int,
     return None
 
 
+def _mention_html_tag_end(lines: list[str], index: int, start: int,
+                          multiline: bool, first_line: str,
+                          containers: tuple[tuple[str, int], ...]) -> tuple[int, int] | None:
+    """Find a complete raw tag without treating quoted attribute text as prose."""
+    prefix = first_line[:start]
+    if (len(prefix) - len(prefix.rstrip('\\'))) % 2:
+        return None
+    if not re.match(r'</?[A-Za-z][A-Za-z0-9\-]*(?=[ \t/>]|$)', first_line[start:]):
+        return None
+    parts: list[str] = []
+    quote = None
+    for end_index in range(index, len(lines)):
+        line = first_line[start:] if end_index == index else ''
+        if end_index != index:
+            line, continued, _ = _mention_container_content(
+                lines[end_index], containers, extend=False,
+            )
+            if (not multiline or not line.strip() or continued != containers
+                    or _MD_MENTION_FENCE_RE.match(line) or _MD_MENTION_LIST_RE.match(line)
+                    or _MD_MENTION_BREAK_RE.match(line)
+                    or _mention_html_block_end(line, paragraph=True) is not None):
+                return None
+        for position, character in enumerate(line):
+            if quote is not None:
+                if character == quote:
+                    quote = None
+            elif character in {'"', "'"}:
+                quote = character
+            elif character == '>':
+                candidate = '\n'.join([*parts, line[:position + 1]])
+                if _MD_MENTION_INLINE_HTML_TAG_RE.fullmatch(candidate):
+                    return end_index, position + 1 + (start if end_index == index else 0)
+                return None
+        parts.append(line)
+    return None
+
+
 def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                            file_nid: str):
     """Scan new citations independently of the legacy heading/link output.
 
-    Block state takes precedence over inline syntax. Within prose, a valid
-    code span takes precedence over comment delimiters in its literal content.
+    Block state takes precedence over inline syntax. Inline tokens are consumed
+    from left to right; code-span and raw-tag contents remain literal.
     """
     index = _mention_body_start(lines)
     containers: tuple[tuple[str, int], ...] = ()
@@ -243,7 +282,7 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 in_comment = False
                 position = end + 3
                 continue
-            token = re.search(r'<!--|`+', line[position:])
+            token = re.search(r'<!--|<|`+', line[position:])
             if token is None:
                 if line[position:].strip() and not block_line:
                     paragraph = True
@@ -252,6 +291,18 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
             if token.group() == '<!--':
                 in_comment = True
                 position = start + 4
+                continue
+            if token.group() == '<':
+                end = _mention_html_tag_end(lines, index, start, not block_line, line, containers)
+                if end is None:
+                    position = start + 1
+                    continue
+                end_index, end_position = end
+                if end_index != index:
+                    line = _mention_container_content(lines[end_index], containers,
+                                                      extend=False)[0]
+                index = end_index
+                position = end_position
                 continue
             width = len(token.group())
             end = _mention_span_end(lines, index, start + width, width,

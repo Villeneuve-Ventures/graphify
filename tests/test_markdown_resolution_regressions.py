@@ -289,3 +289,199 @@ def test_watch_symlinked_checkout_keeps_corpus_qualifiers(tmp_path, file_alias):
                      ambient_output=False, quiet=True)
     refreshed = _refresh_markdown_mentions(result, paths, [paths[-1]], root=physical)
     assert {edge["context"] for edge in _mentions(refreshed)} == {f"src.{module}.render()"}
+
+
+@pytest.mark.parametrize("body, owners", [
+    ("Use `Widget`.\n", {"guide.md"}),
+    ("Use `Widget`.\n\n# Guide\nUse `Widget`.\n", {"guide.md", "Guide"}),
+    ("# Guide\nUse `Widget`.\n", {"Guide"}),
+])
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+def test_page_mentions_follow_canonical_file_ids(tmp_path, body, owners, mode):
+    code = tmp_path / "widget.py"
+    code.write_text("class Widget:\n    pass\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text(body)
+    paths = [code, doc]
+    if mode == "scoped":
+        with SourceIO(tmp_path) as inputs:
+            result = extract(paths, source_root=tmp_path, source_io=inputs,
+                             quiet=True, ambient_output=False)
+    elif mode == "cached":
+        extract(paths, source_root=tmp_path, cache_root=tmp_path / "cache",
+                parallel=False, quiet=True)
+        result = extract(paths, source_root=tmp_path, cache_root=tmp_path / "cache",
+                         parallel=False, quiet=True)
+    else:
+        result = extract(paths, source_root=tmp_path, parallel=False,
+                         quiet=True, ambient_output=False)
+        if mode == "watch":
+            from graphify.watch import _refresh_markdown_mentions
+
+            result = _refresh_markdown_mentions(result, paths, [doc], root=tmp_path)
+    nodes = {node["id"]: node for node in result["nodes"]}
+    assert {nodes[edge["source"]]["label"] for edge in _mentions(result)} == owners
+    assert len(_mentions(result)) == len(owners)
+    assert all(edge["target"] in nodes for edge in _mentions(result))
+    _assert_private_markers_stripped(result)
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "watch"])
+@pytest.mark.parametrize("relative", [False, True])
+def test_symlink_document_cites_from_selected_location(tmp_path, monkeypatch, mode, relative):
+    root = tmp_path / "repo"
+    external = tmp_path / "external"
+    external.mkdir()
+    _write_files(root, {"src/widget.py": "class Widget:\n    pass\n"})
+    (root / "docs").mkdir()
+    body = ("# Relative\n`../src/widget.py::Widget`\n"
+            "# Selected code alias\n`../src/alias.py::Widget`\n"
+            "# Pinned\n`src/widget.py::Widget`\n"
+            "# Escaped\n`../../src/widget.py::Widget`\n")
+    target = external / "guide.md"
+    target.write_text(body)
+    doc = root / "docs/guide.md"
+    alias = root / "src/alias.py"
+    try:
+        doc.symlink_to(target)
+        alias.symlink_to(root / "src/widget.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.chdir(root)
+    paths = [Path("src/alias.py"), Path("docs/guide.md")]
+    if not relative:
+        paths = [root / path for path in paths]
+    if mode == "cached":
+        extract(paths, source_root=root, cache_root=tmp_path / "cache",
+                parallel=False, quiet=True)
+        result = extract(paths, source_root=root, cache_root=tmp_path / "cache",
+                         parallel=False, quiet=True)
+    else:
+        result = extract(paths, source_root=root, parallel=False,
+                         quiet=True, ambient_output=False)
+    if mode == "watch":
+        from graphify.watch import _refresh_markdown_mentions
+
+        result = _refresh_markdown_mentions(result, paths, [doc], root=root)
+    assert {edge["context"] for edge in _mentions(result)} == {
+        "../src/widget.py::Widget", "../src/alias.py::Widget", "src/widget.py::Widget",
+    }
+    _assert_private_markers_stripped(result)
+
+
+@pytest.mark.parametrize("declaration", [
+    "namespace Acme.Tools { public class Widget { public void Run() {} } }",
+    "namespace Acme.Tools; public class Widget { public void Run() {} }",
+    "namespace Acme { namespace Tools { public class Widget { public void Run() {} } } }",
+])
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+def test_declared_namespace_qualifies_marked_targets(tmp_path, declaration, mode):
+    files = {
+        "src/Widget.cs": declaration,
+        "other/Widget.cs": "namespace Other.Tools { public class Widget {} }",
+        "guide.md": ("# Class\n`Acme.Tools.Widget`\n"
+                     "# Method\n`Acme.Tools.Widget.Run()`\n"
+                     "# Wrong\n`Wrong.Tools.Widget`\n"
+                     "# Ambiguous\n`Widget`\n"),
+    }
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    if mode == "scoped":
+        before = _snapshot(tmp_path)
+        with SourceIO(tmp_path) as inputs:
+            result = extract(paths, source_root=tmp_path, source_io=inputs,
+                             quiet=True, ambient_output=False)
+        assert _snapshot(tmp_path) == before
+    elif mode == "cached":
+        extract(paths, source_root=tmp_path, cache_root=tmp_path / "cache",
+                parallel=False, quiet=True)
+        result = extract(paths, source_root=tmp_path, cache_root=tmp_path / "cache",
+                         parallel=False, quiet=True)
+    else:
+        result = extract(paths, source_root=tmp_path, parallel=False,
+                         quiet=True, ambient_output=False)
+    if mode == "watch":
+        from graphify.watch import _refresh_markdown_mentions
+
+        result = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
+    assert {edge["context"] for edge in _mentions(result)} == {
+        "Acme.Tools.Widget", "Acme.Tools.Widget.Run()",
+    }
+    _assert_private_markers_stripped(result)
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "watch"])
+def test_page_mentions_follow_salted_file_ids(tmp_path, mode):
+    from graphify.ids import make_id
+
+    assert make_id("a.b_guide") == make_id("a_b_guide")
+    files = {"widget.py": "class Widget:\n    pass\n",
+             "a.b/guide.md": "Use `Widget`.\n", "a_b/guide.md": "Use `Widget`.\n"}
+    _write_files(tmp_path, files)
+    paths = [tmp_path / name for name in files]
+    if mode == "cached":
+        extract(paths, source_root=tmp_path, cache_root=tmp_path / "cache",
+                parallel=False, quiet=True)
+        result = extract(paths, source_root=tmp_path, cache_root=tmp_path / "cache",
+                         parallel=False, quiet=True)
+    else:
+        result = extract(paths, source_root=tmp_path, parallel=False,
+                         quiet=True, ambient_output=False)
+    if mode == "watch":
+        from graphify.watch import _refresh_markdown_mentions
+
+        result = _refresh_markdown_mentions(result, paths, paths[1:], root=tmp_path)
+    nodes = {node["id"]: node for node in result["nodes"]}
+    assert len(nodes) == len(result["nodes"])
+    assert len(_mentions(result)) == 2
+    assert {nodes[edge["source"]]["source_file"] for edge in _mentions(result)} == {
+        "a.b/guide.md", "a_b/guide.md",
+    }
+
+
+@pytest.mark.parametrize("namespace", [None, [], {"name": "Acme.Tools"}, 7])
+def test_namespace_evidence_requires_recorded_string(namespace):
+    nodes = [
+        {"id": "guide", "label": "Guide", "file_type": "document"},
+        {"id": "widget", "label": "Widget", "file_type": "code", "_callable": True,
+         "metadata": {"namespace": namespace}},
+    ]
+    per_file = [{"raw_calls": [{"caller_nid": "guide", "callee": "Widget",
+                               "qualifiers": ["Acme", "Tools"], "language": "markdown",
+                               "context": "Acme.Tools.Widget"}]}]
+    edges = []
+    resolve_markdown_mentions(per_file, nodes, edges)
+    assert edges == []
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "watch"])
+def test_shared_document_target_does_not_share_owner_evidence(tmp_path, mode):
+    root = tmp_path / "repo"
+    shared = tmp_path / "shared.md"
+    shared.write_text("# Guide\n`./model.py::Widget` and `redis`.\n")
+    _write_files(root, {"a/model.py": "class Widget:\n    def redis(self):\n        pass\n"})
+    (root / "b").mkdir()
+    docs = [root / "a/guide.md", root / "b/guide.md"]
+    try:
+        for doc in docs:
+            doc.symlink_to(shared)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    paths = [root / "a/model.py", *docs]
+    if mode == "cached":
+        extract(paths, source_root=root, cache_root=tmp_path / "cache",
+                parallel=False, quiet=True)
+        result = extract(paths, source_root=root, cache_root=tmp_path / "cache",
+                         parallel=False, quiet=True)
+    else:
+        result = extract(paths, source_root=root, parallel=False,
+                         quiet=True, ambient_output=False)
+    if mode == "watch":
+        from graphify.watch import _refresh_markdown_mentions
+
+        result = _refresh_markdown_mentions(result, paths, docs, root=root)
+    nodes = {node["id"]: node for node in result["nodes"]}
+    assert {(nodes[edge["source"]]["source_file"], edge["context"])
+            for edge in _mentions(result)} == {
+        ("a/guide.md", "./model.py::Widget"), ("a/guide.md", "redis"),
+    }
