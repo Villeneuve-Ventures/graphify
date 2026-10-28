@@ -966,3 +966,100 @@ def test_inline_html_attributes_do_not_publish_false_references(tmp_path):
     mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
     nodes = {node['id']: node for node in result['nodes']}
     assert [nodes[edge['target']]['label'] for edge in mentions] == ['Visible']
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    ('[manual](https://host/`Hidden`) and `Visible`.\n', ['Visible']),
+    ('[manual](<https://host/`Hidden`>) and `Visible`.\n', ['Visible']),
+    ('[manual](https://host/a(b/`Hidden`)) and `Visible`.\n', ['Visible']),
+    ('[manual](https://host/ "hover `Hidden`") and `Visible`.\n', ['Visible']),
+    ('[manual](\nhttps://host/`Hidden` "hover"\n) and `Visible`.\n', ['Visible']),
+    ('[manual]: https://host/`Hidden`\n\nUse `Visible`.\n', ['Visible']),
+    ('[manual]:\n  https://host/`Hidden`\n  "hover `AlsoHidden`"\n\nUse `Visible`.\n',
+     ['Visible']),
+    ('[`Hidden`]: https://host/\n\nUse `Visible`.\n', ['Visible']),
+    ('<https://host/`Hidden`> and `Visible`.\n', ['Visible']),
+    ('<`Hidden`@example.com> and `Visible`.\n', ['Visible']),
+    ('[`Visible`](https://host/`Hidden`)\n', ['Visible']),
+    ('``[manual](https://host/`Hidden`)`` and `Visible`.\n', ['Visible']),
+    ('Paragraph\n[manual]: https://host/`Visible`\n', ['Visible']),
+    ('[manual](https://host/ `Visible`)\n', ['Visible']),
+    ('manual](https://host/`Visible`)\n', ['Visible']),
+    ('[manual\\](https://host/`Visible`)\n', ['Visible']),
+    ('[outer [inner](https://example)](https://host/`Visible`)\n', ['Visible']),
+    ('[![alt](image.png)](https://host/`Hidden`) and `Visible`.\n', ['Visible']),
+    ('[manual]: https://host/ "hover `Visible`" trailing\n', ['Visible']),
+    ('[manual]("hover `Visible`")\n', ['Visible']),
+    ('[manual]( "hover `Visible`")\n', ['Visible']),
+    ('[manual](<> "hover `Hidden`") and `Visible`.\n', ['Visible']),
+    ('[manual]("`Hidden`") and `Visible`.\n', ['Visible']),
+], ids=['destination', 'angle-destination', 'balanced-destination', 'title',
+        'multiline-link', 'definition', 'multiline-definition', 'definition-label',
+        'uri-autolink', 'email-autolink', 'visible-label', 'literal-code',
+        'definition-in-paragraph', 'invalid-title', 'missing-opener', 'escaped-label-close',
+        'invalid-nested-link', 'image-in-link', 'invalid-definition',
+        'invalid-title-only', 'invalid-spaced-title-only', 'empty-destination-title',
+        'quoted-destination'])
+def test_link_metadata_does_not_create_symbol_mentions(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n' + body)
+    calls = extract_markdown(doc)['raw_calls']
+    assert [call['context'] for call in calls] == expected
+
+
+@pytest.mark.parametrize(('body', 'expected'), [
+    (r'Use \`Widget` literally.', []),
+    (r'Use \\`Widget`.', ['Widget']),
+    (r'Use \\\`Widget` literally.', []),
+    (r'Use \\\\`Widget`.', ['Widget']),
+    (r'\<!-- literal `Widget` -->', ['Widget']),
+    (r'\\<!-- literal `Widget` -->', []),
+    (r'Use \```Widget``.', ['Widget']),
+    (r'Use `not_symbol\` then `Widget`.', ['Widget']),
+    ('Use `Widget`.', ['Widget']),
+], ids=['escaped-tick', 'even-slashes', 'three-slashes', 'four-slashes',
+        'escaped-comment', 'even-comment', 'remaining-run', 'literal-code-backslash',
+        'ordinary-span'])
+def test_mention_openers_honor_prose_escapes(tmp_path, body, expected):
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n' + body + '\n')
+    assert [call['context'] for call in extract_markdown(doc)['raw_calls']] == expected
+
+
+@pytest.mark.parametrize('path', [
+    r'src\widget.py', r'.\src\widget.py', r'..\src\widget.py',
+    r'C:\repo\src\widget.py', r'C:/repo/src/widget.py', r'\\host\share\widget.py',
+])
+def test_native_windows_citation_path_is_classified(path):
+    assert _code_span_mention(path + '::Widget::render()') == (path, ['Widget', 'render'])
+    for invalid in (r'C:\Program Files\widget.py::Widget',
+                    r'http://host/widget.py::Widget', r'src\widget.py::Widget + value'):
+        assert _code_span_mention(invalid) is None
+
+
+@pytest.mark.parametrize('mode', ['fresh', 'warm', 'scoped'])
+def test_scanner_repairs_publish_only_visible_references(tmp_path, mode):
+    from graphify.source_io import SourceIO
+
+    source = tmp_path / 'src' / 'widget.py'
+    source.parent.mkdir()
+    source.write_text('class Hidden:\n    pass\n\nclass Visible:\n    pass\n')
+    doc = tmp_path / 'doc.md'
+    doc.write_text('# Guide\n\n[manual](https://host/`Hidden`)\n'
+                   'Use \\`Hidden` literally.\n\n'
+                   r'Use `src\widget.py::Visible`.' + '\n')
+    kwargs = dict(source_root=tmp_path, parallel=False, quiet=True)
+    if mode == 'scoped':
+        with SourceIO(tmp_path) as inputs:
+            result = extract([source, doc], source_io=inputs, **kwargs)
+    elif mode == 'warm':
+        extract([source, doc], cache_root=tmp_path, **kwargs)
+        result = extract([source, doc], cache_root=tmp_path, **kwargs)
+    else:
+        result = extract([source, doc], ambient_output=False, **kwargs)
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    nodes = {node['id']: node for node in result['nodes']}
+    assert [nodes[edge['target']]['label'] for edge in mentions] == ['Visible']
+    assert mentions[0]['context'] == r'src\widget.py::Visible'
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])

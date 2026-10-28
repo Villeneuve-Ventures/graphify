@@ -485,3 +485,110 @@ def test_shared_document_target_does_not_share_owner_evidence(tmp_path, mode):
             for edge in _mentions(result)} == {
         ("a/guide.md", "./model.py::Widget"), ("a/guide.md", "redis"),
     }
+
+
+def _reference_case(root: Path, files: dict[str, str], mode: str) -> dict:
+    _write_files(root, files)
+    paths = [root / name for name in files]
+    if mode == "scoped":
+        before = _snapshot(root)
+        with SourceIO(root) as inputs:
+            result = extract(paths, source_root=root, source_io=inputs,
+                             parallel=False, quiet=True, ambient_output=False)
+        assert _snapshot(root) == before
+    elif mode == "cached":
+        extract(paths, source_root=root, cache_root=root / "cache", parallel=False, quiet=True)
+        result = extract(paths, source_root=root, cache_root=root / "cache",
+                         parallel=False, quiet=True)
+    else:
+        result = extract(paths, source_root=root, parallel=False,
+                         quiet=True, ambient_output=False)
+    if mode == "watch":
+        from graphify.watch import _refresh_markdown_mentions
+
+        docs = [path for path in paths if path.suffix == ".md"]
+        result = _refresh_markdown_mentions(result, paths, docs, root=root)
+    _assert_private_markers_stripped(result)
+    return result
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+def test_dotted_qualifiers_preserve_path_and_owner_order(tmp_path, mode):
+    valid = ["acme.tools.Widget", "tools.Widget", "Widget.render()",
+             "acme.tools.Widget.render()", "pkg.Worker.run()",
+             "worker.Worker.run()", "pkg.worker.Worker.run()",
+             "repeated.repeated.tools.Repeated"]
+    invalid = ["tools.acme.Widget", "acme.acme.tools.Widget",
+               "Widget.acme.tools.render()", "tools.Widget.acme.render()",
+               "repeated.tools.repeated.Repeated", "Wrong.tools.Widget"]
+    files = {
+        "acme/tools.py": "class Widget:\n    def render(self):\n        pass\n",
+        "pkg/worker.py": "class Worker:\n    def run(self):\n        pass\n",
+        "repeated/repeated/tools.py": "class Repeated:\n    pass\n",
+        "guide.md": "\n\n".join(f"# Case{index}\n`{span}`"
+                                   for index, span in enumerate(valid + invalid)),
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == set(valid)
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+def test_dotted_qualifiers_do_not_splice_namespace_and_path(tmp_path, mode):
+    valid = ["Acme.Tools.Widget", "Acme.Tools.Widget.Run()", "Widget.Run()"]
+    invalid = ["Tools.Acme.Widget", "Acme.Acme.Tools.Widget", "Acme.src.Widget",
+               "Widget.Acme.Tools.Run()", "Tools.Widget", "Widget"]
+    files = {
+        "src/Widget.cs": "namespace Acme.Tools { public class Widget { public void Run() {} } }",
+        "other/Widget.cs": "namespace Other.Tools { public class Widget {} }",
+        "guide.md": "\n\n".join(f"# Case{index}\n`{span}`"
+                                   for index, span in enumerate(valid + invalid)),
+    }
+    result = _reference_case(tmp_path, files, mode)
+    assert {edge["context"] for edge in _mentions(result)} == set(valid)
+
+
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+@pytest.mark.parametrize("explicit_first", [False, True])
+def test_duplicate_mention_retains_strongest_provenance(tmp_path, mode, explicit_first):
+    weak = "Widget.render()"
+    strong = "src/widget.py::Widget::render"
+    spans = [strong, weak] if explicit_first else [weak, strong]
+    files = {
+        "src/widget.py": "class Widget:\n    def render(self):\n        pass\n",
+        "guide.md": "# Guide\n\n" + "\n\n".join(f"`{span}`" for span in spans) + "\n",
+    }
+    result = _reference_case(tmp_path, files, mode)
+    edges = _mentions(result)
+    assert len(edges) == 1
+    assert (edges[0]["confidence"], edges[0]["confidence_score"]) == ("EXTRACTED", 1.0)
+    assert edges[0]["context"] == strong
+    assert edges[0]["source_location"] == ("L3" if explicit_first else "L5")
+
+
+@pytest.mark.parametrize("origin, marker", [("semantic", None), ("ast", None),
+                                             ("semantic", 1), ("ast", 1)])
+def test_stronger_mention_only_promotes_owned_references(origin, marker):
+    nodes = [
+        {"id": "guide", "label": "Guide", "file_type": "document", "source_file": "guide.md"},
+        {"id": "widget", "label": "Widget", "file_type": "code", "source_file": "src/widget.py",
+         "_callable": True, "_callable_class": True},
+        {"id": "render", "label": ".render()", "file_type": "code", "source_file": "src/widget.py",
+         "_callable": True},
+    ]
+    previous = {"source": "guide", "target": "render", "relation": "references",
+                "confidence": "INFERRED", "confidence_score": 0.61, "context": "retained",
+                "source_file": "guide.md", "source_location": "L1", "_origin": origin}
+    if marker is not None:
+        previous["_markdown_mention"] = marker
+    edges = [{"source": "widget", "target": "render", "relation": "method"}, dict(previous)]
+    calls = [{"caller_nid": "guide", "callee": "render", "qualifiers": ["Widget"],
+              "path": "src/widget.py", "language": "markdown",
+              "context": "src/widget.py::Widget::render", "source_file": "guide.md",
+              "source_location": "L7"}]
+    resolve_markdown_mentions([{"raw_calls": calls}], nodes, edges)
+    assert len(edges) == 2
+    if origin == "ast" and marker == 1:
+        assert edges[1] == {**previous, "confidence": "EXTRACTED", "confidence_score": 1.0,
+                            "context": "src/widget.py::Widget::render", "source_location": "L7"}
+    else:
+        assert edges[1] == previous

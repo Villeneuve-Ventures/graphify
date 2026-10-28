@@ -512,6 +512,42 @@ def test_inline_html_fixes_do_not_reuse_epoch_four_mentions(tmp_path, monkeypatc
     assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
 
 
+def test_link_escape_and_native_path_fixes_reject_epoch_five_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / "src" / "widget.py"
+    code.parent.mkdir()
+    code.write_text("class Hidden:\n    pass\n\nclass Visible:\n    pass\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text(
+        '# Guide\n\n[manual](https://host/`Hidden`)\n\n'
+        'Use \\`Hidden` literally.\n\nUse `src\\widget.py::Visible`.\n'
+    )
+    old = extract_markdown(doc)
+    owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
+    # Epoch 5 parsed hidden URL/escaped ticks and omitted the native-path cite.
+    old["raw_calls"] = [{
+        "caller_nid": owner, "callee": "Hidden", "language": "markdown",
+        "context": "Hidden", "source_file": str(doc), "source_location": "L3",
+    }]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, "_AST_CACHE_FORMAT", 5)
+        save_cached(doc, old, root=tmp_path)
+    semantic = {"nodes": [{"id": "retained_semantic"}], "edges": []}
+    save_cached(doc, semantic, root=tmp_path, kind="semantic")
+
+    assert load_cached(doc, root=tmp_path) is None
+    result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                     parallel=False, quiet=True)
+    assert {edge["context"] for edge in result["edges"]
+            if edge.get("_markdown_mention")} == {"src\\widget.py::Visible"}
+    assert all("_callable" not in node and "_callable_class" not in node
+               for node in result["nodes"])
+    assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
+
+
 def test_semantic_namespaces_survive_ast_format_change(tmp_path, monkeypatch):
     import graphify.cache as cache_mod
 

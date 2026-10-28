@@ -26,9 +26,10 @@ to the code node that defines it:
   indirect-call pass gives (#1566): a by-name match must land on a real
   function, method or class, never on a same-named data symbol such as a
   JSON key. A dotted mention (``pkg.Widget``, ``Widget.render``) keeps its
-  qualifiers, and a candidate survives only when every qualifier is a label
-  on its ``contains`` / ``method`` owner chain, in its declared namespace, or
-  in its corpus-relative source path: ``time.sleep`` never lands on a repo's own ``sleep``, and
+  qualifiers, and a candidate survives only when they match an ordered suffix
+  of its owner chain, declared namespace, or corpus-relative module/package
+  path, optionally followed by its owners. ``time.sleep`` never lands on a
+  repo's own ``sleep``, and
   ``Widget.render`` picks the ``render`` that ``Widget`` owns. No other
   tie-breaking: an ambiguous name is a guess, and a guess is not an edge.
   A bare, parenthesis-less method name is held to one more test: a word like
@@ -109,39 +110,47 @@ def _match_cited_file(cited: str, doc_file: str, source_files: set[str], *,
 
 
 def _evidence(node_id: str, nodes_by_id: dict[str, dict[str, Any]],
-              parents: dict[str, set[str]], *, source_path: str) -> set[str]:
-    """Labels a dotted mention may qualify ``node_id`` with.
+              parents: dict[str, set[str]], *, source_path: str) -> set[tuple[str, ...]]:
+    """Coherent ordered qualifier sequences for ``node_id``.
 
-    The labels of every node on its ``contains`` / ``method`` owner chain
-    (``Widget`` for ``Widget.render``) plus each segment and stem of its
-    corpus-relative source path and recorded declaration namespace.
-    Host ancestors and the checkout directory are not symbol evidence.
+    Keep each actual owner chain, declared namespace and admitted module or
+    package path separate. A namespace can prefix its declaration's owners;
+    a module/package path can prefix an owner chain. Their unrelated segments
+    cannot be spliced together, reordered or repeated to license a citation.
     """
-    evidence: set[str] = set()
-    frontier = {node_id}
-    seen: set[str] = set()
+    evidence: set[tuple[str, ...]] = set()
+    owner_chains: set[tuple[str, ...]] = {()}
+    frontier: list[tuple[str, tuple[str, ...], frozenset[str]]] = [(node_id, (), frozenset())]
     while frontier:
-        nid = frontier.pop()
+        nid, chain, seen = frontier.pop()
         if nid in seen:
             continue
-        seen.add(nid)
+        seen = seen | {nid}
+        if chain:
+            owner_chains.add(chain)
+            evidence.add(chain)
         declaration = nodes_by_id.get(nid, {})
         metadata = declaration.get("metadata")
         if (declaration.get("file_type") == "code" and declaration.get("_callable")
                 and isinstance(metadata, dict)):
             namespace = metadata.get("namespace")
             if isinstance(namespace, str):
-                evidence.update(segment for segment in namespace.split(".") if segment)
-        owners = parents.get(nid, set())
-        for owner in owners:
+                segments = tuple(segment for segment in namespace.split(".") if segment)
+                if segments:
+                    evidence.add(segments)
+                    evidence.add(segments + chain)
+        for owner in parents.get(nid, ()):
             node = nodes_by_id.get(owner)
-            if node is not None:
-                evidence.add(_symbol_label(node))
-        frontier |= owners
-    for segment in source_path.split("/"):
-        if segment:
-            evidence.add(segment)
-            evidence.add(os.path.splitext(segment)[0])
+            if node is not None and not _is_file_node(node):
+                label = _symbol_label(node)
+                if label:
+                    frontier.append((owner, (label,) + chain, seen))
+    if source_path:
+        parts = source_path.split("/")
+        module = (*parts[:-1], os.path.splitext(parts[-1])[0])
+        for prefix in (module, module[:-1]):
+            if prefix:
+                evidence.update(prefix + chain for chain in owner_chains)
     return evidence
 
 
@@ -249,6 +258,11 @@ def resolve_markdown_mentions(
         (e.get("source"), e.get("target"))
         for e in all_edges if e.get("relation") == "references"
     }
+    mention_edges = {
+        (e.get("source"), e.get("target")): e for e in all_edges
+        if e.get("relation") == "references" and e.get("_markdown_mention") == 1
+        and e.get("_origin") in (None, "ast")
+    }
 
     def _resolve_chain(file_labels: dict[str, list[str]], names: list[str]) -> str | None:
         candidates = list(file_labels.get(names[-1], []))
@@ -281,11 +295,13 @@ def resolve_markdown_mentions(
             return None, "INFERRED", 0.95
         if len(names) == 1 and callee in _LANGUAGE_BUILTIN_GLOBALS:
             return None, "INFERRED", 0.95
-        qualifiers = set(names[:-1])
+        qualifiers = tuple(names[:-1])
         candidates = [
             c for c in by_label.get(callee, [])
-            if qualifiers <= _evidence(c, nodes_by_id, parents,
-                                       source_path=_qualifier_path(nodes_by_id[c]))
+            if not qualifiers or any(sequence[-len(qualifiers):] == qualifiers
+                                     for sequence in _evidence(
+                                         c, nodes_by_id, parents,
+                                         source_path=_qualifier_path(nodes_by_id[c])))
         ]
         return (candidates[0] if len(candidates) == 1 else None), "INFERRED", 0.95
 
@@ -305,25 +321,32 @@ def resolve_markdown_mentions(
         if target is None or target == caller:
             return
         doc = _document_origin(rc.get("source_file", ""))
+        provenance = {
+            "context": rc.get("context", ""), "confidence": confidence,
+            "confidence_score": score, "source_file": rc.get("source_file", ""),
+            "source_location": rc.get("source_location"),
+        }
         if (caller, target) in existing:
+            previous = mention_edges.get((caller, target))
+            if (previous is not None and confidence == "EXTRACTED"
+                    and previous.get("confidence") == "INFERRED"):
+                previous.update(provenance)
             # The edge is already in the graph, but this document still CITES that
             # target, so it stays on record as owner evidence for a later method
             # mention in the same document (#4609 review finding).
             cited_targets.setdefault(doc, set()).add(target)
             return
         existing.add((caller, target))
-        all_edges.append({
+        edge = {
             "source": caller,
             "target": target,
             "relation": "references",
             "_markdown_mention": 1,
-            "context": rc.get("context", ""),
-            "confidence": confidence,
-            "confidence_score": score,
-            "source_file": rc.get("source_file", ""),
-            "source_location": rc.get("source_location"),
+            **provenance,
             "weight": 1.0,
-        })
+        }
+        all_edges.append(edge)
+        mention_edges[(caller, target)] = edge
         cited_targets.setdefault(doc, set()).add(target)
 
     # Pass 1: explicit evidence resolves on its own — a cited path, a dotted

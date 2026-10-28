@@ -4,6 +4,7 @@ from graphify.source_io import source_read_text
 
 import re
 import os
+import string
 
 from pathlib import Path
 from graphify.extractors.base import _file_stem, _make_id
@@ -22,7 +23,15 @@ _MD_MENTION_LIST_RE = re.compile(r'^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)')
 _MD_MENTION_QUOTE_RE = re.compile(r'^ {0,3}>[ \t]?')
 _MD_MENTION_BREAK_RE = re.compile(
     r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|<!--|'
-    r'(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$|\[[^\]]+\]:)'
+    r'(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$)'
+)
+_MD_MENTION_REFERENCE_RE = re.compile(r'^ {0,3}\[((?:\\.|[^\[\]\\]){1,999})\]:')
+_MD_MENTION_WHITESPACE_RE = re.compile(r'[ \t]*(?:\n[ \t]*)?')
+_MD_MENTION_AUTOLINK_RE = re.compile(
+    r'<(?:[A-Za-z][A-Za-z0-9+.\-]{1,31}:[^\x00-\x20\x7f<>]*|'
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~\-]+@"
+    r'[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?'
+    r'(?:\.[A-Za-z0-9](?:[A-Za-z0-9\-]{0,61}[A-Za-z0-9])?)*)>'
 )
 _MD_MENTION_RAW_HTML_START_RE = re.compile(r'^<(?:pre|script|style|textarea)(?:[ \t>]|$)', re.I)
 _MD_MENTION_RAW_HTML_END_RE = re.compile(r'</(?:pre|script|style|textarea)>', re.I)
@@ -45,7 +54,7 @@ _MD_MENTION_INLINE_HTML_TAG_RE = re.compile(_MD_MENTION_HTML_TAG)
 _MD_MENTION_HTML_BLANK_END_RE = re.compile(r'^[ \t]*$')
 _MD_MENTION_SYMBOL = r'[A-Za-z_$][\w$]*[!?]?'
 _MD_PATH_MENTION_RE = re.compile(
-    r'^([A-Za-z0-9_./\-]+\.[A-Za-z0-9]+)::('
+    r'^((?:[A-Za-z]:)?[A-Za-z0-9_./\\\-]+\.[A-Za-z0-9]+)::('
     + _MD_MENTION_SYMBOL + r'(?:::' + _MD_MENTION_SYMBOL + r')*)(?:\(\))?$'
 )
 _MD_BARE_MENTION_RE = re.compile(
@@ -200,6 +209,125 @@ def _mention_html_tag_end(lines: list[str], index: int, start: int,
     return None
 
 
+def _mention_prose_text(lines: list[str], index: int, first_line: str,
+                        containers: tuple[tuple[str, int], ...], *, multiline: bool = True) -> str:
+    """Logical lines available to one inline construct, bounded by its prose block."""
+    parts = [first_line]
+    if multiline:
+        for raw in lines[index + 1:]:
+            line, continued, _ = _mention_container_content(raw, containers, extend=False)
+            if (not line.strip() or continued != containers
+                    or _MD_MENTION_FENCE_RE.match(line) or _MD_MENTION_LIST_RE.match(line)
+                    or _MD_MENTION_BREAK_RE.match(line)
+                    or _mention_html_block_end(line, paragraph=True) is not None):
+                break
+            parts.append(line)
+    return '\n'.join(parts)
+
+
+def _mention_text_position(text: str, end: int, index: int) -> tuple[int, int]:
+    prefix = text[:end]
+    return index + prefix.count('\n'), len(prefix.rsplit('\n', 1)[-1])
+
+
+def _mention_whitespace_end(text: str, start: int) -> int:
+    match = _MD_MENTION_WHITESPACE_RE.match(text, start)
+    return match.end() if match is not None else start
+
+
+def _mention_destination_end(text: str, start: int) -> int | None:
+    """Parse a link destination without interpreting its contents as Markdown."""
+    position = start
+    angle = text.startswith('<', position)
+    if angle:
+        position += 1
+    depth = 0
+    while position < len(text):
+        character = text[position]
+        if (character == '\\' and position + 1 < len(text)
+                and text[position + 1] in string.punctuation):
+            position += 2
+            continue
+        if angle:
+            if character == '>':
+                return position + 1
+            if character in {'<', '\n'}:
+                return None
+        else:
+            if character == ' ' or ord(character) < 32 or ord(character) == 127:
+                break
+            if character == '(':
+                depth += 1
+            elif character == ')':
+                if not depth:
+                    break
+                depth -= 1
+        position += 1
+    return position if not angle and not depth and position > start else None
+
+
+def _mention_title_end(text: str, start: int) -> int | None:
+    if start >= len(text) or text[start] not in {'"', "'", '('}:
+        return None
+    closing = ')' if text[start] == '(' else text[start]
+    position = start + 1
+    while position < len(text):
+        character = text[position]
+        if (character == '\\' and position + 1 < len(text)
+                and text[position + 1] in string.punctuation):
+            position += 2
+            continue
+        if character == closing:
+            return position + 1
+        if text[start] == '(' and character == '(':
+            return None
+        position += 1
+    return None
+
+
+def _mention_inline_destination_end(text: str, start: int) -> int | None:
+    position = _mention_whitespace_end(text, start)
+    if position < len(text) and text[position] == ')':
+        return position + 1
+    end = _mention_destination_end(text, position)
+    if end is not None:
+        after = _mention_whitespace_end(text, end)
+        if after > end:
+            title = _mention_title_end(text, after)
+            if title is not None:
+                after = _mention_whitespace_end(text, title)
+        if after < len(text) and text[after] == ')':
+            return after + 1
+    return None
+
+
+def _mention_reference_end(text: str) -> int | None:
+    reference = _MD_MENTION_REFERENCE_RE.match(text)
+    if reference is None or not reference.group(1).strip():
+        return None
+    start = _mention_whitespace_end(text, reference.end())
+    end = _mention_destination_end(text, start)
+    if end is None:
+        return None
+    same_line = end
+    while same_line < len(text) and text[same_line] in ' \t':
+        same_line += 1
+    if same_line == len(text):
+        return same_line
+    title_start = _mention_whitespace_end(text, end)
+    if title_start > end:
+        title = _mention_title_end(text, title_start)
+        if title is not None:
+            after = title
+            while after < len(text) and text[after] in ' \t':
+                after += 1
+            if after == len(text) or text[after] == '\n':
+                return after
+    # A failed title on the next line belongs to the following prose. A
+    # trailing non-title on the destination's own line invalidates the definition.
+    return same_line if text[same_line] == '\n' else None
+
+
 def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                            file_nid: str):
     """Scan new citations independently of the legacy heading/link output.
@@ -213,6 +341,7 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
     html_block: tuple[re.Pattern[str], tuple[tuple[str, int], ...]] | None = None
     in_comment = False
     paragraph = False
+    brackets: list[tuple[bool, bool]] = []  # (image, active link opener)
     owner = file_nid
     while index < len(lines):
         raw_line = lines[index]
@@ -242,6 +371,7 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
         line, current_containers, added = _mention_container_content(raw_line, containers)
         if current_containers != containers or added:
             paragraph = False
+            brackets.clear()
         containers = current_containers
         fence_match = _MD_MENTION_FENCE_RE.match(line)
 
@@ -249,28 +379,42 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
         if not in_comment:
             if not line.strip():
                 paragraph = False
+                brackets.clear()
                 index += 1
                 continue
             indent = len(line) - len(line.lstrip(' '))
             # An indented line cannot interrupt a paragraph. List content has
             # its own indentation baseline, including after a blank line.
             if indent >= 4 and not paragraph:
+                brackets.clear()
                 index += 1
                 continue
             if (fence_match and (fence_match.group(1)[0] != '`'
                                  or '`' not in fence_match.group(2))):
                 fence = (fence_match.group(1)[0], len(fence_match.group(1)), containers)
                 paragraph = False
+                brackets.clear()
                 index += 1
                 continue
             if html_end := _mention_html_block_end(line, paragraph):
                 if not html_end.search(line):
                     html_block = (html_end, containers)
                 paragraph = False
+                brackets.clear()
                 index += 1
                 continue
+            if not paragraph and re.match(r'^ {0,3}\[', line):
+                text = _mention_prose_text(lines, index, line, containers)
+                reference_end = _mention_reference_end(text)
+                if reference_end is not None:
+                    index, _ = _mention_text_position(text, reference_end, index)
+                    index += 1
+                    brackets.clear()
+                    continue
             owner = heading_owners.get(index, owner)
             block_line = bool(_MD_MENTION_BREAK_RE.match(line))
+            if block_line:
+                brackets.clear()
             paragraph = not block_line
 
         position = 0
@@ -282,17 +426,48 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
                 in_comment = False
                 position = end + 3
                 continue
-            token = re.search(r'<!--|<|`+', line[position:])
+            token = re.search(r'\\|<!--|<|!?\[|\]|`+', line[position:])
             if token is None:
                 if line[position:].strip() and not block_line:
                     paragraph = True
                 break
             start = position + token.start()
+            if token.group() == '\\':
+                position = start + 1
+                if position < len(line) and line[position] in string.punctuation:
+                    position += 1
+                continue
+            if token.group() in {'[', '!['}:
+                brackets.append((token.group() == '![', True))
+                position = start + len(token.group())
+                continue
+            if token.group() == ']':
+                opener = brackets.pop() if brackets else None
+                position = start + 1
+                if opener is not None and opener[1] and line[position:position + 1] == '(':
+                    text = _mention_prose_text(lines, index, line, containers,
+                                               multiline=not block_line)
+                    link_end = _mention_inline_destination_end(text, position + 1)
+                    if link_end is not None:
+                        if not opener[0]:
+                            brackets = [(image, active and image) for image, active in brackets]
+                        end_index, end_position = _mention_text_position(text, link_end, index)
+                        if end_index != index:
+                            line = _mention_container_content(lines[end_index], containers,
+                                                              extend=False)[0]
+                        index = end_index
+                        position = end_position
+                continue
             if token.group() == '<!--':
                 in_comment = True
                 position = start + 4
                 continue
             if token.group() == '<':
+                autolink = _MD_MENTION_AUTOLINK_RE.match(line, start)
+                if autolink is not None:
+                    position = autolink.end()
+                    brackets = [(image, active and image) for image, active in brackets]
+                    continue
                 end = _mention_html_tag_end(lines, index, start, not block_line, line, containers)
                 if end is None:
                     position = start + 1
@@ -325,6 +500,7 @@ def _markdown_mention_spans(lines: list[str], heading_owners: dict[int, str],
             position = end_position + width
         if block_line:
             paragraph = False
+            brackets.clear()
         index += 1
 
 def _resolve_markdown_link(raw: str, source_dir: Path) -> "Path | None":

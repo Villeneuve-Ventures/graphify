@@ -40,8 +40,8 @@ except Exception:
 
 # Markdown mentions and class markers require new per-file payload evidence even
 # when a checkout keeps the same distribution version. Epoch 1 was unformatted;
-# epochs 3 through 5 invalidate successive Markdown block, symbol and HTML fixes.
-_AST_CACHE_FORMAT = 5
+# epochs 3 through 6 invalidate Markdown block, symbol, HTML and inline-token fixes.
+_AST_CACHE_FORMAT = 6
 
 # Namespaces already swept this process — cleanup runs once per namespace.
 _cleaned_ast_dirs: set[str] = set()
