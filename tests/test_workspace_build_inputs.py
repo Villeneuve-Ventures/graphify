@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import patch
 
-from graphify.workspace.contracts import ContractError
+from graphify.workspace.contracts import ContractError, canonical_sha256
 from tools.workspace_artifacts import candidate
 from tests import test_workspace_fixture_inputs as fixtures
 
@@ -17,6 +17,27 @@ class BuildInputTests(unittest.TestCase):
         wheel = self.fixture.wheel()
         (self.fixture.repo / 'graphify/py.typed').write_bytes(b'')
         with self.assertRaises(ContractError):
+            self.fixture.build(wheel)
+        self.assertFalse(self.fixture.output.exists())
+
+    def test_markdown_resolver_bytes_change_identity_and_refuse_stale_wheel(self):
+        helper = self.fixture.repo / 'graphify/markdown_resolution.py'
+        helper.write_bytes(b'# markdown reference resolver version one\n')
+        before = candidate.package_members(self.fixture.repo, config=self.fixture.config)
+        self.assertIn('graphify/markdown_resolution.py', before)
+        wheel = self.fixture.wheel()
+
+        # Hold every other source byte fixed: an added helper must remain part
+        # of the candidate identity, rather than escaping an older fixed list.
+        helper.write_bytes(b'# markdown reference resolver version two\n')
+        after = candidate.package_members(self.fixture.repo, config=self.fixture.config)
+        self.assertEqual(set(before), set(after))
+        self.assertEqual(
+            {name for name in before if before[name] != after[name]},
+            {'graphify/markdown_resolution.py'},
+        )
+        self.assertNotEqual(canonical_sha256(before), canonical_sha256(after))
+        with self.assertRaisesRegex(ContractError, 'wheel does not match the complete candidate package'):
             self.fixture.build(wheel)
         self.assertFalse(self.fixture.output.exists())
 

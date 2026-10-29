@@ -74,6 +74,33 @@ def test_emits_indirect_call_edges_and_keeps_calls_precise(tmp_path):
         assert e["context"] == "argument" and e["confidence"] == "INFERRED"
 
 
+def test_raw_class_marker_comes_from_definitions_not_labels(tmp_path):
+    from graphify.extract import extract_ruby
+
+    python = tmp_path / "types.py"
+    python.write_text(
+        "from external import Missing\n\n"
+        "class Widget(Missing):\n"
+        "    def render(self):\n"
+        "        pass\n\n"
+        "def helper():\n"
+        "    pass\n"
+    )
+    result = extract_python(python)
+    by_label = {node["label"]: node for node in result["nodes"]}
+    assert by_label["Widget"].get("_callable_class") is True
+    assert by_label["Widget"].get("_callable") is True
+    assert not by_label["helper()"].get("_callable_class")
+    assert not by_label[".render()"].get("_callable_class")
+    assert not by_label["Missing"].get("_callable_class")
+
+    ruby = tmp_path / "types.rb"
+    ruby.write_text("Widget = Struct.new(:name)\n")
+    result = extract_ruby(ruby)
+    widget = next(node for node in result["nodes"] if node["label"] == "Widget")
+    assert widget.get("_callable_class") is True
+
+
 def test_affected_includes_indirect_callers(tmp_path):
     r, nid = _build(tmp_path)
     g = nx.DiGraph()

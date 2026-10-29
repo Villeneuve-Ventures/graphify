@@ -24,6 +24,7 @@ from .resolver_registry import (
 )
 from .ruby_resolution import resolve_ruby_member_calls
 from .pascal_resolution import resolve_pascal_inherited_calls
+from .markdown_resolution import MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions
 
 # --- migrated to graphify/extractors/ (see graphify/extractors/MIGRATION.md) ---
 from graphify.extractors.base import (  # noqa: F401
@@ -2888,12 +2889,16 @@ register_language_resolver(
         resolve_pascal_inherited_calls,
     )
 )
+register_language_resolver(
+    LanguageResolver("markdown_mentions", MARKDOWN_MENTION_SUFFIXES, resolve_markdown_mentions)
+)
 
 
 _SCOPED_RESOLVERS = frozenset({
     _resolve_swift_member_calls, _resolve_python_member_calls, resolve_ruby_member_calls,
     _resolve_typescript_member_calls, _resolve_cpp_member_calls, _resolve_objc_member_calls,
     _resolve_csharp_member_calls, _resolve_java_member_calls, resolve_pascal_inherited_calls,
+    resolve_markdown_mentions,
 })
 
 
@@ -4160,6 +4165,19 @@ def _safe_extract_with_xaml_root(extractor, path: Path, root: Path, *, strict: b
         _XAML_ACTIVE_EXTRACT_ROOT = previous_root
 
 
+def _cached_markdown_matches_source(path: Path, cached: dict) -> bool:
+    """Keep path-dependent Markdown fragments owned by the selected input."""
+    if path.suffix.lower() not in MARKDOWN_MENTION_SUFFIXES:
+        return True
+    selected_origin = os.path.abspath(path)
+    return not any(
+        item.get("source_file")
+        and os.path.abspath(str(item["source_file"])) != selected_origin
+        for bucket in ("nodes", "edges", "raw_calls")
+        for item in cached.get(bucket, []) if isinstance(item, dict)
+    )
+
+
 def _extract_single_file(args: tuple) -> tuple[int, dict]:
     """Worker function for parallel extraction. Runs in a subprocess.
 
@@ -4192,7 +4210,7 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     # Check cache first (avoid re-extraction)
     if not bypass_cache:
         cached = load_cached(path, root, cache_root=cache_location)
-        if cached is not None:
+        if cached is not None and _cached_markdown_matches_source(path, cached):
             return idx, cached
 
     extractor = _get_extractor(path, strict=strict)
@@ -4471,6 +4489,7 @@ def _extract_impl(
     report_outcomes: bool = False,
     use_cache: bool = True,
     input_outcomes: list[dict] | None = None,
+    _markdown_context_only: bool = False,
 ) -> dict:
     """Extract AST nodes and edges from a list of code files.
 
@@ -4523,6 +4542,7 @@ def _extract_impl(
         root = cache_root
     if source_root is not None:
         root = source_root
+    logical_root = Path(os.path.abspath(root))
     root = source_resolve(root)
 
     # #1774: the cache is an OUTPUT, so when no explicit cache_root is given it is
@@ -4549,7 +4569,7 @@ def _extract_impl(
         bypass_cache = strict or not use_cache or path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         if not bypass_cache:
             cached = load_cached(path, root, cache_root=cache_location)
-            if cached is not None:
+            if cached is not None and _cached_markdown_matches_source(path, cached):
                 per_file[i] = cached
                 continue
         uncached_work.append((i, path))
@@ -4581,10 +4601,11 @@ def _extract_impl(
                       or not isinstance(result.get("edges"), list) for result in per_file):
         raise RuntimeError("AST extraction incomplete: missing or failed source result")
 
-    # Fill any remaining None slots (shouldn't happen, but defensive)
+    # Keep failed workers distinct from successful empty extraction so resolvers
+    # cannot infer uniqueness from an incomplete selected corpus.
     for i in range(total):
         if per_file[i] is None:
-            per_file[i] = {"nodes": [], "edges": []}
+            per_file[i] = {"nodes": [], "edges": [], "error": "missing extraction result"}
 
     # #1666: surface any source file an extractor accepted but that produced zero
     # nodes (not even a file node). Such a file is silently absent from the graph,
@@ -4666,6 +4687,23 @@ def _extract_impl(
         all_nodes.extend(result.get("nodes", []))
         all_edges.extend(result.get("edges", []))
         all_raw_calls.extend(result.get("raw_calls", []))
+    if any(path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES for path in paths):
+        for path, result in zip(paths, per_file):
+            if result is not None:
+                source = source_resolve(path)
+                selected = Path(os.path.abspath(path))
+                result["_markdown_source_origin"] = str(selected)
+                if selected.is_relative_to(logical_root):
+                    relative_source = selected.relative_to(logical_root).as_posix()
+                else:
+                    # Resolve an aliased checkout directory while retaining the
+                    # selected leaf name when that file is itself a symlink.
+                    selected = source_resolve(path.parent) / path.name
+                    relative_source = (selected.relative_to(root).as_posix()
+                                       if selected.is_relative_to(root) else "")
+                result["_markdown_source_file"] = str(source)
+                result["_markdown_source_alias"] = str(path)
+                result["_markdown_source_relative"] = relative_source
     # Function / method / class def ids for the cross-file indirect_call callable
     # guard. Built from the `_callable` node marker AFTER the id-remap / disambiguation
     # passes below (which rewrite node ids), so it can never go stale — see the
@@ -4739,6 +4777,9 @@ def _extract_impl(
                 e["source"] = id_remap[e["source"]]
             if e.get("target") in id_remap:
                 e["target"] = id_remap[e["target"]]
+        for rc in all_raw_calls:
+            if rc.get("caller_nid") in id_remap:
+                rc["caller_nid"] = id_remap[rc["caller_nid"]]
     if prefix_remap:
         sym_remap: dict[str, str] = {}
         for n in all_nodes:
@@ -4960,6 +5001,8 @@ def _extract_impl(
     _JS_TS_CALL_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
     for rc in all_raw_calls:
         callee = rc.get("callee", "")
+        if rc.get("language") == "markdown":
+            continue
         if not callee:
             continue
         if callee in _LANGUAGE_BUILTIN_GLOBALS:
@@ -5127,8 +5170,26 @@ def _extract_impl(
     # receiver-typed/qualified calls the shared pass skipped) with its own
     # single-definition god-node guard. Registered in graphify.resolver_registry so
     # a new language plugs in without editing this body (#1356 Swift, #1446 Python).
-    run_language_resolvers(paths, per_file, all_nodes, all_edges, strict=strict,
+    # Dispatch accepts mixed-case Markdown suffixes. Normalize only this new
+    # resolver's activation paths, keeping other language gates unchanged.
+    resolver_paths = [path.with_suffix(path.suffix.lower())
+                      if path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES else path
+                      for path in paths]
+    run_language_resolvers(resolver_paths, per_file, all_nodes, all_edges, strict=strict,
                            scoped_resolvers=_SCOPED_RESOLVERS)
+
+    if _markdown_context_only:
+        # Scratch evidence stays in memory. Ordinary results below retain v8's
+        # private-marker stripping and never publish the unresolved mentions.
+        return {"nodes": all_nodes, "edges": all_edges,
+                "raw_calls": [call for call in all_raw_calls
+                              if call.get("language") == "markdown"],
+                "outcomes": outcomes,
+                "source_files": [str(source_resolve(path)) for path in paths],
+                "source_relative_paths": [result.get("_markdown_source_relative", "")
+                                          if result is not None else "" for result in per_file],
+                "source_origins": [result.get("_markdown_source_origin", "")
+                                   if result is not None else "" for result in per_file]}
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash
@@ -5192,6 +5253,7 @@ def _extract_impl(
     for n in all_nodes:
         n.pop("origin_file", None)
         n.pop("_callable", None)  # internal indirect_call marker — never ships to graph.json
+        n.pop("_callable_class", None)
 
     # Tag AST provenance so the incremental watch rebuild can distinguish
     # AST-extracted nodes from semantic/LLM nodes. On a full re-extraction
@@ -5212,6 +5274,74 @@ def _extract_impl(
         "output_tokens": 0,
         **({"outcomes": outcomes} if report_outcomes else {}),
     }
+
+
+def _extract_markdown_context(paths: list[Path], *, root: Path) -> dict:
+    """Capture fresh scratch evidence without publishing internal type markers.
+
+    This ordinary-watch helper bypasses caches, including their stat fast path.
+    Source observations bracket extraction; scoped/certified extraction uses
+    its existing complete-input path instead of borrowing external context.
+    Initially unavailable inputs supply no citation evidence. A later change
+    to observed bytes or availability still rejects the context.
+    """
+    scope = current_source_io()
+    if scope is not None:
+        scope.refuse("ordinary Markdown context cannot enter scoped extraction")
+
+    def observe() -> tuple[dict, dict[str, str]]:
+        observed = {}
+        failures = {}
+        for path in paths:
+            try:
+                info = path.stat()
+                payload = source_read_bytes(path)
+                after = path.stat()
+            except OSError as exc:
+                observed[str(path)] = None
+                failures[str(path)] = f"{type(exc).__name__}: {exc}"
+                continue
+            identity = (info.st_dev, info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)
+            if identity != (after.st_dev, after.st_ino, after.st_size,
+                            after.st_mtime_ns, after.st_ctime_ns):
+                raise RuntimeError(f"Markdown context source changed: {path}")
+            observed[str(path)] = (*identity, hashlib.sha256(payload).hexdigest())
+        return observed, failures
+
+    before, failures = observe()
+    result = _extract_impl(paths, root, source_root=root, use_cache=False,
+                           _markdown_context_only=True)
+    if failures:
+        # Extraction may read text even when the observation read failed.
+        # Such nodes and callers have no byte-bound evidence and cannot license
+        # even an explicit citation. Keep every selected source in the metadata
+        # arrays so failed inputs still participate in cited-file ambiguity.
+        unavailable = {
+            os.path.abspath(alias)
+            for index, path in enumerate(paths) if str(path) in failures
+            for alias in (path, result["source_files"][index], result["source_origins"][index])
+            if alias
+        }
+        for field in ("nodes", "raw_calls"):
+            result[field] = [item for item in result[field]
+                             if os.path.abspath(item.get("source_file", "")) not in unavailable]
+        node_ids = {node["id"] for node in result["nodes"]}
+        result["edges"] = [edge for edge in result["edges"]
+                           if edge.get("source") in node_ids and edge.get("target") in node_ids]
+        for item in result["outcomes"]:
+            if item["path"] in failures:
+                item.update(status="failed_observation", detail=failures[item["path"]])
+
+    def validate_inputs() -> None:
+        current, _failures = observe()
+        if current != before:
+            raise RuntimeError("Markdown context inputs changed during extraction")
+
+    validate_inputs()
+    result["observations"] = before
+    result["validate_inputs"] = validate_inputs
+    return result
 
 
 def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | None = None) -> list[Path]:

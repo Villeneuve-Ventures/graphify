@@ -396,6 +396,177 @@ def test_semantic_cache_survives_version_bump(tmp_path, monkeypatch):
     )
 
 
+def test_ast_cache_format_change_invalidates_same_package_version(tmp_path, monkeypatch):
+    """Unchanged source and package versions cannot admit older AST payload shapes."""
+    import graphify.cache as cache_mod
+
+    source = tmp_path / "doc.md"
+    source.write_text("# Guide\n\nUse `Widget`.\n")
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 1, raising=False)
+    save_cached(source, {"nodes": [{"id": "old"}], "edges": []}, root=tmp_path)
+    old_dir = cache_dir(tmp_path)
+
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 2, raising=False)
+    assert load_cached(source, root=tmp_path) is None
+    assert cache_dir(tmp_path) != old_dir
+    payload = {"nodes": [{"id": "new"}], "edges": [], "raw_calls": []}
+    save_cached(source, payload, root=tmp_path)
+    assert load_cached(source, root=tmp_path) == payload
+
+
+def test_same_version_ast_cache_without_format_epoch_is_not_served(tmp_path):
+    import graphify.cache as cache_mod
+
+    source = tmp_path / "mod.py"
+    source.write_text("class Widget:\n    pass\n")
+    legacy = tmp_path / cache_mod._GRAPHIFY_OUT / "cache" / "ast" / f"v{cache_mod._EXTRACTOR_VERSION}"
+    legacy.mkdir(parents=True)
+    (legacy / f"{file_hash(source, tmp_path)}.json").write_text(
+        '{"nodes":[{"id":"legacy"}],"edges":[]}'
+    )
+
+    assert load_cached(source, root=tmp_path) is None
+
+
+def test_markdown_scanner_fixes_do_not_reuse_epoch_two_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / "widget.py"
+    code.write_text("class Hidden:\n    pass\n\nclass Visible:\n    pass\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text("# Guide\n\n<!-- obsolete: `Hidden` -->\n\nUse `\nVisible\n` now.\n")
+    old = extract_markdown(doc)
+    owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
+    # Epoch 2 scanned the hidden symbol and missed the wrapped visible span.
+    old["raw_calls"] = [{
+        "caller_nid": owner, "callee": "Hidden", "language": "markdown",
+        "context": "Hidden", "source_file": str(doc), "source_location": "L3",
+    }]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, "_AST_CACHE_FORMAT", 2)
+        save_cached(doc, old, root=tmp_path)
+
+    semantic = {"nodes": [{"id": "retained_semantic"}], "edges": []}
+    save_cached(doc, semantic, root=tmp_path, kind="semantic")
+    result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                     parallel=False, quiet=True)
+    assert {edge["context"] for edge in result["edges"]
+            if edge.get("_markdown_mention")} == {"Visible"}
+    assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
+
+
+def test_markdown_block_and_symbol_fixes_do_not_reuse_epoch_three(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / "widget.js"
+    code.write_text("function Hidden() {}\nfunction stream$() {}\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text("# Guide\n\n<script>const api = `Hidden`;</script>\n\nUse `stream$()`.\n")
+    old = extract_markdown(doc)
+    owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
+    old["raw_calls"] = [{
+        "caller_nid": owner, "callee": "Hidden", "language": "markdown",
+        "context": "Hidden", "source_file": str(doc), "source_location": "L3",
+    }]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, "_AST_CACHE_FORMAT", 3)
+        save_cached(doc, old, root=tmp_path)
+
+    semantic = {"nodes": [{"id": "retained_semantic"}], "edges": []}
+    save_cached(doc, semantic, root=tmp_path, kind="semantic")
+    result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                     parallel=False, quiet=True)
+    assert {edge["context"] for edge in result["edges"]
+            if edge.get("_markdown_mention")} == {"stream$()"}
+    assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
+
+
+def test_inline_html_fixes_do_not_reuse_epoch_four_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / "widget.py"
+    code.write_text("class Hidden:\n    pass\n\nclass Visible:\n    pass\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text('# Guide\n\n<span title="`Hidden`">Use `Visible`.</span>\n')
+    old = extract_markdown(doc)
+    owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
+    old["raw_calls"] = [{
+        "caller_nid": owner, "callee": name, "language": "markdown",
+        "context": name, "source_file": str(doc), "source_location": "L3",
+    } for name in ("Hidden", "Visible")]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, "_AST_CACHE_FORMAT", 4)
+        save_cached(doc, old, root=tmp_path)
+    semantic = {"nodes": [{"id": "retained_semantic"}], "edges": []}
+    save_cached(doc, semantic, root=tmp_path, kind="semantic")
+    result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                     parallel=False, quiet=True)
+    assert {edge["context"] for edge in result["edges"]
+            if edge.get("_markdown_mention")} == {"Visible"}
+    assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
+
+
+def test_link_escape_and_native_path_fixes_reject_epoch_five_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / "src" / "widget.py"
+    code.parent.mkdir()
+    code.write_text("class Hidden:\n    pass\n\nclass Visible:\n    pass\n")
+    doc = tmp_path / "guide.md"
+    doc.write_text(
+        '# Guide\n\n[manual](https://host/`Hidden`)\n\n'
+        'Use \\`Hidden` literally.\n\nUse `src\\widget.py::Visible`.\n'
+    )
+    old = extract_markdown(doc)
+    owner = next(node["id"] for node in old["nodes"] if node["label"] == "Guide")
+    # Epoch 5 parsed hidden URL/escaped ticks and omitted the native-path cite.
+    old["raw_calls"] = [{
+        "caller_nid": owner, "callee": "Hidden", "language": "markdown",
+        "context": "Hidden", "source_file": str(doc), "source_location": "L3",
+    }]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, "_AST_CACHE_FORMAT", 5)
+        save_cached(doc, old, root=tmp_path)
+    semantic = {"nodes": [{"id": "retained_semantic"}], "edges": []}
+    save_cached(doc, semantic, root=tmp_path, kind="semantic")
+
+    assert load_cached(doc, root=tmp_path) is None
+    result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                     parallel=False, quiet=True)
+    assert {edge["context"] for edge in result["edges"]
+            if edge.get("_markdown_mention")} == {"src\\widget.py::Visible"}
+    assert all("_callable" not in node and "_callable_class" not in node
+               for node in result["nodes"])
+    assert load_cached(doc, root=tmp_path, kind="semantic") == semantic
+
+
+def test_semantic_namespaces_survive_ast_format_change(tmp_path, monkeypatch):
+    import graphify.cache as cache_mod
+
+    source = tmp_path / "doc.md"
+    source.write_text("# Guide\n\nBody.\n")
+    payload = {"nodes": [{"id": "semantic"}], "edges": []}
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 1, raising=False)
+    locations = {}
+    for kind in ("semantic", "semantic-deep"):
+        save_cached(source, payload, root=tmp_path, kind=kind)
+        locations[kind] = cache_dir(tmp_path, kind)
+
+    monkeypatch.setattr(cache_mod, "_AST_CACHE_FORMAT", 2, raising=False)
+    cache_dir(tmp_path, "ast")
+    for kind, location in locations.items():
+        assert cache_dir(tmp_path, kind) == location
+        assert load_cached(source, root=tmp_path, kind=kind) == payload
+
+
 def test_save_cached_in_root_symlink_keeps_symlink_name(tmp_path):
     """``source_file`` for an in-root symlink must be stored under the
     symlink's own name, not the resolved target. Lower-impact than the
@@ -1052,3 +1223,293 @@ def test_unowned_records_revoke_complete_cache_without_discarding_scoped_claims(
     claims = check_semantic_cache([str(source)], root=tmp_path)
     assert claims[3] == []
     assert [node['id'] for node in claims[0]] == ['scoped']
+
+
+@pytest.mark.parametrize('cached_owner, selected_owner', [('a', 'b'), ('b', 'a')])
+@pytest.mark.parametrize('suffix', ['.md', '.MD'])
+def test_parallel_markdown_cache_rechecks_selected_origin(
+        tmp_path, monkeypatch, cached_owner, selected_owner, suffix):
+    from graphify import extract as extraction
+
+    shared = tmp_path / 'shared.md'
+    shared.write_text('# Guide\n\n`./model.py::Widget`\n')
+    models, documents = {}, {}
+    for owner in ('a', 'b'):
+        folder = tmp_path / owner
+        folder.mkdir()
+        models[owner] = folder / 'model.py'
+        models[owner].write_text('class Widget:\n    pass\n')
+        documents[owner] = folder / ('guide' + suffix)
+        try:
+            documents[owner].symlink_to(shared)
+        except OSError as exc:
+            pytest.skip(f'symlinks unavailable: {exc}')
+    cache = tmp_path / 'cache'
+    extraction.extract([*models.values(), documents[cached_owner]], source_root=tmp_path,
+                       cache_root=cache, parallel=False, quiet=True)
+    fillers = []
+    for index in range(extraction._PARALLEL_THRESHOLD - 1):
+        source = tmp_path / f'filler{index}.md'
+        source.write_text(f'# Filler {index}\n')
+        fillers.append(source)
+
+    parallel_calls = []
+    real_parallel = extraction._extract_parallel
+
+    def observed_parallel(work, *args, **kwargs):
+        ran = real_parallel(work, *args, **kwargs)
+        parallel_calls.append((len(work), ran))
+        return ran
+
+    monkeypatch.setattr(extraction, '_extract_parallel', observed_parallel)
+    result = extraction.extract([*models.values(), documents[selected_owner], *fillers],
+                                source_root=tmp_path, cache_root=cache,
+                                parallel=True, max_workers=2, quiet=True)
+    assert parallel_calls == [(extraction._PARALLEL_THRESHOLD, True)]
+    nodes = {node['id']: node for node in result['nodes']}
+    mentions = [edge for edge in result['edges'] if edge.get('_markdown_mention')]
+    assert len(mentions) == 1
+    assert mentions[0]['source_file'] == f'{selected_owner}/guide{suffix}'
+    assert nodes[mentions[0]['source']]['source_file'] == f'{selected_owner}/guide{suffix}'
+    assert nodes[mentions[0]['target']]['source_file'] == f'{selected_owner}/model.py'
+    assert mentions[0]['confidence'] == 'EXTRACTED'
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])
+
+
+def test_worker_keeps_matching_markdown_cache_hit(tmp_path, monkeypatch):
+    from graphify import extract as extraction
+    from graphify.extractors.markdown import extract_markdown
+
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n\n`Widget`\n')
+    payload = extract_markdown(doc)
+    save_cached(doc, payload, root=tmp_path)
+
+    def unexpected_extractor(*args, **kwargs):
+        raise AssertionError('matching-owner fragment should remain a cache hit')
+
+    monkeypatch.setattr(extraction, '_get_extractor', unexpected_extractor)
+    index, actual = extraction._extract_single_file((0, str(doc), str(tmp_path), str(tmp_path)))
+    assert index == 0
+    assert actual == payload
+
+
+@pytest.mark.parametrize('failure', ['exception', 'error', 'none'])
+def test_parallel_missing_result_cannot_authorize_markdown_uniqueness(
+        tmp_path, monkeypatch, failure):
+    import concurrent.futures
+    from graphify import extract as extraction
+
+    good = tmp_path / 'good.py'
+    good.write_text('class Widget:\n    pass\n')
+    failed = tmp_path / 'failed.py'
+    failed.write_text('class Other:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guess\n\n`Widget`\n\n# Pinned\n\n`good.py::Widget`\n')
+    fillers = []
+    for index in range(extraction._PARALLEL_THRESHOLD - 3):
+        source = tmp_path / f'filler{index}.md'
+        source.write_text(f'# Filler {index}\n')
+        fillers.append(source)
+    submitted = []
+
+    class CompletedPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, function, arguments):
+            submitted.append(arguments[1])
+            future = concurrent.futures.Future()
+            if Path(arguments[1]) == failed and failure == 'exception':
+                future.set_exception(RuntimeError('injected worker failure'))
+            elif Path(arguments[1]) == failed and failure == 'error':
+                future.set_result((arguments[0], {
+                    'nodes': [], 'edges': [], 'error': 'injected worker failure',
+                }))
+            else:
+                future.set_result(function(arguments))
+            return future
+
+    monkeypatch.setattr(concurrent.futures, 'ProcessPoolExecutor', CompletedPool)
+    result = extraction.extract([good, failed, doc, *fillers], source_root=tmp_path,
+                                parallel=True, max_workers=2, ambient_output=False,
+                                report_outcomes=True, quiet=True)
+    assert len(submitted) == extraction._PARALLEL_THRESHOLD
+    outcome = next(item for item in result['outcomes'] if item['path'] == str(failed))
+    assert outcome['status'] == ('success' if failure == 'none' else 'failed_extraction')
+    contexts = {edge['context'] for edge in result['edges'] if edge.get('_markdown_mention')}
+    assert contexts == ({'Widget', 'good.py::Widget'} if failure == 'none'
+                        else {'good.py::Widget'})
+    assert all('_callable' not in node and '_callable_class' not in node
+               for node in result['nodes'])
+
+
+def test_parallel_missing_result_still_fails_strict_extraction(tmp_path, monkeypatch):
+    import concurrent.futures
+    from graphify import extract as extraction
+
+    sources = []
+    for index in range(extraction._PARALLEL_THRESHOLD):
+        path = tmp_path / f'source{index}.md'
+        path.write_text(f'# Source {index}\n')
+        sources.append(path)
+
+    class FailedPool:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def submit(self, *args):
+            future = concurrent.futures.Future()
+            future.set_exception(RuntimeError('injected worker failure'))
+            return future
+
+    monkeypatch.setattr(concurrent.futures, 'ProcessPoolExecutor', FailedPool)
+    with pytest.raises(RuntimeError, match='AST worker failed'):
+        extraction.extract(sources, source_root=tmp_path, parallel=True,
+                           strict=True, ambient_output=False, quiet=True)
+
+
+@pytest.mark.parametrize('hidden', [
+    '`  Hidden  `',
+    '[manual][`Hidden`]\n\n[`hidden`]: /url',
+])
+def test_rendered_citation_fixes_reject_epoch_six_mentions(tmp_path, monkeypatch, hidden):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'widget.py'
+    code.write_text('class Hidden:\n    pass\n\nclass Visible:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n\n' + hidden + '\n\nUse `Visible`.\n')
+    stale = extract_markdown(doc)
+    owner = next(node['id'] for node in stale['nodes'] if node['label'] == 'Guide')
+    # Epoch 6 stored these hidden/rendered-space spans as exact citations.
+    stale['raw_calls'] = [{
+        'caller_nid': owner, 'callee': name, 'language': 'markdown',
+        'context': name, 'source_file': str(doc), 'source_location': 'L3',
+    } for name in ('Hidden', 'Visible')]
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 6)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    save_cached(doc, semantic, root=tmp_path, kind='semantic')
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert {edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')} == {'Visible'}
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    assert load_cached(doc, root=tmp_path, kind='semantic') == semantic
+
+
+def test_column_zero_frontmatter_rejects_epoch_seven_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'model.py'
+    code.write_text('class Hidden:\n    pass\nclass Visible:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('---\nnested:\n  ---\napi: "`Hidden`"\n---\n# Body\n`Visible`\n')
+    stale = extract_markdown(doc)
+    page = next(node['id'] for node in stale['nodes'] if node['label'] == 'guide.md')
+    stale['raw_calls'].append({
+        'caller_nid': page, 'callee': 'Hidden', 'language': 'markdown',
+        'context': 'Hidden', 'source_file': str(doc), 'source_location': 'L4',
+    })
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 7)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    save_cached(doc, semantic, root=tmp_path, kind='semantic')
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert {edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')} == {'Visible'}
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    assert load_cached(doc, root=tmp_path, kind='semantic') == semantic
+
+
+def test_unbound_heading_rejects_epoch_eight_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'model.py'
+    code.write_text('class Hidden:\n    pass\nclass Visible:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Before\n`Visible`\n\n~~~md\n```\n~~~\n\n## Lost\n`Hidden`\n')
+    stale = extract_markdown(doc)
+    before = next(node['id'] for node in stale['nodes'] if node['label'] == 'Before')
+    stale['raw_calls'].append({
+        'caller_nid': before, 'callee': 'Hidden', 'language': 'markdown',
+        'context': 'Hidden', 'source_file': str(doc), 'source_location': 'L9',
+    })
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 8)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    for kind in ('semantic', 'semantic-deep'):
+        save_cached(doc, semantic, root=tmp_path, kind=kind)
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert [edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')] == ['Visible']
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    for kind in ('semantic', 'semantic-deep'):
+        assert load_cached(doc, root=tmp_path, kind=kind) == semantic
+
+
+def test_container_owner_restoration_rejects_epoch_nine_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'model.py'
+    code.write_text('class Before:\n    pass\nclass Hidden:\n    pass\nclass Outside:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n`Before`\n\n> ## Note\n> `Hidden`\n\nUse `Outside`.\n')
+    stale = extract_markdown(doc)
+    stale['raw_calls'] = [call for call in stale['raw_calls'] if call['context'] != 'Outside']
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 9)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    for kind in ('semantic', 'semantic-deep'):
+        save_cached(doc, semantic, root=tmp_path, kind=kind)
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert {edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')} == {'Before', 'Outside'}
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    for kind in ('semantic', 'semantic-deep'):
+        assert load_cached(doc, root=tmp_path, kind=kind) == semantic

@@ -370,6 +370,135 @@ class _StoredSourcePaths:
             item["source_file"] = identity
 
 
+def _refresh_markdown_mentions(result: dict, paths: list[Path], documents: list[Path],
+                               *, root: Path) -> dict:
+    """Refresh only mention-owned edges using current, in-memory AST evidence."""
+    if not documents:
+        return result
+    from collections import defaultdict
+    from graphify.extract import _extract_markdown_context
+    from graphify.markdown_resolution import resolve_markdown_mentions
+
+    context = _extract_markdown_context(paths, root=root)
+
+    def source_identity(value: object) -> str:
+        path = Path(str(value))
+        return os.path.abspath(path if path.is_absolute() else root / path)
+
+    structural_relations = {"contains", "method"}
+
+    def physical_key(node: dict) -> tuple:
+        metadata = node.get("metadata")
+        namespace = metadata.get("namespace") if isinstance(metadata, dict) else None
+        return (source_identity(node.get("source_file", "")), node.get("label"),
+                node.get("source_location"), node.get("type"), node.get("file_type"),
+                namespace if isinstance(namespace, str) else None)
+
+    def declaration_keys(nodes: list[dict], edges: list[dict], *, published: bool) -> dict[str, tuple]:
+        # Public nodes have no private callable markers. Verify their physical
+        # declaration and every coherent AST owner route instead of comparing IDs,
+        # which can carry different collision salts after a partial rebuild.
+        by_id: dict[str, dict] = {
+            node["id"]: node for node in nodes
+            if node.get("source_file") and (not published or node.get("_origin") == "ast")
+        }
+        parents: dict[str, set[str]] = defaultdict(set)
+        for edge in edges:
+            if (edge.get("relation") in structural_relations
+                    and (not published or edge.get("_origin") == "ast")
+                    and edge.get("source") in by_id and edge.get("target") in by_id):
+                parents[edge["target"]].add(edge["source"])
+        keys: dict[str, tuple] = {}
+        for node_id, node in by_id.items():
+            routes: set[tuple] = set()
+            frontier: list[tuple[str, tuple, frozenset[str]]] = [(node_id, (), frozenset())]
+            while frontier:
+                current, route, seen = frontier.pop()
+                if current in seen:
+                    continue
+                owners = parents.get(current, set())
+                if not owners:
+                    routes.add(route)
+                for owner in owners:
+                    frontier.append((owner, (physical_key(by_id[owner]),) + route,
+                                     seen | {current}))
+            if routes:
+                keys[node_id] = (physical_key(node), frozenset(routes))
+        return keys
+
+    actual_ids = {node["id"] for node in result["nodes"]}
+    destinations: dict[tuple, set[str]] = defaultdict(set)
+    for node_id, key in declaration_keys(result["nodes"], result["edges"], published=True).items():
+        destinations[key].add(node_id)
+    current_keys = declaration_keys(context["nodes"], context["edges"], published=False)
+
+    # Scratch normalization can salt IDs differently from a partial rebuild.
+    # Match physical declarations, retaining unmapped candidates for ambiguity
+    # checks while preventing them from becoming published endpoints.
+    remap: dict[str, str] = {}
+    scratch_nodes = []
+    used = set(actual_ids)
+    for index, original in enumerate(context["nodes"]):
+        node = dict(original)
+        declaration = current_keys.get(node["id"])
+        matches = destinations.get(declaration, set()) if declaration is not None else set()
+        target = next(iter(matches)) if len(matches) == 1 else f"_markdown_context_{index}"
+        if len(matches) != 1:
+            while target in used:
+                target += "_"
+        used.add(target)
+        remap[node["id"]] = target
+        node["id"] = target
+        if node.get("source_file"):
+            node["source_file"] = source_identity(node["source_file"])
+        scratch_nodes.append(node)
+
+    document_ids = {source_identity(path) for path in documents}
+    kept_edges = [edge for edge in result["edges"] if not (
+        edge.get("_origin") == "ast" and edge.get("_markdown_mention") == 1
+        and source_identity(edge.get("source_file", "")) in document_ids)]
+    # Retained edges remain publication data, but neither semantic nor old AST
+    # ownership can license a citation. Only fresh scratch structure is evidence.
+    scratch_edges = [edge for edge in kept_edges
+                     if edge.get("relation") not in structural_relations]
+    for edge in context["edges"]:
+        if edge.get("relation") not in structural_relations:
+            continue
+        if edge.get("source") in remap and edge.get("target") in remap:
+            scratch_edges.append({**edge, "source": remap[edge["source"]],
+                                  "target": remap[edge["target"]]})
+    calls = []
+    for original in context["raw_calls"]:
+        if source_identity(original.get("source_file", "")) not in document_ids:
+            continue
+        caller = remap.get(original.get("caller_nid"))
+        if caller in actual_ids:
+            calls.append({**original, "caller_nid": caller,
+                          "source_file": source_identity(original["source_file"])})
+    # Empty extraction remains an admitted outcome, but cannot prove that a
+    # selected source contains no competing definition for an inferred cite.
+    incomplete = any(item["status"] != "success" for item in context["outcomes"])
+    if incomplete:
+        print("[graphify watch] Markdown inferred references withheld: incomplete AST context")
+    per_file = [{"raw_calls": calls, "_unsupported": incomplete}]
+    per_file.extend({"_markdown_source_file": source,
+                     "_markdown_source_alias": str(path),
+                     "_markdown_source_origin": origin,
+                     "_markdown_source_relative": relative}
+                    for path, source, origin, relative in zip(
+                        paths, context["source_files"], context["source_origins"],
+                        context["source_relative_paths"]))
+    boundary = len(scratch_edges)
+    resolve_markdown_mentions(per_file, scratch_nodes, scratch_edges)
+    refreshed_edges = kept_edges + [
+        {**edge, "_origin": "ast"} for edge in scratch_edges[boundary:]
+        if edge["source"] in actual_ids and edge["target"] in actual_ids
+    ]
+    context["validate_inputs"]()
+    result["edges"] = refreshed_edges
+    return result
+
+
 def _reconcile_existing_graph(
     existing_graph: Path,
     result: dict,
@@ -510,6 +639,8 @@ def _reconcile_existing_graph(
         # Raw output keeps incomplete records for diagnostics across updates.
         # Supplied endpoints must still survive; aliases keep their existing
         # retention behavior rather than counting as genuinely absent fields.
+        # Mention edges need an admitted current source even when an excluded
+        # file's nodes and other edges deliberately remain preserved.
         preserved_edges = [
             edge
             for edge in existing.get("links", existing.get("edges", []))
@@ -518,7 +649,13 @@ def _reconcile_existing_graph(
             and not source_paths.is_evicted(edge, edge_evicted_source_identities)
             and not (
                 edge.get("_origin") == "ast"
-                and source_paths.is_evicted(edge, rebuilt_source_identities)
+                and (
+                    source_paths.is_evicted(edge, rebuilt_source_identities)
+                    or (
+                        edge.get("_markdown_mention") == 1
+                        and source_paths.is_evicted(edge, excluded_alive_files)
+                    )
+                )
             )
         ]
 
@@ -1252,6 +1389,16 @@ def _rebuild_code(
             deleted_paths=deleted_paths,
             deleted_source_identities=deleted_source_identities,
         )
+
+        from graphify.markdown_resolution import MARKDOWN_MENTION_SUFFIXES
+        markdown_documents = [path for path in code_files
+                              if path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES
+                              and path not in semantic_doc_files]
+        if markdown_documents:
+            result = _refresh_markdown_mentions(
+                result, [path for path in code_files if path not in semantic_doc_files],
+                markdown_documents, root=project_root,
+            )
 
         _relativize_source_files(result, project_root, scope=watch_root)
         # Source files re-extracted this run — their symbol sets may legitimately
