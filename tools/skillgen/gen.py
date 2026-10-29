@@ -137,6 +137,10 @@ _EXTRACTION_SOURCE = {
     "verbose": "references/shared/extraction-spec.md",
     "compact": "references/shared/extraction-spec-compact.md",
 }
+_DISK_DISPATCHES = frozenset({
+    "agent-tool-disk", "agent-tool-disk-powershell", "task-tool-disk",
+    "task-tool-disk-trae", "manual-paste",
+})
 # Single unified query reference + stub: superior vocab-expansion (Step 0) plus
 # CLI traversal plus inline NetworkX fallback, shipped to every platform. The
 # capabilities used to be split across cli.md / cli-inline.md so no platform got
@@ -1039,7 +1043,7 @@ def _render_saved_interpreter_commands(
     )
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
-    body = _route_full_build_transaction(body)
+    body = _route_full_build_transaction(body, cache_writes=platform.dispatch in _DISK_DISPATCHES)
     body = _route_incremental_transaction(body)
     if artifact_role == "reference":
         body = _route_reference_transaction(body, platform)
@@ -1128,7 +1132,9 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
     return body
 
 
-def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) -> str:
+def _route_prepared_python_blocks(
+    section: str, *, mutations_only: bool = True, cache_writes: bool = False
+) -> str:
     """Run inline Python against the existing exact prepared capability."""
     def route_bash(match: re.Match[str]) -> str:
         block = match.group(1)
@@ -1147,7 +1153,9 @@ def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) 
             "> graphify-out/",
         )
         if command is None or (mutations_only and not any(
-            marker in block for marker in mutation_markers
+            marker in block for marker in mutation_markers + (
+                ("save_semantic_cache(",) if cache_writes else ()
+            )
         )):
             return match.group(0)
         interpreter = (
@@ -1238,7 +1246,7 @@ print(token, end='')
     return body[:start] + section + body[end:]
 
 
-def _route_full_build_transaction(body: str) -> str:
+def _route_full_build_transaction(body: str, *, cache_writes: bool = False) -> str:
     """Route full-build Python blocks through the exact live token runner."""
     starts = [match.start() for match in re.finditer(r"(?m)^### Step 2(?:\s|$)", body)]
     if not starts:
@@ -1264,7 +1272,7 @@ def _route_full_build_transaction(body: str) -> str:
     if len(re.findall(r"(?m)^### Step 9(?:\s|$)", section)) != 1:
         raise ValueError("full-build transaction fence must have one Step 9 marker")
 
-    section = _route_prepared_python_blocks(section)
+    section = _route_prepared_python_blocks(section, cache_writes=cache_writes)
     export_prefix = (
         'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
         "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
@@ -1462,6 +1470,31 @@ def _render_agents_md_hooks(platform: Platform) -> str:
     return _normalise(body)
 
 
+def _render_chunk_staging(platform: Platform) -> str:
+    """Keep the disk intake recipe on the host's existing shell and tools."""
+    body = _read_fragment("references/shared/chunk-staging.md")
+    if platform.shell != "powershell":
+        return body
+
+    def powershell_block(match: re.Match[str]) -> str:
+        # Only this recipe's two fixed commands are converted. Keep JSON/path
+        # data in the environment and Python in a literal native here-string.
+        arguments = shlex.split(match.group(1))
+        if arguments[:-1] != [
+            "$GRAPHIFY_PYTHON", "-E", "-P", "-B", "-m", "graphify.transaction",
+            "run-prepared-token", "$GRAPHIFY_TRANSACTION_TOKEN", "--", "-c",
+        ]:
+            raise ValueError("unexpected disk staging command")
+        return (
+            "```powershell\n$GraphifyPythonSource = @'\n" + arguments[-1].strip("\n")
+            + "\n'@\n& $GraphifyPython -E -P -B -m graphify.transaction "
+            "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -c $GraphifyPythonSource\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n```"
+        )
+
+    return re.sub(r"```bash\n(.*?)\n```", powershell_block, body, flags=re.DOTALL)
+
+
 def render(platform: Platform) -> list[RenderedArtifact]:
     """Render every committed artifact for one platform.
 
@@ -1501,6 +1534,8 @@ def render(platform: Platform) -> list[RenderedArtifact]:
                 _read_fragment("references/query/windows-portable.md") + "\n",
                 1,
             )
+        if name == "extraction-spec" and platform.dispatch in _DISK_DISPATCHES:
+            body += "\n" + _render_chunk_staging(platform)
         body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))
