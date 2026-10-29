@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,12 @@ def _body(reference: str, marker: str) -> str:
     selected = [body for body in bodies if marker in body]
     assert len(selected) == 1
     return selected[0]
+
+
+def _shell_input(block: str, root: Path) -> str:
+    quoted = shlex.quote(str(root))
+    block = block.replace("GRAPHIFY_INPUT_PATH='INPUT_PATH'", "GRAPHIFY_INPUT_PATH=" + quoted)
+    return re.sub(r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", lambda _: quoted, block)
 
 
 def _fixture(tmp_path, monkeypatch, host="pi"):
@@ -296,7 +303,7 @@ def test_disk_parent_runs_actual_quoted_shell_import_with_no_public_chunk(tmp_pa
                    "GRAPHIFY_TRANSACTION_TOKEN": str(tx.active_transaction_token_path(out))}
     allocation = next(b for b in re.findall(r"```bash\n(.*?)\n```", reference, re.S)
                       if "tempfile.mkdtemp" in b)
-    allocated = subprocess.run(["/bin/bash", "-c", allocation], cwd=root, text=True,
+    allocated = subprocess.run(["/bin/bash", "-c", _shell_input(allocation, root)], cwd=root, text=True,
                                capture_output=True, env=environment, check=False, timeout=30)
     assert allocated.returncode == 0, allocated.stderr
     intake = Path(json.loads(allocated.stdout)["CHUNK_PATH"])
@@ -305,7 +312,7 @@ def test_disk_parent_runs_actual_quoted_shell_import_with_no_public_chunk(tmp_pa
     block = next(b for b in re.findall(r"```bash\n(.*?)\n```", reference, re.S)
                  if "# Existing native no-follow regular-file reader" in b)
     result = subprocess.run(
-        ["/bin/bash", "-c", block], cwd=root, text=True, capture_output=True,
+        ["/bin/bash", "-c", _shell_input(block, root)], cwd=root, text=True, capture_output=True,
         env=environment,
         check=False, timeout=30,
     )
@@ -314,6 +321,87 @@ def test_disk_parent_runs_actual_quoted_shell_import_with_no_public_chunk(tmp_pa
     assert json.loads((prepared / ".graphify_chunk_02.json").read_text()) == payload
     assert {name: (out / name).read_bytes() for name in baseline} == baseline
     assert not list(out.glob(".graphify_chunk*.json"))
+
+
+@pytest.mark.parametrize("host", ["pi", "vscode"])
+@pytest.mark.parametrize("configured_output", [False, True])
+def test_staging_rebinds_live_token_in_separate_shell_calls(tmp_path, monkeypatch, host, configured_output):
+    root, source, out, baseline, _, prepared, run, _, _, _, _ = _fixture(tmp_path, monkeypatch, host)
+    reference = next(a.content for a in gen.render(gen.load_platforms()[host])
+                     if a.path.endswith("/extraction-spec.md"))
+    blocks = re.findall(r"```bash\n(.*?)\n```", reference, re.S)
+    allocation = next(b for b in blocks if "tempfile.mkdtemp" in b)
+    collect = next(b for b in blocks if "# Existing native no-follow regular-file reader" in b)
+    # Earlier tool-call exports do not reach either of these fresh shells.
+    environment = {**os.environ, "VIRTUAL_ENV": sys.prefix, "TMPDIR": str(tmp_path / "intakes"),
+                   "GRAPHIFY_CHUNK_NUMBER": "02", "GRAPHIFY_CHUNK_FILES_JSON": json.dumps([str(source)])}
+    environment.pop("GRAPHIFY_TRANSACTION_TOKEN", None)
+    if configured_output:
+        environment["GRAPHIFY_OUT"] = str(out)
+    else:
+        environment.pop("GRAPHIFY_OUT", None)
+    run("from pathlib import Path; Path('.graphify_dispatch_batch.txt').write_text('fresh-shell-batch')")
+
+    def shell(block):
+        return subprocess.run(["/bin/bash", "-c", _shell_input(block, root)], cwd=root, env=environment,
+                              capture_output=True, text=True, check=False, timeout=30)
+
+    allocated = shell(allocation)
+    assert allocated.returncode == 0, allocated.stderr
+    intake = Path(json.loads(allocated.stdout)["CHUNK_PATH"])
+    intake.write_text(json.dumps(_payload(source)))
+    imported = shell(collect)
+    assert imported.returncode == 0, imported.stderr
+    assert json.loads((prepared / ".graphify_completed_chunks.json").read_text()) == [
+        str(prepared / ".graphify_chunk_02.json")]
+    # An explicitly retained wrong token must fail, never switch to the live owner.
+    environment["GRAPHIFY_TRANSACTION_TOKEN"] = str(root / "wrong-token")
+    refused = shell(collect)
+    assert refused.returncode != 0
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+    assert intake.is_file()
+
+
+def test_manual_prompt_substitutes_allocated_intake_path():
+    core = gen.render(gen.load_platforms()["vscode"])[0].content
+    dispatch = core.split("Subagent prompt template:", 1)[1].split("**Step B3", 1)[0]
+    assert "DEEP_MODE, and CHUNK_PATH substituted" in dispatch
+
+
+@pytest.mark.parametrize("records", [
+    {"nodes": [{}]}, {"nodes": [{"id": []}]}, {"nodes": [{"id": 7}]},
+    {"edges": [{}]}, {"edges": [{"source": "fact"}]},
+    {"edges": [{"source": None, "target": "fact"}]},
+    {"edges": [{"from": "fact", "to": False}]},
+    {"hyperedges": [{"id": [], "nodes": ["fact"]}]},
+    {"hyperedges": [{"id": "group"}]},
+    {"hyperedges": [{"id": "group", "nodes": [None]}]},
+    {"hyperedges": [{"members": [7]}]},
+])
+def test_malformed_record_identities_refuse_before_commit(tmp_path, monkeypatch, records):
+    _, source, out, baseline, _, prepared, run, intake, collect, _, _ = _fixture(tmp_path, monkeypatch)
+    payload = _payload(source)
+    payload.update(records)
+    intake.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="identit|hyperedge"):
+        run(collect)
+    assert not (prepared / ".graphify_chunk_01.json").exists()
+    assert json.loads((prepared / ".graphify_completed_chunks.json").read_text()) == []
+    assert intake.read_text() == json.dumps(payload)
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("group_id", [None, "", 7, False])
+@pytest.mark.parametrize("member_key", ["nodes", "members", "node_ids"])
+def test_intake_preserves_v8_identity_aliases_and_anonymous_groups(tmp_path, monkeypatch, group_id, member_key):
+    _, source, _, _, _, prepared, run, intake, collect, _, _ = _fixture(tmp_path, monkeypatch)
+    payload = _payload(source)
+    payload["nodes"][0]["id"] = ""  # v8 admits empty string identities.
+    payload["edges"] = [{"from": "", "to": "", "source_file": str(source)}]
+    payload["hyperedges"] = [{"id": group_id, member_key: [""], "source_file": str(source)}]
+    intake.write_text(json.dumps(payload))
+    run(collect)
+    assert json.loads((prepared / ".graphify_chunk_01.json").read_text()) == payload
 
 
 def test_disk_import_commits_one_captured_immutable_payload(tmp_path, monkeypatch):

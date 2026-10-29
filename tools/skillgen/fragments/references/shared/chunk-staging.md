@@ -1,6 +1,6 @@
 ## Disk result staging
 
-Parent-only steps for disk/manual hosts. CHUNK_PATH is an untrusted intake file, never the published or prepared chunk path. Use only the exact current GRAPHIFY_TRANSACTION_TOKEN retained from Step 1/B0 and the freshly admitted interpreter below; stop if that token is missing or refused. The runner alone can commit into its pinned prepared output.
+Parent-only steps for disk/manual hosts. CHUNK_PATH is an untrusted intake file, never the published or prepared chunk path. Each command freshly admits its interpreter and binds the exact live token for INPUT_PATH and the configured output through v8's existing active-token admission, as B0/B3 do. A token retained from Step 1/B0 must match; stop if it differs, is refused or no live token is available. Shell exports do not persist across tool calls: bind the chunk number, assignment and usage data in each call that needs them. The runner alone can commit into its pinned prepared output.
 
 Before dispatch, assign each current chunk a positive padded number. Bind GRAPHIFY_CHUNK_NUMBER and GRAPHIFY_CHUNK_FILES_JSON as environment data (the latter is the JSON array of that chunk's exact FILE_LIST paths). Set complete quoted data literals: POSIX single quotes with embedded apostrophes escaped as '\''; PowerShell single quotes with doubled apostrophes. Never substitute path or JSON bytes into Python code. Export those variables on POSIX; use $env: variables on PowerShell. Do not dispatch a file outside B0's uncached list or assign a file to multiple chunks. Run allocations serially, once per chunk, before dispatch; give the printed absolute CHUNK_PATH to the subagent's Write/file editor as data. The disk-host prompt directs it to write JSON to CHUNK_PATH and return only a completion notice.
 
@@ -55,7 +55,7 @@ Before each import, bind GRAPHIFY_CHUNK_USAGE_JSON using the same environment-da
 "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "
 import json, os, re
 from pathlib import Path
-from graphify.build import _merge_source_file
+from graphify.build import _admit_string_identities, _hashable, _merge_source_file
 from graphify.llm import _completed_source_paths
 from graphify.transaction import (current_transaction, commit_prepared_bytes,
     pin_output, _read_relative_bytes)
@@ -84,6 +84,15 @@ if (not isinstance(result, dict)
         or not isinstance(result.get('incomplete_sources', []), list)
         or any(not isinstance(item, str) for item in result.get('incomplete_sources', []))):
     raise ValueError('chunk must be an extraction object with record lists')
+nodes, edges = _admit_string_identities(result['nodes'], result['edges'], keep_incomplete_nodes=False)
+if len(nodes) != len(result['nodes']) or len(edges) != len(result['edges']):
+    raise ValueError('chunk contains invalid record identities')
+for group in result.get('hyperedges', []):
+    members = next((group[key] for key in ('nodes', 'members', 'node_ids')
+                    if isinstance(group.get(key), list)), None)
+    if (not _hashable(group.get('id')) or members is None
+            or any(not isinstance(member, str) for member in members)):
+        raise ValueError('chunk contains invalid hyperedge identities or members')
 if (result.get('error') or result.get('failed_chunks')
         or result.get('finish_reason') not in (None, 'stop')):
     raise ValueError('failed chunk cannot be registered')

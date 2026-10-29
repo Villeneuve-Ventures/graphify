@@ -1478,10 +1478,22 @@ def _render_agents_md_hooks(platform: Platform) -> str:
 def _render_chunk_staging(platform: Platform) -> str:
     """Keep the disk intake recipe on the host's existing shell and tools."""
     body = _read_fragment("references/shared/chunk-staging.md")
-    if platform.shell != "powershell":
-        return body
+    # Match B0/B3's live-token admission in every independent shell call. Do not
+    # silently replace an explicitly retained token from a different owner.
+    lookup = (
+        "import os, sys\nfrom pathlib import Path\nfrom graphify.paths import GRAPHIFY_OUT\n"
+        "from graphify.transaction import active_transaction_token_path\n"
+        "root = Path(sys.argv[1]).resolve(strict=True)\n"
+        "configured = Path(GRAPHIFY_OUT).expanduser()\n"
+        "output = (configured if configured.is_absolute() else root / configured).resolve()\n"
+        "token = active_transaction_token_path(output)\n"
+        "retained = os.environ.get('GRAPHIFY_TRANSACTION_TOKEN')\n"
+        "if retained and Path(retained).absolute() != token:\n"
+        "    raise ValueError('retained transaction token does not match the live owner')\n"
+        "print(token)\n"
+    )
 
-    def powershell_block(match: re.Match[str]) -> str:
+    def staging_block(match: re.Match[str]) -> str:
         # Only this recipe's two fixed commands are converted. Keep JSON/path
         # data in the environment and Python in a literal native here-string.
         arguments = shlex.split(match.group(1))
@@ -1490,14 +1502,23 @@ def _render_chunk_staging(platform: Platform) -> str:
             "run-prepared-token", "$GRAPHIFY_TRANSACTION_TOKEN", "--", "-c",
         ]:
             raise ValueError("unexpected disk staging command")
+        if platform.shell != "powershell":
+            return (
+                '```bash\nGRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+                + shlex.quote(lookup) + ' INPUT_PATH) || exit $?\n'
+                'export GRAPHIFY_TRANSACTION_TOKEN\n' + match.group(1) + '\n```'
+            )
         return (
-            "```powershell\n$GraphifyPythonSource = @'\n" + arguments[-1].strip("\n")
+            "```powershell\n$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c '"
+            + lookup.replace("'", "''") + "' INPUT_PATH\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+            "$GraphifyPythonSource = @'\n" + arguments[-1].strip("\n")
             + "\n'@\n& $GraphifyPython -E -P -B -m graphify.transaction "
             "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -c $GraphifyPythonSource\n"
             "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n```"
         )
 
-    return re.sub(r"```bash\n(.*?)\n```", powershell_block, body, flags=re.DOTALL)
+    return re.sub(r"```bash\n(.*?)\n```", staging_block, body, flags=re.DOTALL)
 
 
 def render(platform: Platform) -> list[RenderedArtifact]:

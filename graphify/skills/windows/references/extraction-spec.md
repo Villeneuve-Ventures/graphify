@@ -72,11 +72,12 @@ CHUNK_PATH
 
 ## Disk result staging
 
-Parent-only steps for disk/manual hosts. CHUNK_PATH is an untrusted intake file, never the published or prepared chunk path. Use only the exact current GRAPHIFY_TRANSACTION_TOKEN retained from Step 1/B0 and the freshly admitted interpreter below; stop if that token is missing or refused. The runner alone can commit into its pinned prepared output.
+Parent-only steps for disk/manual hosts. CHUNK_PATH is an untrusted intake file, never the published or prepared chunk path. Each command freshly admits its interpreter and binds the exact live token for INPUT_PATH and the configured output through v8's existing active-token admission, as B0/B3 do. A token retained from Step 1/B0 must match; stop if it differs, is refused or no live token is available. Shell exports do not persist across tool calls: bind the chunk number, assignment and usage data in each call that needs them. The runner alone can commit into its pinned prepared output.
 
 Before dispatch, assign each current chunk a positive padded number. Bind GRAPHIFY_CHUNK_NUMBER and GRAPHIFY_CHUNK_FILES_JSON as environment data (the latter is the JSON array of that chunk's exact FILE_LIST paths). Set complete quoted data literals: POSIX single quotes with embedded apostrophes escaped as '\''; PowerShell single quotes with doubled apostrophes. Never substitute path or JSON bytes into Python code. Export those variables on POSIX; use $env: variables on PowerShell. Do not dispatch a file outside B0's uncached list or assign a file to multiple chunks. Run allocations serially, once per chunk, before dispatch; give the printed absolute CHUNK_PATH to the subagent's Write/file editor as data. The disk-host prompt directs it to write JSON to CHUNK_PATH and return only a completion notice.
 
 ```powershell
+$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"
 $GraphifyPython = $null
 $GraphifyPythonExplicit = $false
 $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
@@ -298,6 +299,20 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import os, sys
+from pathlib import Path
+from graphify.paths import GRAPHIFY_OUT
+from graphify.transaction import active_transaction_token_path
+root = Path(sys.argv[1]).resolve(strict=True)
+configured = Path(GRAPHIFY_OUT).expanduser()
+output = (configured if configured.is_absolute() else root / configured).resolve()
+token = active_transaction_token_path(output)
+retained = os.environ.get(''GRAPHIFY_TRANSACTION_TOKEN'')
+if retained and Path(retained).absolute() != token:
+    raise ValueError(''retained transaction token does not match the live owner'')
+print(token)
+' INPUT_PATH
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $GraphifyPythonSource = @'
 import json, os, re, tempfile
 from pathlib import Path
@@ -347,6 +362,7 @@ Then the parent runs this import serially for each successfully completed chunk,
 Before each import, bind GRAPHIFY_CHUNK_USAGE_JSON using the same environment-data quoting rules. Copy that dispatch's actual parent-observed tool usage into an object with nonnegative integer input_tokens and output_tokens; never use estimates or the subagent's placeholder counts. For a manual host or a tool that does not expose usage, explicitly bind JSON null, report usage as unavailable, and keep v8's numeric zero placeholders for merge compatibility. Unavailable counts are not evidence of zero use. Import applies these counts before the prepared commit; do not edit registered chunks afterward. These read-only intake pins do not enable native Windows mutation: v8's existing transaction refusal still applies.
 
 ```powershell
+$env:GRAPHIFY_INPUT_PATH = "INPUT_PATH"
 $GraphifyPython = $null
 $GraphifyPythonExplicit = $false
 $GraphifyWorkspace = [IO.Path]::GetFullPath((Get-Location).Path)
@@ -568,10 +584,24 @@ if (-not $GraphifyPython) {
     }
 }
 if (-not $GraphifyPython -and -not $GraphifyDiscoveryOptional) { throw "No trusted Graphify Python 3.14.2-final interpreter found; rerun Step 1." }
+$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c 'import os, sys
+from pathlib import Path
+from graphify.paths import GRAPHIFY_OUT
+from graphify.transaction import active_transaction_token_path
+root = Path(sys.argv[1]).resolve(strict=True)
+configured = Path(GRAPHIFY_OUT).expanduser()
+output = (configured if configured.is_absolute() else root / configured).resolve()
+token = active_transaction_token_path(output)
+retained = os.environ.get(''GRAPHIFY_TRANSACTION_TOKEN'')
+if retained and Path(retained).absolute() != token:
+    raise ValueError(''retained transaction token does not match the live owner'')
+print(token)
+' INPUT_PATH
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $GraphifyPythonSource = @'
 import json, os, re
 from pathlib import Path
-from graphify.build import _merge_source_file
+from graphify.build import _admit_string_identities, _hashable, _merge_source_file
 from graphify.llm import _completed_source_paths
 from graphify.transaction import (current_transaction, commit_prepared_bytes,
     pin_output, _read_relative_bytes)
@@ -600,6 +630,15 @@ if (not isinstance(result, dict)
         or not isinstance(result.get('incomplete_sources', []), list)
         or any(not isinstance(item, str) for item in result.get('incomplete_sources', []))):
     raise ValueError('chunk must be an extraction object with record lists')
+nodes, edges = _admit_string_identities(result['nodes'], result['edges'], keep_incomplete_nodes=False)
+if len(nodes) != len(result['nodes']) or len(edges) != len(result['edges']):
+    raise ValueError('chunk contains invalid record identities')
+for group in result.get('hyperedges', []):
+    members = next((group[key] for key in ('nodes', 'members', 'node_ids')
+                    if isinstance(group.get(key), list)), None)
+    if (not _hashable(group.get('id')) or members is None
+            or any(not isinstance(member, str) for member in members)):
+        raise ValueError('chunk contains invalid hyperedge identities or members')
 if (result.get('error') or result.get('failed_chunks')
         or result.get('finish_reason') not in (None, 'stop')):
     raise ValueError('failed chunk cannot be registered')
