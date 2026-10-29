@@ -43,7 +43,8 @@ except Exception:
 # epochs 3 through 6 invalidate Markdown block, symbol, HTML and inline-token fixes.
 # Epoch 7 preserves rendered span whitespace and excludes reference-link metadata.
 # Epoch 8 excludes metadata after indented frontmatter lookalike delimiters.
-_AST_CACHE_FORMAT = 8
+# Epoch 9 withholds citations under headings without a legacy AST owner.
+_AST_CACHE_FORMAT = 9
 
 # Namespaces already swept this process — cleanup runs once per namespace.
 _cleaned_ast_dirs: set[str] = set()

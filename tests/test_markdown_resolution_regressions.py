@@ -512,6 +512,38 @@ def _reference_case(root: Path, files: dict[str, str], mode: str) -> dict:
     return result
 
 
+@pytest.mark.parametrize('mode', ['public', 'cached', 'scoped', 'watch'])
+@pytest.mark.parametrize('fence', ['~~~md\n```\n~~~', '````md\n```\n````'])
+def test_unbound_heading_does_not_publish_prior_owner_reference(tmp_path, mode, fence):
+    result = _reference_case(tmp_path, {
+        'model.py': 'class Visible:\n    pass\nclass Hidden:\n    pass\n',
+        'guide.md': '# Before\n`Visible`\n\n' + fence
+                    + '\n\n## Lost\nUse `Hidden` and `model.py::Hidden`.\n',
+    }, mode)
+    mentions = _mentions(result)
+    assert [edge['context'] for edge in mentions] == ['Visible']
+    before = next(node['id'] for node in result['nodes'] if node['label'] == 'Before')
+    assert mentions[0]['source'] == before
+    assert all(node['label'] != 'Lost' for node in result['nodes'])
+
+
+def test_native_watch_withholds_unbound_heading_references(tmp_path):
+    from tests.test_markdown_code_spans import _native_mentions, _native_rebuild
+
+    corpus = tmp_path / 'corpus'
+    _write_files(corpus, {
+        'model.py': 'class Visible:\n    pass\nclass Hidden:\n    pass\n',
+        'guide.md': '# Before\n`Visible`\n\n## After\n`Hidden`\n',
+    })
+    initial = _native_rebuild(corpus)
+    assert {edge['context'] for edge in _native_mentions(initial)} == {'Visible', 'Hidden'}
+    doc = corpus / 'guide.md'
+    doc.write_text('# Before\n`Visible`\n\n~~~md\n```\n~~~\n\n## After\n`Hidden`\n')
+    refreshed = _native_rebuild(corpus, [doc])
+    assert [edge['context'] for edge in _native_mentions(refreshed)] == ['Visible']
+    assert all(node['label'] != 'After' for node in refreshed['nodes'])
+
+
 @pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
 def test_dotted_qualifiers_preserve_path_and_owner_order(tmp_path, mode):
     valid = ["acme.tools.Widget", "tools.Widget", "Widget.render()",

@@ -22,6 +22,7 @@ _MD_LINKABLE_EXTS = {".md", ".mdx", ".qmd", ".markdown", ".rst", ".txt"}
 _MD_MENTION_FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
 _MD_MENTION_LIST_RE = re.compile(r'^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])([ \t]+)')
 _MD_MENTION_QUOTE_RE = re.compile(r'^ {0,3}>[ \t]?')
+_MD_MENTION_HEADING_RE = re.compile(r'^ {0,3}#{1,6}(?:[ \t]|$)')
 _MD_MENTION_BREAK_RE = re.compile(
     r'^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|<!--|'
     r'(?:[-*_][ \t]*){3,}$|(?:=+|-+)[ \t]*$)'
@@ -450,7 +451,7 @@ def _scan_markdown_mentions(lines: list[str], heading_owners: dict[int, str],
     in_comment = False
     paragraph = False
     brackets: list[tuple[bool, bool, int, int]] = []  # (image, active, line, column)
-    owner = file_nid
+    owner: str | None = file_nid
     prose: _MentionProse | None = None
 
     def prose_context(*, multiline: bool = True) -> _MentionProse:
@@ -555,7 +556,12 @@ def _scan_markdown_mentions(lines: list[str], heading_owners: dict[int, str],
                     index += 1
                     brackets.clear()
                     continue
-            owner = heading_owners.get(index, owner)
+            if index in heading_owners:
+                owner = heading_owners[index]
+            elif _MD_MENTION_HEADING_RE.match(line):
+                # The legacy AST parser can omit a heading recognized here.
+                # Withhold citations until an existing heading binds the owner.
+                owner = None
             block_line = bool(_MD_MENTION_BREAK_RE.match(line))
             if block_line:
                 brackets.clear()
@@ -676,7 +682,8 @@ def _scan_markdown_mentions(lines: list[str], heading_owners: dict[int, str],
                     end_column = end_position if at_line == end_index else len(content)
                     parts.append(literal_slice(at_line, content, 0, end_column))
             # CommonMark normalizes soft line endings in code spans to spaces.
-            yield owner, ' '.join(parts), index + 1
+            if owner is not None:
+                yield owner, ' '.join(parts), index + 1
             if end_index != index:
                 line = _mention_container_content(lines[end_index], containers, extend=False)[0]
             index = end_index

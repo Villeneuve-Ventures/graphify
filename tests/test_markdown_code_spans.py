@@ -688,6 +688,51 @@ def test_mentions_respect_fence_delimiter_and_length(tmp_path, fenced_body):
     assert mentions[0]['source_location'] == after_line
 
 
+@pytest.mark.parametrize('fenced_body', [
+    '~~~md\n[Other](other.md)\n```\n~~~',
+    '````md\n```\n[Other](other.md)\n````',
+], ids=['tilde', 'long-backtick'])
+@pytest.mark.parametrize('prior_heading', [False, True], ids=['page', 'heading'])
+def test_unbound_heading_withholds_mentions_until_bound_owner_returns(
+        tmp_path, fenced_body, prior_heading):
+    doc = tmp_path / 'guide.md'
+    prefix = 'Page `Page`.\n\n'
+    if prior_heading:
+        prefix += '# Before\nUse `Before`.\n\n'
+    doc.write_text(prefix + fenced_body + '\n\n## Lost `Lost`\nUse `Hidden`.\n\n'
+                   '~~~md\n```\n~~~\n\n## Recovered\nUse `Recovered`.\n')
+    result = extract_markdown(doc)
+    labels = {node['id']: node['label'] for node in result['nodes']}
+    # Preserve the legacy parser's omitted heading and document link, even
+    # though the citation scanner recognizes both mixed-marker fences.
+    assert list(labels.values()) == ['guide.md', *(['Before'] if prior_heading else []),
+                                     'Recovered']
+    link, = [edge for edge in result['edges'] if edge['relation'] == 'references']
+    other = tmp_path / 'other.md'
+    other.write_text('# Other\n')
+    assert link['source'] == result['nodes'][0]['id']
+    assert link['target'] == extract_markdown(other)['nodes'][0]['id']
+    assert [(labels[edge['source']], labels[edge['target']])
+            for edge in result['edges'] if edge['relation'] == 'contains'] == (
+        [('guide.md', 'Before'), ('Before', 'Recovered')] if prior_heading
+        else [('guide.md', 'Recovered')])
+    assert [(call['context'], labels[call['caller_nid']])
+            for call in result['raw_calls']] == [
+        ('Page', 'guide.md'), *([('Before', 'Before')] if prior_heading else []),
+        ('Recovered', 'Recovered'),
+    ]
+
+
+@pytest.mark.parametrize('line', ['#hashtag', '####### Text', '\\# Text'])
+def test_nonheading_markers_keep_bound_mention_owner(tmp_path, line):
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n\n' + line + '\nUse `Widget`.\n')
+    result = extract_markdown(doc)
+    guide = next(node['id'] for node in result['nodes'] if node['label'] == 'Guide')
+    call, = result['raw_calls']
+    assert (call['context'], call['caller_nid']) == ('Widget', guide)
+
+
 @pytest.mark.parametrize('suffix', ['.MD', '.mDx'])
 @pytest.mark.parametrize('scoped', [False, True], ids=['public', 'scoped'])
 def test_mixed_case_markdown_suffix_resolves_mentions(tmp_path, suffix, scoped):
