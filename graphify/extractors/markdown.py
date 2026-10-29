@@ -452,6 +452,7 @@ def _scan_markdown_mentions(lines: list[str], heading_owners: dict[int, str],
     paragraph = False
     brackets: list[tuple[bool, bool, int, int]] = []  # (image, active, line, column)
     owner: str | None = file_nid
+    container_owners: list[str | None] = []
     prose: _MentionProse | None = None
 
     def prose_context(*, multiline: bool = True) -> _MentionProse:
@@ -500,6 +501,12 @@ def _scan_markdown_mentions(lines: list[str], heading_owners: dict[int, str],
 
         line, current_containers, added = _mention_container_content(raw_line, containers)
         if current_containers != containers or added:
+            # Preserve the enclosing owner, including an unbound parent. The
+            # continued prefix distinguishes a new sibling item at equal depth.
+            _, continued, _ = _mention_container_content(raw_line, containers, extend=False)
+            while len(container_owners) > len(continued):
+                owner = container_owners.pop()
+            container_owners.extend([owner] * (len(current_containers) - len(continued)))
             paragraph = False
             brackets.clear()
         containers = current_containers
@@ -560,7 +567,7 @@ def _scan_markdown_mentions(lines: list[str], heading_owners: dict[int, str],
                 owner = heading_owners[index]
             elif _MD_MENTION_HEADING_RE.match(line):
                 # The legacy AST parser can omit a heading recognized here.
-                # Withhold citations until an existing heading binds the owner.
+                # Withhold citations in this scope until a heading binds the owner.
                 owner = None
             block_line = bool(_MD_MENTION_BREAK_RE.match(line))
             if block_line:

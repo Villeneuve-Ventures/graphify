@@ -1483,3 +1483,33 @@ def test_unbound_heading_rejects_epoch_eight_mentions(tmp_path, monkeypatch):
                    for node in result['nodes'])
     for kind in ('semantic', 'semantic-deep'):
         assert load_cached(doc, root=tmp_path, kind=kind) == semantic
+
+
+def test_container_owner_restoration_rejects_epoch_nine_mentions(tmp_path, monkeypatch):
+    from graphify.extract import extract
+    from graphify.extractors.markdown import extract_markdown
+    import graphify.cache as cache_mod
+
+    code = tmp_path / 'model.py'
+    code.write_text('class Before:\n    pass\nclass Hidden:\n    pass\nclass Outside:\n    pass\n')
+    doc = tmp_path / 'guide.md'
+    doc.write_text('# Guide\n`Before`\n\n> ## Note\n> `Hidden`\n\nUse `Outside`.\n')
+    stale = extract_markdown(doc)
+    stale['raw_calls'] = [call for call in stale['raw_calls'] if call['context'] != 'Outside']
+    with monkeypatch.context() as previous:
+        previous.setattr(cache_mod, '_AST_CACHE_FORMAT', 9)
+        save_cached(doc, stale, root=tmp_path)
+    semantic = {'nodes': [{'id': 'retained_semantic'}], 'edges': []}
+    for kind in ('semantic', 'semantic-deep'):
+        save_cached(doc, semantic, root=tmp_path, kind=kind)
+
+    assert load_cached(doc, root=tmp_path) is None
+    for _ in range(2):
+        result = extract([code, doc], source_root=tmp_path, cache_root=tmp_path,
+                         parallel=False, quiet=True)
+        assert {edge['context'] for edge in result['edges']
+                if edge.get('_markdown_mention')} == {'Before', 'Outside'}
+        assert all('_callable' not in node and '_callable_class' not in node
+                   for node in result['nodes'])
+    for kind in ('semantic', 'semantic-deep'):
+        assert load_cached(doc, root=tmp_path, kind=kind) == semantic

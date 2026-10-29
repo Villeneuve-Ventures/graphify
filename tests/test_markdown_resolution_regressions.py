@@ -544,6 +544,52 @@ def test_native_watch_withholds_unbound_heading_references(tmp_path):
     assert all(node['label'] != 'After' for node in refreshed['nodes'])
 
 
+@pytest.mark.parametrize('mode', ['public', 'cached', 'scoped', 'watch'])
+@pytest.mark.parametrize('unbound_parent', [False, True])
+@pytest.mark.parametrize('body', [
+    '> ## Note\n> `Hidden`\n\nUse `Outside`.\n',
+    '- ## Note\n  `Hidden`\n\nUse `Outside`.\n',
+    '> ## Note\n> > ## Deep\n> > `Hidden`\n> `Hidden`\n\nUse `Outside`.\n',
+    '- ## Note\n  `Hidden`\n\n- Use `Outside`.\n',
+], ids=['quote', 'list', 'nested-quote', 'sibling-list'])
+def test_unbound_container_heading_preserves_enclosing_owner(
+        tmp_path, mode, unbound_parent, body):
+    prefix = '# Guide\n`Before`\n\n'
+    if unbound_parent:
+        prefix += '~~~md\n```\n~~~\n\n## Lost\n'
+    result = _reference_case(tmp_path, {
+        'model.py': 'class Before:\n    pass\nclass Hidden:\n    pass\nclass Outside:\n    pass\n',
+        'guide.md': prefix + body,
+    }, mode)
+    expected = {'Before'} if unbound_parent else {'Before', 'Outside'}
+    mentions = _mentions(result)
+    assert {edge['context'] for edge in mentions} == expected
+    guide = next(node['id'] for node in result['nodes'] if node['label'] == 'Guide')
+    assert all(edge['source'] == guide for edge in mentions)
+    assert {node['label'] for node in result['nodes'] if node.get('file_type') == 'document'} == {
+        'guide.md', 'Guide',
+    }
+
+
+@pytest.mark.parametrize('body', ['> ## Note\n> `Hidden`', '- ## Note\n  `Hidden`'])
+def test_native_watch_restores_owner_after_unbound_container(tmp_path, body):
+    from tests.test_markdown_code_spans import _native_mentions, _native_rebuild
+
+    corpus = tmp_path / 'corpus'
+    prefix = '# Guide\n`Before`\n\n'
+    _write_files(corpus, {
+        'model.py': 'class Before:\n    pass\nclass Hidden:\n    pass\nclass Outside:\n    pass\n',
+        'guide.md': prefix + 'Use `Hidden`.\n\nUse `Outside`.\n',
+    })
+    assert {edge['context'] for edge in _native_mentions(_native_rebuild(corpus))} == {
+        'Before', 'Hidden', 'Outside',
+    }
+    doc = corpus / 'guide.md'
+    doc.write_text(prefix + body + '\n\nUse `Outside`.\n')
+    refreshed = _native_rebuild(corpus, [doc])
+    assert {edge['context'] for edge in _native_mentions(refreshed)} == {'Before', 'Outside'}
+
+
 @pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
 def test_dotted_qualifiers_preserve_path_and_owner_order(tmp_path, mode):
     valid = ["acme.tools.Widget", "tools.Widget", "Widget.render()",

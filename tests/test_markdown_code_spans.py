@@ -733,6 +733,22 @@ def test_nonheading_markers_keep_bound_mention_owner(tmp_path, line):
     assert (call['context'], call['caller_nid']) == ('Widget', guide)
 
 
+@pytest.mark.parametrize('body', ['> ## Note\n> `Hidden`', '- ## Note\n  `Hidden`'])
+def test_unbound_container_heading_restores_page_owner_and_legacy_links(tmp_path, body):
+    doc = tmp_path / 'guide.md'
+    doc.write_text('Use `Before`.\n\n' + body + '\n\nUse `Outside`; [Other](other.md).\n')
+    result = extract_markdown(doc)
+    page, = result['nodes']
+    assert [(call['context'], call['caller_nid']) for call in result['raw_calls']] == [
+        ('Before', page['id']), ('Outside', page['id']),
+    ]
+    link, = result['edges']
+    other = tmp_path / 'other.md'
+    other.write_text('# Other\n')
+    assert (link['source'], link['target'], link['relation']) == (
+        page['id'], extract_markdown(other)['nodes'][0]['id'], 'references')
+
+
 @pytest.mark.parametrize('suffix', ['.MD', '.mDx'])
 @pytest.mark.parametrize('scoped', [False, True], ids=['public', 'scoped'])
 def test_mixed_case_markdown_suffix_resolves_mentions(tmp_path, suffix, scoped):

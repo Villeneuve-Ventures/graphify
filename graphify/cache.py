@@ -44,7 +44,8 @@ except Exception:
 # Epoch 7 preserves rendered span whitespace and excludes reference-link metadata.
 # Epoch 8 excludes metadata after indented frontmatter lookalike delimiters.
 # Epoch 9 withholds citations under headings without a legacy AST owner.
-_AST_CACHE_FORMAT = 9
+# Epoch 10 scopes unbound heading ownership to its quote/list container.
+_AST_CACHE_FORMAT = 10
 
 # Namespaces already swept this process — cleanup runs once per namespace.
 _cleaned_ast_dirs: set[str] = set()
