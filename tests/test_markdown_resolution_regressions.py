@@ -1193,3 +1193,106 @@ def test_watch_unavailable_source_remains_cited_file_ambiguity(tmp_path, monkeyp
     monkeypatch.setattr(extraction, "source_read_bytes", read)
     refreshed = _refresh_markdown_mentions(result, paths, [tmp_path / "guide.md"], root=tmp_path)
     assert {edge["context"] for edge in _mentions(refreshed)} == {"a/widget.py::Widget"}
+
+
+@pytest.mark.parametrize('active_document', [False, True])
+def test_native_watch_withholds_mentions_from_excluded_alive_documents(
+        tmp_path, monkeypatch, active_document):
+    import importlib
+
+    from graphify.extractors import markdown
+    from tests.test_markdown_code_spans import (
+        _add_semantic_fixture, _native_mentions, _native_rebuild,
+    )
+
+    corpus = tmp_path / 'corpus'
+    files = {
+        'widget.py': 'class Widget:\n    pass\n',
+        'notes/guide.md': '# Guide\n`Widget`\n\n## Pin\n`widget.py::Widget`\n[Anchor](anchor.md)\n',
+        'notes/anchor.md': '# Anchor\n',
+        'semantic.md': '# Semantic\n',
+    }
+    if active_document:
+        files['live.md'] = '# Live\nOrdinary prose.\n'
+    _write_files(corpus, files)
+    first = _native_rebuild(corpus)
+    assert len(_native_mentions(first)) == 2
+    semantic_node, semantic_edge = _add_semantic_fixture(corpus)
+    old_doc_ids = {node['id'] for node in first['nodes']
+                   if node.get('source_file') == 'notes/guide.md'}
+    legacy, = [edge for edge in first['links']
+               if edge.get('source_file') == 'notes/guide.md'
+               and edge.get('relation') == 'references' and not edge.get('_markdown_mention')]
+    (corpus / '.graphifyignore').write_text('notes/\nsemantic.md\n')
+    (corpus / 'notes/guide.md').write_text('# Changed\nThere are no citations now.\n')
+    source = corpus / 'widget.py'
+    source.write_text('class Widget:\n    def updated(self):\n        pass\n')
+    extraction = importlib.import_module('graphify.extract')
+    reads = []
+    real_bytes, real_text = extraction.source_read_bytes, markdown.source_read_text
+
+    def read_bytes(path, *args, **kwargs):
+        reads.append(Path(path).resolve())
+        return real_bytes(path, *args, **kwargs)
+
+    def read_text(path, *args, **kwargs):
+        reads.append(Path(path).resolve())
+        return real_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(extraction, 'source_read_bytes', read_bytes)
+    monkeypatch.setattr(markdown, 'source_read_text', read_text)
+    refreshed = _native_rebuild(corpus, [source])
+    assert not ({(corpus / name).resolve() for name in
+                 ('notes/guide.md', 'notes/anchor.md', 'semantic.md')} & set(reads))
+    assert _native_mentions(refreshed) == []
+    assert old_doc_ids <= {node['id'] for node in refreshed['nodes']}
+    assert legacy in refreshed['links']
+    assert semantic_node in refreshed['nodes'] and semantic_edge in refreshed['links']
+
+
+@pytest.mark.parametrize('absolute_sources', [False, True])
+@pytest.mark.parametrize('full_rebuild', [False, True])
+def test_reconcile_excluded_mentions_respects_tier_and_watch_scope(
+        tmp_path, absolute_sources, full_rebuild):
+    import json
+
+    from graphify.watch import _reconcile_existing_graph
+
+    root = tmp_path / 'corpus'
+    _write_files(root, {'scope/guide.md': '# Guide\n', 'scope/widget.py': 'class Widget: pass\n',
+                        'outside.md': '# Outside\n'})
+    scope = root / 'scope'
+
+    def source(name):
+        return str(root / name) if absolute_sources else name
+
+    code = {'id': 'code', '_origin': 'ast', 'source_file': source('scope/widget.py')}
+    doc = {'id': 'doc', '_origin': 'ast', 'source_file': source('scope/guide.md')}
+    outside = {'id': 'outside', '_origin': 'ast', 'source_file': source('outside.md')}
+    semantic = {'id': 'semantic', 'source_file': source('scope/guide.md')}
+    edges = [
+        {'id': 'mention', 'source': 'doc', 'target': 'code', 'relation': 'references',
+         'source_file': doc['source_file'], '_origin': 'ast', '_markdown_mention': 1},
+        {'id': 'legacy', 'source': 'doc', 'target': 'outside', 'relation': 'references',
+         'source_file': doc['source_file'], '_origin': 'ast'},
+        {'id': 'semantic', 'source': 'semantic', 'target': 'code', 'relation': 'references',
+         'source_file': semantic['source_file']},
+        {'id': 'unowned', 'source': 'semantic', 'target': 'code', 'relation': 'references',
+         'source_file': semantic['source_file'], '_markdown_mention': 1},
+        {'id': 'outside', 'source': 'outside', 'target': 'code', 'relation': 'references',
+         'source_file': outside['source_file'], '_origin': 'ast', '_markdown_mention': 1},
+    ]
+    out = root / 'output'
+    out.mkdir()
+    path = out / 'graph.json'
+    path.write_text(json.dumps({'nodes': [code, doc, outside, semantic], 'links': edges}))
+    result, _ = _reconcile_existing_graph(
+        path, {'nodes': [code], 'edges': []}, out=out, project_root=root, watch_root=scope,
+        code_files=[scope / 'widget.py'], extract_targets=[scope / 'widget.py'],
+        full_rebuild=full_rebuild, deleted_paths=set(), deleted_source_identities=set(),
+    )
+    expected = {'semantic', 'unowned', 'outside'}
+    if not full_rebuild:
+        expected.add('legacy')
+    assert {edge['id'] for edge in result['edges']} == expected
+    assert ('doc' in {node['id'] for node in result['nodes']}) is not full_rebuild

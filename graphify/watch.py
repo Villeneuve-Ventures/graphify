@@ -639,6 +639,8 @@ def _reconcile_existing_graph(
         # Raw output keeps incomplete records for diagnostics across updates.
         # Supplied endpoints must still survive; aliases keep their existing
         # retention behavior rather than counting as genuinely absent fields.
+        # Mention edges need an admitted current source even when an excluded
+        # file's nodes and other edges deliberately remain preserved.
         preserved_edges = [
             edge
             for edge in existing.get("links", existing.get("edges", []))
@@ -647,7 +649,13 @@ def _reconcile_existing_graph(
             and not source_paths.is_evicted(edge, edge_evicted_source_identities)
             and not (
                 edge.get("_origin") == "ast"
-                and source_paths.is_evicted(edge, rebuilt_source_identities)
+                and (
+                    source_paths.is_evicted(edge, rebuilt_source_identities)
+                    or (
+                        edge.get("_markdown_mention") == 1
+                        and source_paths.is_evicted(edge, excluded_alive_files)
+                    )
+                )
             )
         ]
 
