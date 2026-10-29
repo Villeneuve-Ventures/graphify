@@ -242,17 +242,18 @@ def resolve_markdown_mentions(
         n for n in all_nodes
         if n.get("id") and n.get("file_type") == "code" and not _is_file_node(n)
     ]
-    by_label: dict[str, list[str]] = {}
-    by_file: dict[str, dict[str, list[str]]] = {}
+    # Other extractors can import the same declaration; count targets, not records.
+    by_label: dict[str, set[str]] = {}
+    by_file: dict[str, dict[str, set[str]]] = {}
     for n in code_nodes:
         label = _symbol_label(n)
         if not label:
             continue
         if n.get("_callable"):
-            by_label.setdefault(label, []).append(n["id"])
+            by_label.setdefault(label, set()).add(n["id"])
         source_file = _source_identity(n.get("source_file", ""))
         if source_file:
-            by_file.setdefault(source_file, {}).setdefault(label, []).append(n["id"])
+            by_file.setdefault(source_file, {}).setdefault(label, set()).add(n["id"])
     # Empty or failed selected files still participate in cited-file ambiguity.
     # An incomplete corpus cannot justify a unique inferred symbol match.
     # Explicit zero-node results cannot prove absence, even when extraction
@@ -280,7 +281,7 @@ def resolve_markdown_mentions(
         and e.get("_origin") in (None, "ast")
     }
 
-    def _resolve_chain(file_labels: dict[str, list[str]], names: list[str]) -> str | None:
+    def _resolve_chain(file_labels: dict[str, set[str]], names: list[str]) -> str | None:
         candidates = list(file_labels.get(names[-1], []))
         for depth, owner_name in enumerate(reversed(names[:-1]), start=1):
             owners = set(file_labels.get(owner_name, []))

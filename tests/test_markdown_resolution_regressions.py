@@ -512,6 +512,53 @@ def _reference_case(root: Path, files: dict[str, str], mode: str) -> dict:
     return result
 
 
+@pytest.mark.parametrize("mode", ["public", "cached", "scoped", "watch"])
+@pytest.mark.parametrize("xaml_first", [False, True])
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_imported_xaml_class_records_do_not_create_mention_ambiguity(
+        tmp_path, mode, xaml_first, ambiguous):
+    code = {"ViewModels/MainViewModel.cs": (
+        "namespace Demo.ViewModels { public class MainViewModel { } }\n"
+    )}
+    xaml = {"Views/MainWindow.xaml": (
+        '<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"\n'
+        '        xmlns:vm="clr-namespace:Demo.ViewModels">\n'
+        '  <Window.DataContext><vm:MainViewModel /></Window.DataContext>\n'
+        '</Window>\n'
+    )}
+    files = {**xaml, **code} if xaml_first else {**code, **xaml}
+    files["Demo.csproj"] = "<Project />\n"
+    if ambiguous:
+        files["Other/MainViewModel.cs"] = code["ViewModels/MainViewModel.cs"]
+    files["guide.md"] = (
+        "# Bare\n`MainViewModel`\n"
+        "# Qualified\n`Demo.ViewModels.MainViewModel`\n"
+        "# Pinned\n`ViewModels/MainViewModel.cs::MainViewModel`\n"
+        "# Missing\n`OtherViewModel`\n"
+    )
+    result = _reference_case(tmp_path, files, mode)
+    declarations = [node for node in result["nodes"]
+                    if node["label"] == "MainViewModel"]
+    declaration_ids = {node["id"] for node in declarations}
+    assert len(declaration_ids) == (2 if ambiguous else 1)
+    if not ambiguous:
+        # The ordinary XAML import and selected C# source retain both records.
+        assert len(declarations) == 2
+        assert any(edge.get("context") == "view_model"
+                   and edge["target"] in declaration_ids for edge in result["edges"])
+    mentions = _mentions(result)
+    expected = {"ViewModels/MainViewModel.cs::MainViewModel"}
+    if not ambiguous:
+        expected.update({"MainViewModel", "Demo.ViewModels.MainViewModel"})
+    assert {edge["context"] for edge in mentions} == expected
+    assert len(mentions) == len(expected)
+    targets = {node["id"] for node in declarations
+               if node["source_file"] == "ViewModels/MainViewModel.cs"}
+    assert {edge["target"] for edge in mentions} == targets
+    assert all(edge["confidence"] == ("EXTRACTED" if "::" in edge["context"]
+                                      else "INFERRED") for edge in mentions)
+
+
 @pytest.mark.parametrize('mode', ['public', 'cached', 'scoped', 'watch'])
 @pytest.mark.parametrize('fence', ['~~~md\n```\n~~~', '````md\n```\n````'])
 def test_unbound_heading_does_not_publish_prior_owner_reference(tmp_path, mode, fence):
