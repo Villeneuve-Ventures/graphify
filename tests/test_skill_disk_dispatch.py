@@ -58,6 +58,7 @@ def _fixture(tmp_path, monkeypatch, host="pi"):
     monkeypatch.setattr(tempfile, "tempdir", str(intakes))
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "01")
     monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(source)]))
+    monkeypatch.setenv("GRAPHIFY_CHUNK_USAGE_JSON", json.dumps({"input_tokens": 7, "output_tokens": 3}))
     setup = _body(spec, "tempfile.mkdtemp")
     collect = _body(spec, "# Existing native no-follow regular-file reader")
     run(setup)
@@ -165,8 +166,8 @@ def test_disk_completion_uses_existing_assignment_and_partial_validators(tmp_pat
     elif kind == "ownership-only":
         del payload["completed_sources"]
     intake.write_text(json.dumps(payload))
-    if kind == "foreign":
-        with pytest.raises(ValueError, match="ownership is outside"):
+    if kind in ("foreign", "truncated"):
+        with pytest.raises(ValueError, match="ownership is outside|failed chunk"):
             run(collect)
         assert not (prepared / ".graphify_chunk_01.json").exists()
         assert json.loads((prepared / ".graphify_completed_chunks.json").read_text()) == []
@@ -209,6 +210,7 @@ def test_intake_storage_cannot_be_inside_either_output(tmp_path, monkeypatch, lo
     _, _, out, _, _, prepared, run, _, _, _, _ = _fixture(tmp_path, monkeypatch)
     monkeypatch.setattr(tempfile, "tempdir", str(out if location == "public" else prepared))
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
+    run("from pathlib import Path; Path('.graphify_dispatch_batch.txt').write_text('fresh-batch')")
     spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
                 if a.path.endswith("/extraction-spec.md"))
     with pytest.raises(ValueError, match="outside public and prepared"):
@@ -333,3 +335,107 @@ def test_disk_import_commits_one_captured_immutable_payload(tmp_path, monkeypatc
     assert len(reads) == 1
     assert json.loads((prepared / ".graphify_chunk_01.json").read_text()) == payload
     assert json.loads(intake.read_text()) == {"nodes": [], "edges": []}
+
+
+def test_intake_identity_and_reads_request_no_mutation_authority(tmp_path, monkeypatch):
+    original = tx.pin_output
+    calls = []
+
+    def pin(path, **kwargs):
+        if Path(path).name.startswith("graphify-chunk-"):
+            calls.append(kwargs)
+            assert kwargs.get("mutation") is False
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(tx, "pin_output", pin)
+    _, source, _, _, _, _, run, intake, collect, _, _ = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    assert calls == [{"mutation": False}, {"mutation": False}]
+
+
+@pytest.mark.parametrize("host", ["claw", "kiro", "pi"])
+def test_compact_disk_prompt_itself_contains_intake_write_and_notice(host):
+    reference = next(a.content for a in gen.render(gen.load_platforms()[host])
+                     if a.path.endswith("/extraction-spec.md"))
+    prompt = reference.split("```", 2)[1]
+    assert "CHUNK_PATH" in prompt
+    assert "Write" in prompt and "completion notice" in prompt
+    assert "Output ONLY valid JSON" not in prompt
+    assert "Output exactly this JSON" not in prompt
+
+
+@pytest.mark.parametrize("host", DISK_HOSTS)
+def test_disk_collection_uses_prepared_manifest_and_imported_usage(host):
+    core = gen.render(gen.load_platforms()[host])[0].content
+    b3 = core.split("**Step B3", 1)[1].split("#### Part C", 1)[0]
+    assert "graphify-out/.graphify_chunk_NN.json" not in b3
+    assert "skip that chunk" not in b3
+    assert "write them back into the chunk JSON" not in b3
+    assert "Disk result staging" in b3
+    assert "GRAPHIFY_CHUNK_USAGE_JSON" in b3
+
+
+def test_allocation_rejects_overlapping_chunks_only_in_current_batch(tmp_path, monkeypatch):
+    _, source, out, baseline, _, prepared, run, intake, _, b0, _ = _fixture(tmp_path, monkeypatch)
+    reference = next(a.content for a in gen.render(gen.load_platforms()["pi"])
+                     if a.path.endswith("/extraction-spec.md"))
+    allocate = _body(reference, "tempfile.mkdtemp")
+    before = sorted(intake.parent.parent.iterdir())
+    monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
+    with pytest.raises(ValueError, match="already assigned"):
+        run(allocate)
+    assert not (prepared / ".graphify_intake_plan_02.json").exists()
+    assert sorted(intake.parent.parent.iterdir()) == before
+    # Disjoint assignments in this batch still work.
+    other = source.with_name("another.md")
+    other.write_text("Another source")
+    run("from pathlib import Path; Path('.graphify_uncached.txt').write_text(" +
+        repr(str(source) + "\n" + str(other)) + ")")
+    monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(other)]))
+    run(allocate)
+    # A new B0 batch can assign the original file again; old plans remain evidence.
+    run(b0)
+    monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "03")
+    monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(source)]))
+    run(allocate)
+    assert (prepared / ".graphify_intake_plan_03.json").exists()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("usage", [{"input_tokens": 101, "output_tokens": 29},
+                                  {"input_tokens": 0, "output_tokens": 0}, None])
+def test_parent_usage_is_applied_before_prepared_commit_and_merge(tmp_path, monkeypatch, usage, capsys):
+    _, source, out, baseline, _, prepared, run, intake, collect, _, core = _fixture(tmp_path, monkeypatch)
+    payload = _payload(source)
+    payload.update(input_tokens=999, output_tokens=999)
+    intake.write_text(json.dumps(payload))
+    monkeypatch.setenv("GRAPHIFY_CHUNK_USAGE_JSON", json.dumps(usage))
+    run(collect)
+    staged = json.loads((prepared / ".graphify_chunk_01.json").read_text())
+    expected = usage or {"input_tokens": 0, "output_tokens": 0}
+    assert {key: staged[key] for key in expected} == expected
+    if usage is None:
+        assert "unavailable" in capsys.readouterr().out
+    b3 = core.split("**Step B3", 1)[1].split("#### Part C", 1)[0]
+    run(_body(b3, "Merged {len(chunks)} chunks:"))
+    merged = json.loads((prepared / ".graphify_semantic_new.json").read_text())
+    assert {key: merged[key] for key in expected} == expected
+    assert intake.read_text() == json.dumps(payload)
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("usage", ["missing", [], {}, {"input_tokens": -1, "output_tokens": 3},
+                                  {"input_tokens": True, "output_tokens": 3},
+                                  {"input_tokens": 1.5, "output_tokens": 3}])
+def test_invalid_parent_usage_refuses_before_registration(tmp_path, monkeypatch, usage):
+    _, source, _, _, _, prepared, run, intake, collect, _, _ = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    if usage == "missing":
+        monkeypatch.delenv("GRAPHIFY_CHUNK_USAGE_JSON")
+    else:
+        monkeypatch.setenv("GRAPHIFY_CHUNK_USAGE_JSON", json.dumps(usage))
+    with pytest.raises((ValueError, KeyError)):
+        run(collect)
+    assert not (prepared / ".graphify_chunk_01.json").exists()
+    assert json.loads((prepared / ".graphify_completed_chunks.json").read_text()) == []

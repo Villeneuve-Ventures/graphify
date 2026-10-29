@@ -1424,6 +1424,11 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    if platform.dispatch in _DISK_DISPATCHES:
+        prefix, collection = body.split("**Step B3 - Collect, cache, and merge**", 1)
+        _, commands = collection.split("```bash", 1)
+        body = (prefix + "**Step B3 - Collect, cache, and merge**\n\n"
+                + _read_fragment("collection/disk.md") + "\n```bash" + commands)
     if platform.key == "windows":
         if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
             raise ValueError("Windows core must have exactly one portable namespace target")
@@ -1535,6 +1540,15 @@ def render(platform: Platform) -> list[RenderedArtifact]:
                 1,
             )
         if name == "extraction-spec" and platform.dispatch in _DISK_DISPATCHES:
+            if platform.extraction == "compact":
+                body = body.replace(
+                    "and DEEP_MODE).", "DEEP_MODE, and CHUNK_PATH)."
+                ).replace(
+                    "Output ONLY valid JSON matching the schema below - no explanation, no markdown fences, no preamble.",
+                    "Write valid JSON matching the schema below to the absolute intake path CHUNK_PATH "
+                    "using the host Write/file editor tool. Return only a completion notice; "
+                    "do not return the JSON inline.",
+                ).replace("Output exactly this JSON (no other text):", "Write exactly this JSON to CHUNK_PATH:")
             body += "\n" + _render_chunk_staging(platform)
         body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"

@@ -2,12 +2,13 @@
 
 Parent-only steps for disk/manual hosts. CHUNK_PATH is an untrusted intake file, never the published or prepared chunk path. Use only the exact current GRAPHIFY_TRANSACTION_TOKEN retained from Step 1/B0 and the freshly admitted interpreter below; stop if that token is missing or refused. The runner alone can commit into its pinned prepared output.
 
-Before dispatch, assign each current chunk a positive padded number. Bind GRAPHIFY_CHUNK_NUMBER and GRAPHIFY_CHUNK_FILES_JSON as environment data (the latter is the JSON array of that chunk's exact FILE_LIST paths). Set complete quoted data literals: POSIX single quotes with embedded apostrophes escaped as '\''; PowerShell single quotes with doubled apostrophes. Never substitute path or JSON bytes into Python code. Export those variables on POSIX; use $env: variables on PowerShell. Do not dispatch a file outside B0's uncached list or assign a file to multiple chunks. Run this allocation once per chunk; give the printed absolute CHUNK_PATH to the subagent's Write/file editor as data. The compact prompt's inline-return instruction is overridden for these disk hosts: write JSON to CHUNK_PATH and return only a completion notice.
+Before dispatch, assign each current chunk a positive padded number. Bind GRAPHIFY_CHUNK_NUMBER and GRAPHIFY_CHUNK_FILES_JSON as environment data (the latter is the JSON array of that chunk's exact FILE_LIST paths). Set complete quoted data literals: POSIX single quotes with embedded apostrophes escaped as '\''; PowerShell single quotes with doubled apostrophes. Never substitute path or JSON bytes into Python code. Export those variables on POSIX; use $env: variables on PowerShell. Do not dispatch a file outside B0's uncached list or assign a file to multiple chunks. Run allocations serially, once per chunk, before dispatch; give the printed absolute CHUNK_PATH to the subagent's Write/file editor as data. The disk-host prompt directs it to write JSON to CHUNK_PATH and return only a completion notice.
 
 ```bash
 "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "
 import json, os, re, tempfile
 from pathlib import Path
+from graphify.llm import _completed_source_paths
 from graphify.transaction import current_transaction, commit_prepared_bytes, pin_output
 owner = current_transaction()
 number = os.environ['GRAPHIFY_CHUNK_NUMBER']
@@ -23,11 +24,18 @@ batch = Path('.graphify_dispatch_batch.txt').read_text(encoding='utf-8')
 plan_name = '.graphify_intake_plan_' + number + '.json'
 if Path(plan_name).exists() and json.loads(Path(plan_name).read_text())['batch'] == batch:
     raise ValueError('this chunk already has an intake; retain it for diagnosis')
+assigned_paths = _completed_source_paths({'completed_sources': assigned}, Path(owner.root))
+for previous_path in Path.cwd().glob('.graphify_intake_plan_*.json'):
+    previous = json.loads(previous_path.read_text())
+    if previous['owner'] == owner.id and previous['batch'] == batch:
+        previous_paths = _completed_source_paths({'completed_sources': previous['assigned']}, Path(owner.root))
+        if assigned_paths & previous_paths:
+            raise ValueError('source already assigned to another chunk in this batch')
 intake_root = Path(tempfile.gettempdir()).resolve(strict=True)
 if any(intake_root.is_relative_to(path.resolve()) for path in (Path(owner.output), Path.cwd())):
     raise ValueError('intake storage must be outside public and prepared output')
 intake = Path(tempfile.mkdtemp(prefix='graphify-chunk-', dir=intake_root))
-with pin_output(intake) as capability:
+with pin_output(intake, mutation=False) as capability:
     identity = capability.identity.json()
 plan = {'owner': owner.id, 'batch': batch, 'number': number,
         'assigned': assigned, 'intake': str(intake), 'identity': identity}
@@ -40,6 +48,8 @@ print(json.dumps({'CHUNK_PATH': str(intake / 'result.json'), 'CHUNK_NUM': number
 Wait for all dispatches. If any fails, has no result or returns invalid/truncated output, retain its intake and diagnostics and stop before B3; do not import siblings, save cache or publish. Treat this stop rule as overriding B3's older skip-failed-chunk advice. Check explicit completed_sources against the assigned files and actual full reads; omit failed, unreadable, partial and truncated sources. A successful empty extraction is valid, but an absent result is not.
 
 Then the parent runs this import serially for each successfully completed chunk, with GRAPHIFY_CHUNK_NUMBER bound to its trusted number. The existing bounded native reader rejects symlink/nonregular results and reads at most 512 MiB (the graph artifact limit). The intake and its JSON are untrusted data. Foreign record ownership refuses import; explicit completion is intersected with the assigned files and excludes incomplete or partial results. No record ownership or intake path grants completion. B3 keeps v8's existing cache and merge contracts: only explicit validated completion can certify a complete cache entry; retained partial claims cannot. Only verified prepared readback is registered in the current success manifest. Do not write .graphify_semantic_new.json here.
+
+Before each import, bind GRAPHIFY_CHUNK_USAGE_JSON using the same environment-data quoting rules. Copy that dispatch's actual parent-observed tool usage into an object with nonnegative integer input_tokens and output_tokens; never use estimates or the subagent's placeholder counts. For a manual host or a tool that does not expose usage, explicitly bind JSON null, report usage as unavailable, and keep v8's numeric zero placeholders for merge compatibility. Unavailable counts are not evidence of zero use. Import applies these counts before the prepared commit; do not edit registered chunks afterward. These read-only intake pins do not enable native Windows mutation: v8's existing transaction refusal still applies.
 
 ```bash
 "$GRAPHIFY_PYTHON" -E -P -B -m graphify.transaction run-prepared-token "$GRAPHIFY_TRANSACTION_TOKEN" -- -c "
@@ -57,7 +67,7 @@ plan = json.loads(Path('.graphify_intake_plan_' + number + '.json').read_text())
 if (plan['owner'] != owner.id or plan['number'] != number
         or plan['batch'] != Path('.graphify_dispatch_batch.txt').read_text()):
     raise ValueError('intake belongs to a different owner or dispatch batch')
-with pin_output(Path(plan['intake'])) as capability:
+with pin_output(Path(plan['intake']), mutation=False) as capability:
     if capability.identity.json() != plan['identity']:
         raise ValueError('intake directory identity changed')
     # Existing native no-follow regular-file reader; capture immutable bytes once.
@@ -75,8 +85,17 @@ if (not isinstance(result, dict)
         or any(not isinstance(item, str) for item in result.get('incomplete_sources', []))):
     raise ValueError('chunk must be an extraction object with record lists')
 if (result.get('error') or result.get('failed_chunks')
-        or result.get('finish_reason') not in (None, 'stop', 'length')):
+        or result.get('finish_reason') not in (None, 'stop')):
     raise ValueError('failed chunk cannot be registered')
+usage = json.loads(os.environ['GRAPHIFY_CHUNK_USAGE_JSON'])
+if usage is None:
+    print('Token usage unavailable; retaining numeric zero placeholders, not measured zero use.')
+    usage = {'input_tokens': 0, 'output_tokens': 0}
+if (not isinstance(usage, dict) or any(type(usage.get(key)) is not int or usage[key] < 0
+        for key in ('input_tokens', 'output_tokens'))):
+    raise ValueError('parent usage must contain nonnegative integer token counts or be null')
+for key in ('input_tokens', 'output_tokens'):
+    result[key] = usage[key]
 root = Path(owner.root)
 assigned = _completed_source_paths({'completed_sources': plan['assigned']}, root)
 # Reuse v8's ownership keys and explicit-completion validator. A foreign claim
