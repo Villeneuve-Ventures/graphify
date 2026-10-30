@@ -1422,6 +1422,11 @@ def _render_core(platform: Platform) -> str:
         template.replace("@@FRONTMATTER@@", _render_frontmatter(platform))
         .replace("@@INSTALL@@", install)
         .replace("@@DISPATCH@@", dispatch)
+        # Only disk/manual staging consumes this private batch identity.
+        .replace("@@DISPATCH_BATCH@@", (
+            "Path('graphify-out/.graphify_dispatch_batch.txt').write_text(__import__('secrets').token_hex(16))"
+            if platform.dispatch in _DISK_DISPATCHES else ""
+        ))
         .replace("@@QUERY_STUB@@", query_stub)
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
