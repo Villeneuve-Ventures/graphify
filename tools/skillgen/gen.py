@@ -45,6 +45,7 @@ REPO_ROOT = SKILLGEN_DIR.parent.parent
 FRAGMENTS_DIR = SKILLGEN_DIR / "fragments"
 EXPECTED_DIR = SKILLGEN_DIR / "expected"
 PLATFORMS_TOML = SKILLGEN_DIR / "platforms.toml"
+_INLINE_DISPATCHES = frozenset({"codex-agenttask", "opencode-mention"})
 
 # Immutable coverage baseline for --audit-coverage. The working-tree skill bodies
 # are being replaced by the lean core, so the audit reads each host's v8 body
@@ -1039,7 +1040,7 @@ def _render_saved_interpreter_commands(
     )
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
-    body = _route_full_build_transaction(body)
+    body = _route_full_build_transaction(body, cache_writes=platform.dispatch in _INLINE_DISPATCHES)
     body = _route_incremental_transaction(body)
     if artifact_role == "reference":
         body = _route_reference_transaction(body, platform)
@@ -1128,7 +1129,9 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
     return body
 
 
-def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) -> str:
+def _route_prepared_python_blocks(
+    section: str, *, mutations_only: bool = True, cache_writes: bool = False
+) -> str:
     """Run inline Python against the existing exact prepared capability."""
     def route_bash(match: re.Match[str]) -> str:
         block = match.group(1)
@@ -1140,6 +1143,7 @@ def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) 
         mutation_markers = (
             "write_text(",
             "write_bytes(",
+            "commit_prepared_bytes(",
             "save_manifest(",
             "to_json(",
             "unlink(",
@@ -1147,7 +1151,9 @@ def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) 
             "> graphify-out/",
         )
         if command is None or (mutations_only and not any(
-            marker in block for marker in mutation_markers
+            marker in block for marker in mutation_markers + (
+                ("save_semantic_cache(",) if cache_writes else ()
+            )
         )):
             return match.group(0)
         interpreter = (
@@ -1238,7 +1244,7 @@ print(token, end='')
     return body[:start] + section + body[end:]
 
 
-def _route_full_build_transaction(body: str) -> str:
+def _route_full_build_transaction(body: str, *, cache_writes: bool = False) -> str:
     """Route full-build Python blocks through the exact live token runner."""
     starts = [match.start() for match in re.finditer(r"(?m)^### Step 2(?:\s|$)", body)]
     if not starts:
@@ -1264,7 +1270,7 @@ def _route_full_build_transaction(body: str) -> str:
     if len(re.findall(r"(?m)^### Step 9(?:\s|$)", section)) != 1:
         raise ValueError("full-build transaction fence must have one Step 9 marker")
 
-    section = _route_prepared_python_blocks(section)
+    section = _route_prepared_python_blocks(section, cache_writes=cache_writes)
     export_prefix = (
         'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
         "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
@@ -1416,6 +1422,22 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    if platform.dispatch in _INLINE_DISPATCHES:
+        body = body.replace(
+            "If all files are cached, skip to Part C directly.",
+            "If all files are cached, skip B1/B2 and run B3 to merge the cached results before Part C.",
+            1,
+        ).replace(
+            "Register each validated chunk's absolute file path in that same manifest through the exact prepared-token runner used by B3.",
+            "Stage the validated inline aggregate through the exact prepared-token runner used by B3. Only OpenCode's serial fallback registers chunk paths in the prepared manifest.",
+            1,
+        )
+        start = body.index("**Step B3 - Collect, cache, and merge**")
+        end = body.index("Save new results to cache:", start)
+        collection = _read_fragment("collection/inline.md").replace(
+            "@@INLINE_SERIAL_FALLBACK@@", str(platform.dispatch == "opencode-mention")
+        )
+        body = body[:start] + collection + "\n" + body[end:]
     if platform.key == "windows":
         if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
             raise ValueError("Windows core must have exactly one portable namespace target")
