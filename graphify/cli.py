@@ -4114,7 +4114,7 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
             sys.exit(1)
         if backend == "ollama":
             from graphify.llm import _validate_ollama_base_url
-            _oll_url = os.environ.get("OLLAMA_BASE_URL") or _BACKENDS["ollama"].get("base_url") or ""
+            _oll_url = os.environ.get("OLLAMA_BASE_URL", _BACKENDS["ollama"].get("base_url", ""))
             try:
                 _validate_ollama_base_url(_oll_url, warn=False)
             except ValueError as exc:
@@ -4124,10 +4124,13 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
             allow_no_key = False
             if backend == "ollama":
                 from urllib.parse import urlparse
-                ollama_url = (os.environ.get("OLLAMA_BASE_URL")
-                              or _BACKENDS["ollama"].get("base_url") or "")
+                ollama_url = os.environ.get(
+                    "OLLAMA_BASE_URL",
+                    _BACKENDS["ollama"].get("base_url", ""),
+                )
                 try:
                     host = (urlparse(ollama_url).hostname or "").lower()
+                    assert isinstance(host, str)  # Environment URLs are text, including empty text.
                 except Exception:
                     host = ""
                 allow_no_key = (

@@ -1541,7 +1541,7 @@ def extract_files_direct(
         # Ollama ignores auth but the OpenAI client library requires a non-empty
         # string. Use a placeholder and surface a visible warning so this never
         # silently routes traffic without the user realising — see F-029.
-        ollama_url = os.environ.get("OLLAMA_BASE_URL") or cfg.get("base_url") or ""
+        ollama_url = os.environ.get("OLLAMA_BASE_URL", cfg.get("base_url", ""))
         _validate_ollama_base_url(ollama_url)
         print(
             "[graphify] WARNING: ollama backend selected with no OLLAMA_API_KEY set; "
@@ -2259,7 +2259,7 @@ def _call_llm(
     cfg = BACKENDS[backend]
     key = _get_backend_api_key(backend)
     if not key and backend == "ollama":
-        ollama_url = os.environ.get("OLLAMA_BASE_URL") or cfg.get("base_url") or ""
+        ollama_url = os.environ.get("OLLAMA_BASE_URL", cfg.get("base_url", ""))
         _validate_ollama_base_url(ollama_url)
         key = "ollama"
     if not key and backend not in ("bedrock", "claude-cli"):
@@ -2451,7 +2451,7 @@ def _ollama_host_is_link_local_or_metadata(host: str) -> bool:
     return False
 
 
-def _validate_ollama_base_url(url: str, *, warn: bool = True) -> None:
+def _validate_ollama_base_url(url: str | None, *, warn: bool = True) -> None:
     """Warn if OLLAMA_BASE_URL looks unsafe; hard-block link-local/metadata (F3).
 
     Sending an entire corpus to a non-loopback http:// endpoint silently leaks
@@ -2481,7 +2481,9 @@ def _validate_ollama_base_url(url: str, *, warn: bool = True) -> None:
                 file=sys.stderr,
             )
         return
-    host = (parsed.hostname or "").lower()
+    hostname = parsed.hostname
+    assert hostname is None or isinstance(hostname, str)  # Only a text URL can have an HTTP scheme.
+    host = (hostname or "").lower()
     if _ollama_host_is_link_local_or_metadata(host):
         raise ValueError(
             f"OLLAMA_BASE_URL points at a link-local/metadata address ({host!r}); refusing to "
