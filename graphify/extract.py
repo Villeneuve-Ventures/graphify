@@ -4189,9 +4189,12 @@ def _cached_markdown_matches_source(path: Path, cached: dict) -> bool:
     )
 
 
-class _ExtractionOptions(TypedDict, total=False):
-    strict: bool
+class _ExtractionCacheOptions(TypedDict, total=False):
     use_cache: bool
+
+
+class _ExtractionOutcomeOptions(TypedDict, total=False):
+    input_outcomes: list[dict]
 
 
 def _extract_single_file(args: tuple[int, str, str] | tuple[int, str, str, str]
@@ -4595,20 +4598,31 @@ def _extract_impl(
 
     # Phase 2: extract uncached files (parallel or sequential)
     if uncached_work:
-        cache_options: _ExtractionOptions = {"use_cache": False} if not use_cache else {}
-        if strict:
-            cache_options["strict"] = True
+        cache_options: _ExtractionCacheOptions = {"use_cache": False} if not use_cache else {}
+        outcome_options: _ExtractionOutcomeOptions = (
+            {"input_outcomes": input_outcomes} if input_outcomes is not None else {}
+        )
         ran_parallel = False
         if parallel and len(uncached_work) >= _PARALLEL_THRESHOLD:
-            ran_parallel = _extract_parallel(
-                uncached_work, per_file, root, max_workers, total, cache_location,
-                **cache_options,
-            )
+            if strict:
+                ran_parallel = _extract_parallel(
+                    uncached_work, per_file, root, max_workers, total, cache_location,
+                    True, **cache_options,
+                )
+            else:
+                ran_parallel = _extract_parallel(
+                    uncached_work, per_file, root, max_workers, total, cache_location,
+                    **cache_options,
+                )
         if not ran_parallel:
-            _extract_sequential(uncached_work, per_file, root, total, cache_location,
-                                **cache_options,
-                                **({'input_outcomes': input_outcomes}
-                                   if input_outcomes is not None else {}))
+            if strict:
+                _extract_sequential(uncached_work, per_file, root, total, cache_location,
+                                    True, **cache_options,
+                                    **outcome_options)
+            else:
+                _extract_sequential(uncached_work, per_file, root, total, cache_location,
+                                    **cache_options,
+                                    **outcome_options)
 
     outcomes = [_input_outcome(path, result) for path, result in zip(paths, per_file)]
     scope = current_source_io()
