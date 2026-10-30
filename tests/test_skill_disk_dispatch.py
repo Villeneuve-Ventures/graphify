@@ -366,6 +366,25 @@ def test_manual_prompt_substitutes_allocated_intake_path():
     core = gen.render(gen.load_platforms()["vscode"])[0].content
     dispatch = core.split("Subagent prompt template:", 1)[1].split("**Step B3", 1)[0]
     assert "DEEP_MODE, and CHUNK_PATH substituted" in dispatch
+    b2 = core.split("**Step B2", 1)[1].split("**Step B3", 1)[0]
+    assert "never overwrite" in b2
+    assert "Return only valid extraction JSON" in b2
+
+
+@pytest.mark.parametrize("invalid", ["", " ", "\t", "\x00", "broken\x00path"])
+@pytest.mark.parametrize("invalid_first", [False, True])
+def test_invalid_incomplete_source_cannot_hide_an_assigned_incomplete_file(tmp_path, monkeypatch, invalid, invalid_first):
+    _, source, out, baseline, _, prepared, run, intake, collect, _, _ = _fixture(tmp_path, monkeypatch)
+    payload = _payload(source)
+    payload['incomplete_sources'] = [invalid, str(source)] if invalid_first else [str(source), invalid]
+    intake.write_text(json.dumps(payload))
+    with pytest.raises(ValueError):
+        run(collect)
+    assert not (prepared / '.graphify_chunk_01.json').exists()
+    assert json.loads((prepared / '.graphify_completed_chunks.json').read_text()) == []
+    assert not list(out.glob('cache/semantic/*.json'))
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+    assert intake.read_text() == json.dumps(payload)
 
 
 @pytest.mark.parametrize("records", [
