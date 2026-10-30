@@ -335,3 +335,11 @@ def test_smoke_checks_console_commands_in_a_disposable_home(tmp_path, monkeypatc
     assert calls[0][1] == calls[1][1] and not calls[0][1].exists()
     assert protected.read_text() == "preserve"
     assert set(operator_home.iterdir()) == {protected}
+
+
+def test_pytest_cache_pruning_is_explicit_in_both_workflows():
+    for path in ("ci.yml", "dependabot-ci.yml"):
+        ci = yaml.load((ROOT / ".github/workflows" / path).read_text(), Loader=yaml.BaseLoader)
+        steps = ci["jobs"]["test"]["steps"]
+        setup = next(step for step in steps if step.get("uses", "").startswith("astral-sh/setup-uv@"))
+        assert setup["with"]["prune-cache"] == "true"

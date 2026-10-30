@@ -118,6 +118,7 @@ jobs:
         uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: ${{ matrix.python-version }}
+          prune-cache: true
 
       # --frozen installs straight from the committed uv.lock without re-resolving
       # or rewriting it, so CI never churns the lock.
