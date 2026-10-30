@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import weakref
 from pathlib import Path
 
 import pytest
@@ -665,3 +666,201 @@ def test_b3_command_runs_in_a_fresh_parent_shell_with_the_prepared_owner(tmp_pat
     assert json.loads((prepared / ".graphify_semantic_new.json").read_text())["nodes"] == _payload(source)["nodes"]
     assert intake.exists()
     assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("host", DISK_HOSTS)
+def test_b3_refuses_uncached_sources_without_any_assignment(tmp_path, monkeypatch, host):
+    _, source, out, baseline, _, prepared, run, intake, collect, _, core = _fixture(
+        tmp_path, monkeypatch, host)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    other = source.with_name("unassigned.md")
+    other.write_text("This source must also be dispatched.\n")
+    run("from pathlib import Path; Path('.graphify_uncached.txt').write_text(" +
+        repr(str(source) + "\n" + str(other)) + ")")
+    with pytest.raises(ValueError, match="assign|uncached"):
+        run(_body(core, "Merged {len(chunks)} chunks:"))
+    assert not (prepared / ".graphify_semantic_new.json").exists()
+    assert not list(out.glob("cache/semantic/*.json"))
+    assert intake.exists()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+def test_new_batch_cannot_overwrite_a_retained_chunk_plan(tmp_path, monkeypatch):
+    _, source, out, baseline, _, prepared, run, intake, _, b0, _ = _fixture(tmp_path, monkeypatch)
+    plan = (prepared / ".graphify_intake_plan_01.json").read_bytes()
+    before = sorted(intake.parent.parent.iterdir())
+    run(b0)
+    spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
+                if a.path.endswith("/extraction-spec.md"))
+    with pytest.raises(ValueError, match="retain|already"):
+        run(_body(spec, "tempfile.mkdtemp"))
+    assert (prepared / ".graphify_intake_plan_01.json").read_bytes() == plan
+    assert sorted(intake.parent.parent.iterdir()) == before
+    monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
+    monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(source)]))
+    run(_body(spec, "tempfile.mkdtemp"))
+    assert (prepared / ".graphify_intake_plan_02.json").is_file()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+def _numbered_chunks(tmp_path, monkeypatch, numbers):
+    fixture = _fixture(tmp_path, monkeypatch)
+    _, source, _, _, _, prepared, run, intake, collect, _, _ = fixture
+    sources = [source] + [source.with_name("source-" + number + ".md") for number in numbers[1:]]
+    for other in sources[1:]:
+        other.write_text("Another complete source.\n")
+    run("from pathlib import Path; Path('.graphify_uncached.txt').write_text(" +
+        repr("\n".join(map(str, sources))) + ")")
+    spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
+                if a.path.endswith("/extraction-spec.md"))
+    for number, current in zip(numbers, sources):
+        monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", number)
+        monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(current)]))
+        if number != "01":
+            run(_body(spec, "tempfile.mkdtemp"))
+            plan = json.loads((prepared / (".graphify_intake_plan_" + number + ".json")).read_text())
+            intake = Path(plan["intake"]) / "result.json"
+        payload = _payload(current)
+        payload["nodes"][0]["label"] = number
+        payload["retention_probe"] = True
+        payload["unmerged_metadata"] = "diagnostic " * 100
+        intake.write_text(json.dumps(payload))
+        run(collect)
+    return fixture
+
+
+@pytest.mark.parametrize("numbers", [("01", "02"), ("01", "99", "100"), ("01", "010", "10")])
+def test_b3_numeric_order_and_first_record_are_independent_of_import_order(tmp_path, monkeypatch, numbers):
+    _, _, _, _, _, prepared, run, _, _, _, core = _numbered_chunks(tmp_path, monkeypatch, numbers)
+    merge = _body(core, "Merged {len(chunks)} chunks:")
+    cache_merge = _body(core, "cached = json.loads(Path('.graphify_cached.json')")
+    expected = sorted(numbers, key=lambda number: (int(number), number))
+    for order in (numbers, tuple(reversed(numbers))):
+        paths = [str(prepared / (".graphify_chunk_" + number + ".json")) for number in order]
+        run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text(" +
+            repr(json.dumps(paths)) + ")")
+        run(merge)
+        result = json.loads((prepared / ".graphify_semantic_new.json").read_text())
+        assert [node["label"] for node in result["nodes"]] == expected
+        assert result["input_tokens"] == 7 * len(numbers)
+        assert result["output_tokens"] == 3 * len(numbers)
+        run(cache_merge)
+        assert json.loads((prepared / ".graphify_semantic.json").read_text())["nodes"][0]["label"] == "01"
+
+
+def test_b3_releases_decoded_chunk_wrappers_before_loading_all_results(tmp_path, monkeypatch):
+    _, _, _, _, _, _, run, _, _, _, core = _numbered_chunks(tmp_path, monkeypatch, ("01", "02", "03"))
+    original = json.loads
+    references = []
+
+    class DecodedChunk(dict):
+        pass
+
+    def loads(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if isinstance(result, dict) and result.get("retention_probe"):
+            assert sum(reference() is not None for reference in references) <= 1
+            result = DecodedChunk(result)
+            references.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(json, "loads", loads)
+    run(_body(core, "Merged {len(chunks)} chunks:"))
+    assert len(references) == 3
+
+
+def test_manual_pasted_json_mode_replaces_the_whole_file_write_response_block():
+    artifacts = gen.render(gen.load_platforms()["vscode"])
+    core = artifacts[0].content
+    spec = next(a.content for a in artifacts if a.path.endswith("/extraction-spec.md"))
+    b2 = core.split("**Step B2", 1)[1].split("**Step B3", 1)[0]
+    assert "completion-notice line" in b2
+    prompt = spec.split("```", 2)[1]
+    instruction = prompt.index("Then write the JSON to disk")
+    pasted = prompt[:instruction] + "Return only valid extraction JSON, with no completion notice."
+    assert "Return only a completion notice" not in pasted
+
+
+@pytest.mark.parametrize("host", DISK_HOSTS)
+def test_finalization_keeps_staging_evidence_private_and_preserves_intended_outputs(tmp_path, monkeypatch, capsys, host):
+    root, source, out, baseline, _, prepared, run, intake, collect, b0, core = _fixture(tmp_path, monkeypatch, host)
+    intake.write_text(json.dumps(_payload(source)))
+    raw = intake.read_bytes()
+    run(collect)
+    if host == "pi":
+        # A successful retry must also preserve the prior batch's plan/chunk.
+        run(b0)
+        monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
+        spec = next(a.content for a in gen.render(gen.load_platforms()[host])
+                    if a.path.endswith("/extraction-spec.md"))
+        run(_body(spec, "tempfile.mkdtemp"))
+        plan = json.loads((prepared / ".graphify_intake_plan_02.json").read_text())
+        Path(plan["intake"], "result.json").write_bytes(raw)
+        run(collect)
+    run(_body(core, "Merged {len(chunks)} chunks:"))
+    staged = {p.name: p.read_bytes() for p in prepared.iterdir()
+              if p.name.startswith((".graphify_intake_plan_", ".graphify_chunk_"))
+              or p.name in {".graphify_completed_chunks.json", ".graphify_dispatch_batch.txt"}}
+    run("from pathlib import Path; Path('intended-export.txt').write_text('retain this export')")
+    if "Retained disk staging evidence:" in core:
+        run(_body(core, "Retained disk staging evidence:"))
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+    run("from graphify.transaction import finalize_prepared_transaction; finalize_prepared_transaction()")
+    assert not any((out / name).exists() for name in staged)
+    captured = capsys.readouterr()
+    archive = Path(next(line.split(": ", 1)[1] for line in captured.out.splitlines()
+                        if line.startswith("Retained disk staging evidence:")))
+    assert not archive.is_relative_to(root) and not archive.is_relative_to(prepared)
+    assert {name: (archive / name).read_bytes() for name in staged} == staged
+    receipt = json.loads((archive / "retention.json").read_text())
+    assert set(receipt["files"]) == set(staged)
+    assert intake.read_bytes() == raw
+    assert (out / "intended-export.txt").read_text() == "retain this export"
+    assert json.loads((out / "graph.json").read_text())["nodes"][0]["id"] == "baseline"
+    assert json.loads((out / "manifest.json").read_text()) == {"baseline": True}
+
+
+@pytest.mark.parametrize("damage", ["archive-write", "archive-readback", "unsafe-location"])
+def test_staging_retention_failure_keeps_prepared_evidence_and_public_output(tmp_path, monkeypatch, damage):
+    root, source, out, baseline, _, prepared, run, intake, collect, _, core = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    before = {p.name: p.read_bytes() for p in prepared.iterdir() if p.is_file()}
+    original = tx._replace_relative_bytes
+
+    def replace(capability, name, payload, **kwargs):
+        if capability.path.name.startswith("graphify-staging-evidence-"):
+            if damage == "archive-write":
+                raise OSError("injected archive write failure")
+            if damage == "archive-readback":
+                payload = b"corrupt archive"
+        return original(capability, name, payload, **kwargs)
+
+    monkeypatch.setattr(tx, "_replace_relative_bytes", replace)
+    if damage == "unsafe-location":
+        monkeypatch.setattr(tempfile, "tempdir", str(root))
+    with pytest.raises((OSError, ValueError), match="archive|outside|readback"):
+        run(_body(core, "Retained disk staging evidence:"))
+    assert {p.name: p.read_bytes() for p in prepared.iterdir() if p.is_file()} == before
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+    assert intake.exists()
+
+
+@pytest.mark.parametrize("unsafe_location", [False, True])
+def test_retention_command_uses_live_owner_and_stops_the_shell_on_failure(tmp_path, monkeypatch, unsafe_location):
+    root, source, out, baseline, _, _, run, intake, collect, _, core = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    block = next(block for block in re.findall(r"```bash\n(.*?)\n```", core, re.S)
+                 if "Retained disk staging evidence:" in block)
+    environment = {**os.environ, "VIRTUAL_ENV": sys.prefix,
+                   "TMPDIR": str(root if unsafe_location else intake.parent.parent)}
+    environment.pop("GRAPHIFY_TRANSACTION_TOKEN", None)
+    command = _shell_input(block, root) + "\nprintf 'AFTER_RETENTION\\n'"
+    result = subprocess.run(["/bin/bash", "-c", command], cwd=root, env=environment,
+                            capture_output=True, text=True, check=False, timeout=30)
+    assert (result.returncode != 0) is unsafe_location, result.stderr
+    assert ("AFTER_RETENTION" in result.stdout) is not unsafe_location
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+    assert intake.exists()

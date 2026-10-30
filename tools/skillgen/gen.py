@@ -1147,6 +1147,7 @@ def _route_prepared_python_blocks(
             "write_text(",
             "write_bytes(",
             "commit_prepared_bytes(",
+            "unlink_prepared(",
             "save_manifest(",
             "to_json(",
             "unlink(",
@@ -1430,6 +1431,10 @@ def _render_core(platform: Platform) -> str:
         _, commands = collection.split("Save new results to cache:", 1)
         body = (prefix + "**Step B3 - Collect, cache, and merge**\n\n"
                 + _read_fragment("collection/disk.md") + "\nSave new results to cache:" + commands)
+        step9 = "### Step 9 - Save manifest, update cost tracker, clean up, and report\n\n"
+        if body.count(step9) != 1:
+            raise ValueError("disk staging retention needs exactly one Step 9 boundary")
+        body = body.replace(step9, step9 + _read_fragment("collection/disk-publication.md") + "\n", 1)
     if platform.key == "windows":
         if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
             raise ValueError("Windows core must have exactly one portable namespace target")
