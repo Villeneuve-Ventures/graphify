@@ -10,6 +10,20 @@ from pathlib import Path
 from graphify import transaction as tx
 
 
+def resolve_parent_recipes(core: str, reference: str) -> str:
+    """Follow the core's parent-recipe links in the shipped extraction sidecar."""
+    for match in list(re.finditer(
+        r"\[([^\n]+?)\]\(references/extraction-spec\.md#(parent-[a-z0-9-]+)\)", core
+    )):
+        title, anchor = match.groups()
+        assert re.sub(r"[^a-z0-9 -]", "", title.lower()).replace(" ", "-") == anchor
+        heading = "## " + title + "\n"
+        assert reference.count(heading) == 1
+        recipe = reference.split(heading, 1)[1].split("\n## ", 1)[0]
+        core = core.replace(match.group(0), recipe)
+    return core
+
+
 def python_bodies(text: str) -> list[str]:
     bodies = []
     for block in re.findall(r"```bash\n(.*?)\n```", text, re.S):

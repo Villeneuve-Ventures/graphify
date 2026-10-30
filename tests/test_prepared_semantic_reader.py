@@ -445,7 +445,10 @@ def _rendered_semantic_stage(platform_key, needle):
     import re
     import shlex
     from tools.skillgen import gen
-    body = gen.render(gen.load_platforms()[platform_key])[0].content
+    from tests.skill_runbook_helpers import resolve_parent_recipes
+    artifacts = gen.render(gen.load_platforms()[platform_key])
+    body = resolve_parent_recipes(artifacts[0].content, next((
+        a.content for a in artifacts if a.path.endswith('/extraction-spec.md')), ''))
     block = next(block for block in re.findall(r'```(?:bash|sh)\n(.*?)\n```', body, re.S)
                  if needle in block)
     assert 'run-prepared-token' in next(line for line in block.splitlines() if line.endswith('-c "'))
