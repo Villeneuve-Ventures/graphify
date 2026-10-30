@@ -7,11 +7,11 @@ The proposed quality-job additions run Ruff and Pyright after installing the
 PR's locked dependencies. Neither check permits failure. The existing pytest
 matrix, execution receipts, admission jobs, and final gate retain their behavior.
 
-This candidate needs a passing typecheck baseline before delivery. On the
-initial base, the configured Pyright command failed. Do not suppress errors,
-reduce the configured scope, or make the step advisory to accept this candidate.
-The complete local report is retained outside Git. Full-suite validation and
-integration with concurrent workflow changes must also finish before delivery.
+The configured checks must pass before delivery. Keep Pyright's checking mode
+and include scope in `pyproject.toml`; do not suppress errors, reduce that scope,
+or make the step advisory to accept a dependency update. Type repairs use the
+validated runtime shapes and preserve malformed-input rejection tests. Full-suite
+validation and integration with concurrent workflow changes remain required.
 
 ## Tool pins
 

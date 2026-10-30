@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 from graphify.paths import read_graphify_root
 from pathlib import Path
+from typing import TypedDict
 
 
 _TRANSACTION_OUTPUT_OVERRIDE: Path | None = None
@@ -3714,6 +3715,12 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
         sys.exit(1)
 
 
+class _MergeUpdateOptions(TypedDict, total=False):
+    ast_refresh_sources: list[str] | None
+    ast_refresh_source_map: dict[str, str] | None
+    replacement_sources: list[str]
+
+
 def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
     # Headless full-pipeline extraction for CI / scripts (#698).
     # Runs detect -> AST extraction on code -> semantic LLM extraction on
@@ -4523,6 +4530,17 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
         for _src in list(excluded_files) + graph_stale_sources:
             if _src not in _prune_sources:
                 _prune_sources.append(_src)
+        merge_options = (
+            _MergeUpdateOptions(ast_refresh_sources=ast_refresh_sources,
+                                ast_refresh_source_map=ast_refresh_source_map)
+            if ast_refresh else _MergeUpdateOptions(
+                replacement_sources=sorted(semantic_replacements | {
+                    record["source_file"]
+                    for result in (ast_result, pg_result, cargo_result)
+                    for record in result.get("nodes", []) if record.get("source_file")
+                })
+            )
+        )
         G = _build_merge(
             [merged],
             graph_path=existing_graph_path,
@@ -4530,13 +4548,7 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
             dedup=True,
             dedup_llm_backend=dedup_backend,
             root=target,
-            ast_refresh_sources=ast_refresh_sources if ast_refresh else None,
-            ast_refresh_source_map=ast_refresh_source_map if ast_refresh else None,
-            replacement_sources=None if ast_refresh else sorted(semantic_replacements | {
-                record["source_file"]
-                for result in (ast_result, pg_result, cargo_result)
-                for record in result.get("nodes", []) if record.get("source_file")
-            }),
+            **merge_options,
         )
     else:
         G = _build([merged], dedup=True, dedup_llm_backend=dedup_backend, root=target)
