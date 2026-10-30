@@ -242,7 +242,7 @@ def test_non_shard_job_policies_preserve_baseline_except_action_updates():
     old = yaml.load(baseline, Loader=yaml.BaseLoader)
     current = workflow()
     action_updates = {
-        "actions/checkout@v6": "actions/checkout@v7.0.1",
+        "actions/checkout@v6": "actions/checkout@v7",
         "astral-sh/setup-uv@v8.1.0": "astral-sh/setup-uv@v10.2.0",
         "actions/upload-artifact@v4": "actions/upload-artifact@v7.0.2",
     }
