@@ -3837,3 +3837,40 @@ else:
     assert _rebuild_code(root, changed_paths=[], no_cluster=True, block_on_lock=True)
     snapshot = tx.open_graph_snapshot(output / "graph.json", purpose="entrypoint-replay")
     assert "late_late" in {node["id"] for node in snapshot.data["nodes"]}
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("no_cluster", [False, True])
+@pytest.mark.parametrize("managed", [False, True])
+def test_rebuild_preserves_saved_direction(tmp_path, directed, no_cluster, managed):
+    from graphify.build import build_from_json
+    from graphify.export import to_json
+    from graphify.extract import extract
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "lib.py"
+    source.write_text("def alpha(): return beta()\ndef beta(): return alpha()\n")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    extraction = extract([source], cache_root=tmp_path, source_root=tmp_path, parallel=False)
+    graph = build_from_json(extraction, directed=directed, root=tmp_path)
+    graph.graph["hyperedges"] = [{
+        "id": "lib_cycle", "label": "Mutual calls", "nodes": list(graph.nodes),
+        "source_file": "lib.py", "relation": "participate_in",
+        "confidence": "INFERRED", "confidence_score": 0.85,
+    }]
+    assert to_json(graph, {}, str(output / "graph.json"))
+    source.write_text(source.read_text() + "def gamma(): return alpha()\n")
+    assert _rebuild_code(tmp_path, changed_paths=[source], no_cluster=no_cluster,
+                         acquire_lock=managed, block_on_lock=True)
+    saved = json.loads((output / "graph.json").read_text())
+    assert saved.get("directed", False) is directed
+    assert {"graph", "directed", "multigraph"} <= saved.keys()
+    assert saved["multigraph"] is False
+    assert saved["graph"].get("hyperedges", []) == saved.get("hyperedges", [])
+    assert [group["id"] for group in saved["hyperedges"]] == ["lib_cycle"]
+    calls = {(edge["source"], edge["target"]) for edge in saved["links"]
+             if edge.get("relation") == "calls"}
+    assert ("lib_alpha", "lib_beta") in calls
+    if directed:
+        assert ("lib_beta", "lib_alpha") in calls

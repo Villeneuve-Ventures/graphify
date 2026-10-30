@@ -1415,6 +1415,10 @@ def _rebuild_code(
         rebuilt_sources |= set(deleted_paths)
         out.mkdir(exist_ok=True)
 
+        # Rebuilds preserve the saved traversal direction. Falling back to the
+        # builder default silently collapses reciprocal calls in directed graphs.
+        directed = existing_graph_data.get("directed", False)
+
         if no_cluster:
             # Normalise to "links" key so schema is consistent with the full clustered path.
             # Dedupe parallel edges (the clustered path's DiGraph collapses them implicitly);
@@ -1426,6 +1430,13 @@ def _rebuild_code(
                 "nodes": _dedupe_nodes(result.get("nodes", [])),
                 "links": _dedupe_edges(result.get("edges", [])),
             }
+            if "directed" in existing_graph_data:
+                candidate_graph_data.update(
+                    directed=directed,
+                    multigraph=existing_graph_data.get("multigraph", False),
+                    graph={**existing_graph_data.get("graph", {}),
+                           "hyperedges": candidate_graph_data.get("hyperedges", [])},
+                )
             candidate_graph_text = _json_text(candidate_graph_data)
             same_graph = False
             if existing_graph.exists():
@@ -1486,7 +1497,7 @@ def _rebuild_code(
             "total_words": detected.get("total_words", 0),
         }
 
-        G = build_from_json(result)
+        G = build_from_json(result, directed=directed)
         candidate_topology = _topology_from_graph(G)
         if existing_graph_data:
             try:
