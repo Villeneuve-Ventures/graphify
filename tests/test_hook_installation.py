@@ -48,6 +48,15 @@ def _live(root):
             for name in publication.NAMES}
 
 
+def _required_live(root) -> dict[str, bytes]:
+    """Read a complete user-hook fixture; missing hooks violate these cases."""
+    result: dict[str, bytes] = {}
+    for name, data in _live(root).items():
+        assert data is not None
+        result[name] = data
+    return result
+
+
 def _interrupt(root, monkeypatch, operation="install"):
     real = publication._rename
     calls = []
@@ -68,7 +77,7 @@ def _interrupt(root, monkeypatch, operation="install"):
 def test_partial_batch_is_complete_per_path_and_resumes_exactly(repo, monkeypatch):
     old = _live(repo)
     _interrupt(repo, monkeypatch)
-    partial = _live(repo)
+    partial = _required_live(repo)
     assert hooks._HOOK_MARKER.encode() in partial["post-commit"]
     assert partial["post-checkout"] == old["post-checkout"]
     assert partial["post-merge"] == old["post-merge"]
@@ -142,7 +151,7 @@ def test_never_writes_or_chmods_a_live_hook_and_preserves_noop_inodes(repo, monk
     hooks.install(repo)
     assert _snapshot(_hooks(repo)) == before
     hooks.uninstall(repo)
-    assert all(b"graphify-hook-start" not in data for data in _live(repo).values())
+    assert all(b"graphify-hook-start" not in data for data in _required_live(repo).values())
 
 
 def test_mode_only_repair_is_atomic_and_preserves_bytes(repo):
@@ -275,7 +284,7 @@ def test_pending_request_window_refuses_and_preserves_external_edit(repo, monkey
 
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
 def test_request_revalidation_allows_unchanged_exact_retry(repo, monkeypatch, operation):
-    original = _live(repo)
+    original = _required_live(repo)
     (repo / ".gitattributes").write_bytes(b"*.dat binary\n")
     subprocess.run(["git", "-C", str(repo), "config", "merge.other.driver", "keep this driver"], check=True)
     if operation == "uninstall":
@@ -288,7 +297,7 @@ def test_request_revalidation_allows_unchanged_exact_retry(repo, monkeypatch, op
     assert "pending" not in hooks.status(repo)
     assert b"*.dat binary\n" in (repo / ".gitattributes").read_bytes()
     assert subprocess.check_output(["git", "-C", str(repo), "config", "merge.other.driver"], text=True).strip() == "keep this driver"
-    for (name, data), marker in zip(_live(repo).items(), (hooks._HOOK_MARKER, hooks._CHECKOUT_MARKER, hooks._POST_MERGE_MARKER), strict=True):
+    for (name, data), marker in zip(_required_live(repo).items(), (hooks._HOOK_MARKER, hooks._CHECKOUT_MARKER, hooks._POST_MERGE_MARKER), strict=True):
         assert original[name].rstrip() in data
         assert stat.S_IMODE((_hooks(repo) / name).stat().st_mode) == 0o751
         assert (marker.encode() in data) == (operation == "install")
@@ -431,7 +440,7 @@ def test_request_change_at_preparation_noop_and_completion_checks(repo, monkeypa
         assert _live(repo) == before
     else:
         for name, marker in zip(publication.NAMES, (hooks._HOOK_MARKER_END, hooks._CHECKOUT_MARKER_END, hooks._POST_MERGE_MARKER_END), strict=True):
-            assert marker.encode() in _live(repo)[name]
+            assert marker.encode() in _required_live(repo)[name]
             assert stat.S_IMODE((_hooks(repo) / name).stat().st_mode) == 0o751
         assert "pending install" in hooks.status(repo)
         assert observed["state"] == _request_window_state(repo.parent, Path.home())
@@ -552,6 +561,7 @@ sys.stdin.read()
 """
     child = subprocess.Popen([sys.executable, "-I", "-S", "-c", code, str(_hooks(repo))], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
     try:
+        assert child.stdout is not None
         assert child.stdout.readline().strip() == "locked"
         before = _snapshot(repo)
         with pytest.raises(RuntimeError, match="incomplete"):
@@ -595,14 +605,14 @@ main()
                             capture_output=True, text=True)
     assert result.returncode != 0
     assert "injected config failure" in result.stdout + result.stderr
-    assert all(b"graphify" in data for data in _live(repo).values())
+    assert all(b"graphify" in data for data in _required_live(repo).values())
     assert "pending" not in hooks.status(repo)
 
 
 def test_legacy_dispatch_does_not_enter_posix_authority(repo, monkeypatch):
     monkeypatch.setattr(hooks, "_atomic_hooks_supported", lambda: False)
     monkeypatch.setattr(publication, "run", lambda *a, **k: pytest.fail("legacy dispatcher entered POSIX recovery"))
-    before = _live(repo)
+    before = _required_live(repo)
     hooks.install(repo)
     assert "installed" in hooks.status(repo)
     hooks.uninstall(repo)
@@ -687,7 +697,9 @@ def test_terminal_sync_failure_preserves_pending_binding_and_exact_retry(repo, m
 
     def fail(fd):
         if stat.S_ISDIR(os.fstat(fd).st_mode) and "completion" in os.listdir(fd):
-            journal = publication._read(fd, "journal")[1]
+            journal_record = publication._read(fd, "journal")
+            assert journal_record is not None
+            journal = journal_record[1]
             if json.loads(journal)["body"]["active"] is None:
                 raise OSError("terminal directory sync failed")
         return real(fd)
@@ -835,7 +847,7 @@ def test_empty_xdg_state_home_uses_default_for_public_operations(repo, monkeypat
     hooks.install(repo)
     assert "pending" not in hooks.status(repo)
     hooks.uninstall(repo)
-    assert all(b"graphify-hook-start" not in data for data in _live(repo).values())
+    assert all(b"graphify-hook-start" not in data for data in _required_live(repo).values())
 
 
 def test_status_without_attempt_distinguishes_unsafe_authority_and_preserves_state(repo):
@@ -976,7 +988,7 @@ def test_native_setgid_public_lifecycle(repo, monkeypatch, parent, entry_point):
     directory.mkdir(exist_ok=True)
     directory.chmod(0o2755)
     parent_info = directory.stat()
-    original = _live(repo)
+    original = _required_live(repo)
     attrs = repo / ".gitattributes"
     attrs.write_bytes(b"*.dat binary\n")
     unrelated = _hooks(repo) / "pre-push"
@@ -1221,7 +1233,7 @@ def test_bsd_flag_copy_failure_precedes_live_publication(repo, monkeypatch):
 
     def library(*args, **kwargs):
         result = real(*args, **kwargs)
-        result.fchflags = denied
+        setattr(result, "fchflags", denied)
         return result
 
     monkeypatch.setattr(publication.ctypes, "CDLL", library)
@@ -1520,7 +1532,7 @@ def test_uninstall_preserves_inherited_global_driver_config(repo, monkeypatch, t
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     before_global = global_config.read_bytes()
-    user_hooks = _live(repo)
+    user_hooks = _required_live(repo)
     attrs = repo / ".gitattributes"
     attrs.write_text("*.dat binary\n")
     if installed:
@@ -1545,7 +1557,7 @@ def test_uninstall_removes_duplicate_local_driver_values(repo, monkeypatch, tmp_
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     before_global = global_config.read_bytes()
-    user_hooks = {name: data + b"\n" for name, data in _live(repo).items()}
+    user_hooks = {name: data + b"\n" for name, data in _required_live(repo).items()}
     attrs = repo / ".gitattributes"
     attrs.write_text("*.dat binary\n")
     git_config = ["git", "-C", str(repo), "config", "--local"]
@@ -1588,7 +1600,7 @@ def test_uninstall_reports_local_config_removal_failure_and_retries(repo):
             hooks.uninstall(repo)
         assert (repo / ".git/config").read_bytes() == config
         assert (repo / ".gitattributes").read_bytes() == attrs
-        assert all(b"graphify-hook-start" not in data for data in _live(repo).values())
+        assert all(b"graphify-hook-start" not in data for data in _required_live(repo).values())
     finally:
         lock.unlink()
     assert "removed" in hooks.uninstall(repo)
@@ -1761,6 +1773,7 @@ def test_readonly_hooks_directory_refuses_with_actionable_error_and_retries(repo
         directory.chmod(mode)  # Restore only this fixture's directory access.
     result = invoke()
     if entry_point == "api":
+        assert isinstance(result, str)
         assert "post-commit:" in result
     else:
         assert result.returncode == 0
@@ -1946,7 +1959,7 @@ def test_registration_error_releases_both_lifecycle_locks(repo, monkeypatch, ope
         with pytest.raises(RuntimeError, match="injected registration failure"):
             getattr(hooks, operation)(repo)
     assert "pending" not in hooks.status(repo)
-    for data in _live(repo).values():
+    for data in _required_live(repo).values():
         assert (b"graphify-" in data) == (operation == "install")
     assert getattr(hooks, operation)(repo)
     assert hooks._merge_driver_status(repo) == ("registered" if operation == "install" else "not registered")
@@ -2163,7 +2176,9 @@ def test_completed_older_ownership_evidence_is_retained_without_adoption(repo):
             store = publication._Store(slot, identity, False)
             completed, = store.body["history"]
             name = completed["retired"]
-            body = store._decode(publication._read(slot, name, private=True)[1])
+            stored_record = publication._read(slot, name, private=True)
+            assert stored_record is not None
+            body = store._decode(stored_record[1])
             batch = body["active"]
             batch.pop("ownership_version")
             for entry in batch["entries"]:
@@ -2180,7 +2195,9 @@ def test_completed_older_ownership_evidence_is_retained_without_adoption(repo):
                 os.close(target)
             completed["completion"] = publication._signature(publication._read(slot, name, private=True))
             store.save()
-            record = publication._read(slot, name, private=True)[1]
+            stored_record = publication._read(slot, name, private=True)
+            assert stored_record is not None
+            record = stored_record[1]
             retained = _snapshot(_hooks(repo))
         finally:
             os.close(slot)

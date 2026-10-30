@@ -651,9 +651,9 @@ def test_historical_workspace_probe_stops_at_first_matching_entry(tmp_path, monk
     class CountedScan:
         def __init__(self, scan):
             self.scan = scan
-            self.entries = iter(sorted(
-                scan, key=lambda item: item.name != historical.parent.name,
-            ))
+            def historical_first(item: os.DirEntry[str]) -> bool:
+                return item.name != historical.parent.name
+            self.entries = iter(sorted(scan, key=historical_first))
 
         def __enter__(self):
             return self

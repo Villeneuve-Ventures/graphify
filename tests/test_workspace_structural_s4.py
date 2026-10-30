@@ -2,6 +2,9 @@
 import os
 import sys
 import time
+from datetime import datetime
+from typing import TypedDict
+
 import pytest
 
 from graphify.workspace.adapters.base import QueryRequest
@@ -9,10 +12,23 @@ from graphify.workspace.composition import (
     WorkspaceRuntimeAuthority, WorkspaceRuntimeInputs, compose_workspace_runtime,
 )
 from graphify.workspace.identity import discover_source
+from graphify.workspace.leases import LeaseStore, LeaseOwner
 from graphify.workspace.query import query_structural
 from graphify.workspace.sync import StructuralSyncRequest, prepare_structural_sync, synchronize_structural
 from tests.test_workspace_contracts import compatibility
 from tests.workspace_s3_helpers import REPO_UUID, authorization, create_repo, tree_snapshot
+
+
+class ActivationKwargs(TypedDict):
+    leases: LeaseStore
+    owner: LeaseOwner
+    expected_registry_revision: int
+    expected_active_source_revision: int
+    expected_operation_epoch: int
+    expected_migration_epoch: int
+    acquired_at: datetime
+    monotonic_ns: int
+    ttl_ns: int
 
 
 def runtime_fixture(tmp_path, monkeypatch, *, native=False):
@@ -92,7 +108,7 @@ def test_linked_source_is_explicitly_adopted_and_activated(tmp_path, monkeypatch
     stores.registry.adopt(source, replace(authorization("adopt-s4"), action=IdentityAction.ADOPT),
                           expected_revision=1)
     lease = stores.leases.inspect(REPO_UUID)
-    kwargs = dict(leases=stores.leases, owner=stores.leases.current_owner(),
+    kwargs = ActivationKwargs(leases=stores.leases, owner=stores.leases.current_owner(),
         expected_registry_revision=2, expected_active_source_revision=1,
         expected_operation_epoch=lease.operation_epoch, expected_migration_epoch=lease.migration_epoch,
         acquired_at=datetime.now(timezone.utc), monotonic_ns=time.monotonic_ns(), ttl_ns=10**12)
@@ -202,6 +218,7 @@ def test_incomplete_extraction_closes_staging_and_allows_new_request(tmp_path, m
     with pytest.raises(StructuralBuildIncomplete):
         synchronize_structural(runtime, request, attempt_sha256="a" * 64)
     state = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert state is not None
     assert state.lifecycle_state == "ABANDONED"
     assert state.abandon_reason == "EXTRACTION_INCOMPLETE"
     assert len(state.canonical) < 64 * 1024
@@ -236,6 +253,7 @@ def test_incomplete_extraction_abandon_intent_recovers_exactly(tmp_path, monkeyp
     with pytest.raises(GenerationConflict, match="abandoned"):
         synchronize_structural(runtime, request, attempt_sha256="b" * 64)
     state = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert state is not None
     assert state.lifecycle_state == "ABANDONED"
     assert state.abandon_reason == "EXTRACTION_INCOMPLETE"
 
@@ -404,6 +422,7 @@ def test_incomplete_extraction_cannot_close_after_successor_fence(tmp_path, monk
     with pytest.raises(StaleLease):
         synchronize_structural(runtime, request, attempt_sha256="a" * 64)
     staged = stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert staged is not None
     assert staged.lifecycle_state == "PUBLISHING"
     assert staged.abandonment_intent is None
     assert stores.pointers.load(REPO_UUID, allow_missing=True) is None
@@ -421,6 +440,7 @@ def test_watermark_change_blocks_certification(tmp_path, monkeypatch):
         result = original(grant, **kwargs)
         with runtime.stores.leases.current_operation(grant, monotonic_ns=kwargs["monotonic_ns"]):
             state = queue._load_locked(REPO_UUID)
+            assert state.reconciliation is not None
             reconciliation = replace(state.reconciliation, desired_watermark=2)
             queue._commit_locked(state, replace(state, revision=state.revision + 1,
                 desired_watermark=2, completed_watermark=2, reconciliation=reconciliation))

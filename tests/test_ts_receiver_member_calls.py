@@ -27,7 +27,7 @@ def _calls(tmp_path, files: dict[str, str]):
     # Real-CLI shape: absolute input paths + a graphify-out cache subdir.
     r = extract([tmp_path / n for n in files], cache_root=tmp_path / "graphify-out")
     lbl = {n["id"]: n["label"] for n in r["nodes"]}
-    return {(lbl.get(e["source"]), lbl.get(e["target"])) for e in r["edges"]
+    return {(lbl[e["source"]], lbl[e["target"]]) for e in r["edges"]
             if e["relation"] == "calls"}, r
 
 

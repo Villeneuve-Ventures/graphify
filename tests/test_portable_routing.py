@@ -1,9 +1,16 @@
 """Portable signals must never become local or unmanaged write authority."""
 import json
 
+from collections.abc import Callable
+
 import pytest
 
 from graphify import transaction as tx
+
+
+def _invoke_unvalidated(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+    """Exercise runtime rejection with inputs outside the static API contract."""
+    return function(*args, **kwargs)
 
 
 def inventory(root):
@@ -60,7 +67,7 @@ def test_portable_snapshot_cannot_be_a_local_baseline(tmp_path):
 
     before = inventory(tmp_path)
     with pytest.raises(TypeError, match="GraphSnapshot"):
-        tx.begin_transaction(
+        _invoke_unvalidated(tx.begin_transaction,
             "full", tmp_path, output=tmp_path / "out", expected_snapshot=ReadOnlySnapshot()
         )
     assert inventory(tmp_path) == before

@@ -72,6 +72,7 @@ exec(operation, {'__name__': '__main__'})
 def _worker_import_paths(deadline_ns):
     """Select package, standard library and installed dependency roots."""
     package = sys.modules["graphify"]
+    assert package.__file__ is not None  # graphify is a file-backed package.
     package_root = Path(package.__file__).resolve().parent.parent
     stdlib = Path(sysconfig.get_path("stdlib")).resolve()
     ziplib = Path(sys.base_prefix) / "lib" / (
@@ -174,6 +175,7 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
                 for stream, event in ((process.stdin, selectors.EVENT_WRITE),
                                       (process.stdout, selectors.EVENT_READ),
                                       (process.stderr, selectors.EVENT_READ)):
+                    assert stream is not None  # All three streams were requested as PIPE.
                     os.set_blocking(stream.fileno(), False)
                     selector.register(stream, event)
                 while selector.get_map():
@@ -190,6 +192,7 @@ def run_readonly(code, request, *, deadline_ns, max_output_bytes,
                                 sent = len(request)
                             if sent == len(request):
                                 selector.unregister(key.fileobj)
+                                assert process.stdin is not None
                                 process.stdin.close()
                             continue
                         try:

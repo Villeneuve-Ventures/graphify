@@ -177,6 +177,7 @@ def test_composed_store_refuses_existing_oversized_allocation(tmp_path, monkeypa
     payload = preparation.staging_path / "graphify-out"
     payload.mkdir(mode=0o700)
     (payload / "graph.json").write_bytes(b" " * (2 * LIMIT) + b"{}\n")
+    assert observations[0].consumed_inputs is not None
     (payload / "input-manifest.json").write_bytes(observations[0].consumed_inputs.canonical)
     stores = _composed(harness, observations, monkeypatch)
     before = tree_snapshot(harness.state_root)

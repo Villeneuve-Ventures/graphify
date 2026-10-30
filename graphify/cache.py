@@ -812,7 +812,7 @@ def save_semantic_cache(
             if merge_existing:
                 prev = load_cached(p, root, kind=kind, cache_root=cache_root)
                 if prev:
-                    result = {
+                    result: dict = {
                         "nodes": (prev.get("nodes", []) or []) + result["nodes"],
                         "edges": (prev.get("edges", []) or []) + result["edges"],
                         "hyperedges": (prev.get("hyperedges", []) or []) + result["hyperedges"],

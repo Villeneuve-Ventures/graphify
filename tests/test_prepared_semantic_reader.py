@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -561,7 +562,11 @@ def test_rendered_later_graph_consumers_preserve_accepted_facts(
             index = next(i for i, statement in enumerate(tree.body) if isinstance(statement, ast.Assign)
                          and any(isinstance(target, ast.Name) and target.id in {'G', 'G_new'}
                                  for target in statement.targets))
-            target = tree.body[index].targets[0].id
+            statement = tree.body[index]
+            assert isinstance(statement, ast.Assign)
+            assignment_target = statement.targets[0]
+            assert isinstance(assignment_target, ast.Name)
+            target = assignment_target.id
             prefix = ast.Module(body=tree.body[:index + 1], type_ignores=[])
             runner = next(line for line in block.splitlines() if line.endswith('-c "'))
             # Prepared bodies start in output; direct consumers start in the corpus.
@@ -644,7 +649,7 @@ Path('.graphify_completed_chunks.json').write_text('[".graphify_chunk_old.json"]
     block = block.replace('INPUT_PATH', str(fixture.root))
     result = subprocess.run(['bash', '-e', '-c', block], cwd=fixture.root, text=True,
                             capture_output=True, env={**os.environ,
-                                'GRAPHIFY_PYTHON': str(Path(os.sys.executable).absolute())})
+                                'GRAPHIFY_PYTHON': str(Path(sys.executable).absolute())})
     assert result.returncode == 0, result.stdout + result.stderr
     _run(fixture, """
 fresh = json.loads(Path('.graphify_extract.json').read_text())
@@ -751,7 +756,7 @@ Path('cost.json').write_text('invalid cost JSON')
     block, _ = _deletion_stage(platform_key, '# Update cumulative cost tracker')
     block = block.replace(gen._POSIX_OPERATION_GUARD, '').replace('INPUT_PATH', str(fixture.root))
     result = subprocess.run(['bash', '-c', block], cwd=fixture.root, capture_output=True, text=True,
-                            env={**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable})
+                            env={**os.environ, 'GRAPHIFY_PYTHON': sys.executable})
     assert result.returncode != 0 and 'JSONDecodeError' in result.stderr
     assert _published_bytes(fixture.output) == before
     from graphify.detect import detect_incremental
@@ -760,7 +765,7 @@ Path('cost.json').write_text('invalid cost JSON')
     assert pending['deleted_files']
     _run(fixture, "Path('cost.json').unlink()")
     result = subprocess.run(['bash', '-c', block], cwd=fixture.root, capture_output=True, text=True,
-                            env={**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable})
+                            env={**os.environ, 'GRAPHIFY_PYTHON': sys.executable})
     assert result.returncode == 0, result.stdout + result.stderr
     current = tx.open_graph_snapshot(fixture.output / 'graph.json', purpose='deletion-retry')
     assert current.data['nodes'] == [] and current.data['links'] == []
@@ -778,7 +783,7 @@ def _update_shell(fixture, platform, needle, *, token=None, resume_assignment=No
                               "raise RuntimeError('injected detection failure')\nresult = detect_incremental(", 1)
     if resume_assignment is not None:
         block = resume_assignment + '\n' + block
-    environment = {**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable,
+    environment = {**os.environ, 'GRAPHIFY_PYTHON': sys.executable,
                    'GRAPHIFY_OUT': str(fixture.output)}
     environment.pop('GRAPHIFY_TRANSACTION_TOKEN', None)
     if token is not None:
@@ -805,7 +810,7 @@ def test_relative_update_input_uses_owner_root(tmp_path, monkeypatch, platform, 
                                   reference=platform == 'claude' and needle != '# Update cumulative cost tracker')
         block = block.replace(gen._POSIX_OPERATION_GUARD, '')
         block = re.sub(r'\bINPUT_PATH\b', input_spelling, block).replace('IS_DIRECTED', str(directed))
-        environment = {**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable,
+        environment = {**os.environ, 'GRAPHIFY_PYTHON': sys.executable,
                        'GRAPHIFY_OUT': str(fixture.output)}
         environment.pop('GRAPHIFY_TRANSACTION_TOKEN', None)
         if token:
@@ -1167,7 +1172,7 @@ def _run_rendered_wiki(fixture, platform, *, directed=False):
     block = block.replace(gen._POSIX_OPERATION_GUARD, '').replace('INPUT_PATH', str(fixture.root))
     block = block.replace('IS_DIRECTED', str(directed))
     return subprocess.run(['bash', '-c', block], cwd=fixture.root, capture_output=True, text=True,
-                          env={**os.environ, 'GRAPHIFY_PYTHON': os.sys.executable,
+                          env={**os.environ, 'GRAPHIFY_PYTHON': sys.executable,
                                'GRAPHIFY_OUT': str(fixture.output),
                                'GRAPHIFY_TRANSACTION_TOKEN': str(fixture.token.path)})
 
@@ -1349,7 +1354,7 @@ def test_empty_prune_invalidates_owned_callflow_destinations(tmp_path, monkeypat
     fixture = _baseline(tmp_path, monkeypatch)
     sections = tmp_path / 'sections.json'
     sections.write_text(json.dumps([{'id': 'rules', 'name': 'Rules', 'communities': [0]}]))
-    args = [os.sys.executable, '-m', 'graphify', 'export', 'callflow-html',
+    args = [sys.executable, '-m', 'graphify', 'export', 'callflow-html',
             '--graph', str(fixture.output / 'graph.json'), '--sections', str(sections)]
     if destination:
         args += ['--output', str(fixture.output / destination)]
@@ -1403,7 +1408,7 @@ def test_empty_prune_invalidates_owned_callflow_destinations(tmp_path, monkeypat
 @pytest.mark.parametrize('empty', [False, True])
 def test_empty_prune_invalidates_only_owned_custom_tree_destinations(tmp_path, monkeypatch, platform, destination, empty):
     fixture = _baseline(tmp_path, monkeypatch)
-    exported = subprocess.run([os.sys.executable, '-m', 'graphify', 'tree',
+    exported = subprocess.run([sys.executable, '-m', 'graphify', 'tree',
         '--graph', str(fixture.output / 'graph.json'), '--output', str(fixture.output / destination)],
         cwd=fixture.root, capture_output=True, text=True)
     assert exported.returncode == 0, exported.stdout + exported.stderr
@@ -1573,7 +1578,7 @@ def test_retry_merge_discards_failed_attempt_semantics(tmp_path, monkeypatch, pl
 @pytest.mark.parametrize('outcome', ['publish', 'report-failed', 'regenerate'])
 def test_prune_to_empty_invalidates_custom_managed_vault(tmp_path, monkeypatch, platform, vault, outcome):
     fixture = _baseline(tmp_path, monkeypatch)
-    exported = subprocess.run([os.sys.executable, '-m', 'graphify', 'export', 'obsidian',
+    exported = subprocess.run([sys.executable, '-m', 'graphify', 'export', 'obsidian',
                                '--graph', str(fixture.output / 'graph.json'),
                                '--dir', str(fixture.output / vault)],
                               cwd=fixture.root, capture_output=True, text=True)
@@ -1974,13 +1979,13 @@ def _recover_update_fixture(fixture, entrypoint='direct', *, failpoint=None):
         owner = pending[3] if pending is not None else tx._read_transaction(capability)
         protocol = tx._read_protocol(capability)
         identity = capability.identity
-    selectors = dict(expected_output_identity=identity,
-                     expected_generation=protocol['generation'] if owner is None else owner.generation,
-                     expected_transaction_id=None if owner is None else owner.id)
+    assert protocol is not None
+    generation = protocol['generation'] if owner is None else owner.generation
+    transaction_id = None if owner is None else owner.id
     if entrypoint == 'cli':
-        command = [os.sys.executable, '-B', '-m', 'graphify', 'transaction', 'recover',
+        command = [sys.executable, '-B', '-m', 'graphify', 'transaction', 'recover',
                    '--root', str(fixture.root), '--output', str(fixture.output),
-                   '--generation', str(selectors['expected_generation']),
+                   '--generation', str(generation),
                    '--device', str(identity.device), '--inode', str(identity.inode)]
         if owner is not None:
             command += ['--transaction-id', owner.id]
@@ -1991,9 +1996,11 @@ def _recover_update_fixture(fixture, entrypoint='direct', *, failpoint=None):
         return tx.resume_transaction(handoff['transaction_id'], fixture.root, output=fixture.output)
     if entrypoint == 'direct':
         return tx.recover_transaction('update', fixture.root, output=fixture.output, now=10**12,
-                                      transition_failpoint=failpoint, **selectors)
+                                      transition_failpoint=failpoint, expected_output_identity=identity,
+                                      expected_generation=generation, expected_transaction_id=transaction_id)
     return tx.recover_selected_transaction('update', fixture.root, output=fixture.output,
-                                           now=10**12, **selectors)
+                                           now=10**12, expected_output_identity=identity,
+                                           expected_generation=generation, expected_transaction_id=transaction_id)
 
 
 @pytest.mark.parametrize('entrypoint', ['direct', 'selected', 'cli'])
@@ -2326,7 +2333,7 @@ def test_receiptless_recovery_entrypoints_preserve_rejected_workspace(tmp_path, 
     if entrypoint == 'cli':
         identity = owner.output_identity
         result = subprocess.run(
-            [os.sys.executable, '-B', '-m', 'graphify', 'transaction', 'recover',
+            [sys.executable, '-B', '-m', 'graphify', 'transaction', 'recover',
              '--root', str(fixture.root), '--output', str(fixture.output),
              '--generation', str(owner.generation), '--transaction-id', owner.id,
              '--device', str(identity.device), '--inode', str(identity.inode)],

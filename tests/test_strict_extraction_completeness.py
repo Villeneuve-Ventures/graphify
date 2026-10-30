@@ -150,7 +150,7 @@ def install():
             if fail and isinstance(path, (str, os.PathLike)) and Path(path).name == "graph.json":
                 frame = sys._getframe(1)
                 while frame:
-                    if (frame.f_code.co_name == "_dispatch_command"
+                    if (frame.f_code.co_name == "_dispatch_extract"
                             and frame.f_locals.get("existing_graph_path") == Path(path)
                             and "incremental_mode" not in frame.f_locals):
                         record("fault", path=str(path), helper="baseline_exists_stat")
@@ -505,11 +505,11 @@ def test_strict_consumed_operation_failure(tmp_path, monkeypatch, family):
     resolution._TSCONFIG_ALIAS_CACHE.clear()
     observed = []
     if family == "workspace_partial":
-        original = os.scandir
+        original_scandir = os.scandir
 
         class PartialScan:
             def __init__(self, path):
-                self.scan = original(path)
+                self.scan = original_scandir(path)
                 self.count = 0
 
             def __enter__(self):
@@ -533,7 +533,7 @@ def test_strict_consumed_operation_failure(tmp_path, monkeypatch, family):
                 return entry
 
         def scandir(path):
-            return PartialScan(path) if Path(path) == tmp_path / "packages" else original(path)
+            return PartialScan(path) if Path(path) == tmp_path / "packages" else original_scandir(path)
 
         monkeypatch.setattr(os, "scandir", scandir)
     else:
@@ -872,7 +872,9 @@ def test_strict_incremental_identity_observations(tmp_path, monkeypatch, case):
                 raise OSError(5, "unneeded strict mtime observation")
             return original(path, *args, **kwargs)
         monkeypatch.setattr(os, "stat", stat)
-        assert str(source) in action()["new_files"]["code"]
+        detected = action()
+        assert isinstance(detected, dict)
+        assert str(source) in detected["new_files"]["code"]
         assert not observed, "strict complete refresh must bypass the unneeded mtime comparison"
         return
     with pytest.raises(OSError):
@@ -1020,13 +1022,20 @@ def test_strict_pascal_partial_enumeration_and_cache(tmp_path, monkeypatch, case
         helper, args, target = resolution._pascal_resolve_unit, (source, "Peer"), tmp_path / "sub"
     else:
         helper, args, target = resolution._pascal_resolve_class, (source, "TPeer"), tmp_path / "sub"
-    assert helper(*args, strict=True)
+    def invoke(strict=False):
+        if case == "F056":
+            return resolution._pascal_project_root(source, strict=strict)
+        if case in {"F057", "F068"}:
+            return resolution._pascal_resolve_unit(source, "Peer", strict=strict)
+        return resolution._pascal_resolve_class(source, "TPeer", strict=strict)
+
+    assert invoke(strict=True)
     if case in {"F068", "F069"}:
-        assert helper(*args), "ordinary resolver cache must be warmed before strict fault"
+        assert invoke(), "ordinary resolver cache must be warmed before strict fault"
     observed = []
     _inject_partial_scan(monkeypatch, target, helper.__name__, observed)
     with pytest.raises(OSError):
-        helper(*args, strict=True)
+        invoke(strict=True)
     assert "failure after valid entry" in observed
 
 

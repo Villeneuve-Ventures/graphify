@@ -1694,6 +1694,7 @@ def _js_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                         add_edge_fn(file_nid, nid, "contains", line)
                         handled = True
                     elif kind == "prototype":
+                        assert owner_name is not None
                         owner_nid = _make_id(stem, owner_name)
                         nid = _make_id(owner_nid, member_name)
                         add_node_fn(nid, f".{member_name}()", line)
@@ -2251,7 +2252,7 @@ def _extract_generic(
             merged.setdefault("namespace", ".".join(namespace_stack))
         if scope_stack and node_type != "namespace":
             merged.setdefault("scope_chain", list(scope_stack))
-        node = {
+        node: dict[str, object] = {
             "id": nid,
             "label": label,
             "file_type": "code",
@@ -2311,6 +2312,8 @@ def _extract_generic(
     add_node(file_nid, path.name, 1)
 
     def walk(node, parent_class_nid: str | None = None) -> None:
+        metadata: dict[str, object] | None
+        csharp_refs: list[tuple[str, str, bool, str]]
         t = node.type
 
         # Import types
@@ -2635,11 +2638,11 @@ def _extract_generic(
                                 for arg in tal.children:
                                     if not arg.is_named:
                                         continue
-                                    refs: list[tuple[str, str, bool, str]] = []
+                                    csharp_refs = []
                                     _csharp_collect_type_refs(
-                                        arg, source, True, refs, csharp_type_params
+                                        arg, source, True, csharp_refs, csharp_type_params
                                     )
-                                    for ref_name, _role, ref_qualified, ref_qualifier in refs:
+                                    for ref_name, _role, ref_qualified, ref_qualifier in csharp_refs:
                                         target = ensure_named_node(ref_name, line)
                                         metadata = {"ref_token": ref_name}
                                         if ref_qualified:
@@ -2946,9 +2949,9 @@ def _extract_generic(
             type_node = node.child_by_field_name("type")
             if type_node is not None:
                 line = node.start_point[0] + 1
-                refs: list[tuple[str, str, bool, str]] = []
-                _csharp_collect_type_refs(type_node, source, False, refs)
-                for ref_name, role, qualified, qualifier in refs:
+                csharp_refs = []
+                _csharp_collect_type_refs(type_node, source, False, csharp_refs)
+                for ref_name, role, qualified, qualifier in csharp_refs:
                     ctx = "generic_arg" if role == "generic_arg" else "field"
                     target_nid = ensure_named_node(ref_name, line)
                     if target_nid != parent_class_nid:
@@ -3187,11 +3190,11 @@ def _extract_generic(
                         if p.type != "parameter":
                             continue
                         type_node = p.child_by_field_name("type")
-                        refs: list[tuple[str, str, bool, str]] = []
+                        csharp_refs = []
                         _csharp_collect_type_refs(
-                            type_node, source, False, refs, csharp_type_params
+                            type_node, source, False, csharp_refs, csharp_type_params
                         )
-                        for ref_name, role, qualified, qualifier in refs:
+                        for ref_name, role, qualified, qualifier in csharp_refs:
                             ctx = "generic_arg" if role == "generic_arg" else "parameter_type"
                             target_nid = ensure_named_node(ref_name, line)
                             if target_nid != func_nid:
@@ -3204,11 +3207,11 @@ def _extract_generic(
                                          context=ctx, metadata=metadata)
                 return_node = node.child_by_field_name("returns")
                 if return_node is not None:
-                    refs: list[tuple[str, str, bool, str]] = []
+                    csharp_refs = []
                     _csharp_collect_type_refs(
-                        return_node, source, False, refs, csharp_type_params
+                        return_node, source, False, csharp_refs, csharp_type_params
                     )
-                    for ref_name, role, qualified, qualifier in refs:
+                    for ref_name, role, qualified, qualifier in csharp_refs:
                         ctx = "generic_arg" if role == "generic_arg" else "return_type"
                         target_nid = ensure_named_node(ref_name, line)
                         if target_nid != func_nid:

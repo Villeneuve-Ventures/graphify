@@ -32,7 +32,7 @@ def _refresh_learning_overlay(graph: nx.Graph, snapshot) -> None:
         graph.graph["_learning_overlay"] = {}
 
 
-def _graph_from_snapshot(snapshot) -> nx.Graph:
+def _graph_from_snapshot(snapshot) -> nx.DiGraph:
     """Build the in-memory graph from one admitted immutable snapshot."""
     data = snapshot.data
     if "links" not in data and "edges" in data:
@@ -52,13 +52,14 @@ def _graph_from_snapshot(snapshot) -> nx.Graph:
         G = json_graph.node_link_graph(data, edges="links")
     except TypeError:
         G = json_graph.node_link_graph(data)
+    assert isinstance(G, nx.DiGraph)  # The snapshot view forces directed=True above.
     # Optional learning is loaded after canonical graph snapshot admission.
     # Receipt-owned sidecars remain bound to that same admitted generation.
     _refresh_learning_overlay(G, snapshot)
     return G
 
 
-def _load_graph(graph_path: str) -> nx.Graph:
+def _load_graph(graph_path: str) -> nx.DiGraph:
     from graphify.transaction import PendingTransactionError
 
     try:
@@ -1058,7 +1059,7 @@ def _build_server(graph_path: str):
     try:
         from mcp.server import Server
         from mcp import types
-        from mcp.types import AnyUrl
+        from pydantic import AnyUrl
     except ImportError as e:
         raise ImportError('mcp not installed. Run: pip install "graphifyy[mcp]"') from e
 
@@ -1487,7 +1488,7 @@ def _build_server(graph_path: str):
         if repo:
             view_args += ["--repo", repo]
         pr_data = _gh(*view_args)
-        if pr_data is None:
+        if not isinstance(pr_data, dict):
             return f"PR #{number} not found or gh not authenticated."
         files = fetch_pr_files(number, repo)
         if not files:

@@ -444,7 +444,7 @@ def test_incremental_incomplete_edge_preserves_warning_and_valid_siblings(tmp_pa
     path = seed(tmp_path, {"nodes": [node("anchor"), node("beacon")],
                           "links": [edge("anchor", "beacon")]})
     before = path.read_bytes()
-    incomplete = edge("anchor", "beacon")
+    incomplete: dict[str, object] = {**edge("anchor", "beacon")}
     incomplete.pop(endpoint)
     fresh = {"nodes": [node("fresh", "changed.md")], "edges": [incomplete]}
     original = deepcopy(fresh)
@@ -516,7 +516,7 @@ def test_public_no_cluster_update_preserves_incomplete_extraction_edges(tmp_path
 def test_raw_reconciliation_preserves_retained_incomplete_edges(tmp_path, links_key, missing):
     from graphify.watch import _reconcile_existing_graph
     (tmp_path / "stable.md").write_text("accepted evidence")
-    incomplete = edge("anchor", "beacon")
+    incomplete: dict[str, object] = {**edge("anchor", "beacon")}
     for endpoint in missing:
         incomplete.pop(endpoint)
     good = edge("anchor", "beacon")
@@ -539,7 +539,7 @@ def test_raw_reconciliation_preserves_retained_incomplete_edges(tmp_path, links_
 def test_retained_incomplete_edges_still_obey_eviction_and_identity_rules(tmp_path, case):
     from graphify.watch import _reconcile_existing_graph
     (tmp_path / "unrelated.md").write_text("accepted evidence")
-    incomplete = edge("anchor", "beacon")
+    incomplete: dict[str, object] = {**edge("anchor", "beacon")}
     incomplete.pop("target")
     if case == "replaced-ast":
         incomplete["_origin"] = "ast"

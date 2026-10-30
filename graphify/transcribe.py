@@ -70,17 +70,16 @@ def download_audio(url: str, output_dir: Path) -> Path:
             print(f"  cached audio: {candidate.name}")
             return candidate
 
-    ydl_opts = {
+
+    print(f"  downloading audio: {url[:80]} ...", flush=True)
+    with yt_dlp.YoutubeDL({
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': out_template,
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'postprocessors': [],  # no ffmpeg needed — use native audio
-    }
-
-    print(f"  downloading audio: {url[:80]} ...", flush=True)
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    }) as ydl:
         info = ydl.extract_info(url, download=True)
         ext = info.get('ext', 'm4a')
         downloaded = output_dir / f"yt_{url_hash}.{ext}"

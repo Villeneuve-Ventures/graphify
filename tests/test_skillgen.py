@@ -6385,7 +6385,9 @@ def test_reference_wiki_skip_is_one_owned_python_argument(platform_key):
     else:
         arguments = shlex.split(line.rsplit('"$GRAPHIFY_TRANSACTION_TOKEN" -- ', 1)[1])
     assert len(arguments) == 2 and arguments[0] == '-c'
-    outer = ast.parse(arguments[1]).body[0].value
+    outer_statement = ast.parse(arguments[1]).body[0]
+    assert isinstance(outer_statement, ast.Expr)
+    outer = outer_statement.value
     assert isinstance(outer, ast.Call) and isinstance(outer.func, ast.Name) and outer.func.id == 'exec'
     code = ast.literal_eval(outer.args[0])
     compile(code, '<prepared-wiki-export>', 'exec')

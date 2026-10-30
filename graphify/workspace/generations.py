@@ -10,7 +10,7 @@ import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence, cast
+from typing import TypedDict, Any, Callable, Mapping, Sequence, cast
 
 from graphify.workspace.adapters import UnsupportedCompatibility
 from graphify.workspace.contracts import (
@@ -212,13 +212,23 @@ class StagedBuildPreparation:
     staging_path: Path
 
 
+class PayloadEntry(TypedDict):
+    """One measured file in a staged payload inventory."""
+
+    path: str
+    size: int
+    sha256: str
+    file_type: str
+    mode: str
+
+
 @dataclass(frozen=True)
 class StagedBuildCompletion:
     """Durable proof that staged payload bytes are complete and source-bound."""
 
     state: StagedBuildState
     allocation: GenerationAllocation
-    entries: tuple[dict[str, str | int], ...]
+    entries: tuple[PayloadEntry, ...]
 
     @property
     def manifest_sha256(self) -> str:
@@ -230,7 +240,7 @@ class StagedBuildCompletion:
 
 @dataclass(frozen=True)
 class _PayloadInventory:
-    entries: tuple[dict[str, str | int], ...]
+    entries: tuple[PayloadEntry, ...]
     directories: tuple[str, ...]
 
     @property
@@ -1712,7 +1722,7 @@ class GenerationStore:
         operation: LeaseOperation,
         state: StagedBuildState,
         receipt: GenerationReceipt,
-    ) -> tuple[CertificationRequest, tuple[dict[str, str | int], ...]]:
+    ) -> tuple[CertificationRequest, tuple[PayloadEntry, ...]]:
         if self.semantic_queue is None:
             raise GenerationConflict(
                 "staged certification recovery requires semantic queue authority"
@@ -1720,7 +1730,7 @@ class GenerationStore:
         value = receipt.to_dict()
         payload = cast(dict[str, Any], value["sealed_query_payload"])
         entries = tuple(
-            cast(dict[str, str | int], item) for item in cast(list[object], payload["entries"])
+            cast(PayloadEntry, item) for item in cast(list[object], payload["entries"])
         )
         validations = tuple(str(item) for item in cast(list[object], value["validations"]))
         certification_request = CertificationRequest(
@@ -2578,10 +2588,13 @@ class GenerationStore:
                         remaining -= len(chunk)
                     payload = b"".join(chunks)
                     try:
-                        from graphify.workspace.semantic_release_decision import (
-                            SemanticReleaseDecisionBinding,
-                            SemanticReleaseDecisionInvalid,
-                        )
+                        from importlib import import_module
+                        decision_module = import_module("graphify.workspace.semantic_release_decision")
+                        SemanticReleaseDecisionBinding = decision_module.SemanticReleaseDecisionBinding
+                        SemanticReleaseDecisionInvalid = decision_module.SemanticReleaseDecisionInvalid
+                        # The S3 build intentionally does not ship this optional S5 module.
+                        # Import failure remains a refused unsupported state.
+
                     except ImportError as exc:
                         raise StatePathError(
                             "semantic release decision state is unsupported in S3"
@@ -4107,7 +4120,7 @@ class GenerationStore:
         descriptor: int,
         *,
         prefix: str,
-        entries: list[dict[str, str | int]],
+        entries: list[PayloadEntry],
         byte_budget: list[int] | None = None,
         deadline_ns: int | None = None,
     ) -> None:
@@ -4222,7 +4235,7 @@ class GenerationStore:
             try:
                 if _identity(os.fstat(payload_descriptor)) != _identity(payload_details):
                     raise PayloadChanged("graphify-out changed while opened")
-                entries: list[dict[str, str | int]] = []
+                entries: list[PayloadEntry] = []
                 directories = ["graphify-out"]
                 self._scan_directory(
                     payload_descriptor,
@@ -4257,7 +4270,7 @@ class GenerationStore:
     def inspect_staged_payload(
         self,
         allocation: GenerationAllocation,
-    ) -> tuple[dict[str, str | int], ...]:
+    ) -> tuple[PayloadEntry, ...]:
         expected = self.state.path(self._staging(allocation.repo_uuid, allocation.generation_id))
         if allocation.staging_path != expected:
             raise GenerationConflict("allocation staging path is not canonical")

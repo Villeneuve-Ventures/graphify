@@ -1,5 +1,7 @@
 # monitor a folder and auto-trigger --update when files change
 from __future__ import annotations
+
+from typing import overload
 import contextlib
 import json
 import os
@@ -331,6 +333,15 @@ class _StoredSourcePaths:
     def normalize(self, source_file: str | None) -> str | None:
         normalized = self._normalize_source(source_file, str(self.project_root))
         return posixpath.normpath(normalized) if normalized else normalized
+
+    @overload
+    def absolute_identity(self, source_file: str, root: Path) -> str: ...
+
+    @overload
+    def absolute_identity(self, source_file: None, root: Path) -> None: ...
+
+    @overload
+    def absolute_identity(self, source_file: str | None, root: Path) -> str | None: ...
 
     def absolute_identity(self, source_file: str | None, root: Path) -> str | None:
         normalized = self._normalize_source(source_file)
