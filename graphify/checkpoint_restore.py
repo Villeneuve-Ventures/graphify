@@ -217,7 +217,8 @@ def capture(source_id, root, output, expected_head, *, failpoint=None):
         root, _root_id = _canonical_directory(str(root))
         protocol = tx._read_protocol(cap)
         _require(protocol is not None and protocol["root"] == str(root)
-                 and "restore_binding" not in protocol and "bootstrap_binding" not in protocol,
+                 and "restore_binding" not in protocol and "bootstrap_binding" not in protocol
+                 and "replacement_binding" not in protocol,
                  "capture requires a closed ordinary output at the selected root")
         entries = set(tx._list_entries(cap))
         _require(not entries.intersection(tx._COORDINATION_FILES - {

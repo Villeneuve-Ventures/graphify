@@ -344,6 +344,7 @@ def _prune_graph_json_sources(graph_path: Path, stale_sources: list[str]) -> int
         data["hyperedges"] = kept_hyper
     from graphify.export import backup_if_protected as _backup
     _backup(graph_path.parent)
+    _replacement_write_guard(graph_path)
     graph_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return n_removed
 
@@ -488,6 +489,7 @@ def _clone_repo(
         if result.returncode != 0:
             print(f"warning: git pull failed:\n{result.stderr}", file=sys.stderr)
     else:
+        _replacement_write_guard(dest.parent)
         dest.parent.mkdir(parents=True, exist_ok=True)
         print(f"Cloning {url} -> {dest} ...", flush=True)
         cmd = ["git", "clone", "--depth", "1"]
@@ -724,6 +726,7 @@ def _transactional_extract() -> None:
     with tempfile.TemporaryDirectory(prefix="graphify-extract-prepare-") as staging_name:
         staging_root = Path(staging_name)
         staging_output = staging_root / "graphify-out"
+        _replacement_write_guard(staging_output)
         staging_output.mkdir()
         source_snapshot = open_graph_snapshot(
             destination.graph,
@@ -733,7 +736,9 @@ def _transactional_extract() -> None:
         if source_snapshot.graph_present:
             for name, payload in source_snapshot.artifacts.items():
                 target = staging_output / name
+                _replacement_write_guard(target.parent)
                 target.parent.mkdir(parents=True, exist_ok=True)
+                _replacement_write_guard(target)
                 target.write_bytes(payload)
             prior_inventory = source_snapshot.artifacts
         else:
@@ -748,6 +753,7 @@ def _transactional_extract() -> None:
                 metadata.pop(GRAPH_WATERMARK_KEY, None)
                 baseline["graph"] = metadata
             baseline_graph_data = baseline
+            _replacement_write_guard(staged_graph)
             staged_graph.write_text(json.dumps(baseline), encoding="utf-8")
         transaction = begin_transaction(
             "full",
@@ -774,6 +780,7 @@ def _transactional_extract() -> None:
             sys.argv = original_argv
             globals()["_TRANSACTION_OUTPUT_OVERRIDE"] = original_output_override
         if "--no-viz" in original_argv:
+            _replacement_write_guard(staging_output / "graph.html")
             (staging_output / "graph.html").unlink(missing_ok=True)
         prepared_graph_data = (
             json.loads(staged_graph.read_text(encoding="utf-8"))
@@ -846,6 +853,7 @@ def _transactional_cluster_only(cmd: str) -> None:
     )
     report_auxiliaries = admit_report_auxiliaries(source_snapshot)
     source_graph_data = source_snapshot.data
+    _replacement_write_guard(destination.output)
     destination.output.mkdir(parents=True, exist_ok=True)
     transaction = begin_transaction(
         "runtime",
@@ -860,11 +868,15 @@ def _transactional_cluster_only(cmd: str) -> None:
         staging = Path(staging_name)
         for name, payload in source_snapshot.artifacts.items():
             target = staging / name
+            _replacement_write_guard(target.parent)
             target.parent.mkdir(parents=True, exist_ok=True)
+            _replacement_write_guard(target)
             target.write_bytes(payload)
         for name, payload in report_auxiliaries.items():
             target = staging / name
+            _replacement_write_guard(target.parent)
             target.parent.mkdir(parents=True, exist_ok=True)
+            _replacement_write_guard(target)
             target.write_bytes(payload)
         staged_graph = staging / destination.graph.name
         graph_data = source_graph_data
@@ -873,6 +885,7 @@ def _transactional_cluster_only(cmd: str) -> None:
             graph_metadata = dict(graph_metadata)
             graph_metadata.pop(GRAPH_WATERMARK_KEY, None)
             graph_data["graph"] = graph_metadata
+        _replacement_write_guard(staged_graph)
         staged_graph.write_text(json.dumps(graph_data), encoding="utf-8")
         sys.argv = [
             *original_argv[:2],
@@ -891,6 +904,7 @@ def _transactional_cluster_only(cmd: str) -> None:
         finally:
             sys.argv = original_argv
         if "--no-viz" in original_argv:
+            _replacement_write_guard(staging / "graph.html")
             (staging / "graph.html").unlink(missing_ok=True)
         published_graph = json.loads(staged_graph.read_text(encoding="utf-8"))
         published_metadata = published_graph.get("graph")
@@ -908,11 +922,13 @@ def _transactional_cluster_only(cmd: str) -> None:
         ).encode("utf-8")
         manifest = staging / "manifest.json"
         if not manifest.is_file():
+            _replacement_write_guard(manifest)
             manifest.write_bytes(b"{}")
         manifest_payload = manifest.read_bytes()
         # Borrowed report learning stays outside ownership; receipt-owned
         # learning must survive this successor plan with its fingerprints.
         if ".graphify_learning.json" not in source_snapshot.artifacts:
+            _replacement_write_guard(staging / ".graphify_learning.json")
             (staging / ".graphify_learning.json").unlink(missing_ok=True)
         _discard_report_only_directory(staging / "memory")
         plan = publication_plan_from_directory(
@@ -1368,7 +1384,9 @@ def _transactional_export() -> None:
         external_target: Path | None = None
         for name, payload in snapshot.artifacts.items():
             target = staging / name
+            _replacement_write_guard(target.parent)
             target.parent.mkdir(parents=True, exist_ok=True)
+            _replacement_write_guard(target)
             target.write_bytes(payload)
         if not managed_delivery and export_subcmd == "obsidian":
             if external_obsidian_inventory is None:
@@ -1376,12 +1394,16 @@ def _transactional_export() -> None:
                     "external Obsidian inventory is unavailable"
                 )
             external_vault = staging / "__external_obsidian"
+            _replacement_write_guard(external_vault)
             external_vault.mkdir()
             for name, entry in external_obsidian_inventory.files.items():
                 target = external_vault / name
+                _replacement_write_guard(target.parent)
                 target.parent.mkdir(parents=True, exist_ok=True)
+                _replacement_write_guard(target)
                 target.write_bytes(entry.payload)
             if external_obsidian_inventory.manifest_payload is not None:
+                _replacement_write_guard(external_vault / ".graphify_obsidian_manifest.json")
                 (external_vault / ".graphify_obsidian_manifest.json").write_text(
                     json.dumps(
                         {"files": sorted(external_obsidian_inventory.files)},
@@ -1396,6 +1418,7 @@ def _transactional_export() -> None:
             metadata = dict(metadata)
             metadata.pop(GRAPH_WATERMARK_KEY, None)
             graph_data["graph"] = metadata
+        _replacement_write_guard(staged_graph)
         staged_graph.write_text(json.dumps(graph_data), encoding="utf-8")
         rewritten = _replace_export_graph_argument(
             original_argv[3:], staged_graph, subcmd=original_argv[2]
@@ -1403,6 +1426,7 @@ def _transactional_export() -> None:
         for option, (canonical_name, payload) in explicit_artifacts.items():
             override_path = overrides / canonical_name
             if payload is not None:
+                _replacement_write_guard(override_path)
                 override_path.write_bytes(payload)
             rewritten = _replace_export_path_argument(
                 rewritten, option, override_path
@@ -1580,6 +1604,11 @@ def _transactional_export() -> None:
         sys.stderr.write(rendered_err)
         if success_exit is not None:
             raise success_exit
+
+
+def _replacement_write_guard(path):
+    from .canonical_replacement import guard_output
+    guard_output(path, mutation=True)
 
 
 def dispatch_command(cmd: str) -> None:
@@ -1825,6 +1854,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
         global_path = _custom_providers_path(global_=True)
 
         if subcmd == "list":
+            _replacement_write_guard(global_path.parent)
             global_path.parent.mkdir(parents=True, exist_ok=True)
             existing: dict = {}
             if global_path.is_file():
@@ -1896,6 +1926,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             if not provider_base_url_ok(base_url, name):
                 print(f"Error: refusing to add provider with unsafe base_url {base_url!r}.", file=sys.stderr)
                 sys.exit(1)
+            _replacement_write_guard(global_path.parent)
             global_path.parent.mkdir(parents=True, exist_ok=True)
             existing = {}
             if global_path.is_file():
@@ -1910,6 +1941,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 "pricing": {"input": pricing_input, "output": pricing_output},
                 "temperature": 0,
             }
+            _replacement_write_guard(global_path)
             global_path.write_text(_json.dumps(existing, indent=2) + "\n", encoding="utf-8")
             print(f"Provider '{name}' added. Use with: graphify extract . --backend {name}")
 
@@ -1928,6 +1960,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 print(f"Provider '{name}' not found.", file=sys.stderr)
                 sys.exit(1)
             del existing[name]
+            _replacement_write_guard(global_path)
             global_path.write_text(_json.dumps(existing, indent=2) + "\n", encoding="utf-8")
             print(f"Provider '{name}' removed.")
 
@@ -2688,6 +2721,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
         # intentional for arbitrary ``--graph`` paths: routing back into the
         # current working tree can mix two independently managed graphs (#89).
         out = graph_json.parent
+        _replacement_write_guard(out)
         out.mkdir(parents=True, exist_ok=True)
         labels_path = out / ".graphify_labels.json"
         existing_labels: dict[int, str] = {}
@@ -2809,6 +2843,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                           tokens, str(watch_path), suggested_questions=questions,
                           min_community_size=min_community_size, built_at_commit=_commit,
                           learning=_llfr(graph_json))
+        _replacement_write_guard(out / "GRAPH_REPORT.md")
         (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
         stages.mark("report")
         from graphify.export import backup_if_protected as _backup
@@ -2820,15 +2855,18 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             "surprises": surprises,
             "questions": questions,
         }
+        _replacement_write_guard(out / ".graphify_analysis.json")
         (out / ".graphify_analysis.json").write_text(
             json.dumps(analysis, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         to_json(G, communities, str(graph_json), community_labels=labels)
+        _replacement_write_guard(labels_path)
         labels_path.write_text(json.dumps({str(k): v for k, v in labels.items()}, ensure_ascii=False), encoding="utf-8")
         # Membership signatures beside the labels so a later cluster-only can detect
         # which communities changed and avoid reusing a stale label (see reuse above).
         from graphify.cluster import community_member_sigs as _cms
+        _replacement_write_guard(labels_path.parent / (labels_path.name + ".sig"))
         (labels_path.parent / (labels_path.name + ".sig")).write_text(
             json.dumps({str(k): v for k, v in _cms(communities).items()}), encoding="utf-8")
 
@@ -2839,6 +2877,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
         html_target = out / "graph.html"
         if no_viz:
             if html_target.exists():
+                _replacement_write_guard(html_target)
                 html_target.unlink()
             stages.mark("export"); stages.total()
             print(f"Done - {len(communities)} communities. GRAPH_REPORT.md and graph.json updated (--no-viz; graph.html removed).")
@@ -2853,6 +2892,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 print(f"Done - {len(communities)} communities. GRAPH_REPORT.md, graph.json and graph.html updated.")
             except ValueError as viz_err:
                 if html_target.exists():
+                    _replacement_write_guard(html_target)
                     html_target.unlink()
                 print(f"Skipped graph.html: {viz_err}")
                 stages.mark("export"); stages.total()
@@ -3101,7 +3141,9 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             out_data = _jg.node_link_data(composed_graph, edges="links")
         except TypeError:
             out_data = _jg.node_link_data(composed_graph)
+        _replacement_write_guard(out_path.parent)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        _replacement_write_guard(out_path)
         out_path.write_text(json.dumps(out_data, indent=2), encoding="utf-8")
         print(f"Merged {len(graphs)} graphs -> {composed_graph.number_of_nodes()} nodes, {composed_graph.number_of_edges()} edges")
         print(f"Written to: {out_path}")
@@ -3393,6 +3435,7 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             if no_viz:
                 html_target = out_dir / "graph.html"
                 if html_target.exists():
+                    _replacement_write_guard(html_target)
                     html_target.unlink()
                 print("--no-viz: skipped graph.html")
             else:
@@ -3590,8 +3633,10 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             files, root, mode=cache_mode, require_complete=True
         )
         out = root / _GRAPHIFY_OUT
+        _replacement_write_guard(out)
         out.mkdir(parents=True, exist_ok=True)
         if len(uncached) < len(files):
+            _replacement_write_guard(out / ".graphify_cached.json")
             (out / ".graphify_cached.json").write_text(
                 json.dumps({"nodes": cached_nodes, "edges": cached_edges, "hyperedges": cached_hyperedges,
                             "completed_sources": sorted(set(files) - set(uncached))},
@@ -3599,7 +3644,9 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                 encoding="utf-8",
             )
         else:
+            _replacement_write_guard(out / ".graphify_cached.json")
             (out / ".graphify_cached.json").unlink(missing_ok=True)
+        _replacement_write_guard(out / ".graphify_uncached.txt")
         (out / ".graphify_uncached.txt").write_text("\n".join(uncached), encoding="utf-8")
         print(f"Cache: {len(files) - len(uncached)} hit, {len(uncached)} miss")
 
@@ -3652,7 +3699,9 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
                     | _replacement_source_set(chunk.get("completed_sources", []), None))
             merged["input_tokens"] += chunk.get("input_tokens", 0)
             merged["output_tokens"] += chunk.get("output_tokens", 0)
+        _replacement_write_guard(out_path.parent)
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        _replacement_write_guard(out_path)
         out_path.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
         print(
             f"Merged {len(chunk_files)} chunks: {len(merged['nodes'])} nodes, {len(merged['edges'])} edges, "
@@ -3698,7 +3747,9 @@ def _dispatch_command(cmd: str, *, learning_overlay: dict | None = None) -> None
             "completed_sources": sorted(set(cached_data.get("completed_sources", []))
                                         | set(new_data.get("completed_sources", []))),
         }
+        _replacement_write_guard(out_path2.parent)
         out_path2.parent.mkdir(parents=True, exist_ok=True)
+        _replacement_write_guard(out_path2)
         out_path2.write_text(json.dumps(merged2, ensure_ascii=False), encoding="utf-8")
         print(f"Merged: {len(merged2['nodes'])} nodes, {len(merged2['edges'])} edges")
 
@@ -3898,6 +3949,7 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
     # the skill.md pipeline.
     out_root = (out_dir.resolve() if out_dir else target)
     graphify_out = _TRANSACTION_OUTPUT_OVERRIDE or (out_root / _GRAPHIFY_OUT)
+    _replacement_write_guard(graphify_out)
     graphify_out.mkdir(parents=True, exist_ok=True)
     # Persist --exclude so later update/watch/hook rebuilds re-apply it
     # instead of silently re-including the excluded paths (#1886).
@@ -4465,6 +4517,7 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
                     _node_sf.get(_e.get("source")) or _node_sf.get(_e.get("target")) or ""
                 )
         _backup(graphify_out)
+        _replacement_write_guard(graph_json_path)
         graph_json_path.write_text(
             json.dumps(merged, indent=2), encoding="utf-8"
         )
@@ -4582,6 +4635,7 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
     _to_json(G, communities, str(graph_json_path), force=True)
     stages.mark("export")
     if merged.get("output_tokens", 0) > 0:
+        _replacement_write_guard(graphify_out / ".graphify_semantic_marker")
         (graphify_out / ".graphify_semantic_marker").write_text(
             json.dumps({"output_tokens": merged["output_tokens"]}), encoding="utf-8"
         )
@@ -4607,6 +4661,7 @@ def _dispatch_extract(*, learning_overlay: dict | None = None) -> None:
             "output": merged["output_tokens"],
         },
     }
+    _replacement_write_guard(analysis_path)
     analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
     try:
         _save_manifest(
