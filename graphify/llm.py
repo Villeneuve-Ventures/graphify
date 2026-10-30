@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
+from typing import TypedDict
 
 from graphify.file_slice import (
     FileSlice,
@@ -2687,6 +2688,10 @@ def _label_batch_with_retry(
         return left | right
 
 
+class _LabelBatchOptions(TypedDict, total=False):
+    usage_out: dict
+
+
 def label_communities(
     G,
     communities,
@@ -2745,10 +2750,11 @@ def label_communities(
         # never race on the shared accumulator; it is merged on the main thread
         # in _merge (#1694).
         batch_usage: dict | None = {} if usage_out is not None else None
+        batch_kwargs: _LabelBatchOptions = {"usage_out": batch_usage} if batch_usage is not None else {}
         try:
             parsed = _label_batch_with_retry(
                 labeled_cids[start:end], lines[start:end], backend=backend, model=model,
-                usage_out=batch_usage,
+                **batch_kwargs,
             )
             return batch_idx, parsed, None, batch_usage
         except Exception as exc:  # noqa: BLE001 - reported per-batch; surfaced below
