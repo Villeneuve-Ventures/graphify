@@ -242,7 +242,7 @@ def test_non_shard_job_policies_preserve_baseline_except_action_updates():
     old = yaml.load(baseline, Loader=yaml.BaseLoader)
     current = workflow()
     action_updates = {
-        "actions/checkout@v6": "actions/checkout@v7",
+        "actions/checkout@v6": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "astral-sh/setup-uv@v8.1.0": "astral-sh/setup-uv@v10.2.0",
         "actions/upload-artifact@v4": "actions/upload-artifact@v7.0.2",
     }
@@ -335,3 +335,12 @@ def test_smoke_checks_console_commands_in_a_disposable_home(tmp_path, monkeypatc
     assert calls[0][1] == calls[1][1] and not calls[0][1].exists()
     assert protected.read_text() == "preserve"
     assert set(operator_home.iterdir()) == {protected}
+
+
+def test_checkout_is_pinned_consistently_in_ci_and_release():
+    expected = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+    for path in ("ci.yml", "dependabot-ci.yml", "release-graph.yml"):
+        ci = yaml.load((ROOT / ".github/workflows" / path).read_text(), Loader=yaml.BaseLoader)
+        checkouts = [step["uses"] for job in ci["jobs"].values()
+                     for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")]
+        assert checkouts and all(action == expected for action in checkouts)

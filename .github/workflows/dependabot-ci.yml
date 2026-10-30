@@ -64,7 +64,7 @@ jobs:
     # enum, the monolith round-trips, and the always-on round-trips.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The audit-coverage, monolith-roundtrip, and always-on-roundtrip
           # validators read blobs from origin/v8. A shallow checkout omits that
@@ -107,7 +107,7 @@ jobs:
         shard: [1, 2, 3, 4]
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # test_skillgen.py reads pre-split skill bodies from the immutable
           # baseline commit via `git show`; a shallow checkout omits that history
@@ -200,7 +200,7 @@ jobs:
     if: ${{ always() && needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -257,7 +257,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install reporting Python
         id: reporting_python
@@ -322,7 +322,7 @@ jobs:
     name: Leiden binary smoke (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv and Python 3.14
         uses: astral-sh/setup-uv@v10.2.0
