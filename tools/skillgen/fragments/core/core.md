@@ -196,6 +196,7 @@ else:
     Path('graphify-out/.graphify_cached.json').unlink(missing_ok=True)
 Path('graphify-out/.graphify_uncached.txt').write_text('\n'.join(uncached), encoding=\"utf-8\")
 Path('graphify-out/.graphify_completed_chunks.json').write_text('[]')
+@@DISPATCH_BATCH@@
 Path('graphify-out/.graphify_semantic_new.json').unlink(missing_ok=True)
 print(f'Cache: {len(all_files)-len(uncached)} files hit, {len(uncached)} files need extraction')
 "

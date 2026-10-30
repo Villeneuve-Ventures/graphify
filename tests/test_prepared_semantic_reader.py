@@ -476,6 +476,13 @@ if {platform_key == 'codex'!r}:
     Path('.graphify_semantic_new.json').write_bytes(chunk.read_bytes())
 else:
     Path('.graphify_completed_chunks.json').write_text(json.dumps([str(chunk)]))
+if {platform_key == 'claude'!r}:
+    # Disk B3 requires a plan from this exact prepared owner and B0 batch.
+    Path('.graphify_intake_plan_01.json').write_text(json.dumps({{
+        'owner': tx.current_transaction().id,
+        'batch': Path('.graphify_dispatch_batch.txt').read_text(),
+        'number': '01', 'assigned': [str(root / 'changed.md')],
+    }}))
 exec({merge_code!r})
 merged = json.loads(Path('.graphify_semantic_new.json').read_text())
 assert [node['id'] for node in merged['nodes']] == ['fresh']
