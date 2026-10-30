@@ -212,10 +212,17 @@ def test_import_refuses_plan_from_other_owner_or_assignment(tmp_path, monkeypatc
     assert intake.is_file()
 
 
-@pytest.mark.parametrize("location", ["public", "prepared"])
+@pytest.mark.parametrize("location", ["public", "prepared", "corpus", "corpus-child", "corpus-alias"])
 def test_intake_storage_cannot_be_inside_either_output(tmp_path, monkeypatch, location):
-    _, _, out, _, _, prepared, run, _, _, _, _ = _fixture(tmp_path, monkeypatch)
-    monkeypatch.setattr(tempfile, "tempdir", str(out if location == "public" else prepared))
+    root, _, out, _, _, prepared, run, _, _, _, _ = _fixture(tmp_path, monkeypatch)
+    storage = {"public": out, "prepared": prepared, "corpus": root}.get(location)
+    if location == "corpus-child":
+        storage = root / "temporary"
+        storage.mkdir()
+    elif location == "corpus-alias":
+        storage = tmp_path / "corpus-alias"
+        storage.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(tempfile, "tempdir", str(storage))
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
     run("from pathlib import Path; Path('.graphify_dispatch_batch.txt').write_text('fresh-batch')")
     spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
@@ -225,6 +232,7 @@ def test_intake_storage_cannot_be_inside_either_output(tmp_path, monkeypatch, lo
     assert not (prepared / ".graphify_intake_plan_02.json").exists()
     assert not list(out.glob("graphify-chunk-*"))
     assert not list(prepared.glob("graphify-chunk-*"))
+    assert not list(root.rglob("graphify-chunk-*"))
 
 
 @pytest.mark.parametrize("damage", ["failed", "error", "failed-finish", "bad-records", "bad-completion"])
@@ -481,6 +489,9 @@ def test_disk_collection_uses_prepared_manifest_and_imported_usage(host):
     assert "write them back into the chunk JSON" not in b3
     assert "Disk result staging" in b3
     assert "GRAPHIFY_CHUNK_USAGE_JSON" in b3
+    merge = next(block for block in re.findall(r"```bash\n(.*?)\n```", b3, re.S)
+                 if "Merged {len(chunks)} chunks:" in block)
+    assert "graphify.transaction run-prepared-token" in merge
 
 
 def test_allocation_rejects_overlapping_chunks_only_in_current_batch(tmp_path, monkeypatch):
@@ -546,3 +557,111 @@ def test_invalid_parent_usage_refuses_before_registration(tmp_path, monkeypatch,
         run(collect)
     assert not (prepared / ".graphify_chunk_01.json").exists()
     assert json.loads((prepared / ".graphify_completed_chunks.json").read_text()) == []
+
+
+@pytest.mark.parametrize("host", DISK_HOSTS)
+def test_b3_refuses_an_unimported_current_plan_before_aggregate_or_cache(tmp_path, monkeypatch, host):
+    _, _, out, baseline, _, prepared, run, intake, _, _, core = _fixture(tmp_path, monkeypatch, host)
+    with pytest.raises(ValueError, match="planned|registered"):
+        run(_body(core, "Merged {len(chunks)} chunks:"))
+    assert not (prepared / ".graphify_semantic_new.json").exists()
+    assert not list(out.glob("cache/semantic/*.json"))
+    assert json.loads((prepared / ".graphify_completed_chunks.json").read_text()) == []
+    assert intake.parent.is_dir()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("damage", ["unimported-sibling", "duplicate", "foreign", "old-batch", "absent-chunk"])
+def test_b3_requires_exactly_the_current_batchs_registered_plans(tmp_path, monkeypatch, damage):
+    _, source, out, baseline, _, prepared, run, intake, collect, b0, core = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    chunk = str(prepared / ".graphify_chunk_01.json")
+    if damage == "unimported-sibling":
+        other = source.with_name("other.md")
+        other.write_text("Another source.\n")
+        run("from pathlib import Path; Path('.graphify_uncached.txt').write_text(" +
+            repr(str(source) + "\n" + str(other)) + ")")
+        monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
+        monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(other)]))
+        spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
+                    if a.path.endswith("/extraction-spec.md"))
+        run(_body(spec, "tempfile.mkdtemp"))
+    elif damage == "duplicate":
+        run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text(" +
+            repr(json.dumps([chunk, chunk])) + ")")
+    elif damage == "foreign":
+        run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text(" +
+            repr(json.dumps([str(out / ".graphify_chunk_01.json")])) + ")")
+    elif damage == "old-batch":
+        run(b0)
+    else:
+        (prepared / ".graphify_chunk_01.json").unlink()
+    with pytest.raises((ValueError, tx.PendingTransactionError, FileNotFoundError)):
+        run(_body(core, "Merged {len(chunks)} chunks:"))
+    assert not (prepared / ".graphify_semantic_new.json").exists()
+    assert not list(out.glob("cache/semantic/*.json"))
+    assert intake.exists()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+def test_b3_rechecks_plans_even_when_an_aggregate_already_exists(tmp_path, monkeypatch):
+    _, source, out, baseline, _, prepared, run, intake, collect, _, core = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    merge = _body(core, "Merged {len(chunks)} chunks:")
+    run(merge)
+    aggregate = (prepared / ".graphify_semantic_new.json").read_bytes()
+    run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text('[]')")
+    with pytest.raises(ValueError, match="planned|registered"):
+        run(merge)
+    assert (prepared / ".graphify_semantic_new.json").read_bytes() == aggregate
+    assert not list(out.glob("cache/semantic/*.json"))
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("host", DISK_HOSTS)
+def test_all_disk_prompts_request_file_write_and_only_completion_notice(host):
+    reference = next(a.content for a in gen.render(gen.load_platforms()[host])
+                     if a.path.endswith("/extraction-spec.md"))
+    prompt = reference.split("```", 2)[1]
+    assert "CHUNK_PATH" in prompt and "Return only a completion notice" in prompt
+    assert "Output ONLY valid JSON" not in prompt
+
+
+def test_b3_ignores_prior_batch_plans_without_merging_old_chunks(tmp_path, monkeypatch):
+    _, source, out, baseline, _, prepared, run, intake, collect, b0, core = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    run(b0)
+    monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
+    spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
+                if a.path.endswith("/extraction-spec.md"))
+    run(_body(spec, "tempfile.mkdtemp"))
+    plan = json.loads((prepared / ".graphify_intake_plan_02.json").read_text())
+    Path(plan["intake"], "result.json").write_text(json.dumps(_payload(source)))
+    run(collect)
+    run(_body(core, "Merged {len(chunks)} chunks:"))
+    merged = json.loads((prepared / ".graphify_semantic_new.json").read_text())
+    assert merged["nodes"] == _payload(source)["nodes"]
+    assert merged["input_tokens"] == 7 and merged["output_tokens"] == 3
+    assert (prepared / ".graphify_intake_plan_01.json").exists()
+    assert intake.exists()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+def test_b3_command_runs_in_a_fresh_parent_shell_with_the_prepared_owner(tmp_path, monkeypatch):
+    root, source, out, baseline, _, prepared, run, intake, collect, _, core = _fixture(tmp_path, monkeypatch)
+    intake.write_text(json.dumps(_payload(source)))
+    run(collect)
+    block = next(block for block in re.findall(r"```bash\n(.*?)\n```", core, re.S)
+                 if "Merged {len(chunks)} chunks:" in block)
+    environment = {**os.environ, "VIRTUAL_ENV": sys.prefix}
+    environment.pop("GRAPHIFY_TRANSACTION_TOKEN", None)
+    result = subprocess.run(["/bin/bash", "-c", _shell_input(block, root)], cwd=root,
+                            env=environment, capture_output=True, text=True, check=False, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "Merged 1 chunks" in result.stdout
+    assert json.loads((prepared / ".graphify_semantic_new.json").read_text())["nodes"] == _payload(source)["nodes"]
+    assert intake.exists()
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline

@@ -4,7 +4,7 @@ Load this in Step 3 Part B when the corpus has at least one doc, paper, or image
 
 ```
 You are a graphify extraction subagent. Read the files listed and extract a knowledge graph fragment.
-Output ONLY valid JSON matching the schema below - no explanation, no markdown fences, no preamble.
+Generate extraction JSON matching the schema below. Follow the file-writing and response instruction at the end of this prompt.
 
 Files (chunk CHUNK_NUM of TOTAL_CHUNKS):
 FILE_LIST
@@ -68,6 +68,7 @@ source_file RULE (every node, edge, and hyperedge): set source_file to the path 
 
 Then write the JSON to disk using the Write tool at this exact absolute path (no relative paths — Write resolves relative paths against an undefined cwd and the file will be silently lost):
 CHUNK_PATH
+Return only a completion notice; do not return the JSON inline.
 ```
 
 ## Disk result staging
@@ -342,8 +343,8 @@ for previous_path in Path.cwd().glob('.graphify_intake_plan_*.json'):
         if assigned_paths & previous_paths:
             raise ValueError('source already assigned to another chunk in this batch')
 intake_root = Path(tempfile.gettempdir()).resolve(strict=True)
-if any(intake_root.is_relative_to(path.resolve()) for path in (Path(owner.output), Path.cwd())):
-    raise ValueError('intake storage must be outside public and prepared output')
+if any(intake_root.is_relative_to(path.resolve()) for path in (Path(owner.output), Path.cwd(), Path(owner.root))):
+    raise ValueError('intake storage must be outside public and prepared output and corpus')
 intake = Path(tempfile.mkdtemp(prefix='graphify-chunk-', dir=intake_root))
 with pin_output(intake, mutation=False) as capability:
     identity = capability.identity.json()
@@ -692,4 +693,4 @@ print('Staged and registered chunk ' + number + '; retain intake until consumers
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
 
-Keep failed/partial intake bytes and diagnostics for recovery. Once import/readback and all dependent consumers finish, the parent may remove only that successful intake file/directory after rechecking its recorded identity, content, links and consumers. Do not run an unconditional cleanup on failure or follow intake symlinks.
+Keep failed/partial intake bytes and diagnostics for recovery. After publication and all dependent consumers finish, the parent must decide whether each successful intake can be released. When cleanup is authorized and the intake is verified disposable, remove only that intake file/directory after rechecking its recorded identity, content, links and consumers. If a no-cleanup instruction, evidence requirement or remaining consumer prevents release, retain it and record the reason and release condition in the local retention index. Do not leave a successful intake without a release-or-hold decision. Do not run an unconditional cleanup on failure or follow intake symlinks.

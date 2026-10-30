@@ -83,8 +83,8 @@ for previous_path in Path.cwd().glob('.graphify_intake_plan_*.json'):
         if assigned_paths & previous_paths:
             raise ValueError('source already assigned to another chunk in this batch')
 intake_root = Path(tempfile.gettempdir()).resolve(strict=True)
-if any(intake_root.is_relative_to(path.resolve()) for path in (Path(owner.output), Path.cwd())):
-    raise ValueError('intake storage must be outside public and prepared output')
+if any(intake_root.is_relative_to(path.resolve()) for path in (Path(owner.output), Path.cwd(), Path(owner.root))):
+    raise ValueError('intake storage must be outside public and prepared output and corpus')
 intake = Path(tempfile.mkdtemp(prefix='graphify-chunk-', dir=intake_root))
 with pin_output(intake, mutation=False) as capability:
     identity = capability.identity.json()
@@ -209,4 +209,4 @@ print('Staged and registered chunk ' + number + '; retain intake until consumers
 "
 ```
 
-Keep failed/partial intake bytes and diagnostics for recovery. Once import/readback and all dependent consumers finish, the parent may remove only that successful intake file/directory after rechecking its recorded identity, content, links and consumers. Do not run an unconditional cleanup on failure or follow intake symlinks.
+Keep failed/partial intake bytes and diagnostics for recovery. After publication and all dependent consumers finish, the parent must decide whether each successful intake can be released. When cleanup is authorized and the intake is verified disposable, remove only that intake file/directory after rechecking its recorded identity, content, links and consumers. If a no-cleanup instruction, evidence requirement or remaining consumer prevents release, retain it and record the reason and release condition in the local retention index. Do not leave a successful intake without a release-or-hold decision. Do not run an unconditional cleanup on failure or follow intake symlinks.
