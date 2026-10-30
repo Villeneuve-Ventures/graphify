@@ -716,6 +716,7 @@ _SKIP_DIRS = {
 
 # Large generated files that are never useful to extract
 _SKIP_FILES = {
+    ".graphify_replacement_guard",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.lock", "poetry.lock", "Gemfile.lock",
     "composer.lock", "go.sum", "go.work.sum",
@@ -1660,7 +1661,10 @@ def save_manifest(
         # their absolute form so the manifest round-trips on the saving
         # machine even when not every entry can be portably encoded.
         manifest = {_to_relative_for_storage(k, root): v for k, v in manifest.items()}
+    from .canonical_replacement import guard_output
+    guard_output(manifest_path, mutation=True)
     Path(manifest_path).parent.mkdir(parents=True, exist_ok=True)
+    guard_output(manifest_path, mutation=True)
     Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 

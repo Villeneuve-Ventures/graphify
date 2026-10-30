@@ -512,6 +512,10 @@ def _run_cli() -> None:
         from graphify.legacy_bootstrap import run_cli
         raise SystemExit(run_cli(sys.argv[2:]))
 
+    if len(sys.argv) > 1 and sys.argv[1] == "replacement":
+        from graphify.canonical_replacement import main as replacement_main
+        raise SystemExit(replacement_main(sys.argv[2:]))
+
     if len(sys.argv) > 1 and sys.argv[1] == "checkpoint":
         from graphify.checkpoint_restore import run_cli
         raise SystemExit(run_cli(sys.argv[2:]))

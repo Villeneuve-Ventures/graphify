@@ -356,6 +356,7 @@ class Transaction:
     legacy_inventory_digest: str | None = None
     bootstrap_binding: str | None = None
     restore_binding: str | None = None
+    replacement_binding: str | None = None
 
 
 @dataclass(frozen=True)
@@ -533,6 +534,7 @@ class _Authority:
     legacy_inventory_digest: str | None = None
     bootstrap_binding: str | None = None
     restore_binding: str | None = None
+    replacement_binding: str | None = None
 
 
 _AUTHORITY = contextvars.ContextVar[_Authority | None](
@@ -563,6 +565,17 @@ def _directory_entry_identity(
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
         raise PendingTransactionError(f"unsafe output directory entry: {name}")
     return OutputIdentity(info.st_dev, info.st_ino)
+
+
+def _replacement_allocation_valid(capability, binding):
+    from .canonical_replacement import validate_allocation
+    validate_allocation(capability, binding)
+    return True
+
+
+def _replacement_guard_output(path, *, mutation=True):
+    from .canonical_replacement import guard_output
+    guard_output(path, mutation=mutation)
 
 
 def _create_output_chain(
@@ -600,6 +613,7 @@ def _create_output_chain(
     opened: list[OutputCapability] = []
     created: list[tuple[OutputCapability, str, OutputIdentity]] = []
     with pin_output(ancestor) as parent, _locked(parent):
+        _replacement_guard_output(absolute)
         if expected_parent_identity is not None and parent.identity != expected_parent_identity:
             raise PendingTransactionError("admitted output parent identity changed")
         current = parent
@@ -695,6 +709,7 @@ def pin_output(
     intentionally blocked until the final replace/unlink primitive is proven
     handle-relative on a native runner.
     """
+    _replacement_guard_output(output, mutation=mutation or create)
     path = Path(output)
     if mutation or create:
         _reject_portable_path(path)
@@ -1000,6 +1015,7 @@ def _locked(capability: OutputCapability) -> Iterator[None]:
             held = {}
             _FILE_LOCK_STATE.held = held
         if key in held:
+            _replacement_guard_output(capability.path)
             held[key] += 1
             try:
                 yield
@@ -1012,6 +1028,7 @@ def _locked(capability: OutputCapability) -> Iterator[None]:
             if _PLATFORM != "windows":
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             capability.validate()
+            _replacement_guard_output(capability.path)
             held[key] = 1
             try:
                 yield
@@ -2596,6 +2613,11 @@ _PROTOCOL_COMMON_FIELDS = {
 }
 
 
+REPLACEMENT_BINDING_PREFIX = "canonical-replacement-v1:"
+REPLACEMENT_PROVENANCE = ".graphify_replacement_origin.json"
+_REPLACEMENT_AUTHORITY = contextvars.ContextVar[str | None]("graphify_canonical_replacement_authority", default=None)
+
+
 RESTORE_BINDING_PREFIX = "checkpoint-restore-v1:"
 RESTORE_PROVENANCE = ".graphify_restore_provenance.json"
 _RESTORE_AUTHORITY = contextvars.ContextVar[str | None](
@@ -2607,6 +2629,13 @@ def _validate_restore_binding(value: object) -> str:
     if (type(value) is not str or not value.startswith(RESTORE_BINDING_PREFIX)
             or not _is_hex(value[len(RESTORE_BINDING_PREFIX):])):
         raise PendingTransactionError("malformed checkpoint restore binding")
+    return value
+
+
+def _validate_replacement_binding(value: object) -> str:
+    if (type(value) is not str or not value.startswith(REPLACEMENT_BINDING_PREFIX)
+            or not _is_hex(value[len(REPLACEMENT_BINDING_PREFIX):])):
+        raise PendingTransactionError("malformed canonical replacement binding")
     return value
 
 
@@ -2637,6 +2666,33 @@ def _restore_recovery_guard(
     raise PendingTransactionError("checkpoint restore requires its dedicated exact-request resume")
 
 
+def _replacement_recovery_guard(
+    capability: OutputCapability, *, validate_receipt: bool = True,
+) -> None:
+    """Fence first-publication restore state before generic reads or mutations."""
+    raw_protocol = _load_json(capability, PROTOCOL_FILE)
+    if not isinstance(raw_protocol, dict) or "replacement_binding" not in raw_protocol:
+        return
+    protocol = _protocol_from_json(capability, raw_protocol)
+    binding = protocol["replacement_binding"]
+    if protocol["generation"] != 1 or _REPLACEMENT_AUTHORITY.get() == binding:
+        return
+    drainer = _read_drainer(capability)
+    if (protocol["state"] == "COMPLETE"
+            and _read_transaction(capability) is None
+            and _entry_stat(capability, PREPARED_FILE) is None
+            and _entry_stat(capability, TRANSITION_FILE) is None
+            and _entry_stat(capability, TOKEN_TRANSITION_FILE) is None
+            and drainer is not None
+            and (drainer[1] == "complete" or (
+                drainer[1] == "reserved" and drainer[0].generation == 2
+                and drainer[2].get("predecessor_receipt") == protocol.get("receipt_digest")))):
+        if validate_receipt:
+            _validate_receipt_locked(capability, require_closed=drainer[1] == "complete")
+        return
+    raise PendingTransactionError("canonical replacement requires its dedicated exact-request resume")
+
+
 def _validate_restore_provenance(
     capability: OutputCapability, binding: str, payload: bytes | None = None,
 ) -> tuple[str, int]:
@@ -2661,6 +2717,30 @@ def _validate_restore_provenance(
     return digest, len(payload)
 
 
+def _validate_replacement_provenance(
+    capability: OutputCapability, binding: str, payload: bytes | None = None,
+) -> tuple[str, int]:
+    _validate_replacement_binding(binding)
+    if payload is None:
+        payload = _read_relative_bytes(capability, REPLACEMENT_PROVENANCE, _MAX_STATE_BYTES)
+    if type(payload) is not bytes or len(payload) > _MAX_STATE_BYTES:
+        raise PendingTransactionError("canonical replacement provenance exceeds bounded record")
+    digest = hashlib.sha256(payload).hexdigest()
+    if binding != REPLACEMENT_BINDING_PREFIX + digest:
+        raise PendingTransactionError("canonical replacement provenance binding changed")
+    try:
+        raw = json.loads(payload)
+    except (ValueError, UnicodeError) as exc:
+        raise PendingTransactionError("malformed canonical replacement provenance") from exc
+    if (not isinstance(raw, dict) or type(raw.get("schema")) is not int
+            or raw["schema"] != 1 or raw.get("mode") != "canonical-replacement"
+            or type(raw.get("generation")) is not int or raw["generation"] != 1):
+        raise PendingTransactionError("malformed canonical replacement provenance")
+    _require_output_identity(capability, raw.get("output_identity"),
+                             record="restore provenance", context="canonical replacement provenance changed")
+    return digest, len(payload)
+
+
 _BOOTSTRAP_BINDING_PREFIX = "legacy-bootstrap-v1:structural-v1:core-v1:"
 _BOOTSTRAP_AUTHORITY = contextvars.ContextVar[str | None](
     "graphify_legacy_bootstrap_authority", default=None
@@ -2677,6 +2757,7 @@ def _validate_bootstrap_binding(value: object) -> str:
 def _bootstrap_recovery_guard(capability: OutputCapability, binding: str | None = None) -> None:
     """Fence generic takeover before any queue, owner or workspace mutation."""
     _restore_recovery_guard(capability)
+    _replacement_recovery_guard(capability)
     protocol = _read_protocol(capability)
     actual = None if protocol is None else protocol.get("bootstrap_binding")
     if actual is None:
@@ -2723,9 +2804,17 @@ def _protocol_from_json(
     if "restore_binding" in raw:
         _validate_restore_binding(raw["restore_binding"])
         if ("bootstrap_binding" in raw or "legacy_inventory_digest" in raw
+                or ("restore_binding" in raw and "replacement_binding" in raw)
                 or (raw.get("generation") == 1 and raw.get("kind") != "full")):
             raise PendingTransactionError("conflicting publication origin bindings")
         fields.add("restore_binding")
+    if "replacement_binding" in raw:
+        _validate_replacement_binding(raw["replacement_binding"])
+        if ("bootstrap_binding" in raw or "legacy_inventory_digest" in raw
+                or ("restore_binding" in raw and "replacement_binding" in raw)
+                or (raw.get("generation") == 1 and raw.get("kind") != "full")):
+            raise PendingTransactionError("conflicting publication origin bindings")
+        fields.add("replacement_binding")
     if set(raw) != fields:
         raise PendingTransactionError("malformed protocol state")
     generation = raw.get("generation")
@@ -2759,7 +2848,7 @@ def _protocol_from_json(
         # A completed restore describes a historical source; live admission
         # still requires the current directory and its selected capability.
         canonical_root = (Path(os.path.abspath(root)) if ("bootstrap_binding" in raw
-                          or (state == "COMPLETE" and "restore_binding" in raw))
+                          or (state == "COMPLETE" and ("restore_binding" in raw or "replacement_binding" in raw)))
                           else root.resolve(strict=True))
     except OSError as exc:
         raise PendingTransactionError("malformed protocol root") from exc
@@ -2969,7 +3058,7 @@ def _transaction_from_json(
     allowed_phases: set[str] = _TRANSACTION_PHASES,
     source_io=None,
 ) -> Transaction:
-    if not isinstance(raw, dict) or set(raw) - {"restore_binding"} not in (
+    if not isinstance(raw, dict) or set(raw) - {"restore_binding", "replacement_binding"} not in (
         _TRANSACTION_FIELDS, _TRANSACTION_FIELDS | {"legacy_inventory_digest"},
         _TRANSACTION_FIELDS | {"legacy_inventory_digest", "bootstrap_binding"},
     ):
@@ -2977,6 +3066,13 @@ def _transaction_from_json(
     if "restore_binding" in raw:
         _validate_restore_binding(raw["restore_binding"])
         if ("bootstrap_binding" in raw or "legacy_inventory_digest" in raw
+                or ("restore_binding" in raw and "replacement_binding" in raw)
+                or (raw.get("generation") == 1 and raw.get("kind") != "full")):
+            raise PendingTransactionError("conflicting publication origin bindings")
+    if "replacement_binding" in raw:
+        _validate_replacement_binding(raw["replacement_binding"])
+        if ("bootstrap_binding" in raw or "legacy_inventory_digest" in raw
+                or ("restore_binding" in raw and "replacement_binding" in raw)
                 or (raw.get("generation") == 1 and raw.get("kind") != "full")):
             raise PendingTransactionError("conflicting publication origin bindings")
     if "bootstrap_binding" in raw:
@@ -3038,6 +3134,7 @@ def _transaction_from_json(
         legacy_inventory_digest=raw.get("legacy_inventory_digest"),
         bootstrap_binding=raw.get("bootstrap_binding"),
         restore_binding=raw.get("restore_binding"),
+        replacement_binding=raw.get("replacement_binding"),
     )
     if tx.output_identity != capability.identity or tx.drainer.generation != tx.generation:
         raise PendingTransactionError("malformed live transaction binding")
@@ -3074,6 +3171,8 @@ def _transaction_json(tx: Transaction, *, phase: str) -> dict[str, object]:
            if tx.bootstrap_binding is not None else {}),
         **({"restore_binding": tx.restore_binding}
            if tx.restore_binding is not None else {}),
+        **({"replacement_binding": tx.replacement_binding}
+           if tx.replacement_binding is not None else {}),
     }
 
 
@@ -3242,8 +3341,13 @@ def _read_pending_transition(
         raise PendingTransactionError("pending transition legacy inventory binding changed")
     if (successor.restore_binding != predecessor_protocol.get("restore_binding")
             or successor.restore_binding != successor_protocol.get("restore_binding")
+            or successor.replacement_binding != successor_protocol.get("replacement_binding")
             or (prior_tx is not None and prior_tx.restore_binding != successor.restore_binding)):
         raise PendingTransactionError("pending transition checkpoint restore binding changed")
+    if (successor.replacement_binding != predecessor_protocol.get("replacement_binding")
+            or successor.replacement_binding != successor_protocol.get("replacement_binding")
+            or (prior_tx is not None and prior_tx.replacement_binding != successor.replacement_binding)):
+        raise PendingTransactionError("pending transition canonical replacement binding changed")
     if (successor.bootstrap_binding != predecessor_protocol.get("bootstrap_binding")
             or successor.bootstrap_binding != successor_protocol.get("bootstrap_binding")
             or (prior_tx is not None and prior_tx.bootstrap_binding != successor.bootstrap_binding)):
@@ -3337,6 +3441,7 @@ def _authority_for(tx: Transaction, drainer: DrainerTuple | None = None) -> _Aut
         tx.legacy_inventory_digest,
         tx.bootstrap_binding,
         tx.restore_binding,
+        tx.replacement_binding,
     )
 
 
@@ -3354,6 +3459,7 @@ def _cancellation_recovery(successor: Transaction) -> CancellationRecovery:
         phase=successor.phase,
         predecessor_generation=successor.generation - 1,
         restore_binding=successor.restore_binding,
+        replacement_binding=successor.replacement_binding,
     )
 
 
@@ -4562,6 +4668,7 @@ def begin_transaction(
     expected_snapshot: GraphSnapshot | None = None,
     bootstrap_binding: str | None = None,
     restore_binding: str | None = None,
+    replacement_binding: str | None = None,
     root_capability: OutputCapability | None = None,
 ) -> Transaction:
     if expected_snapshot is not None and not isinstance(expected_snapshot, GraphSnapshot):
@@ -4572,6 +4679,7 @@ def begin_transaction(
             raise TypeError("transaction root requires an OutputCapability")
         _validate_root_capability(root_capability, root_path)
     output_path = Path(output).expanduser().absolute()
+    _replacement_guard_output(output_path)
     _reject_portable_path(output_path)
     try:
         require_ordinary_output(output_path)
@@ -4589,6 +4697,7 @@ def begin_transaction(
             if root_capability is not None:
                 _validate_root_capability(root_capability, root_path)
             _restore_recovery_guard(capability)
+            _replacement_recovery_guard(capability)
             if restore_binding is not None:
                 _validate_restore_binding(restore_binding)
                 if (kind != "full" or bootstrap_binding is not None
@@ -4597,6 +4706,14 @@ def begin_transaction(
                         or _read_drainer(capability) is not None
                         or bool(_list_entries(capability))):
                     raise PendingTransactionError("checkpoint restore requires a pristine generation-one owner")
+            if replacement_binding is not None:
+                _validate_replacement_binding(replacement_binding)
+                if (kind != "full" or bootstrap_binding is not None
+                        or _REPLACEMENT_AUTHORITY.get() != replacement_binding
+                        or _read_protocol(capability) is not None
+                        or _read_drainer(capability) is not None
+                        or not _replacement_allocation_valid(capability, replacement_binding)):
+                    raise PendingTransactionError("canonical replacement requires a pristine generation-one owner")
             if bootstrap_binding is not None:
                 _validate_bootstrap_binding(bootstrap_binding)
                 if kind != "update":
@@ -4621,10 +4738,16 @@ def begin_transaction(
                 if restore_binding is not None and restore_binding != inherited_restore:
                     raise PendingTransactionError("checkpoint restore origin cannot be replaced")
                 restore_binding = inherited_restore
+                inherited_replacement = prior_protocol.get("replacement_binding")
+                if replacement_binding is not None and replacement_binding != inherited_replacement:
+                    raise PendingTransactionError("canonical replacement origin cannot be replaced")
+                replacement_binding = inherited_replacement
             receipt_present = _entry_stat(capability, RECEIPT_FILE) is not None
             current_drainer = _read_drainer(capability)
             if prior_protocol is None and not receipt_present:
                 allowed = list(_SAFE_GRAPHLESS_RUNTIME_ENTRIES)
+                if replacement_binding is not None:
+                    allowed.append(".graphify_replacement_allocation.json")
                 if current_drainer is not None:
                     queued = _read_queue(capability)
                     matching = [
@@ -4790,6 +4913,8 @@ def begin_transaction(
                 protocol["bootstrap_binding"] = bootstrap_binding
             if restore_binding is not None:
                 protocol["restore_binding"] = restore_binding
+            if replacement_binding is not None:
+                protocol["replacement_binding"] = replacement_binding
             if prior_protocol is None:
                 try:
                     _create_bytes(capability, PROTOCOL_FILE, _json_bytes(protocol))
@@ -4814,6 +4939,7 @@ def begin_transaction(
                 legacy_inventory_digest=legacy_inventory_digest,
                 bootstrap_binding=bootstrap_binding,
                 restore_binding=restore_binding,
+                replacement_binding=replacement_binding,
             )
             successor_protocol = dict(protocol)
             successor_protocol.pop("legacy_inventory_digest", None)
@@ -4895,6 +5021,7 @@ def resume_transaction(
     root_path = _canonical_directory(Path(root))
     with pin_output(output) as capability, _locked(capability):
         _restore_recovery_guard(capability)
+        _replacement_recovery_guard(capability)
         tx = _read_transaction(capability)
         if tx is None:
             cancellation = _read_predecessor_authority(capability)
@@ -5927,8 +6054,10 @@ def _validate_token_transition_current(
         } | ({"legacy_inventory_digest"}
              if target_base.legacy_inventory_digest is not None else set())
            | ({"bootstrap_binding"} if target_base.bootstrap_binding is not None else set())
-           | ({"restore_binding"} if target_base.restore_binding is not None else set()))
+           | ({"restore_binding"} if target_base.restore_binding is not None else set())
+           | ({"replacement_binding"} if target_base.replacement_binding is not None else set()))
         or token_payload.get("restore_binding") != target_base.restore_binding
+        or token_payload.get("replacement_binding") != target_base.replacement_binding
         or token_payload.get("bootstrap_binding") != target_base.bootstrap_binding
         or token_payload.get("legacy_inventory_digest") != target_base.legacy_inventory_digest
         or token_payload.get("schema") != 1
@@ -6501,6 +6630,8 @@ def stage_transaction_handoff(
                if live.bootstrap_binding is not None else {}),
             **({"restore_binding": live.restore_binding}
                if live.restore_binding is not None else {}),
+            **({"replacement_binding": live.replacement_binding}
+               if live.replacement_binding is not None else {}),
         }
         digest = hashlib.sha256(_json_bytes(token_payload)).hexdigest()
         target = replace(live, token_digest=digest, token_identity=None)
@@ -6559,6 +6690,7 @@ def _open_token(
             or raw.get("output") != str(live.output)
             or raw.get("legacy_inventory_digest") != live.legacy_inventory_digest
             or raw.get("restore_binding") != live.restore_binding
+            or raw.get("replacement_binding") != live.replacement_binding
             or raw.get("bootstrap_binding") != live.bootstrap_binding
             or hashlib.sha256(payload).hexdigest() != live.token_digest
             or identity != live.token_identity
@@ -6752,6 +6884,7 @@ def _validate_authority(
         or protocol.get("root") != live.root
         or protocol.get("kind") != live.kind
         or protocol.get("restore_binding") != live.restore_binding
+        or protocol.get("replacement_binding") != live.replacement_binding
         or protocol.get("bootstrap_binding") != live.bootstrap_binding
         or protocol.get("owner_capability_digest") != live.token_digest
         or _managed_entry_identity_from_json(protocol.get("token_identity"))
@@ -6762,6 +6895,8 @@ def _validate_authority(
         raise PendingTransactionError("drainer is not exactly claimed for publication")
     if live.restore_binding is not None and live.generation > 1:
         _validate_restore_provenance(capability, live.restore_binding)
+    if live.replacement_binding is not None and live.generation > 1:
+        _validate_replacement_provenance(capability, live.replacement_binding)
     return live
 
 
@@ -6795,6 +6930,7 @@ def _validate_durable_live_binding(
         or durable_protocol.get("root") != live.root
         or durable_protocol.get("kind") != live.kind
         or durable_protocol.get("restore_binding") != live.restore_binding
+        or durable_protocol.get("replacement_binding") != live.replacement_binding
         or durable_protocol.get("bootstrap_binding") != live.bootstrap_binding
         or durable_protocol.get("owner_capability_digest") != live.token_digest
         or durable_protocol.get("token_identity") != token_identity
@@ -6841,6 +6977,7 @@ def _validate_durable_live_binding(
         if (not isinstance(token_data, dict)
                 or token_data.get("legacy_inventory_digest") != live.legacy_inventory_digest
                 or token_data.get("restore_binding") != live.restore_binding
+                or token_data.get("replacement_binding") != live.replacement_binding
                 or token_data.get("bootstrap_binding") != live.bootstrap_binding):
             raise PendingTransactionError("durable live transaction token changed")
     return durable_protocol, durable_drainer
@@ -6877,6 +7014,9 @@ def _require_bootstrap_publication_context(transaction: Transaction) -> None:
     if (transaction.restore_binding is not None and transaction.generation == 1
             and _RESTORE_AUTHORITY.get() != transaction.restore_binding):
         raise PendingTransactionError("checkpoint restore requires its dedicated finalizer")
+    if (transaction.replacement_binding is not None and transaction.generation == 1
+            and _REPLACEMENT_AUTHORITY.get() != transaction.replacement_binding):
+        raise PendingTransactionError("canonical replacement requires its dedicated finalizer")
     if (transaction.bootstrap_binding is not None
             and _BOOTSTRAP_AUTHORITY.get() != transaction.bootstrap_binding):
         raise PendingTransactionError("trusted bootstrap requires sealed publication")
@@ -6902,6 +7042,8 @@ def commit_bytes(
             _validate_authority(cap, transaction)
             if transaction.restore_binding is not None and name == RESTORE_PROVENANCE:
                 _validate_restore_provenance(cap, transaction.restore_binding, payload)
+            if transaction.replacement_binding is not None and name == REPLACEMENT_PROVENANCE:
+                _validate_replacement_provenance(cap, transaction.replacement_binding, payload)
             if failpoint:
                 failpoint("after_validate")
             _replace_bytes(cap, name, payload)
@@ -6928,6 +7070,8 @@ def commit_relative_bytes(
         _validate_authority(capability, transaction)
         if transaction.restore_binding is not None and relative_name == RESTORE_PROVENANCE:
             _validate_restore_provenance(capability, transaction.restore_binding, payload)
+        if transaction.replacement_binding is not None and relative_name == REPLACEMENT_PROVENANCE:
+            _validate_replacement_provenance(capability, transaction.replacement_binding, payload)
         if failpoint:
             failpoint("after_validate")
         _replace_relative_bytes(
@@ -6948,6 +7092,8 @@ def commit_unlink(
     name = _validated_shallow_name(name)
     if transaction.restore_binding is not None and name == RESTORE_PROVENANCE:
         raise PendingTransactionError("checkpoint restore provenance cannot be deleted")
+    if transaction.replacement_binding is not None and name == REPLACEMENT_PROVENANCE:
+        raise PendingTransactionError("canonical replacement provenance cannot be deleted")
     owned = capability is None
     cap = pin_output(transaction.output) if owned else capability
     assert cap is not None
@@ -7221,6 +7367,24 @@ def _commit_publication_plan(
                 if RESTORE_PROVENANCE in retained and retained[RESTORE_PROVENANCE] != provenance_binding:
                     raise PendingTransactionError("checkpoint restore retained provenance changed")
                 retained[RESTORE_PROVENANCE] = provenance_binding
+                plan = PublicationPlan(plan.payloads, plan.deletions, retained)
+    if transaction.replacement_binding is not None:
+        with pin_output(transaction.output) as capability, _locked(capability):
+            _validate_authority(capability, transaction)
+            if REPLACEMENT_PROVENANCE in plan.deletions:
+                raise PendingTransactionError("canonical replacement provenance cannot be deleted")
+            if REPLACEMENT_PROVENANCE in plan.payloads:
+                _validate_replacement_provenance(
+                    capability, transaction.replacement_binding, plan.payloads[REPLACEMENT_PROVENANCE],
+                )
+                if transaction.generation > 1:
+                    _validate_replacement_provenance(capability, transaction.replacement_binding)
+            else:
+                provenance_binding = _validate_replacement_provenance(capability, transaction.replacement_binding)
+                retained = dict(plan.retained)
+                if REPLACEMENT_PROVENANCE in retained and retained[REPLACEMENT_PROVENANCE] != provenance_binding:
+                    raise PendingTransactionError("canonical replacement retained provenance changed")
+                retained[REPLACEMENT_PROVENANCE] = provenance_binding
                 plan = PublicationPlan(plan.payloads, plan.deletions, retained)
     validated = _validated_publication_plan(plan, graph_name=graph_name)
     payloads = validated.payloads
@@ -7551,6 +7715,8 @@ def commit_generation(
     graph_name = _validated_relative_name(graph_name)
     if transaction.restore_binding is not None and RESTORE_PROVENANCE not in required_artifacts:
         required_artifacts = (*required_artifacts, RESTORE_PROVENANCE)
+    if transaction.replacement_binding is not None and REPLACEMENT_PROVENANCE not in required_artifacts:
+        required_artifacts = (*required_artifacts, REPLACEMENT_PROVENANCE)
     required_artifacts = tuple(
         _validated_relative_name(name) for name in required_artifacts
     )
@@ -7577,6 +7743,8 @@ def commit_generation(
         live = _validate_authority(capability, transaction, allow_complete=True)
         if live.restore_binding is not None:
             _validate_restore_provenance(capability, live.restore_binding)
+        if live.replacement_binding is not None:
+            _validate_replacement_provenance(capability, live.replacement_binding)
         existing_protocol = _read_protocol(capability)
         if existing_protocol is not None and existing_protocol.get("state") == "COMPLETE":
             _receipt, existing_digest, _inventory = _validate_receipt_locked(
@@ -7666,6 +7834,7 @@ def _validate_receipt_locked(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PendingTransactionError("generation receipt is malformed") from exc
     _restore_recovery_guard(capability, validate_receipt=False)
+    _replacement_recovery_guard(capability, validate_receipt=False)
     protocol = (
         _read_protocol(capability)
         if protocol_override is None
@@ -7723,12 +7892,19 @@ def _validate_receipt_locked(
     ):
         raise PendingTransactionError("generation receipt does not match protocol")
     restore_binding = protocol.get("restore_binding")
+    replacement_binding = protocol.get("replacement_binding")
     if restore_binding is not None:
         if RESTORE_PROVENANCE not in required:
             raise PendingTransactionError("checkpoint restore provenance is absent from receipt")
         provenance_digest, _size = _validate_restore_provenance(capability, restore_binding)
         if artifact_digests.get(RESTORE_PROVENANCE) != provenance_digest:
             raise PendingTransactionError("checkpoint restore provenance receipt changed")
+    if replacement_binding is not None:
+        if REPLACEMENT_PROVENANCE not in required:
+            raise PendingTransactionError("canonical replacement provenance is absent from receipt")
+        provenance_digest, _size = _validate_replacement_provenance(capability, replacement_binding)
+        if artifact_digests.get(REPLACEMENT_PROVENANCE) != provenance_digest:
+            raise PendingTransactionError("canonical replacement provenance receipt changed")
     try:
         validated_required = [
             _validated_relative_name(cast(str, name)) for name in required
@@ -10249,6 +10425,7 @@ def open_graph_snapshot(
 ) -> GraphSnapshot:
     requested = Path(path).expanduser()
     requested_output = requested.parent.absolute()
+    _replacement_guard_output(requested_output, mutation=False)
     _reject_portable_path(requested_output)
     if allow_absent and not requested_output.exists():
         existing_parent = requested_output
@@ -10261,6 +10438,7 @@ def open_graph_snapshot(
             Path(*reversed(missing_parts)).as_posix()
         )
         with pin_output(output_parent, mutation=False) as parent, _locked(parent):
+            _replacement_guard_output(requested_output, mutation=False)
             try:
                 os.stat(
                     Path(output_name).parts[0],
@@ -10288,6 +10466,7 @@ def open_graph_snapshot(
     with pin_output(output, mutation=False) as capability, _locked(capability):
         _reject_portable_authority(capability)
         _restore_recovery_guard(capability)
+        _replacement_recovery_guard(capability)
         if _entry_stat(capability, graph_path.name) is None:
             protocol = _read_protocol(capability)
             if protocol is not None:
@@ -12778,6 +12957,7 @@ def _fence_pending_enqueue_locked(
 ) -> QueueReceipt | None:
     """Validate one pending enqueue before any unrelated mutation."""
     _restore_recovery_guard(capability)
+    _replacement_recovery_guard(capability)
     journal = _read_enqueue_journal(capability)
     if journal is None:
         return None
@@ -13901,6 +14081,7 @@ def queue_rebuild(
         raise PendingTransactionError("malformed rebuild root")
     root_path = _canonical_directory(Path(root_value))
     output_path = Path(output).expanduser().absolute()
+    _replacement_guard_output(output_path)
     if _expected_output_identity is None:
         _materialize_absent_snapshot_output(
             output_path, expected_snapshot, failpoint=failpoint
@@ -14441,6 +14622,8 @@ def takeover_drainer(
                        if live.legacy_inventory_digest is not None else {}),
                     **({"restore_binding": live.restore_binding}
                        if live.restore_binding is not None else {}),
+                    **({"replacement_binding": live.replacement_binding}
+                       if live.replacement_binding is not None else {}),
                 }
             )
             token_digest = hashlib.sha256(token_payload).hexdigest()
@@ -14960,8 +15143,11 @@ def _recover_close_pending_without_live_locked(
     """Resume an exact close after its token and live owner were already retired."""
     _validate_close_pending_protocol_locked(capability, protocol, drainer)
     restore_binding = protocol.get("restore_binding")
+    replacement_binding = protocol.get("replacement_binding")
     if restore_binding is not None:
         restore_binding = _validate_restore_binding(restore_binding)
+    if replacement_binding is not None:
+        replacement_binding = _validate_replacement_binding(replacement_binding)
     pending = drainer[2]
     _finish_close_locked(capability, pending)
     completed = _read_drainer(capability)
@@ -14982,6 +15168,7 @@ def _recover_close_pending_without_live_locked(
         drainer=completed[0],
         phase="complete",
         restore_binding=restore_binding,
+        replacement_binding=replacement_binding,
     )
     return _finish_completed_recovery_locked(
         capability,
@@ -15691,6 +15878,7 @@ def recover_transaction(
                 legacy_inventory_digest=protocol.get("legacy_inventory_digest"),
                 bootstrap_binding=protocol.get("bootstrap_binding"),
                 restore_binding=protocol.get("restore_binding"),
+                replacement_binding=protocol.get("replacement_binding"),
             )
             successor_protocol = dict(protocol)
             successor_protocol.pop("legacy_inventory_digest", None)
@@ -15866,6 +16054,7 @@ def recover_transaction(
             legacy_inventory_digest=current.legacy_inventory_digest,
             bootstrap_binding=current.bootstrap_binding,
             restore_binding=current.restore_binding,
+            replacement_binding=current.replacement_binding,
         )
         predecessor_protocol = dict(protocol)
         successor_protocol = dict(protocol)
@@ -17002,6 +17191,7 @@ def _inspect_recovery_locked(
 ) -> RecoveryInspection:
     try:
         _restore_recovery_guard(capability)
+        _replacement_recovery_guard(capability)
         transfer = _prepared_transfer_target_locked(capability)
         if transfer is not None:
             return RecoveryInspection(
@@ -17119,6 +17309,8 @@ def _finalize_prepared_transaction(
     """Capability-commit an owner-prepared generation and optionally close it."""
     if transaction.restore_binding is not None and transaction.generation == 1:
         raise PendingTransactionError("checkpoint restore requires its dedicated finalizer")
+    if transaction.replacement_binding is not None and transaction.generation == 1:
+        raise PendingTransactionError("canonical replacement requires its dedicated finalizer")
     if transaction.bootstrap_binding is not None:
         raise PendingTransactionError("trusted bootstrap requires its dedicated finalizer")
     with pin_output(transaction.output) as capability, _locked(capability):
