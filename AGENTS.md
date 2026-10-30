@@ -68,6 +68,18 @@ Run the path checks locally with
 This rule does not restrict multilingual input corpora or language extraction
 support. Any change to this policy requires an explicit operator request.
 
+## External semantic search
+
+Maintenance source code and its tests are approved for TypeSafe processing through
+optional jevgrep searches using `jev-latest`. Exclude research data, credentials,
+account and runtime state, and protected evaluation artifacts, including such
+content embedded in code, tests, or fixtures. Check both paths and contents;
+preview paths with `jg files ROOT --list`, then use narrow roots and matching
+exclusions. Exclude mixed files that contain unapproved content.
+
+Follow the global jevgrep skill. Jevgrep supplements the graph/wiki orientation
+rules below; its results do not establish test passage or authorization.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
