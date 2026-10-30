@@ -14,8 +14,49 @@ concurrency:
 
 # Approved Dependabot label events rerun CI so a skipped run cannot satisfy the gate.
 jobs:
+  admission:
+    # Reruns retain event data; query live approval for each full attempt.
+    # Partial reruns cannot reuse admission from a previous attempt.
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      pull-requests: read
+    outputs:
+      attempt: ${{ steps.approval.outputs.attempt }}
+    steps:
+      - name: Check current Dependabot approval
+        id: approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" | python3 -c '
+          import json
+          import os
+          import sys
+
+          pr = json.load(sys.stdin)
+          approved = (
+              pr["user"]["login"] == "dependabot[bot]"
+              and pr["state"] == "open"
+              and pr["draft"] is False
+              and pr["head"]["sha"] == os.environ["PR_HEAD_SHA"]
+              and any(label["name"] == "run-ci" for label in pr["labels"])
+          )
+          if not approved:
+              sys.exit("Current Dependabot PR state does not authorize CI.")
+          print("Current Dependabot PR approval verified.")
+          '
+          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
   skillgen-check:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'run-ci') }}
+    needs: [admission]
+    if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
     # the fragments in tools/skillgen/. This fails if someone hand-edited a
     # generated file or forgot to re-run the generator and bless expected/, and it
@@ -56,7 +97,8 @@ jobs:
 
   test:
     name: Pytest shard ${{ matrix.shard }}/4
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'run-ci') }}
+    needs: [admission]
+    if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -154,8 +196,8 @@ jobs:
 
   quality:
     name: Python quality gate
-    needs: [test]
-    if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'run-ci') }}
+    needs: [admission, test]
+    if: ${{ always() && needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
@@ -207,7 +249,8 @@ jobs:
         run: exit 1
 
   security-scan:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'run-ci') }}
+    needs: [admission]
+    if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
     # completion and coverage are validated independently of the job conclusion.
     permissions:
@@ -274,7 +317,8 @@ jobs:
         run: '"${{ steps.reporting_python.outputs.python-path }}" -I -S tools/security_receipts.py publish --output "$RUNNER_TEMP/security-receipts"'
 
   leiden-binary-smoke:
-    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.draft == false && contains(github.event.pull_request.labels.*.name, 'run-ci') }}
+    needs: [admission]
+    if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     name: Leiden binary smoke (macOS)
     runs-on: macos-latest
     steps:
@@ -304,18 +348,45 @@ jobs:
 
   dependabot-ci-gate:
     name: Dependabot CI gate
-    needs: [skillgen-check, test, quality, security-scan, leiden-binary-smoke]
-    # No checkout: this check only inspects event data and completed CI results.
+    needs: [admission, skillgen-check, test, quality, security-scan, leiden-binary-smoke]
+    # No checkout: recheck live approval, then require completed CI results.
     if: ${{ always() && github.event_name == 'pull_request' && (github.event.pull_request.user.login == 'dependabot[bot]' || (github.event.action != 'labeled' && github.event.action != 'unlabeled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
-    permissions: {}
+    permissions:
+      pull-requests: read
     steps:
+      - name: Check current Dependabot approval
+        if: ${{ always() && github.event.pull_request.user.login == 'dependabot[bot]' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER" | python3 -c '
+          import json
+          import os
+          import sys
+
+          pr = json.load(sys.stdin)
+          approved = (
+              pr["user"]["login"] == "dependabot[bot]"
+              and pr["state"] == "open"
+              and pr["draft"] is False
+              and pr["head"]["sha"] == os.environ["PR_HEAD_SHA"]
+              and any(label["name"] == "run-ci" for label in pr["labels"])
+          )
+          if not approved:
+              sys.exit("Current Dependabot PR state does not authorize CI.")
+          print("Current Dependabot PR approval verified.")
+          '
       - name: Require approval and successful CI for Dependabot
         if: ${{ always() }}
         env:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          HAS_RUN_CI: ${{ contains(github.event.pull_request.labels.*.name, 'run-ci') }}
           CI_RESULTS: ${{ toJSON(needs) }}
         shell: bash
         run: |
@@ -327,8 +398,6 @@ jobs:
           if os.environ['PR_AUTHOR'] != 'dependabot[bot]':
               print('Dependabot approval is not required for this pull request.')
               sys.exit(0)
-          if os.environ['HAS_RUN_CI'] != 'true':
-              sys.exit('Dependabot CI requires the run-ci label.')
           results = json.loads(os.environ['CI_RESULTS'])
           unsuccessful = [name for name, job in results.items() if job['result'] != 'success']
           if not results or unsuccessful:
