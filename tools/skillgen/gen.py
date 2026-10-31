@@ -137,6 +137,10 @@ _EXTRACTION_SOURCE = {
     "verbose": "references/shared/extraction-spec.md",
     "compact": "references/shared/extraction-spec-compact.md",
 }
+_DISK_DISPATCHES = frozenset({
+    "agent-tool-disk", "agent-tool-disk-powershell", "task-tool-disk",
+    "task-tool-disk-trae", "manual-paste",
+})
 # Single unified query reference + stub: superior vocab-expansion (Step 0) plus
 # CLI traversal plus inline NetworkX fallback, shipped to every platform. The
 # capabilities used to be split across cli.md / cli-inline.md so no platform got
@@ -1039,7 +1043,7 @@ def _render_saved_interpreter_commands(
     )
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
-    body = _route_full_build_transaction(body)
+    body = _route_full_build_transaction(body, cache_writes=platform.dispatch in _DISK_DISPATCHES)
     body = _route_incremental_transaction(body)
     if artifact_role == "reference":
         body = _route_reference_transaction(body, platform)
@@ -1128,7 +1132,9 @@ def _route_reference_transaction(body: str, platform: Platform) -> str:
     return body
 
 
-def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) -> str:
+def _route_prepared_python_blocks(
+    section: str, *, mutations_only: bool = True, cache_writes: bool = False
+) -> str:
     """Run inline Python against the existing exact prepared capability."""
     def route_bash(match: re.Match[str]) -> str:
         block = match.group(1)
@@ -1140,6 +1146,8 @@ def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) 
         mutation_markers = (
             "write_text(",
             "write_bytes(",
+            "commit_prepared_bytes(",
+            "unlink_prepared(",
             "save_manifest(",
             "to_json(",
             "unlink(",
@@ -1147,7 +1155,9 @@ def _route_prepared_python_blocks(section: str, *, mutations_only: bool = True) 
             "> graphify-out/",
         )
         if command is None or (mutations_only and not any(
-            marker in block for marker in mutation_markers
+            marker in block for marker in mutation_markers + (
+                ("save_semantic_cache(",) if cache_writes else ()
+            )
         )):
             return match.group(0)
         interpreter = (
@@ -1238,7 +1248,7 @@ print(token, end='')
     return body[:start] + section + body[end:]
 
 
-def _route_full_build_transaction(body: str) -> str:
+def _route_full_build_transaction(body: str, *, cache_writes: bool = False) -> str:
     """Route full-build Python blocks through the exact live token runner."""
     starts = [match.start() for match in re.finditer(r"(?m)^### Step 2(?:\s|$)", body)]
     if not starts:
@@ -1264,7 +1274,7 @@ def _route_full_build_transaction(body: str) -> str:
     if len(re.findall(r"(?m)^### Step 9(?:\s|$)", section)) != 1:
         raise ValueError("full-build transaction fence must have one Step 9 marker")
 
-    section = _route_prepared_python_blocks(section)
+    section = _route_prepared_python_blocks(section, cache_writes=cache_writes)
     export_prefix = (
         'GRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
         "'import sys; from pathlib import Path; from graphify.paths import GRAPHIFY_OUT; from graphify.transaction import active_transaction_token_path; root=Path(sys.argv[1]).resolve(strict=True); configured=Path(GRAPHIFY_OUT).expanduser(); output=(configured if configured.is_absolute() else root / configured).resolve(); print(active_transaction_token_path(output))' INPUT_PATH) || exit $?; "
@@ -1412,10 +1422,24 @@ def _render_core(platform: Platform) -> str:
         template.replace("@@FRONTMATTER@@", _render_frontmatter(platform))
         .replace("@@INSTALL@@", install)
         .replace("@@DISPATCH@@", dispatch)
+        # Only disk/manual staging consumes this private batch identity.
+        .replace("@@DISPATCH_BATCH@@", (
+            "Path('graphify-out/.graphify_dispatch_batch.txt').write_text(__import__('secrets').token_hex(16))"
+            if platform.dispatch in _DISK_DISPATCHES else ""
+        ))
         .replace("@@QUERY_STUB@@", query_stub)
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    if platform.dispatch in _DISK_DISPATCHES:
+        prefix, collection = body.split("**Step B3 - Collect, cache, and merge**", 1)
+        _, commands = collection.split("Save new results to cache:", 1)
+        body = (prefix + "**Step B3 - Collect, cache, and merge**\n\n"
+                + _read_fragment("collection/disk-stub.md") + "\nSave new results to cache:" + commands)
+        step9 = "### Step 9 - Save manifest, update cost tracker, clean up, and report\n\n"
+        if body.count(step9) != 1:
+            raise ValueError("disk staging retention needs exactly one Step 9 boundary")
+        body = body.replace(step9, step9 + _read_fragment("collection/disk-publication-stub.md") + "\n", 1)
     if platform.key == "windows":
         if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
             raise ValueError("Windows core must have exactly one portable namespace target")
@@ -1462,6 +1486,52 @@ def _render_agents_md_hooks(platform: Platform) -> str:
     return _normalise(body)
 
 
+def _render_chunk_staging(platform: Platform) -> str:
+    """Keep the disk intake recipe on the host's existing shell and tools."""
+    body = _read_fragment("references/shared/chunk-staging.md")
+    # Match B0/B3's live-token admission in every independent shell call. Do not
+    # silently replace an explicitly retained token from a different owner.
+    lookup = (
+        "import os, sys\nfrom pathlib import Path\nfrom graphify.paths import GRAPHIFY_OUT\n"
+        "from graphify.transaction import active_transaction_token_path\n"
+        "root = Path(sys.argv[1]).resolve(strict=True)\n"
+        "configured = Path(GRAPHIFY_OUT).expanduser()\n"
+        "output = (configured if configured.is_absolute() else root / configured).resolve()\n"
+        "token = active_transaction_token_path(output)\n"
+        "retained = os.environ.get('GRAPHIFY_TRANSACTION_TOKEN')\n"
+        "if retained and Path(retained).absolute() != token:\n"
+        "    raise ValueError('retained transaction token does not match the live owner')\n"
+        "print(token)\n"
+    )
+
+    def staging_block(match: re.Match[str]) -> str:
+        # Only this recipe's two fixed commands are converted. Keep JSON/path
+        # data in the environment and Python in a literal native here-string.
+        arguments = shlex.split(match.group(1))
+        if arguments[:-1] != [
+            "$GRAPHIFY_PYTHON", "-E", "-P", "-B", "-m", "graphify.transaction",
+            "run-prepared-token", "$GRAPHIFY_TRANSACTION_TOKEN", "--", "-c",
+        ]:
+            raise ValueError("unexpected disk staging command")
+        if platform.shell != "powershell":
+            return (
+                '```bash\nGRAPHIFY_TRANSACTION_TOKEN=$("$GRAPHIFY_PYTHON" -E -P -B -c '
+                + shlex.quote(lookup) + ' INPUT_PATH) || exit $?\n'
+                'export GRAPHIFY_TRANSACTION_TOKEN\n' + match.group(1) + '\n```'
+            )
+        return (
+            "```powershell\n$Env:GRAPHIFY_TRANSACTION_TOKEN = & $GraphifyPython -E -P -B -c '"
+            + lookup.replace("'", "''") + "' INPUT_PATH\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n"
+            "$GraphifyPythonSource = @'\n" + arguments[-1].strip("\n")
+            + "\n'@\n& $GraphifyPython -E -P -B -m graphify.transaction "
+            "run-prepared-token $Env:GRAPHIFY_TRANSACTION_TOKEN '--' -c $GraphifyPythonSource\n"
+            "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n```"
+        )
+
+    return re.sub(r"```bash\n(.*?)\n```", staging_block, body, flags=re.DOTALL)
+
+
 def render(platform: Platform) -> list[RenderedArtifact]:
     """Render every committed artifact for one platform.
 
@@ -1500,6 +1570,32 @@ def render(platform: Platform) -> list[RenderedArtifact]:
                 _PORTABLE_QUERY_MIGRATION,
                 _read_fragment("references/query/windows-portable.md") + "\n",
                 1,
+            )
+        if name == "extraction-spec" and platform.dispatch in _DISK_DISPATCHES:
+            if platform.extraction == "compact":
+                body = body.replace(
+                    "and DEEP_MODE).", "DEEP_MODE, and CHUNK_PATH)."
+                ).replace(
+                    "Output ONLY valid JSON matching the schema below - no explanation, no markdown fences, no preamble.",
+                    "Write valid JSON matching the schema below to the absolute intake path CHUNK_PATH "
+                    "using the host Write/file editor tool. Return only a completion notice; "
+                    "do not return the JSON inline.",
+                ).replace("Output exactly this JSON (no other text):", "Write exactly this JSON to CHUNK_PATH:")
+            else:
+                body = body.replace(
+                    "Output ONLY valid JSON matching the schema below - no explanation, no markdown fences, no preamble.",
+                    "Generate extraction JSON matching the schema below. Follow the file-writing and response instruction at the end of this prompt.",
+                ).replace(
+                    "CHUNK_PATH\n```",
+                    "CHUNK_PATH\nReturn only a completion notice; do not return the JSON inline.\n```",
+                    1,
+                )
+            body += "\n" + _render_chunk_staging(platform)
+            body += "\n## Parent collection (Step B3)\n\n" + _route_prepared_python_blocks(
+                _read_fragment("collection/disk.md")
+            )
+            body += "\n## Parent staging retention (Step 9)\n\n" + _route_prepared_python_blocks(
+                _read_fragment("collection/disk-publication.md")
             )
         body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"

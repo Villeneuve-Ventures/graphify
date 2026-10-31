@@ -158,7 +158,7 @@ def _detect_default_branch(repo: str | None = None) -> str:
     if repo:
         args += ["--repo", repo]
     data = _gh(*args)
-    if data and data.get("defaultBranchRef", {}).get("name"):
+    if isinstance(data, dict) and data.get("defaultBranchRef", {}).get("name"):
         return data["defaultBranchRef"]["name"]
     # Fall back to git symbolic-ref for the current repo
     try:

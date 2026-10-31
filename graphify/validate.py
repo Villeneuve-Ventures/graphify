@@ -7,7 +7,7 @@ REQUIRED_NODE_FIELDS = {"id", "label", "file_type", "source_file"}
 REQUIRED_EDGE_FIELDS = {"source", "target", "relation", "confidence", "source_file"}
 
 
-def validate_extraction(data: dict) -> list[str]:
+def validate_extraction(data: object) -> list[str]:
     """
     Validate an extraction JSON dict against the graphify schema.
     Returns a list of error strings - empty list means valid.

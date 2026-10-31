@@ -61,7 +61,7 @@ def resolve_ruby_member_calls(
     (god-node guard) so an ambiguous class name resolves to nothing rather than a
     wrong edge.
     """
-    node_by_id: dict[str, dict] = {n.get("id"): n for n in all_nodes}
+    node_by_id: dict[str | None, dict] = {n.get("id"): n for n in all_nodes}
 
     # class label key -> [class node ids]; (class_node_id, method_key) -> method id
     class_def_nids: dict[str, list[str]] = {}
@@ -70,6 +70,7 @@ def resolve_ruby_member_calls(
         if e.get("relation") != "method":
             continue
         src, tgt = e.get("source"), e.get("target")
+        assert src is not None and tgt is not None
         cnode = node_by_id.get(src)
         if cnode is not None:
             class_def_nids.setdefault(_key(cnode.get("label", "")), []).append(str(src))

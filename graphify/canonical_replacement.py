@@ -14,6 +14,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import time
+from typing import cast
 
 from . import legacy_source as source
 from . import transaction as tx
@@ -22,7 +23,7 @@ GUARD = ".graphify_replacement_guard"
 PROVENANCE = ".graphify_replacement_origin.json"
 PROFILE = "fresh-corpus-codex-v1"
 MAX_BYTES = 128 * 1024 * 1024
-_AUTHORITY = ContextVar("replacement_operation", default=None)
+_AUTHORITY: ContextVar[tuple[str, str] | None] = ContextVar("replacement_operation", default=None)
 
 
 def _require(value, reason):
@@ -232,7 +233,8 @@ def build_data(raw, fragments, *, _source_output=None):
                      and fragment.get("network_egress") is False,
                      "only host-Codex fragments admitted")
             hashes = fragment.get("source_sha256")
-            _require(isinstance(hashes, dict) and hashes, "fragment source hashes required")
+            if not isinstance(hashes, dict) or not hashes:
+                raise tx.PendingTransactionError("fragment source hashes required")
             _require(not (covered & hashes.keys()) and set(hashes) <= set(semantic),
                      "duplicate or unselected semantic scope")
             for path, digest in hashes.items():
@@ -272,7 +274,7 @@ def build_data(raw, fragments, *, _source_output=None):
             data = inputs.read_bytes(path)
             relative = str(Path(path).relative_to(root))
             source_hashes[relative] = _sha(data)
-            info = inputs.probe(path)
+            info = cast(os.stat_result, inputs.probe(path))
             manifest[relative] = {"mtime": info.st_mtime, "ast_hash": "", "semantic_hash": ""}
             import hashlib
             key = "ast_hash" if path in files.get("code", []) else "semantic_hash"
@@ -300,7 +302,7 @@ def _tree(path):
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 _require(stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode)
                          and info.st_nlink == 1), "unsafe preservation entry")
-                record = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode}
+                record: dict[str, int | str] = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode}
                 result[relative] = record
                 if stat.S_ISDIR(info.st_mode):
                     child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=fd)
@@ -497,8 +499,8 @@ def _rename(source_path, target_path):
         _require(left.identity.device == right.identity.device, "cross-filesystem replacement refused")
         libc = ctypes.CDLL(None, use_errno=True)
         function = getattr(libc, "renameatx_np" if sys.platform == "darwin" else "renameat2", None)
-        _require(function is not None and (sys.platform == "darwin" or sys.platform.startswith("linux")),
-                 "no-replace namespace operation unavailable")
+        if function is None or not (sys.platform == "darwin" or sys.platform.startswith("linux")):
+            raise tx.PendingTransactionError("no-replace namespace operation unavailable")
         function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
         function.restype = ctypes.c_int
         left.validate()
@@ -612,10 +614,10 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
             _require(journal["state"] == "PUBLISHING", "unknown replacement state")
             with tx.pin_output(output) as cap, tx._locked(cap):
                 protocol = tx._read_protocol(cap)
-                _require(protocol is not None and protocol.get("generation") == 1
-                         and protocol.get("replacement_binding") == binding
-                         and protocol.get("transaction_id") == journal["owner"]["id"],
-                         "replacement generation/owner changed")
+                if (protocol is None or protocol.get("generation") != 1
+                        or protocol.get("replacement_binding") != binding
+                        or protocol.get("transaction_id") != journal["owner"]["id"]):
+                    raise tx.PendingTransactionError("replacement generation/owner changed")
                 complete = protocol["state"] == "COMPLETE"
             if not complete:
                 owner = tx.resume_transaction(journal["owner"]["id"], request["root"], output=output)
@@ -635,12 +637,14 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
                 with tx.pin_output(output) as cap, tx._locked(cap):
                     tx._validate_receipt_locked(cap)
                     drainer = tx._read_drainer(cap)
-                    _require(drainer is not None, "replacement closure drainer missing")
+                    if drainer is None:
+                        raise tx.PendingTransactionError("replacement closure drainer missing")
                     if drainer[1] == "CLOSE_PENDING":
                         tx.recover_close(output)
                     elif drainer[1] != "complete":
                         owner = tx._read_transaction(cap)
-                        _require(owner is not None, "replacement closure owner missing")
+                        if owner is None:
+                            raise tx.PendingTransactionError("replacement closure owner missing")
                         token = tx._AUTHORITY.set(tx._authority_for(owner))
                         try:
                             tx._finish_transaction(owner, failpoint=failpoint)
@@ -658,7 +662,8 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
 
 def validate_allocation(capability, binding):
     context = _AUTHORITY.get()
-    _require(context is not None, "allocation requires exact replacement owner")
+    if context is None:
+        raise tx.PendingTransactionError("allocation requires exact replacement owner")
     journal = _load(context[0])
     _require(journal.get("request_digest") == context[1] and journal.get("binding") == binding
              and journal.get("state") == "NEW_INSTALLED"

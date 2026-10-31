@@ -474,7 +474,7 @@ def docx_to_markdown(path: Path) -> str:
         doc = Document(str(path))
         lines = []
         for para in doc.paragraphs:
-            style = para.style.name if para.style else ""
+            style = (para.style.name or "") if para.style else ""
             text = para.text.strip()
             if not text:
                 lines.append("")
@@ -1323,8 +1323,9 @@ def _detect_impl(root: Path, *, follow_symlinks: bool | None = None, google_work
         if _is_sensitive(p):
             skipped_sensitive.append(str(p))
             continue
-        if current_source_io() is not None:
-            current_source_io().read_bytes(p)
+        source_io = current_source_io()
+        if source_io is not None:
+            source_io.read_bytes(p)
         ftype = classify_file(p, strict=strict)
         if not ftype:
             # Considered but unclassifiable: an extension not in any supported set,
@@ -1336,8 +1337,9 @@ def _detect_impl(root: Path, *, follow_symlinks: bool | None = None, google_work
         if ftype:
             if p.suffix.lower() in GOOGLE_WORKSPACE_EXTENSIONS:
                 if read_only:
-                    if current_source_io() is not None:
-                        current_source_io().refuse('unsupported comparison: Google Workspace shortcut')
+                    source_io = current_source_io()
+                    if source_io is not None:
+                        source_io.refuse('unsupported comparison: Google Workspace shortcut')
                     raise RuntimeError('unsupported comparison: Google Workspace shortcut')
                 if not google_workspace:
                     skipped_sensitive.append(
@@ -1577,6 +1579,7 @@ def save_manifest(
         root_res = Path(root) if root is not None else None
 
     def _in_scan(path_str: str) -> bool:
+        assert scan_set is not None  # Called only when a complete scan set was supplied.
         if path_str in scan_set:
             return True
         try:

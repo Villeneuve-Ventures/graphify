@@ -63,6 +63,7 @@ def test_actual_empty_extraction_and_two_phase_binding(tmp_path):
 
 
 def test_validated_input_models_are_required_at_trust_boundaries(tmp_path):
+    from tests.test_workspace_lifecycle_s3 import _invoke_unvalidated
     initial, final = manifests(tmp_path)
     fake = SimpleNamespace(
         complete=True,
@@ -74,9 +75,9 @@ def test_validated_input_models_are_required_at_trust_boundaries(tmp_path):
     with pytest.raises(ContractError, match="validated input manifests"):
         CompletionBinding.bind(initial, fake, compatibility=compatibility(), graph_sha256="c" * 64)
     with pytest.raises(ContractError, match="validated input manifests"):
-        SourceObservation(fake, final, 2)
+        _invoke_unvalidated(SourceObservation, fake, final, 2)
     with pytest.raises(ContractError, match="validated input manifest"):
-        StructuralBuild(fake, "c" * 64, 0, 0)
+        _invoke_unvalidated(StructuralBuild, fake, "c" * 64, 0, 0)
 
     class ForgedInputManifest(InputManifest):
         @property
@@ -158,9 +159,9 @@ def test_failed_batch_cannot_be_relabelled_empty(tmp_path, monkeypatch, resolver
         p.write_text("def okay(): pass")
     with SourceIO(root) as inputs:
         if resolver_failure:
-            def fail(*args, **kwargs):
+            def fail_resolver(*args, **kwargs):
                 raise RuntimeError("resolver failed after successful per-file extraction")
-            monkeypatch.setattr(engine, "run_language_resolvers", fail)
+            monkeypatch.setattr(engine, "run_language_resolvers", fail_resolver)
         else:
             original = inputs.read_bytes
             def fail(path, **kwargs):

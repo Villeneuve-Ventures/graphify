@@ -144,6 +144,8 @@ def test_java_implements_edge_survives_build(tmp_path: Path):
     )
     result = extract([iface, impl], cache_root=tmp_path)
     G = build_from_json(result, directed=True)
+    import networkx as nx
+    assert isinstance(G, nx.DiGraph)
     impl_edges = [
         (u, v) for u, v, d in G.edges(data=True) if d.get("relation") == "implements"
     ]

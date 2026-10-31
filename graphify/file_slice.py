@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
 
 # Plain-text document types where boundary-based slicing is meaningful and where
 # `_file_to_text` is a straight ``read_text`` (so a char range matches the bytes
@@ -105,7 +106,7 @@ def slice_boundaries(text: str, max_chars: int) -> list[tuple[int, int]]:
 
 
 def expand_oversized_files(
-    files: list[Path], max_chars: int
+    files: Sequence[Path | FileSlice], max_chars: int
 ) -> list["Path | FileSlice"]:
     """Replace each oversized splittable-text file with a list of ``FileSlice``s.
 
@@ -115,6 +116,9 @@ def expand_oversized_files(
     """
     out: list["Path | FileSlice"] = []
     for f in files:
+        if isinstance(f, FileSlice):
+            out.append(f)
+            continue
         if not is_splittable_text(f):
             out.append(f)
             continue

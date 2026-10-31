@@ -138,6 +138,7 @@ def _run_bounded(request, deadline_ns):
                 for stream, event in ((process.stdin, selectors.EVENT_WRITE),
                                       (process.stdout, selectors.EVENT_READ),
                                       (process.stderr, selectors.EVENT_READ)):
+                    assert stream is not None  # All three streams were requested as PIPE.
                     os.set_blocking(stream.fileno(), False)
                     selector.register(stream, event)
                 while selector.get_map():
@@ -154,6 +155,7 @@ def _run_bounded(request, deadline_ns):
                                 sent = len(request.canonical)
                             if sent == len(request.canonical):
                                 selector.unregister(key.fileobj)
+                                assert process.stdin is not None
                                 process.stdin.close()
                             continue
                         try:

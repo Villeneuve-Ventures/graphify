@@ -1,11 +1,16 @@
 """Accepted graph records are not fresh extraction input during semantic updates."""
 from copy import deepcopy
 import json
+from typing import TypedDict
 
 import pytest
 
 from graphify.build import build, build_merge
 from graphify.export import to_json
+
+
+class MergeOptions(TypedDict, total=False):
+    replacement_sources: list[str]
 
 
 def node(identity, label=None, source="stable.md", **attrs):
@@ -349,7 +354,7 @@ def test_fresh_dedup_tolerates_unhashable_group_members(tmp_path, malformed):
 @pytest.mark.parametrize("confidence", ["EXTRACTED", "INFERRED", "AMBIGUOUS"])
 @pytest.mark.parametrize("score_mode", ["default", "explicit_equal", "explicit_conflict"])
 def test_exported_edge_default_score_is_semantically_compatible(tmp_path, confidence, score_mode):
-    accepted = dict(edge("a", "b"), confidence=confidence)
+    accepted: dict[str, str | float] = dict(edge("a", "b"), confidence=confidence)
     incoming = dict(accepted)
     if score_mode != "default":
         accepted["confidence_score"] = 0.73
@@ -1149,8 +1154,7 @@ def test_falsey_retained_node_recovery_across_dedup_variants(tmp_path, identity,
     path, _ = seed(tmp_path, records, [])
     before = path.read_bytes()
     chunks = [] if mode in {"singleton", "default_old_sibling"} else [{"nodes": [node("beacon", source="changed.md")]}]
-    graph = build_merge(chunks, path, root=tmp_path,
-                        **({"dedup": False} if mode == "dedup_false" else {}))
+    graph = build_merge(chunks, path, root=tmp_path, dedup=mode != "dedup_false")
     expected = set() if mode == "singleton" else {"anchor"} if mode == "default_old_sibling" else {"beacon"}
     assert set(graph) == expected
     assert "skipping node with non-string id" in capsys.readouterr().err
@@ -1210,8 +1214,8 @@ def test_relationship_owner_alone_is_additional_claim(tmp_path, explicit, kind):
                    [{"id": "old", "source_file": "evidence.md", "nodes": ["a"]}])
     fresh = {"edges": [edge("b", "c", "evidence.md")]} if kind == "edge" else {
         "hyperedges": [{"id": "new", "source_file": "evidence.md", "nodes": ["b"]}]}
-    graph = build_merge([fresh], path, root=tmp_path,
-                        **({"replacement_sources": []} if explicit else {}))
+    options: MergeOptions = {"replacement_sources": []} if explicit else {}
+    graph = build_merge([fresh], path, root=tmp_path, **options)
     assert graph.has_edge("a", "b")
     assert "old" in {h["id"] for h in graph.graph["hyperedges"]}
 
@@ -1224,9 +1228,9 @@ def test_prune_removes_fresh_relationship_claims_without_replacement(tmp_path, d
     before = path.read_bytes()
     fresh = {"edges": [edge("a", "b", "evidence.md")],
              "hyperedges": [{"id": "new", "source_file": "evidence.md", "nodes": ["a"]}]}
+    options: MergeOptions = {} if legacy else {"replacement_sources": []}
     graph = build_merge([fresh], path, root=tmp_path, directed=directed, dedup=dedup,
-                        prune_sources=[str(tmp_path / "evidence.md")],
-                        **({} if legacy else {"replacement_sources": []}))
+                        prune_sources=[str(tmp_path / "evidence.md")], **options)
     assert graph.number_of_edges() == 0 and not graph.graph.get("hyperedges")
     assert path.read_bytes() == before
 

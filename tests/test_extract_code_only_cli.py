@@ -237,6 +237,7 @@ def test_public_code_refresh_withholds_failed_ast_publication(tmp_path, monkeypa
             frame = sys._getframe(1)
             if frame.f_code.co_name == "source_read_bytes":
                 frame = frame.f_back
+                assert frame is not None
             if path == repo / "first.py" and frame.f_code.co_name == "_resolve_cross_file_imports":
                 reads.append(path)
                 raise OSError("injected inner import read")
@@ -325,6 +326,7 @@ def test_public_code_refresh_withholds_vue_read_failure(tmp_path, monkeypatch, p
         frame = sys._getframe(1)
         if frame.f_code.co_name == "source_read_text":
             frame = frame.f_back
+            assert frame is not None
         if path == vue and frame.f_code.co_name == "extract_" + suffix:
             reads.append(path)
             raise OSError("injected component read failure")
@@ -785,8 +787,9 @@ def test_public_code_refresh_checks_source_observations(
     record_property("accepted_artifacts_unchanged", str(before == after))
     for path in protected:
         record_property("before_" + path.name, hashlib.sha256(before[path]).hexdigest())
+        after_bytes = after[path]
         record_property("after_" + path.name,
-                        hashlib.sha256(after[path]).hexdigest() if after[path] is not None else "absent")
+                        hashlib.sha256(after_bytes).hexdigest() if after_bytes is not None else "absent")
     expected = {
         "R1-after-baseline": ["after-baseline"], "R2-after-ast": ["after-ast"],
         "R3-aba": ["after-baseline", "restored-after-ast"],

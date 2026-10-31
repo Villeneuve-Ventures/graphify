@@ -892,6 +892,7 @@ def test_html_export_keeps_learning_for_actual_graph_name(tmp_path, graph_name):
     assert after.data["nodes"] == before.data["nodes"]
     assert after.data["links"] == before.data["links"]
     assert (out / ".graphify_learning.json").read_bytes() == learning
+    assert before.generation is not None
     assert after.generation == before.generation + 1
 
 

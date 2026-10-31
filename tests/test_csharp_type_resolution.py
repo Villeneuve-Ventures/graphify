@@ -449,7 +449,7 @@ def test_csharp_type_ref_never_targets_a_file_label(tmp_path: Path):
     bad = [
         e for e in result["edges"]
         if e.get("relation") in ("inherits", "implements", "references")
-        and str(_node_by_id(result, e.get("target")).get("label", "") if _node_by_id(result, e.get("target")) else "").endswith(".cs")
+        and str(target.get("label", "") if (target := _node_by_id(result, e.get("target"))) else "").endswith(".cs")
     ]
     assert not bad, f"a C# type ref must not target a .cs file-labeled node: {bad}"
 

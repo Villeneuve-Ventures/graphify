@@ -29,7 +29,8 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from html import escape
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+from collections.abc import MutableMapping
 
 from graphify.paths import GRAPHIFY_OUT, GRAPHIFY_OUT_NAME
 
@@ -995,10 +996,13 @@ def should_include_edge(edge: dict) -> bool:
 def node_degree_scores(edges: list) -> Counter:
     """Score nodes by useful edge participation."""
     scores = Counter()
+    # Counter accepts fractional weights at runtime, while typeshed assumes int
+    # counts. Keep the Counter API and check weight updates through a float view.
+    weights = cast(MutableMapping[str, float], scores)
     for edge in edges:
         score = edge_score(edge)
-        scores[edge.get("source", "")] += score
-        scores[edge.get("target", "")] += score
+        weights[edge.get("source", "")] += score
+        weights[edge.get("target", "")] += score
     return scores
 
 
@@ -1071,7 +1075,7 @@ def select_diagram_nodes(nodes: list, edges: list, max_nodes: int) -> list:
 
 def node_label(node: dict) -> str:
     """Build a readable Mermaid node label."""
-    label = humanize_label(node.get("label") or node.get("id"), node.get("source_file", ""))
+    label = humanize_label(node.get("label") or node.get("id") or "", node.get("source_file", ""))
     source_file = safe_file_path(node.get("source_file", ""))
     if source_file and not label.endswith(Path(source_file).name):
         return f"{safe_mermaid_text(label)}<br/><small>{safe_mermaid_text(source_file)}</small>"
@@ -1087,10 +1091,16 @@ def group_nodes_by_file(nodes: list) -> dict:
     return dict(sorted(groups.items(), key=lambda item: (-len(item[1]), item[0])))
 
 
+class _SectionEdgeSummary(TypedDict):
+    count: int
+    relations: Counter[str]
+
+
 def section_edge_summary(classified_edges: dict) -> dict:
     """Aggregate inter-section edge counts and relation names."""
     node_section = classified_edges.get("node_section", {})
-    summary = defaultdict(lambda: {"count": 0, "relations": Counter()})
+    summary: defaultdict[tuple[str, str], _SectionEdgeSummary] = defaultdict(
+        lambda: {"count": 0, "relations": Counter()})
     for edge in classified_edges.get("inter", []):
         if not should_include_edge(edge):
             continue

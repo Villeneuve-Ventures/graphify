@@ -34,6 +34,35 @@ def test_ordinary_writer_obeys_replacement_guard(tmp_path, monkeypatch):
         require_ordinary_output(tmp_path / 'graphify-out' / 'cache')
 
 
+@pytest.mark.parametrize('entrypoint', ['helper', 'dispatch'])
+def test_extract_dispatch_preserves_replacement_guard(tmp_path, monkeypatch, entrypoint):
+    import sys
+    from graphify import cli
+
+    corpus = tmp_path / 'corpus'
+    corpus.mkdir()
+    (corpus / 'source.py').write_text('def source(): pass\n')
+    output_root = tmp_path / 'absent-output'
+    checked = []
+
+    def refuse(path, *, mutation=True):
+        checked.append((Path(path), mutation))
+        raise tx.PendingTransactionError('replacement is pending')
+
+    monkeypatch.setattr(replacement, 'guard_output', refuse)
+    monkeypatch.setattr(sys, 'argv', [
+        'graphify', 'extract', str(corpus), '--out', str(output_root), '--code-only',
+    ])
+    with pytest.raises(tx.PendingTransactionError, match='replacement is pending'):
+        if entrypoint == 'helper':
+            cli._dispatch_extract()
+        else:
+            cli._dispatch_command('extract')
+    assert checked == [(output_root / 'graphify-out', True)]
+    assert not output_root.exists()
+    assert (corpus / 'source.py').read_text() == 'def source(): pass\n'
+
+
 def test_exact_guard_namespace_excluded():
     from graphify.detect import _SKIP_FILES
     assert '.graphify_replacement_guard' in _SKIP_FILES
@@ -94,7 +123,10 @@ def test_old_protocol_parser_refuses_replacement(case, modeled):
     request, fragments = case
     seal = replacement.build_data(request, fragments)
     replacement.execute(request, seal, replacement.preview(request, seal)['preview_sha256'])
-    source = subprocess.check_output(['git', 'show', 'HEAD:graphify/transaction.py'], text=True)
+    # Freeze the pre-replacement parser; HEAD already includes this feature.
+    old_protocol_base = 'f9b1beb2bd5aeb183a64987594b406a969e2ddae'
+    source = subprocess.check_output(
+        ['git', 'show', f'{old_protocol_base}:graphify/transaction.py'], text=True)
     function = next(node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef) and node.name == '_protocol_from_json')
     namespace = vars(tx).copy()
     exec(compile(ast.Module(body=[function], type_ignores=[]), '<base-protocol-parser>', 'exec'), namespace)

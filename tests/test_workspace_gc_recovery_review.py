@@ -371,7 +371,9 @@ def test_gc_replay_syncs_absent_intent_after_uncertain_clear(
         retry(10_003)
     assert attempts == ["gc_parent"]
     fail_sync = False
-    assert retry(10_004).quarantined == ("gen-uncertain-rename",)
+    retried = retry(10_004)
+    assert retried is not None
+    assert retried.quarantined == ("gen-uncertain-rename",)
     assert attempts == ["gc_parent", "gc_parent"]
 
 

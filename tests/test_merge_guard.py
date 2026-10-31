@@ -513,7 +513,9 @@ def test_missing_runtime_is_required_only_for_selected_merge_graph(tmp_path, mon
         "#!/bin/sh\nprintf 'probe\\n' >> " + shlex.quote(str(probe_log)) + "\nexit 1\n"
     )
     failed_runtime.chmod(0o755)
-    (runtime_dir / "git").symlink_to(shutil.which("git"))
+    git_executable = shutil.which("git")
+    assert git_executable is not None
+    (runtime_dir / "git").symlink_to(git_executable)
     monkeypatch.setattr(hooks, "_pinned_python", lambda: str(failed_runtime))
     hooks.install(repo, merge_guard=True)
     if case == "ordinary":

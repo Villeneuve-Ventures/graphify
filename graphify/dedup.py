@@ -314,7 +314,7 @@ def _deduplicate_entities_with_remap(
     # Guard: cross-project dedup is not supported — nodes from different repos
     # share label names by coincidence and must never be merged by string similarity.
     # If you need to dedup a global graph, run deduplicate_entities per-repo first.
-    repos_seen = {n.get("repo") for n in nodes if n.get("repo")}
+    repos_seen = {repo for n in nodes if (repo := n.get("repo"))}
     if len(repos_seen) > 1:
         raise ValueError(
             f"deduplicate_entities: nodes span multiple repos {sorted(repos_seen)!r}. "

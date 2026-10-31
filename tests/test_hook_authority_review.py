@@ -252,7 +252,9 @@ def test_unpublished_candidate_is_visible_beside_canonical_authority(repo, monke
         assert "post-commit: installed" in result and "merge driver: registered" in result
     elif phase == "active":
         assert "pending install (PREPARING)" in result
-        assert publication._pending_record(_hooks(repo))["binding"] == body(repo)["active"]["binding"]
+        pending = publication._pending_record(_hooks(repo))
+        assert isinstance(pending, dict)
+        assert pending["binding"] == body(repo)["active"]["binding"]
     else:
         assert "retained incomplete" in result
     assert (_evidence(repo), _evidence(publication._state_root())) == protected
@@ -323,7 +325,7 @@ def test_selinux_target_label_refuses_new_hook_creation(repo, monkeypatch, phase
         (_hooks(repo) / name).unlink()
     if phase != "new":
         _interrupt(repo, monkeypatch, phase)
-    listxattr = os.listxattr
+    listxattr = getattr(os, "listxattr")
     identity = publication._identity(_hooks(repo).stat())
 
     def labeled(fd, *args, **kwargs):
@@ -410,8 +412,8 @@ def _default_acl(directory):
         for tag, permissions, identity in [(1, 7, 0xFFFFFFFF), (2, 0, 65534),
                                            (4, 5, 0xFFFFFFFF), (16, 5, 0xFFFFFFFF),
                                            (32, 5, 0xFFFFFFFF)])
-    os.setxattr(directory, "system.posix_acl_default", acl)
-    return os.getxattr(directory, "system.posix_acl_default")
+    getattr(os, "setxattr")(directory, "system.posix_acl_default", acl)
+    return getattr(os, "getxattr")(directory, "system.posix_acl_default")
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="native Linux POSIX default ACL")
@@ -436,7 +438,7 @@ def test_new_hook_default_acl_refuses_without_live_changes(repo, legacy):
         assert {name: after[name] for name in before} == before
     if not legacy:
         assert observed == protected
-    assert os.getxattr(_hooks(repo), "system.posix_acl_default") == acl
+    assert getattr(os, "getxattr")(_hooks(repo), "system.posix_acl_default") == acl
     assert not (repo / ".gitattributes").exists()
 
 
@@ -453,4 +455,4 @@ def test_default_acl_added_during_pending_creation_refuses_and_preserves(repo, m
     with pytest.raises(RuntimeError, match="Cannot preserve hooks-directory.*ACL"):
         hooks.install(repo)
     assert (_evidence(repo), _evidence(publication._state_root())) == protected
-    assert os.getxattr(_hooks(repo), "system.posix_acl_default") == acl
+    assert getattr(os, "getxattr")(_hooks(repo), "system.posix_acl_default") == acl

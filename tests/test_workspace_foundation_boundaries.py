@@ -123,6 +123,8 @@ def test_directory_retry_repeats_failed_parent_sync(tmp_path, source_repository,
     assert syscalls.attempts > attempts
     assert retained.stat().st_ino == retained_inode
     if boundary == "root":
+        from graphify.workspace.lifecycle_contracts import Registry
+        assert isinstance(result, Registry)
         assert result.to_dict()["revision"] == 1
         assert store.load().to_dict()["revision"] == 1
     else:

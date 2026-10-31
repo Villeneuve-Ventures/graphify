@@ -454,6 +454,7 @@ class _Store:
             _write(fd, "capability", secrets.token_bytes(32), 0o600)
             os.fsync(fd)
             key = _read(fd, "capability", private=True)
+            assert key is not None  # _write persisted the new capability.
             self.key = key[1]
             self.identity = _signature(key)
             self.body = {"schema": schema, "authority": _identity(os.fstat(fd)),
@@ -487,6 +488,7 @@ class _Store:
             retired = _read(fd, completed["retired"], private=True)
             if _signature(retired) != completed["completion"]:
                 raise RuntimeError("Missing or changed completion evidence; retain installer authority")
+            assert retired is not None  # Its signature matched required completion evidence.
             self._decode(retired[1])
 
     def _decode(self, data):
@@ -806,7 +808,10 @@ def _desired(plan, snapshot, operation):
     mode = None if snapshot is None else stat.S_IMODE(snapshot[0].st_mode)
     if operation == "install":
         data = plan.data if plan.data is not None else (plan.text.encode("utf-8") if plan.text is not None else old)
-        return data, 0o755 if plan.create else mode | 0o111
+        if plan.create:
+            return data, 0o755
+        assert mode is not None  # Existing-file plans carry a snapshot.
+        return data, mode | 0o111
     return (None, None) if plan.delete else (plan.data if plan.data is not None else old, mode)
 
 
@@ -873,11 +878,14 @@ def _prepare(fd, store, snapshots, plans, request, operation, names=NAMES):
             snapshot = snapshots[name]
             old = _signature(snapshot)
             ownership = None if snapshot is None else [snapshot[0].st_uid, snapshot[0].st_gid]
-            unchanged = snapshot is None and data is None or snapshot is not None and data == snapshot[1] and mode == old["mode"]
+            if snapshot is not None:
+                assert old is not None  # _signature preserves a present snapshot.
+            unchanged = snapshot is None and data is None or snapshot is not None and data == snapshot[1] and old is not None and mode == old["mode"]
             entry = {"name": name, "old": old, "new": old if unchanged else None,
                      "changed": not unchanged, "slot": str(index), "preimage": None}
             if not unchanged:
                 if snapshot is not None:
+                    assert old is not None
                     _write(stage_fd, "pre-" + str(index), snapshot[1], old["mode"], snapshot[2], ownership)
                     entry["preimage"] = _signature(_read(stage_fd, "pre-" + str(index)))
                 if data is not None:
@@ -1000,7 +1008,7 @@ def _prepare_authenticated(fd, store, snapshots, plans, binding, desired, names)
             snapshot = snapshots[name]
             old = _signature(snapshot)
             unchanged = (snapshot is None and data is None or snapshot is not None
-                         and old is not None and data == snapshot[1] and mode == old["mode"])
+                         and old is not None and data == snapshot[1] and old is not None and mode == old["mode"])
             entry = {"name": name, "old": old, "new": old if unchanged else None,
                      "changed": not unchanged, "slot": str(index), "preimage": None}
             parent = os.fstat(fd)

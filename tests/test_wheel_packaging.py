@@ -45,8 +45,7 @@ def _expected_artifacts() -> list[Path]:
     return bodies + refs + always
 
 
-@pytest.fixture(scope="module")
-def built_wheel(tmp_path_factory) -> Path:
+def _build_wheel(tmp_path_factory) -> Path:
     try:
         import build  # noqa: F401
     except ImportError:
@@ -67,10 +66,15 @@ def built_wheel(tmp_path_factory) -> Path:
     return max(wheels, key=lambda p: p.stat().st_mtime)
 
 
+@pytest.fixture(scope="module")
+def built_wheel(tmp_path_factory) -> Path:
+    return _build_wheel(tmp_path_factory)
+
+
 def test_missing_build_dependency_fails(monkeypatch, tmp_path_factory):
     monkeypatch.setitem(sys.modules, "build", None)
     with pytest.raises(pytest.fail.Exception, match="declared dev dependency"):
-        built_wheel.__wrapped__(tmp_path_factory)
+        _build_wheel(tmp_path_factory)
 
 
 @pytest.fixture(scope="module")

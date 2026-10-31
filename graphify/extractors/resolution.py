@@ -1,5 +1,9 @@
 """resolution — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tree_sitter import Node
 from graphify.source_io import source_ancestors, at_source_root, engine_print, source_read_bytes, source_read_text, source_resolve, source_stat
 from graphify.extractors.base import checked_exists, checked_is_file, checked_is_dir, checked_glob, checked_rglob
 
@@ -1181,8 +1185,8 @@ def _js_default_export_name(node, source: bytes) -> str | None:
         return _read_text(value, source)
     return None
 
-def _js_top_level_function_bodies(path: Path, root_node, source: bytes) -> list[tuple[str, object]]:
-    bodies: list[tuple[str, object]] = []
+def _js_top_level_function_bodies(path: Path, root_node, source: bytes) -> list[tuple[str, Node]]:
+    bodies: list[tuple[str, Node]] = []
     stem = _file_stem(path)
     for node in root_node.children:
         if node.type == "function_declaration":
@@ -1389,7 +1393,7 @@ def _collect_js_symbol_resolution_facts(paths: list[Path], facts: _SymbolResolut
     if not js_paths:
         return
 
-    trees: dict[Path, tuple[bytes, object]] = {}
+    trees: dict[Path, tuple[bytes, Node]] = {}
 
     for path in js_paths:
         resolved_path = source_resolve(path)
@@ -1654,8 +1658,8 @@ def _resolve_python_module_path(module_name: str, current_path: Path, root: Path
         return py_candidate
     return None
 
-def _python_top_level_function_bodies(path: Path, root_node, source: bytes) -> list[tuple[str, object]]:
-    bodies: list[tuple[str, object]] = []
+def _python_top_level_function_bodies(path: Path, root_node, source: bytes) -> list[tuple[str, Node]]:
+    bodies: list[tuple[str, Node]] = []
     stem = _file_stem(path)
     for node in root_node.children:
         if node.type != "function_definition":
@@ -1685,7 +1689,7 @@ def _collect_python_symbol_resolution_facts(
     if not py_paths:
         return
 
-    trees: dict[Path, tuple[bytes, object]] = {}
+    trees: dict[Path, tuple[bytes, Node]] = {}
     for path in py_paths:
         parsed = _parse_python_tree(path, strict=strict)
         if parsed is None:
@@ -2241,7 +2245,7 @@ def _resolve_java_type_references(
         fqn_to_id.setdefault(f"{pkg}.{label}" if pkg else label, nid)
 
     # Bare shadow stubs: no source_file, type-like label.
-    stub_label: dict[str, str] = {
+    stub_label: dict[str | None, str] = {
         node["id"]: node.get("label", "")
         for node in all_nodes
         if node.get("id") and not node.get("source_file") and node.get("label", "")[:1].isupper()
@@ -2259,7 +2263,7 @@ def _resolve_java_type_references(
     # the reference must point at the RIGHT one (#1744). Mirrors the C# resolver,
     # whose REPOINT set already covers `references`.
     REPOINT_RELATIONS = {"implements", "inherits", "extends", "imports", "references"}
-    repointed_from: set[str] = set()
+    repointed_from: set[str | None] = set()
     for edge in all_edges:
         if edge.get("relation") not in REPOINT_RELATIONS:
             continue
@@ -2283,7 +2287,7 @@ def _resolve_java_type_references(
         return
 
     # Drop shadow stubs that no edge references anymore.
-    still_referenced: set[str] = set()
+    still_referenced: set[str | None] = set()
     for edge in all_edges:
         still_referenced.add(edge.get("source"))
         still_referenced.add(edge.get("target"))
@@ -2477,7 +2481,7 @@ def _resolve_php_type_references(
         fqn_to_id.setdefault(fqn.lower(), nid)
 
     node_ids = {n.get("id") for n in all_nodes if n.get("id")}
-    stub_label: dict[str, str] = {
+    stub_label: dict[str | None, str] = {
         n["id"]: n.get("label", "")
         for n in all_nodes
         if n.get("id") and not n.get("source_file") and n.get("label")
@@ -2504,7 +2508,7 @@ def _resolve_php_type_references(
         external_stub_ids[key] = nid
         return nid
 
-    repointed_from: set[str] = set()
+    repointed_from: set[str | None] = set()
     for edge in all_edges:
         relation = edge.get("relation")
         if relation not in _PHP_REPOINT_RELATIONS:
@@ -2552,7 +2556,7 @@ def _resolve_php_type_references(
     if not repointed_from:
         return
 
-    still_referenced: set[str] = set()
+    still_referenced: set[str | None] = set()
     for edge in all_edges:
         still_referenced.add(edge.get("source"))
         still_referenced.add(edge.get("target"))
