@@ -2895,7 +2895,9 @@ def test_cpp_header_routes_to_cpp_extractor():
     """A `.h` with a C++ class must route to extract_cpp, not extract_c (which has
     no class_specifier and would drop the class entirely)."""
     p = (FIXTURES / "cpp_paired" / "Foo.h").resolve()
-    assert _get_extractor(p).__name__ == "extract_cpp"
+    extractor = _get_extractor(p)
+    assert extractor is not None
+    assert extractor.__name__ == "extract_cpp"
     assert _is_cpp_header(p)
 
 
@@ -2903,7 +2905,9 @@ def test_plain_c_header_stays_on_c_extractor():
     """A plain C header (no C++ signal) must keep its extract_c routing."""
     p = (FIXTURES / "cpp_samedir" / "plain.h").resolve()
     assert not _is_cpp_header(p)
-    assert _get_extractor(p).__name__ == "extract_c"
+    extractor = _get_extractor(p)
+    assert extractor is not None
+    assert extractor.__name__ == "extract_c"
 
 
 def test_cpp_paired_single_class_node():
@@ -2957,7 +2961,9 @@ def test_objc_header_with_import_routes_to_objc():
     extract_objc; extract_c parses `#import` as preproc_call and drops the edge."""
     p = (FIXTURES / "objc_mixed" / "Bridging-Header.h").resolve()
     assert _is_objc_header(p)
-    assert _get_extractor(p).__name__ == "extract_objc"
+    extractor = _get_extractor(p)
+    assert extractor is not None
+    assert extractor.__name__ == "extract_objc"
 
 
 def test_objc_paired_single_class_methods_not_duplicated():

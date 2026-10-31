@@ -59,6 +59,7 @@ def test_certified_drift_abandons_and_allows_successor(tmp_path, monkeypatch, ch
     with pytest.raises(GenerationConflict, match='abandoned'):
         synchronize_structural(runtime, request, attempt_sha256='b' * 64)
     stage = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert stage is not None
     assert stage.lifecycle_state == 'ABANDONED'
     assert stage.abandon_reason == 'SOURCE_CHANGED'
     assert StagedBuildState.from_json(stage.canonical) == stage

@@ -10,9 +10,9 @@ import errno
 import os
 import stat
 import uuid
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Iterator, TextIO, BinaryIO
+from typing import IO, Iterator, Literal, TextIO, overload
 
 
 WORKSPACE_ROOT_MARKER = ".graphify-workspace-root.json"
@@ -253,7 +253,7 @@ def _create_windows_output(path: Path, flags: int) -> int:
     import msvcrt
     from ctypes import wintypes
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
     create = kernel.CreateFileW
     create.argtypes = (
         wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
@@ -262,12 +262,12 @@ def _create_windows_output(path: Path, flags: int) -> int:
     create.restype = wintypes.HANDLE
     handle = create(str(path), 0x40010000, 0x7, None, 1, 0x80, None)
     if handle == ctypes.c_void_p(-1).value:
-        error = ctypes.get_last_error()
+        error = getattr(ctypes, "get_last_error")()
         if error in {80, 183}:  # ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS
             raise FileExistsError(error, "ordinary output already exists", str(path))
-        raise ctypes.WinError(error)
+        raise getattr(ctypes, "WinError")(error)
     try:
-        return msvcrt.open_osfhandle(handle, flags | getattr(os, "O_NOINHERIT", 0))
+        return getattr(msvcrt, "open_osfhandle")(handle, flags | getattr(os, "O_NOINHERIT", 0))
     except BaseException:
         try:
             _delete_opened_windows_handle(handle)
@@ -292,7 +292,7 @@ def _delete_opened_windows_handle(handle: int, *, unlink_on_close: bool = False)
     class FileDispositionInfoEx(ctypes.Structure):
         _fields_ = [("Flags", ctypes.c_uint32)]
 
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
     set_info = kernel.SetFileInformationByHandle
     set_info.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
     set_info.restype = wintypes.BOOL
@@ -303,19 +303,37 @@ def _delete_opened_windows_handle(handle: int, *, unlink_on_close: bool = False)
         handle, 21 if unlink_on_close else 4,  # FileDispositionInfoEx / FileDispositionInfo
         ctypes.byref(disposition), ctypes.sizeof(disposition),
     ):
-        raise ctypes.WinError(ctypes.get_last_error())
+        raise getattr(ctypes, "WinError")(getattr(ctypes, "get_last_error")())
 
 
 def _delete_opened_windows_output(descriptor: int) -> None:
     import msvcrt
 
-    _delete_opened_windows_handle(msvcrt.get_osfhandle(descriptor))
+    _delete_opened_windows_handle(getattr(msvcrt, "get_osfhandle")(descriptor))
+
+
+@overload
+def ordinary_open(
+    path: str | os.PathLike[str], mode: Literal["w", "a"], *, encoding: str | None = None,
+) -> AbstractContextManager[IO[str]]: ...
+
+
+@overload
+def ordinary_open(
+    path: str | os.PathLike[str], mode: Literal["wb", "ab"], *, encoding: str | None = None,
+) -> AbstractContextManager[IO[bytes]]: ...
+
+
+@overload
+def ordinary_open(
+    path: str | os.PathLike[str], mode: str, *, encoding: str | None = None,
+) -> AbstractContextManager[IO[str] | IO[bytes]]: ...
 
 
 @contextmanager
 def ordinary_open(
     path: str | os.PathLike[str], mode: str, *, encoding: str | None = None,
-) -> Iterator[TextIO | BinaryIO]:
+) -> Iterator[IO[str] | IO[bytes]]:
     """Open a regular output relative to a held, inspected parent directory."""
 
     if mode not in {"w", "a", "wb", "ab"}:

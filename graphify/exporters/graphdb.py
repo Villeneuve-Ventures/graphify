@@ -4,6 +4,7 @@ from __future__ import annotations
 from graphify.analyze import _node_community_map
 import networkx as nx
 import re
+from typing import LiteralString, cast
 
 
 def push_to_neo4j(
@@ -29,13 +30,14 @@ def push_to_neo4j(
 
     node_community = _node_community_map(communities) if communities else {}
 
-    def _safe_rel(relation: str) -> str:
-        return re.sub(r"[^A-Z0-9_]", "_", relation.upper().replace(" ", "_").replace("-", "_")) or "RELATED_TO"
+    def _safe_rel(relation: str) -> LiteralString:
+        # Only identifier characters survive; values remain driver parameters.
+        return cast(LiteralString, re.sub(r"[^A-Z0-9_]", "_", relation.upper().replace(" ", "_").replace("-", "_")) or "RELATED_TO")
 
-    def _safe_label(label: str) -> str:
+    def _safe_label(label: str) -> LiteralString:
         """Sanitize a Neo4j node label to prevent Cypher injection."""
         sanitized = re.sub(r"[^A-Za-z0-9_]", "", label)
-        return sanitized if sanitized else "Entity"
+        return cast(LiteralString, sanitized) if sanitized else "Entity"
 
     driver = GraphDatabase.driver(uri, auth=(user, password))
     nodes_pushed = 0
@@ -116,13 +118,14 @@ def push_to_falkordb(
 
     node_community = _node_community_map(communities) if communities else {}
 
-    def _safe_rel(relation: str) -> str:
-        return re.sub(r"[^A-Z0-9_]", "_", relation.upper().replace(" ", "_").replace("-", "_")) or "RELATED_TO"
+    def _safe_rel(relation: str) -> LiteralString:
+        # Only identifier characters survive; values remain driver parameters.
+        return cast(LiteralString, re.sub(r"[^A-Z0-9_]", "_", relation.upper().replace(" ", "_").replace("-", "_")) or "RELATED_TO")
 
-    def _safe_label(label: str) -> str:
+    def _safe_label(label: str) -> LiteralString:
         """Sanitize a FalkorDB node label to prevent Cypher injection."""
         sanitized = re.sub(r"[^A-Za-z0-9_]", "", label)
-        return sanitized if sanitized else "Entity"
+        return cast(LiteralString, sanitized) if sanitized else "Entity"
 
     parsed = urlparse(uri if "://" in uri else f"redis://{uri}")
     # FalkorDB auth is optional. Only send credentials when a password is

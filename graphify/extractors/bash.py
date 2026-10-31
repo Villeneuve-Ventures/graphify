@@ -197,7 +197,8 @@ def extract_bash(path: Path, *, strict: bool = False) -> dict:
                             target_path = resolved
                             if not path.is_absolute():
                                 try:
-                                    target_path = resolved.relative_to((current_source_io().root if current_source_io() else source_resolve(Path.cwd())))
+                                    scope = current_source_io()
+                                    target_path = resolved.relative_to((scope.root if scope else source_resolve(Path.cwd())))
                                 except ValueError:
                                     pass
                             caller_nid = entry_nid if parent_nid == file_nid else parent_nid

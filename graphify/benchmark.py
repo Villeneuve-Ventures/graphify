@@ -113,6 +113,7 @@ def run_benchmark(
         # Rough estimate: each node label is ~3 words, plus source context
         corpus_words = G.number_of_nodes() * 50
 
+    assert corpus_words is not None
     corpus_tokens = corpus_words * 100 // 75  # words → tokens (100 words ≈ 133 tokens)
 
     qs = questions or _SAMPLE_QUESTIONS

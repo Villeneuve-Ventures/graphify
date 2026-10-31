@@ -11,11 +11,12 @@ import os
 import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
+from typing import TypedDict
 
 from graphify.file_slice import (
     FileSlice,
@@ -544,7 +545,7 @@ def _wrap_untrusted(rel: str, content: str) -> str:
     )
 
 
-def _read_files(units: "list[Path | FileSlice]", root: Path, *, consumed=None) -> str:
+def _read_files(units: "Sequence[Path | FileSlice]", root: Path, *, consumed=None) -> str:
     """Return file/slice contents formatted for the extraction prompt.
 
     Each unit is wrapped in an <untrusted_source> delimiter block and known
@@ -649,7 +650,7 @@ def _is_vision_image(path: Path) -> bool:
 
 
 def _partition_semantic_files(
-    units: "list[Path | FileSlice]",
+    units: "Sequence[Path | FileSlice]",
 ) -> tuple["list[Path | FileSlice]", list[Path]]:
     """Split a chunk into (text-like units, raster-image files).
 
@@ -1160,7 +1161,12 @@ def _call_claude(api_key: str, model: str, user_message: str, max_tokens: int = 
         system=_extraction_system(deep=deep_mode),
         messages=[{"role": "user", "content": _anthropic_content(user_message, images or [])}],
     )
-    raw_content = resp.content[0].text if resp.content else None
+    raw_content = None
+    if resp.content:
+        block = resp.content[0]
+        if block.type != "text":
+            raise ValueError("Anthropic response did not begin with a text block")
+        raw_content = block.text
     result = _parse_llm_json(raw_content or "{}")
     result["input_tokens"] = resp.usage.input_tokens if resp.usage else 0
     result["output_tokens"] = resp.usage.output_tokens if resp.usage else 0
@@ -1494,7 +1500,7 @@ def _merge_completion(left: dict, right: dict) -> dict:
 
 
 def extract_files_direct(
-    files: list[Path],
+    files: Sequence[str | Path | FileSlice],
     backend: str | None = None,
     api_key: str | None = None,
     model: str | None = None,
@@ -1666,7 +1672,7 @@ def _estimate_file_tokens(unit: "Path | FileSlice") -> int:
 
 
 def _pack_chunks_by_tokens(
-    files: "list[Path | FileSlice]",
+    files: "Sequence[Path | FileSlice]",
     token_budget: int,
 ) -> "list[list[Path | FileSlice]]":
     """Greedily pack files/slices into chunks that fit a token budget.
@@ -1741,7 +1747,7 @@ def _looks_like_context_exceeded(exc: BaseException) -> bool:
 
 
 def _extract_with_adaptive_retry(
-    chunk: list[Path],
+    chunk: Sequence[str | Path | FileSlice],
     backend: str,
     api_key: str | None,
     model: str | None,
@@ -1784,6 +1790,8 @@ def _extract_with_adaptive_retry(
     non-splittable file (e.g. one huge code file) can't be made smaller than
     itself, so we return what we got and warn.
     """
+    chunk = [item if isinstance(item, FileSlice) else Path(item) for item in chunk]
+
     def _merge_two(left_units, right_units) -> dict:
         left = _extract_with_adaptive_retry(
             left_units, backend, api_key, model, root, max_depth, _depth + 1, deep_mode=deep_mode
@@ -1925,7 +1933,7 @@ def _extract_with_adaptive_retry(
 
 
 def extract_corpus_parallel(
-    files: list[Path],
+    files: Sequence[str | Path | FileSlice],
     backend: str = "kimi",
     api_key: str | None = None,
     model: str | None = None,
@@ -1994,7 +2002,7 @@ def extract_corpus_parallel(
     }
     total = len(chunks)
 
-    def _run_one(idx: int, chunk: list[Path]) -> tuple[int, dict | None, Exception | None]:
+    def _run_one(idx: int, chunk: Sequence[Path | FileSlice]) -> tuple[int, dict | None, Exception | None]:
         t0 = time.time()
         try:
             result = _extract_with_adaptive_retry(
@@ -2024,7 +2032,7 @@ def extract_corpus_parallel(
     # over session state. Force serial unless the user explicitly opts in.
     if backend == "claude-cli" and os.environ.get("GRAPHIFY_CLAUDE_CLI_PARALLEL", "").strip() != "1":
         max_concurrency = 1
-    def _checkpoint_chunk(result: dict, chunk: "list[Path | FileSlice]") -> None:
+    def _checkpoint_chunk(result: dict, chunk: "Sequence[Path | FileSlice]") -> None:
         # Persist each chunk's semantic results to the cache as soon as it
         # completes. Without this, the semantic cache is only written once, at
         # the very end of the run (in __main__), so a run interrupted partway
@@ -2280,7 +2288,12 @@ def _call_llm(
         u = getattr(resp, "usage", None)
         if u is not None:
             _rec(getattr(u, "input_tokens", 0), getattr(u, "output_tokens", 0))
-        return resp.content[0].text if resp.content else ""
+        if not resp.content:
+            return ""
+        block = resp.content[0]
+        if block.type != "text":
+            raise ValueError("Anthropic response did not begin with a text block")
+        return block.text
 
     if backend == "claude-cli":
         import platform, shutil, subprocess
@@ -2404,7 +2417,7 @@ def _call_llm(
     return resp.choices[0].message.content or ""
 
 
-def estimate_cost(backend: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_cost(backend: str | None, input_tokens: int, output_tokens: int) -> float:
     """Estimate USD cost for a given token count using published pricing."""
     if backend not in BACKENDS:
         return 0.0
@@ -2439,7 +2452,7 @@ def _ollama_host_is_link_local_or_metadata(host: str) -> bool:
     return False
 
 
-def _validate_ollama_base_url(url: str, *, warn: bool = True) -> None:
+def _validate_ollama_base_url(url: str | None, *, warn: bool = True) -> None:
     """Warn if OLLAMA_BASE_URL looks unsafe; hard-block link-local/metadata (F3).
 
     Sending an entire corpus to a non-loopback http:// endpoint silently leaks
@@ -2469,7 +2482,9 @@ def _validate_ollama_base_url(url: str, *, warn: bool = True) -> None:
                 file=sys.stderr,
             )
         return
-    host = (parsed.hostname or "").lower()
+    hostname = parsed.hostname
+    assert hostname is None or isinstance(hostname, str)  # Only a text URL can have an HTTP scheme.
+    host = (hostname or "").lower()
     if _ollama_host_is_link_local_or_metadata(host):
         raise ValueError(
             f"OLLAMA_BASE_URL points at a link-local/metadata address ({host!r}); refusing to "
@@ -2673,6 +2688,10 @@ def _label_batch_with_retry(
         return left | right
 
 
+class _LabelBatchOptions(TypedDict, total=False):
+    usage_out: dict
+
+
 def label_communities(
     G,
     communities,
@@ -2730,8 +2749,8 @@ def label_communities(
         # Accumulate token usage into a per-batch dict so concurrent workers
         # never race on the shared accumulator; it is merged on the main thread
         # in _merge (#1694).
-        batch_usage: dict = {} if usage_out is not None else None
-        batch_kwargs = {"usage_out": batch_usage} if usage_out is not None else {}
+        batch_usage: dict | None = {} if usage_out is not None else None
+        batch_kwargs: _LabelBatchOptions = {"usage_out": batch_usage} if batch_usage is not None else {}
         try:
             parsed = _label_batch_with_retry(
                 labeled_cids[start:end], lines[start:end], backend=backend, model=model,

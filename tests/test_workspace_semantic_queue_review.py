@@ -94,7 +94,7 @@ def test_rejected_recovery_preserves_pending_commit(queue_case, field, missing):
         expected_queue_revision=current.revision,
         expected_desired_watermark=current.desired_watermark,
     )
-    invalid = dict(expected)
+    invalid: dict[str, int | None] = dict(expected)
     invalid[field] = None if missing else expected[field] - 1
     before = tree_snapshot(harness.state_root)
     with pytest.raises(SemanticQueueConflict):

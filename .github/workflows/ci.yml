@@ -22,7 +22,7 @@ jobs:
     # enum, the monolith round-trips, and the always-on round-trips.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The audit-coverage, monolith-roundtrip, and always-on-roundtrip
           # validators read blobs from origin/v8. A shallow checkout omits that
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.14"
           prune-cache: true
@@ -64,7 +64,7 @@ jobs:
         shard: [1, 2, 3, 4]
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # test_skillgen.py reads pre-split skill bodies from the immutable
           # baseline commit via `git show`; a shallow checkout omits that history
@@ -72,9 +72,10 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: ${{ matrix.python-version }}
+          prune-cache: true
 
       # --frozen installs straight from the committed uv.lock without re-resolving
       # or rewriting it, so CI never churns the lock.
@@ -157,7 +158,7 @@ jobs:
     if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -174,13 +175,19 @@ jobs:
         run: python -m tools.ci_pytest_gate check --receipts "$RUNNER_TEMP/pytest-results"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.14"
           prune-cache: true
 
       - name: Install dependencies
         run: uv sync --all-extras --frozen
+
+      - name: Lint locked dependencies
+        run: uv run --frozen ruff check .
+
+      - name: Typecheck locked dependencies
+        run: uv run --frozen pyright
 
       - name: Install acceptance-pinned Git 2.55.0
         run: |
@@ -213,16 +220,16 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install reporting Python
         id: reporting_python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.14"
           prune-cache: true
@@ -277,10 +284,10 @@ jobs:
     name: Leiden binary smoke (macOS)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv and Python 3.14
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           python-version: "3.14"
           prune-cache: true

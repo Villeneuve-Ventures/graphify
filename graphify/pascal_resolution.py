@@ -69,6 +69,7 @@ def resolve_pascal_inherited_calls(
             class_bases.setdefault(e["source"], []).append(e["target"])
         elif e.get("relation") == "method":
             owner, method_nid = e.get("source"), e.get("target")
+            assert owner is not None and method_nid is not None
             owner_of[method_nid] = owner
             mnode = node_by_id.get(method_nid)
             if mnode is None:

@@ -15,8 +15,12 @@ repos:
         pass_filenames: false
         always_run: true
 
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.14
+  # Use the uv-managed Ruff version so local lint and CI share one lock.
+  - repo: local
     hooks:
       - id: ruff
+        name: ruff (uv lockfile)
+        entry: uv run --frozen ruff check
+        language: system
+        types_or: [python, pyi]
         args: ["--config", "pyproject.toml"]

@@ -151,12 +151,14 @@ def _git_inputs(inputs, source, *, deadline_ns=None):
         raw = _optional(inputs, loose)
         if raw is None:
             selected_packed = _packed_entries(packed, [(ref, inputs._locate(loose)[2])])
+            assert selected_packed is not None  # _packed_entries returned the requested entry.
             head = selected_packed[0][2].encode("ascii")
         else:
             head = raw.strip()
     valid_oid = re.fullmatch(rb"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", head)
     if valid_oid is None or head.lower() != source.head_commit.encode("ascii"):
         raise SourceChanged("Git HEAD changed during observation")
+    assert selected_packed is not None  # Initialized for both loose and packed refs.
     inputs.record_packed_refs(tuple(selected_packed))
     policy = inputs.read_bytes(root / ".graphify" / "workspace.toml")
     if hashlib.sha256(policy).hexdigest() != source.config_sha256:

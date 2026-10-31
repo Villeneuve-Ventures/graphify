@@ -11,7 +11,7 @@ import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypedDict
 
 from .cache import load_cached, save_cached
 from .mcp_ingest import extract_mcp_config, is_mcp_config_path
@@ -1153,7 +1153,9 @@ def _extract_js_rationale(path: Path, result: dict, *, strict: bool = False) -> 
     def _add_doc_ref(token: str, line: int) -> None:
         # Normalize "adr 11" / "ADR-0011" spellings to a canonical "ADR-0011"
         # style label so references to the same document collapse to one node.
-        kind, num = re.match(r"([A-Za-z]+)[- ]?(\d+)", token).groups()
+        match = re.match(r"([A-Za-z]+)[- ]?(\d+)", token)
+        assert match is not None
+        kind, num = match.groups()
         kind = kind.upper()
         label = f"{kind}-{num.zfill(4)}" if kind == "ADR" else f"{kind}-{num}"
         if label in seen_doc_refs:
@@ -2046,8 +2048,9 @@ def _merge_swift_extensions(
     rewritten: list[dict] = []
     seen_keys: set[tuple] = set()
     for e in all_edges:
-        src = remap.get(e.get("source"), e.get("source"))
-        tgt = remap.get(e.get("target"), e.get("target"))
+        old_source, old_target = e.get("source"), e.get("target")
+        src = remap.get(old_source, old_source) if old_source is not None else None
+        tgt = remap.get(old_target, old_target) if old_target is not None else None
         if src == tgt:
             continue
         e["source"] = src
@@ -2100,7 +2103,7 @@ def _resolve_swift_member_calls(
     # Type name -> definition node ids (real, source-backed, type-like defs only).
     # len != 1 is the god-node guard: an ambiguous type name bails.
     type_def_nids: dict[str, list[str]] = {}
-    node_by_id: dict[str, dict] = {}
+    node_by_id: dict[str | None, dict] = {}
     for n in all_nodes:
         node_by_id[n.get("id")] = n
         if n.get("source_file") and n.get("id") in contained and _is_type_like_definition(n):
@@ -2112,6 +2115,7 @@ def _resolve_swift_member_calls(
         if e.get("relation") != "method":
             continue
         src, tgt = e.get("source"), e.get("target")
+        assert src is not None and tgt is not None
         tnode = node_by_id.get(tgt)
         if tnode is not None:
             method_index[(src, _key(tnode.get("label", "")))] = tgt
@@ -2192,7 +2196,7 @@ def _resolve_python_member_calls(
     def _key(label: str) -> str:
         return re.sub(r"[^a-zA-Z0-9]+", "", str(label)).lower()
 
-    node_by_id: dict[str, dict] = {n.get("id"): n for n in all_nodes}
+    node_by_id: dict[str | None, dict] = {n.get("id"): n for n in all_nodes}
 
     # A class owns methods: it is the source of one or more `method` edges. Index
     # class label -> owning class node ids (len != 1 is the god-node guard), and
@@ -2203,6 +2207,7 @@ def _resolve_python_member_calls(
         if e.get("relation") != "method":
             continue
         src, tgt = e.get("source"), e.get("target")
+        assert src is not None and tgt is not None
         cnode = node_by_id.get(src)
         if cnode is not None:
             class_def_nids.setdefault(_key(cnode.get("label", "")), []).append(src)
@@ -2229,17 +2234,18 @@ def _resolve_python_member_calls(
     for e in all_edges:
         if e.get("relation") == "contains":
             src, tgt = e.get("source"), e.get("target")
+            assert src is not None and tgt is not None
             tnode = node_by_id.get(tgt)
             if tnode is not None:
                 contains_children.setdefault(src, {}).setdefault(
                     _key(tnode.get("label", "")), []).append(tgt)
                 file_of_node[tgt] = src
-    imported_by_filenode: dict[str, set[str]] = {}
+    imported_by_filenode: dict[str | None, set[str | None]] = {}
     for e in all_edges:
         if e.get("relation") in ("imports", "imports_from"):
             imported_by_filenode.setdefault(e.get("source"), set()).add(e.get("target"))
 
-    def _module_stem_key(nid: str) -> str:
+    def _module_stem_key(nid: str | None) -> str:
         n = node_by_id.get(nid)
         if not n:
             return ""
@@ -2328,7 +2334,7 @@ def _resolve_typescript_member_calls(
     contained = {e.get("target") for e in all_edges if e.get("relation") == "contains"}
 
     type_def_nids: dict[str, list[str]] = {}
-    node_by_id: dict[str, dict] = {}
+    node_by_id: dict[str | None, dict] = {}
     for n in all_nodes:
         node_by_id[n.get("id")] = n
         if n.get("source_file") and n.get("id") in contained and _is_type_like_definition(n):
@@ -2339,6 +2345,7 @@ def _resolve_typescript_member_calls(
         if e.get("relation") != "method":
             continue
         src, tgt = e.get("source"), e.get("target")
+        assert src is not None and tgt is not None
         tnode = node_by_id.get(tgt)
         if tnode is not None:
             method_index[(src, _key(tnode.get("label", "")))] = tgt
@@ -2434,7 +2441,7 @@ def _resolve_cpp_member_calls(
     contained = {e.get("target") for e in all_edges if e.get("relation") == "contains"}
 
     type_def_nids: dict[str, list[str]] = {}
-    node_by_id: dict[str, dict] = {}
+    node_by_id: dict[str | None, dict] = {}
     for n in all_nodes:
         node_by_id[n.get("id")] = n
         if n.get("source_file") and n.get("id") in contained and _is_type_like_definition(n):
@@ -2452,6 +2459,7 @@ def _resolve_cpp_member_calls(
             if e.get("relation") != rel:
                 continue
             src, tgt = e.get("source"), e.get("target")
+            assert src is not None and tgt is not None
             tnode = node_by_id.get(tgt)
             if tnode is None:
                 continue
@@ -2555,7 +2563,7 @@ def _resolve_csharp_member_calls(
     contained = {e.get("target") for e in all_edges if e.get("relation") == "contains"}
 
     type_def_nids: dict[str, list[str]] = {}
-    node_by_id: dict[str, dict] = {}
+    node_by_id: dict[str | None, dict] = {}
     for n in all_nodes:
         node_by_id[n.get("id")] = n
         if n.get("source_file") and n.get("id") in contained and _is_type_like_definition(n):
@@ -2569,6 +2577,7 @@ def _resolve_csharp_member_calls(
         if e.get("relation") != "method":
             continue
         src, tgt = e.get("source"), e.get("target")
+        assert src is not None and tgt is not None
         tnode = node_by_id.get(tgt)
         if tnode is None:
             continue
@@ -2668,6 +2677,7 @@ def _resolve_java_member_calls(
         if edge.get("relation") != "method":
             continue
         owner, method = edge.get("source"), edge.get("target")
+        assert owner is not None and method is not None
         method_node = node_by_id.get(method)
         if method_node is None:
             continue
@@ -2759,7 +2769,7 @@ def _resolve_objc_member_calls(
     contained = {e.get("target") for e in all_edges if e.get("relation") == "contains"}
 
     type_def_nids: dict[str, list[str]] = {}
-    node_by_id: dict[str, dict] = {}
+    node_by_id: dict[str | None, dict] = {}
     for n in all_nodes:
         node_by_id[n.get("id")] = n
         if n.get("source_file") and n.get("id") in contained and _is_type_like_definition(n):
@@ -2771,6 +2781,7 @@ def _resolve_objc_member_calls(
         if e.get("relation") != "method":
             continue
         src, tgt = e.get("source"), e.get("target")
+        assert src is not None and tgt is not None
         enclosing_type.setdefault(tgt, src)
         tnode = node_by_id.get(tgt)
         if tnode is not None:
@@ -2960,7 +2971,7 @@ def extract_lazarus_package(path: Path, *, strict: bool = False) -> dict:
     edges: list[dict] = []
     seen_ids: set[str] = set()
 
-    def add_node(nid: str, label: str) -> None:
+    def add_node(nid: str, label: str | None) -> None:
         if nid not in seen_ids:
             seen_ids.add(nid)
             nodes.append({
@@ -3664,7 +3675,7 @@ def extract_xaml(path: Path, *, strict: bool = False) -> dict:
     nodes: list[dict] = []
     edges: list[dict] = []
     seen_ids: set[str] = set()
-    seen_edges: set[tuple[str, str, str, str | None]] = set()
+    seen_edges: set[tuple[str | None, str | None, str | None, str | None]] = set()
 
     def line_for(value: str | None) -> int:
         if value:
@@ -4178,7 +4189,17 @@ def _cached_markdown_matches_source(path: Path, cached: dict) -> bool:
     )
 
 
-def _extract_single_file(args: tuple) -> tuple[int, dict]:
+class _ExtractionCacheOptions(TypedDict, total=False):
+    use_cache: bool
+
+
+class _ExtractionOutcomeOptions(TypedDict, total=False):
+    input_outcomes: list[dict]
+
+
+def _extract_single_file(args: tuple[int, str, str] | tuple[int, str, str, str]
+                         | tuple[int, str, str, str, bool]
+                         | tuple[int, str, str, str, bool, bool]) -> tuple[int, dict]:
     """Worker function for parallel extraction. Runs in a subprocess.
 
     Must be at module level (not a closure) so it can be pickled by
@@ -4196,8 +4217,7 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     strict = len(args) >= 5 and args[4]
     use_cache = args[5] if len(args) >= 6 else True
     if len(args) >= 4:
-        args = args[:4]
-        idx, path_str, root_str, cache_location_str = args
+        idx, path_str, root_str, cache_location_str = args[:4]
     else:  # legacy 3-tuple: location == anchor
         idx, path_str, root_str = args
         cache_location_str = root_str
@@ -4408,7 +4428,9 @@ def _observe_input(path, outcomes, index):
     try:
         yield
         if outcomes is not None:
-            current_source_io().check()
+            scope = current_source_io()
+            assert scope is not None
+            scope.check()
     except SourceError as exc:
         if outcomes is not None:
             outcomes[index] = {'path': str(path), 'status': exc.code, 'detail': str(exc)}
@@ -4576,23 +4598,36 @@ def _extract_impl(
 
     # Phase 2: extract uncached files (parallel or sequential)
     if uncached_work:
+        cache_options: _ExtractionCacheOptions = {"use_cache": False} if not use_cache else {}
+        outcome_options: _ExtractionOutcomeOptions = (
+            {"input_outcomes": input_outcomes} if input_outcomes is not None else {}
+        )
         ran_parallel = False
         if parallel and len(uncached_work) >= _PARALLEL_THRESHOLD:
-            ran_parallel = _extract_parallel(
-                uncached_work, per_file, root, max_workers, total, cache_location,
-                *([True] if strict else []),
-                **({'use_cache': False} if not use_cache else {}),
-            )
+            if strict:
+                ran_parallel = _extract_parallel(
+                    uncached_work, per_file, root, max_workers, total, cache_location,
+                    True, **cache_options,
+                )
+            else:
+                ran_parallel = _extract_parallel(
+                    uncached_work, per_file, root, max_workers, total, cache_location,
+                    **cache_options,
+                )
         if not ran_parallel:
-            _extract_sequential(uncached_work, per_file, root, total, cache_location,
-                                *([True] if strict else []),
-                                **({'use_cache': False} if not use_cache else {}),
-                                **({'input_outcomes': input_outcomes}
-                                   if input_outcomes is not None else {}))
+            if strict:
+                _extract_sequential(uncached_work, per_file, root, total, cache_location,
+                                    True, **cache_options,
+                                    **outcome_options)
+            else:
+                _extract_sequential(uncached_work, per_file, root, total, cache_location,
+                                    **cache_options,
+                                    **outcome_options)
 
     outcomes = [_input_outcome(path, result) for path, result in zip(paths, per_file)]
-    if current_source_io() is not None:
-        current_source_io().check()
+    scope = current_source_io()
+    if scope is not None:
+        scope.check()
         if any(item["status"] not in {"success", "empty"} for item in outcomes):
             raise ExtractionIncomplete(outcomes)
 
@@ -4607,12 +4642,17 @@ def _extract_impl(
         if per_file[i] is None:
             per_file[i] = {"nodes": [], "edges": [], "error": "missing extraction result"}
 
+    completed_per_file: list[dict] = []
+    for result in per_file:
+        assert result is not None
+        completed_per_file.append(result)
+
     # #1666: surface any source file an extractor accepted but that produced zero
     # nodes (not even a file node). Such a file is silently absent from the graph,
     # so affected/explain are blind to and through it with no other signal.
     _empty_sources: list[str] = []
     for i, _p in enumerate(paths):
-        _res = per_file[i] or {}
+        _res = completed_per_file[i] or {}
         if _res.get("nodes") or _res.get("error"):
             continue
         if _get_extractor(_p, strict=strict) is not None:
@@ -4661,7 +4701,7 @@ def _extract_impl(
     _missing_dep_count: dict[str, int] = {}
     _missing_dep_error: dict[str, str] = {}
     for i, _p in enumerate(paths):
-        _err = (per_file[i] or {}).get("error") or ""
+        _err = (completed_per_file[i] or {}).get("error") or ""
         if "not installed" in _err:
             _ext = _p.suffix.lower()
             _missing_dep_count[_ext] = _missing_dep_count.get(_ext, 0) + 1
@@ -4683,12 +4723,12 @@ def _extract_impl(
     all_nodes: list[dict] = []
     all_edges: list[dict] = []
     all_raw_calls: list[dict] = []
-    for result in per_file:
+    for result in completed_per_file:
         all_nodes.extend(result.get("nodes", []))
         all_edges.extend(result.get("edges", []))
         all_raw_calls.extend(result.get("raw_calls", []))
     if any(path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES for path in paths):
-        for path, result in zip(paths, per_file):
+        for path, result in zip(paths, completed_per_file):
             if result is not None:
                 source = source_resolve(path)
                 selected = Path(os.path.abspath(path))
@@ -4827,7 +4867,7 @@ def _extract_impl(
                 if cn in sym_remap:
                     rc["caller_nid"] = sym_remap[cn]
 
-    _merge_swift_extensions(per_file, all_nodes, all_edges)
+    _merge_swift_extensions(completed_per_file, all_nodes, all_edges)
     _disambiguate_colliding_node_ids(all_nodes, all_edges, all_raw_calls, root, strict=strict)
     _canonicalize_csharp_namespace_nodes(all_nodes, all_edges)
     # PHP namespace/use disambiguation must run BEFORE the unique-stub rewire:
@@ -4835,7 +4875,7 @@ def _extract_impl(
     # matches a unique internal class from a different namespace.
     _php_exts = {".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phps"}
     _php_sel = [
-        (r, p) for r, p in zip(per_file, paths)
+        (r, p) for r, p in zip(completed_per_file, paths)
         if p.suffix.lower() in _php_exts and not p.name.lower().endswith(".blade.php")
     ]
     if _php_sel:
@@ -4853,7 +4893,7 @@ def _extract_impl(
     # Add cross-file class-level edges (Python only - uses Python parser internally)
     py_paths = [p for p in paths if p.suffix == ".py"]
     if py_paths:
-        py_results = [r for r, p in zip(per_file, paths) if p.suffix == ".py"]
+        py_results = [r for r, p in zip(completed_per_file, paths) if p.suffix == ".py"]
         try:
             cross_file_edges = _resolve_cross_file_imports(py_results, py_paths, strict=strict)
             all_edges.extend(cross_file_edges)
@@ -4866,7 +4906,7 @@ def _extract_impl(
     # Cross-file Java import resolution
     java_paths = [p for p in paths if p.suffix == ".java"]
     if java_paths:
-        java_results = [r for r, p in zip(per_file, paths) if p.suffix == ".java"]
+        java_results = [r for r, p in zip(completed_per_file, paths) if p.suffix == ".java"]
         try:
             all_edges.extend(_resolve_cross_file_java_imports(java_results, java_paths, strict=strict))
         except Exception as exc:
@@ -4889,7 +4929,7 @@ def _extract_impl(
     # referencing file's `using` directives + enclosing namespace (mirrors Java #1318).
     cs_paths = [p for p in paths if p.suffix == ".cs"]
     if cs_paths:
-        cs_results = [r for r, p in zip(per_file, paths) if p.suffix == ".cs"]
+        cs_results = [r for r, p in zip(completed_per_file, paths) if p.suffix == ".cs"]
         try:
             _resolve_csharp_type_references(cs_results, cs_paths, all_nodes, all_edges)
         except Exception as exc:
@@ -4942,8 +4982,8 @@ def _extract_impl(
     # the strongest evidence — caller's file_id has an `imports` edge directly to
     # the callee's symbol id. Module imports (`imports_from`) are weaker but still
     # confirm the caller pulled in the callee's source file.
-    file_to_symbol_imports: dict[str, set[str]] = {}
-    file_to_module_imports: dict[str, set[str]] = {}
+    file_to_symbol_imports: dict[str | None, set[str]] = {}
+    file_to_module_imports: dict[str | None, set[str]] = {}
     for e in all_edges:
         if e.get("relation") == "imports":
             file_to_symbol_imports.setdefault(e["source"], set()).add(e["target"])
@@ -5175,7 +5215,7 @@ def _extract_impl(
     resolver_paths = [path.with_suffix(path.suffix.lower())
                       if path.suffix.lower() in MARKDOWN_MENTION_SUFFIXES else path
                       for path in paths]
-    run_language_resolvers(resolver_paths, per_file, all_nodes, all_edges, strict=strict,
+    run_language_resolvers(resolver_paths, completed_per_file, all_nodes, all_edges, strict=strict,
                            scoped_resolvers=_SCOPED_RESOLVERS)
 
     if _markdown_context_only:
@@ -5187,9 +5227,9 @@ def _extract_impl(
                 "outcomes": outcomes,
                 "source_files": [str(source_resolve(path)) for path in paths],
                 "source_relative_paths": [result.get("_markdown_source_relative", "")
-                                          if result is not None else "" for result in per_file],
+                                          if result is not None else "" for result in completed_per_file],
                 "source_origins": [result.get("_markdown_source_origin", "")
-                                   if result is not None else "" for result in per_file]}
+                                   if result is not None else "" for result in completed_per_file]}
 
     # Relativize source_file fields so paths are portable across machines (#555).
     # A target OUTSIDE the scan root (an out-of-root ProjectReference/.sln/bash
@@ -5345,8 +5385,9 @@ def _extract_markdown_context(paths: list[Path], *, root: Path) -> dict:
 
 
 def collect_files(target: Path, *, follow_symlinks: bool = False, root: Path | None = None) -> list[Path]:
-    if current_source_io() is not None:
-        current_source_io().refuse("collect_files is not a scoped detector; use detect(source_io=...)")
+    scope = current_source_io()
+    if scope is not None:
+        scope.refuse("collect_files is not a scoped detector; use detect(source_io=...)")
     containment_root = root if root is not None else target
     from graphify.detect import _resolves_under_root
     if target.is_file():

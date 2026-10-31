@@ -61,6 +61,7 @@ def test_bootstrap_preparation_starts_empty(legacy):
     token = tx.stage_transaction_handoff(owner)
     with tx.pin_output(output) as cap, tx._locked(cap):
         owner = tx._read_transaction(cap)
+        assert owner is not None
         assert owner.bootstrap_binding == BINDING
         assert json.loads(token.path.read_bytes())["bootstrap_binding"] == BINDING
         prepared = tx._pin_prepared_workspace(owner, cap)
@@ -555,7 +556,9 @@ def test_admitted_path_budget_seals_and_resumes(legacy, monkeypatch):
         bootstrap.execute(request, plan["preview_sha256"], failpoint=cut)
     assert (output / tx.PREPARED_FILE).stat().st_size <= tx._MAX_STATE_BYTES
     with tx.pin_output(output, mutation=False) as cap:
-        assert "bootstrap_seal" in tx._load_json(cap, tx.PREPARED_FILE)
+        prepared_marker = tx._load_json(cap, tx.PREPARED_FILE)
+        assert prepared_marker is not None
+        assert "bootstrap_seal" in prepared_marker
     token = next(output.glob(".graphify_transaction_token.*"))
     assert bootstrap.execute(request, token_path=token)["status"] == "complete"
 
