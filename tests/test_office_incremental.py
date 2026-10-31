@@ -44,6 +44,7 @@ def test_modified_docx_reconverts_sidecar(tmp_path: Path):
     _bump_mtime(sidecar, -10)  # sidecar older than the freshly-written source
 
     sidecar2 = detect.convert_office_file(src, out)
+    assert sidecar2 is not None
     assert sidecar2 == sidecar  # same deterministic name
     body = sidecar2.read_text(encoding="utf-8")
     assert "revised beta content" in body
@@ -62,6 +63,7 @@ def test_unchanged_docx_sidecar_not_rewritten(tmp_path: Path):
     before = sidecar.stat().st_mtime
 
     sidecar2 = detect.convert_office_file(src, out)
+    assert sidecar2 is not None
     assert sidecar2 == sidecar
     # Not rewritten: mtime unchanged, so detect_incremental won't see churn (#1226).
     assert sidecar2.stat().st_mtime == before

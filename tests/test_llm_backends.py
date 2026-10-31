@@ -484,7 +484,7 @@ def _install_fake_openai(monkeypatch, fake_resp):
             return fake_resp
 
     fake_module = types.ModuleType("openai")
-    fake_module.OpenAI = _FakeOpenAI
+    setattr(fake_module, 'OpenAI', _FakeOpenAI)
     monkeypatch.setitem(sys.modules, "openai", fake_module)
 
 
@@ -577,7 +577,7 @@ def _install_capturing_openai(monkeypatch, *, calls=None):
             )
 
     fake_module = types.ModuleType("openai")
-    fake_module.OpenAI = _FakeOpenAI
+    setattr(fake_module, 'OpenAI', _FakeOpenAI)
     monkeypatch.setitem(sys.modules, "openai", fake_module)
     return captured
 
@@ -874,7 +874,7 @@ def _install_fake_azure_openai(monkeypatch, fake_resp):
             return fake_resp
 
     fake_module = types.ModuleType("openai")
-    fake_module.AzureOpenAI = _FakeAzureOpenAI
+    setattr(fake_module, 'AzureOpenAI', _FakeAzureOpenAI)
     monkeypatch.setitem(sys.modules, "openai", fake_module)
     return captured
 
@@ -1184,7 +1184,7 @@ def test_openai_compat_client_built_with_retries(monkeypatch):
             )
 
     fake_module = types.ModuleType("openai")
-    fake_module.OpenAI = _FakeOpenAI
+    setattr(fake_module, 'OpenAI', _FakeOpenAI)
     monkeypatch.setitem(sys.modules, "openai", fake_module)
     monkeypatch.delenv("GRAPHIFY_MAX_RETRIES", raising=False)
 
@@ -1195,7 +1195,8 @@ def test_openai_compat_client_built_with_retries(monkeypatch):
     assert ctor_kwargs.get("max_retries", 0) >= 5, ctor_kwargs
 
 
-def test_call_llm_claude_client_built_with_timeout_and_retries(monkeypatch):
+@pytest.mark.parametrize("response_type", ["text", "thinking"])
+def test_call_llm_claude_client_built_with_timeout_and_retries(monkeypatch, response_type):
     """The secondary dispatch path (_call_llm, used by the dedup tiebreaker)
     must build its Anthropic client with both timeout and max_retries, matching
     the primary extraction path — #1442. Previously _call_llm passed neither
@@ -1207,7 +1208,9 @@ def test_call_llm_claude_client_built_with_timeout_and_retries(monkeypatch):
 
     class _FakeMessages:
         def create(self, **_):
-            return types.SimpleNamespace(content=[types.SimpleNamespace(text="ok")])
+            block = (types.SimpleNamespace(type="text", text="ok") if response_type == "text" else
+                     types.SimpleNamespace(type="thinking", thinking="internal reasoning"))
+            return types.SimpleNamespace(content=[block])
 
     class _FakeAnthropic:
         def __init__(self, *_, **kwargs):
@@ -1215,13 +1218,17 @@ def test_call_llm_claude_client_built_with_timeout_and_retries(monkeypatch):
             self.messages = _FakeMessages()
 
     fake_module = types.ModuleType("anthropic")
-    fake_module.Anthropic = _FakeAnthropic
+    setattr(fake_module, 'Anthropic', _FakeAnthropic)
     monkeypatch.setitem(sys.modules, "anthropic", fake_module)
     monkeypatch.setattr(llm, "_get_backend_api_key", lambda _b: "fake-key")
     monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "1")
     monkeypatch.delenv("GRAPHIFY_MAX_RETRIES", raising=False)
 
-    assert llm._call_llm("hi", backend="claude") == "ok"
+    if response_type == "text":
+        assert llm._call_llm("hi", backend="claude") == "ok"
+    else:
+        with pytest.raises(ValueError, match="did not begin with a text block"):
+            llm._call_llm("hi", backend="claude")
     assert ctor_kwargs.get("timeout") == 1.0, ctor_kwargs
     assert ctor_kwargs.get("max_retries", 0) >= 5, ctor_kwargs
 
@@ -1243,7 +1250,7 @@ def test_call_llm_openai_compat_client_built_with_timeout_and_retries(monkeypatc
             return _fake_openai_response("ok", finish_reason="stop", completion_tokens=1)
 
     fake_module = types.ModuleType("openai")
-    fake_module.OpenAI = _FakeOpenAI
+    setattr(fake_module, 'OpenAI', _FakeOpenAI)
     monkeypatch.setitem(sys.modules, "openai", fake_module)
     monkeypatch.setattr(llm, "_get_backend_api_key", lambda _b: "fake-key")
     monkeypatch.setenv("GRAPHIFY_API_TIMEOUT", "1")
@@ -1436,9 +1443,9 @@ def test_relative_input_paths_bind_to_one_scan_root(tmp_path, monkeypatch, entry
 
     monkeypatch.setattr(llm, '_call_openai_compat', call)
     monkeypatch.setenv('GRAPHIFY_NO_INCREMENTAL_CACHE', '1')
-    options = dict(backend='gemini', api_key='fixture-key', root=root.absolute() if absolute_root else root)
-    result = (llm.extract_files_direct(units, **options) if entry == 'direct' else
-              llm.extract_corpus_parallel(units, **options, chunk_size=1, token_budget=None,
+    scan_root = root.absolute() if absolute_root else root
+    result = (llm.extract_files_direct(units, backend='gemini', api_key='fixture-key', root=scan_root) if entry == 'direct' else
+              llm.extract_corpus_parallel(units, backend='gemini', api_key='fixture-key', root=scan_root, chunk_size=1, token_budget=None,
                                          max_concurrency=1 if entry == 'serial' else 2))
     assert result['completed_sources'] == sorted([str(source.absolute()), str(other.absolute())])
     assert {node['id'] for node in result['nodes']} == {source.stem, other.stem}

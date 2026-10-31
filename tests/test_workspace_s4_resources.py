@@ -39,6 +39,7 @@ def test_payload_writer_stops_at_durable_reservation(tmp_path, monkeypatch, chun
     with runtime.stores.registry.read_only_snapshot():
         with runtime.stores.leases.read_only_workspace_lock(REPO_UUID):
             staged = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+            assert staged is not None
             assert staged.lifecycle_state == 'ABANDONED'
     assert not runtime.stores.leases.inspect(REPO_UUID).leases
     assert not any(t.name == 'graphify-structural-heartbeat' for t in threading.enumerate())

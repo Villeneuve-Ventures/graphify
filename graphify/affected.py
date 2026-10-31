@@ -156,7 +156,7 @@ def affected_nodes(
     # otherwise. The member nodes are seeds only (not reported as hits), and
     # `method`/`contains` stay out of the general relation-filtered walk, so this
     # adds no forward noise anywhere else.
-    if hasattr(graph, "out_edges"):
+    if isinstance(graph, nx.DiGraph):
         member_edges = graph.out_edges(seed, data=True)
     else:
         member_edges = (
@@ -174,7 +174,7 @@ def affected_nodes(
         current, current_depth = queue.popleft()
         if current_depth >= depth:
             continue
-        if hasattr(graph, "in_edges"):
+        if isinstance(graph, nx.DiGraph):
             incoming = graph.in_edges(current, data=True)
         else:
             incoming = (

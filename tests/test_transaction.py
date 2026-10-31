@@ -9922,6 +9922,7 @@ def test_recovery_revalidates_public_inventory_inside_takeover_lock(
     else:
         assert not isinstance(result[0], Exception)
         target = result[0]
+        assert isinstance(target, transaction_module.Transaction)
         rebound = json.loads(
             (output / transaction_module.PREPARED_FILE).read_text(
                 encoding="utf-8"
@@ -10373,6 +10374,7 @@ def test_selected_recovery_revalidates_interleaved_successor_ready_under_lock(
     else:
         assert not isinstance(result[0], Exception)
         target = result[0]
+        assert isinstance(target, transaction_module.Transaction)
         rebound = json.loads(
             (output / transaction_module.PREPARED_FILE).read_text(encoding="utf-8")
         )
@@ -11490,7 +11492,10 @@ def test_stdio_mcp_tool_rejects_pending_managed_graph(tmp_path):
     request = types.CallToolRequest(
         params=types.CallToolRequestParams(name="graph_stats", arguments={})
     )
-    response = asyncio.run(handler(request))
+    async def invoke_handler():
+        return await handler(request)
+
+    response = asyncio.run(invoke_handler())
     assert "without a graph receipt" in str(response)
 
 
@@ -11648,6 +11653,7 @@ def test_admitted_intent_survives_second_crash_at_transfer_boundary(tmp_path, bo
         if phase == boundary:
             raise RuntimeError(phase)
 
+    assert target is not None
     with pytest.raises(RuntimeError, match=boundary):
         tx.recover_transaction(
             "update",
@@ -11702,6 +11708,7 @@ def test_transfer_recovers_interrupted_intent_admission_before_replay(tmp_path, 
             failpoint=crash,
         )
     assert (output / tx.TOKEN_TRANSITION_FILE).read_bytes() == transfer_bytes
+    assert target is not None
     recovered = tx.recover_selected_transaction(
         "update",
         root,
@@ -11882,6 +11889,7 @@ def test_transfer_replay_rejects_corrupted_admission_journal(tmp_path, corruptio
         raw["predecessor"]["inode"] += 1
         journal_path.write_text(json.dumps(raw))
     before = _file_bytes(output)
+    assert target is not None
     with pytest.raises(tx.PendingTransactionError):
         tx.recover_transaction(
             "update",
@@ -12036,6 +12044,7 @@ def test_transfer_recovery_preserves_target_after_queue_recovery(tmp_path, monke
         before.update(_file_bytes(output))
 
     monkeypatch.setattr(tx, "_recover_queue_transitions_locked", replace_transfer)
+    assert target is not None
     with pytest.raises(tx.PendingTransactionError):
         tx.recover_transaction(
             "update", root, output=output, now=10**14,
@@ -12279,8 +12288,10 @@ def test_successor_returning_callback_contract(tmp_path, case, boundary):
         observed.append(phase)
         if phase != boundary or substituted:
             return
-        if claimed and claim.inflight_path.exists():
-            return
+        if claimed:
+            assert claim.inflight_path is not None
+            if claim.inflight_path.exists():
+                return
         substituted = True
         if case in {"N1", "N2"}:
             # A returning callback installs a valid, different owner at the same output.
@@ -12335,6 +12346,7 @@ def test_successor_returning_callback_contract(tmp_path, case, boundary):
         assert sum(item["changed_paths"] == ["pending.py"] for item in items) == 1
     else:
         assert "after_queue_retirement_rename" in observed
+        assert claim.inflight_path is not None
         assert not claim.inflight_path.exists()
         assert sum(item["id"] == queued.id for item in items) == 1
 
@@ -12732,6 +12744,7 @@ def test_snapshot_auxiliary_managed_plan_preserves_receipt_inventory(tmp_path):
     assert after.data["links"] == snapshot.data["links"]
     assert after.artifacts["custom.txt"] == b"preserve me"
     assert after.artifacts[".graphify_learning.json"] == b"{}"
+    assert snapshot.generation is not None
     assert after.generation == snapshot.generation + 1
 
 
@@ -13113,6 +13126,7 @@ def test_snapshot_auxiliary_can_explicitly_carry_sparse_inventory(tmp_path, monk
         retain_in_place=True,
     )
     after = open_graph_snapshot(output / "graph.json", purpose="serve")
+    assert sparse.generation is not None
     assert after.generation == sparse.generation + 1
     assert "custom.txt" in dict(after.inventory_selector)
     assert (output / "custom.txt").read_bytes() == b"preserve me"

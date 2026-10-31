@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import Enum
 from itertools import islice
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
 
 from graphify.workspace.contracts import (
     CompatibilityManifest, InputManifest, ContractError, MAX_TOTAL_BYTES, _validate_input_extension,
@@ -201,6 +201,10 @@ class QueryRequest:
             )
 
 
+if TYPE_CHECKING:
+    from graphify.workspace.lifecycle_observation import SourceObservation as LifecycleObservation
+
+
 class EngineAdapter(Protocol):
     """Paths are explicit, never cwd-derived authority.
 
@@ -210,6 +214,7 @@ class EngineAdapter(Protocol):
     """
     adapter_id: str
     detector_id: str
+    expected: CompatibilityManifest | None
 
     def build_structural(self, source_root: Path, *, payload_fd: int,
                          scratch_fd: int, initial_detection: InputManifest, write_guard=None,
@@ -220,6 +225,9 @@ class EngineAdapter(Protocol):
 
     def observe(self, source_root: Path, *, input_manifest: InputManifest | None = None,
                 max_inventory_passes: int = 6, deadline_ns: int | None = None) -> SourceObservation: ...
+
+    def observe_lifecycle(self, source_root: Path, *, max_inventory_passes: int = 6,
+                          deadline_ns: int | None = None) -> LifecycleObservation: ...
 
     def observe_consumed_inputs(self, source_root: Path, *, input_manifest: InputManifest) -> str:
         """Digest repeated current evidence for the sealed operation set, for recovery."""

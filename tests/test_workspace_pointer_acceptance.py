@@ -175,7 +175,7 @@ def test_advanced_prior_requires_latest_unsuperseded_exact_repair(tmp_path, late
     })
 
     def event(transition, revision, ref):
-        return SimpleNamespace(to_dict=lambda: {
+        return lifecycle._journal_event(to_dict=lambda: {
             **ref, "transition": transition, "pointer_revision": revision,
             "operation_epoch": revision, "fence_token": revision,
         })

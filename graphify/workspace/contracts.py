@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import stat
 import unicodedata
+from typing import Self
 
 STATE_SCHEMA_VERSION = 2
 ADAPTER_CONTRACT_VERSION = 3
@@ -337,7 +338,7 @@ class Document:
         self.validate(value)
 
     @classmethod
-    def from_mapping(cls, value):
+    def from_mapping(cls, value) -> Self:
         # Bound the document before validators allocate derived inventories, but
         # validate the original input so NFC cannot repair filesystem labels.
         canonical = canonical_json_bytes(value)
@@ -345,7 +346,7 @@ class Document:
         return cls(canonical)
 
     @classmethod
-    def from_json(cls, payload):
+    def from_json(cls, payload) -> Self:
         return cls(payload)
 
     def to_dict(self):

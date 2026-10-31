@@ -83,6 +83,7 @@ def test_strict_inner_source_read_refusal(tmp_path, monkeypatch, helper, suffix)
         frame = sys._getframe(1)
         if frame.f_code.co_name in {"source_read_bytes", "source_read_text"}:
             frame = frame.f_back
+            assert frame is not None
         if path == source and frame.f_code.co_name == helper:
             observed.append(path)
             if fail:
@@ -841,13 +842,13 @@ def test_extract_generic_surfaces_tree_sitter_version_mismatch_hint(monkeypatch)
     fake_ts = types.ModuleType("tree_sitter")
     def _raise(*args, **kwargs):
         raise TypeError("missing 1 required positional argument: 'name'")
-    fake_ts.Language = _raise
-    fake_ts.Parser = None
+    setattr(fake_ts, 'Language', _raise)
+    setattr(fake_ts, 'Parser', None)
     monkeypatch.setitem(sys.modules, "tree_sitter", fake_ts)
 
     # Stub the language module so import_module returns something with .language
     fake_lang_mod = types.ModuleType("fake_ts_lang")
-    fake_lang_mod.language = lambda: object()
+    setattr(fake_lang_mod, 'language', lambda: object())
     monkeypatch.setitem(sys.modules, "fake_ts_lang", fake_lang_mod)
 
     config = LanguageConfig(ts_module="fake_ts_lang", ts_language_fn="language")

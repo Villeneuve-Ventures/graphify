@@ -1,0 +1,3 @@
+Wait for every dispatch and complete **Disk result staging** in `references/extraction-spec.md`. Stop on failed, missing, invalid or truncated results. Bind actual parent-observed GRAPHIFY_CHUNK_USAGE_JSON before exact-owner import; successful-empty completion and partial claims remain distinct.
+
+Read and execute [Parent collection (Step B3)](references/extraction-spec.md#parent-collection-step-b3) before saving cache or proceeding to Part C. This mandatory recipe verifies every current plan, registration and uncached assignment, then merges only admitted prepared chunks in numeric order. Do not use public chunk files as a success signal or skip the recipe when an aggregate already exists.

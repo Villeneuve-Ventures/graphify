@@ -99,6 +99,7 @@ def _staged_with_intent(lifecycle_state="REQUESTED"):
 def test_abandonment_allows_new_grant_and_later_global_epoch(lifecycle_state):
     value = _staged_with_intent(lifecycle_state)
     state = StagedBuildState.from_mapping(value)
+    assert state.abandonment_intent is not None
     assert state.abandonment_intent.operation_epoch < state.abandonment_intent.evidence.operation_epoch
     assert state.to_dict() == value
     assert StagedBuildState.from_json(state.canonical) == state
@@ -140,6 +141,7 @@ def test_extraction_failure_evidence_is_bounded_and_replays_exactly():
     document["abandonment_intent"]["reason"] = "EXTRACTION_INCOMPLETE"
     document["abandonment_intent"]["evidence_sha256"] = canonical_sha256(evidence)
     state = StagedBuildState.from_mapping(document)
+    assert state.abandonment_intent is not None
     assert state.abandonment_intent.evidence.reason_for(request) == "EXTRACTION_INCOMPLETE"
     assert StagedBuildState.from_json(state.canonical) == state
     assert len(state.canonical) < 64 * 1024

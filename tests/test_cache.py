@@ -240,6 +240,7 @@ def test_load_cached_absolutizes_source_file(tmp_path):
 
     loaded = load_cached(src, root=tmp_path, kind="ast")
     assert loaded is not None
+    assert loaded is not None
     assert loaded["nodes"][0]["source_file"] == abs_src
     assert loaded["edges"][0]["source_file"] == abs_src
 
@@ -265,6 +266,7 @@ def test_load_cached_passes_through_legacy_absolute_source_file(tmp_path):
     }))
 
     loaded = load_cached(src, root=tmp_path, kind="ast")
+    assert loaded is not None
     assert loaded is not None
     assert loaded["nodes"][0]["source_file"] == abs_src
 
@@ -293,6 +295,7 @@ def test_cache_portable_across_roots(tmp_path):
 
     src_b = repo_b / "src" / "foo.py"
     loaded = load_cached(src_b, root=repo_b, kind="ast")
+    assert loaded is not None
     assert loaded is not None, (
         "cache must port across absolute prefixes (content hash + relative source_file)"
     )
@@ -698,6 +701,7 @@ def test_save_semantic_cache_overwrites_by_default(tmp_path):
     save_semantic_cache([{"id": "a", "source_file": "doc.md"}], [], root=tmp_path)
     save_semantic_cache([{"id": "b", "source_file": "doc.md"}], [], root=tmp_path)
     cached = load_cached(f, root=tmp_path, kind="semantic")
+    assert cached is not None
     ids = {n["id"] for n in cached["nodes"]}
     assert ids == {"b"}, "default must overwrite, not accumulate"
 
@@ -740,9 +744,11 @@ def test_save_semantic_cache_rejects_out_of_scope_source_file(tmp_path):
 
     assert saved == 1
     intended_cache = load_cached(intended, root=tmp_path, kind="semantic")
+    assert intended_cache is not None
     assert {node["id"] for node in intended_cache["nodes"]} == {"expected"}
 
     protected_cache = load_cached(protected, root=tmp_path, kind="semantic")
+    assert protected_cache is not None
     assert {node["id"] for node in protected_cache["nodes"]} == {"original"}
     assert protected_cache["edges"] == []
     assert protected_cache["hyperedges"] == []
@@ -904,6 +910,7 @@ def test_save_semantic_cache_merge_existing_unions(tmp_path):
     save_semantic_cache([{"id": "b", "source_file": "big.md"}], [],
                         root=tmp_path, merge_existing=True)
     cached = load_cached(f, root=tmp_path, kind="semantic")
+    assert cached is not None
     ids = {n["id"] for n in cached["nodes"]}
     assert ids == {"a", "b"}, "merge_existing must union both chunk slices"
     assert len(cached["edges"]) == 1
@@ -1076,6 +1083,7 @@ def test_save_semantic_cache_merge_existing_prunes_only_incoming(tmp_path):
         )
 
     cached = load_cached(big, root=tmp_path, kind="semantic")
+    assert cached is not None
     assert {n["id"] for n in cached["nodes"]} == {"a", "b"}
     pairs = [(e["source"], e["target"]) for e in cached["edges"]]
     assert ("a", "a") in pairs, "prior entry's valid edge must survive the union"
@@ -1094,15 +1102,14 @@ def test_complete_semantic_cache_is_explicit_and_invalidates_partial_entries(tmp
         edges = [{"source": "a", "target": "b", "source_file": "source.md"}]
     if kind in {"hyperedge", "aliases"}:
         groups = [{"id": "g", "nodes": ["a"], "source_file": str(source)}]
-    options = dict(root=tmp_path, mode=mode, allowed_source_files=[source])
-    save_semantic_cache(nodes, edges, groups, **options)
+    save_semantic_cache(nodes, edges, groups, root=tmp_path, mode=mode, allowed_source_files=[source])
     assert check_semantic_cache([str(source)], tmp_path, mode, require_complete=True)[3] == [str(source)]
-    assert save_semantic_cache(nodes, edges, groups, **options, completed_source_files=[source]) == 1
+    assert save_semantic_cache(nodes, edges, groups, root=tmp_path, mode=mode, allowed_source_files=[source], completed_source_files=[source]) == 1
     hit = check_semantic_cache([str(source)], tmp_path, mode, require_complete=True)
     assert hit[3] == [] and len(hit[1]) == len(edges) and len(hit[2]) == len(groups)
     # An interrupted checkpoint cannot inherit the complete flag from its base.
     save_semantic_cache([], [{"source": "c", "target": "d", "source_file": str(source)}],
-                        **options, merge_existing=True, completed_source_files=[source])
+                        root=tmp_path, mode=mode, allowed_source_files=[source], merge_existing=True, completed_source_files=[source])
     assert check_semantic_cache([str(source)], tmp_path, mode, require_complete=True)[3] == [str(source)]
     assert check_semantic_cache([str(source)], tmp_path, mode)[3] == []  # default compatibility
 

@@ -106,6 +106,7 @@ def _manifest(raw: bytes):
     layer_paths = {layer: set() for layer in ("base", "head", "index", "worktree")}
     for row in rows:
         _keys(row, {"path", "base", "head", "index", "worktree"})
+        assert isinstance(row, dict)  # _keys checked the exact built-in type.
         path = row["path"]
         _require(type(path) is str and len(path) <= 4096, "path.size")
         parts = path.split("/")
@@ -165,6 +166,7 @@ def _validation(raw: bytes, candidate_digest: str):
     for check in checks:
         _keys(check, {"name", "command_sha256", "receipt_sha256", "result",
                       "head_sensitive", "valid_until"})
+        assert isinstance(check, dict)  # _keys checked the exact built-in type.
         _label(check["name"])
         _require(check["name"] not in names, "validation.duplicate")
         names.add(check["name"])

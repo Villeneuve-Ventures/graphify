@@ -4,7 +4,7 @@ from __future__ import annotations
 import errno
 import fnmatch
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import stat
 
 from graphify.ids import make_id
@@ -37,11 +37,11 @@ _LANGUAGE_BUILTIN_GLOBALS: frozenset[str] = frozenset({
 })
 
 
-def _make_id(*parts: str) -> str:
+def _make_id(*parts: str | None) -> str:
     return make_id(*parts)
 
 
-def _file_stem(path: Path) -> str:
+def _file_stem(path: PurePath) -> str:
     """Stem used as the node-ID prefix for a file and its symbols.
 
     The full path (extension dropped) is preserved as path segments; ``make_id``
@@ -213,7 +213,9 @@ class _ScopedEntry:
         return stat.S_ISLNK(self.mode)
 
     def stat(self, *, follow_symlinks=True):
-        info = current_source_io().probe(self.path)
+        scope = current_source_io()
+        assert scope is not None
+        info = scope.probe(self.path)
         if info is None:
-            current_source_io().refuse('listed entry disappeared')
+            scope.refuse('listed entry disappeared')
         return info

@@ -1766,6 +1766,7 @@ def test_convert_office_file_does_not_rewrite_existing_sidecar(tmp_path, monkeyp
     mtime_before = first.stat().st_mtime_ns
 
     second = detect_mod.convert_office_file(src, out_dir)
+    assert second is not None
     assert second == first
     assert second.stat().st_mtime_ns == mtime_before
 

@@ -24,6 +24,7 @@ def test_help_survives_reader_closing_pipe_early():
         stdin=producer.stdout,
         stdout=subprocess.DEVNULL,
     )
+    assert producer.stdout is not None
     producer.stdout.close()  # let the producer see EPIPE when the reader exits
     reader.wait()
     rc = producer.wait()
@@ -43,6 +44,7 @@ def test_small_buffered_output_survives_reader_that_reads_nothing():
         stdin=producer.stdout,
         stdout=subprocess.DEVNULL,
     )
+    assert producer.stdout is not None
     producer.stdout.close()
     reader.wait()
     rc = producer.wait()

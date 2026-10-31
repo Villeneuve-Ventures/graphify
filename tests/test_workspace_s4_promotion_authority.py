@@ -21,7 +21,9 @@ def test_authority_rotation_cannot_replace_prior_pointer(tmp_path, monkeypatch, 
     runtime, _repo = runtime_fixture(tmp_path, monkeypatch)
     synchronize_structural(runtime, request_for(runtime), attempt_sha256='a' * 64)
     stores = runtime.stores
-    prior = stores.pointers.load(REPO_UUID).canonical
+    prior_pointer = stores.pointers.load(REPO_UUID)
+    assert prior_pointer is not None
+    prior = prior_pointer.canonical
     request = prepare_structural_sync(runtime, repo_uuid=REPO_UUID, generation_id='gen-next',
         source_epoch=1, desired_watermark=2, expected_payload_bytes=1024 * 1024)
     reached = []
@@ -52,9 +54,13 @@ def test_authority_rotation_cannot_replace_prior_pointer(tmp_path, monkeypatch, 
     (runtime.inputs.state_root / 'runtime-manifest.json').write_bytes(runtime.inputs.authority.canonical)
     result = synchronize_structural(runtime, request, attempt_sha256='c' * 64)
     assert result.generation_id == 'gen-next'
-    pointer = stores.pointers.load(REPO_UUID).canonical
+    current_pointer = stores.pointers.load(REPO_UUID)
+    assert current_pointer is not None
+    pointer = current_pointer.canonical
     assert synchronize_structural(runtime, request, attempt_sha256='d' * 64) == result
-    assert stores.pointers.load(REPO_UUID).canonical == pointer
+    repeated_pointer = stores.pointers.load(REPO_UUID)
+    assert repeated_pointer is not None
+    assert repeated_pointer.canonical == pointer
 
 
 def test_authority_rotation_during_pending_recovery_preserves_pending(tmp_path, monkeypatch):

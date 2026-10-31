@@ -847,14 +847,6 @@ def _node_sources(graph_path):
     return {n.get("source_file", "") for n in data.get("nodes", [])}
 
 
-def _run_extract(monkeypatch, argv):
-    monkeypatch.setattr(mainmod.sys, "argv", argv)
-    try:
-        mainmod.main()
-    except SystemExit as exc:
-        assert exc.code in (None, 0), f"unexpected exit code {exc.code}"
-
-
 def test_incremental_extract_prunes_newly_excluded_file_not_in_manifest(
     monkeypatch, tmp_path
 ):

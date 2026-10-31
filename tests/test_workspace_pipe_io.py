@@ -71,8 +71,10 @@ def _pipe_faults(monkeypatch, fault):
     def popen(*args, **kwargs):
         process = real_popen(*args, **kwargs)
         processes.append(process)
-        descriptors.update({stream.fileno(): name for name, stream in (
-            ("stdin", process.stdin), ("stdout", process.stdout), ("stderr", process.stderr))})
+        for name, stream in (("stdin", process.stdin), ("stdout", process.stdout),
+                             ("stderr", process.stderr)):
+            assert stream is not None
+            descriptors[stream.fileno()] = name
         return process
 
     def write(fd, data):

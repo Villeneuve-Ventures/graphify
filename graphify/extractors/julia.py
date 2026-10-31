@@ -1,5 +1,9 @@
 """julia — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tree_sitter import Node
 from graphify.source_io import source_read_bytes
 
 from graphify.extractors.base import _file_stem, _make_id, _read_text
@@ -29,7 +33,7 @@ def extract_julia(path: Path) -> dict:
     nodes: list[dict] = []
     edges: list[dict] = []
     seen_ids: set[str] = set()
-    function_bodies: list[tuple[str, object]] = []
+    function_bodies: list[tuple[str, Node]] = []
 
     def add_node(nid: str, label: str, line: int) -> None:
         if nid not in seen_ids:

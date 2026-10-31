@@ -92,6 +92,7 @@ def test_receipt_headroom_overflow_abandons_and_allows_next_request(tmp_path, mo
     with runtime.stores.registry.read_only_snapshot():
         with runtime.stores.leases.read_only_workspace_lock(REPO_UUID):
             staged = runtime.stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert staged is not None
     assert staged.lifecycle_state == 'ABANDONED'
     assert not runtime.stores.leases.inspect(REPO_UUID).leases
     monkeypatch.setattr(export, 'write_json', original)

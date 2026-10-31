@@ -68,6 +68,7 @@ def test_abandoned_exact_retry_cleans_interrupted_lease_release(tmp_path, monkey
     monkeypatch.setattr(stores.leases, "release", original_release)
     stores.leases.state.fault_hook = lambda label: None
     staged = stores.generations.read_only_staged_build_locked(REPO_UUID, deadline_ns=None)
+    assert staged is not None
     assert staged.lifecycle_state == "ABANDONED"
 
     if boundary == "before_release":
