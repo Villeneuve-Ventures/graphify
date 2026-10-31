@@ -4,11 +4,11 @@ from graphify.source_io import source_read_bytes
 
 import re
 
-from pathlib import Path
+from pathlib import PurePath
 from graphify.extractors.base import _file_stem, _make_id
 
 
-def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
+def extract_sql(path: PurePath, content: str | bytes | None = None) -> dict:
     """Extract tables, views, functions, and relationships from .sql files via tree-sitter."""
     try:
         import tree_sitter_sql as tssql
@@ -115,11 +115,12 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
                             # Regex-scan the raw column_definitions text as fallback.
                             col_text = _read(col)
                             for rm in re.finditer(r"\bREFERENCES\s+([\w$]+)", col_text, re.IGNORECASE):
-                                ref_name = rm.group(1)
-                                if ref_name.lower() not in seen_refs:
-                                    ref_nid = table_nids.get(ref_name.lower()) or _make_id(stem, ref_name)
+                                regex_ref_name = rm.group(1)
+                                assert regex_ref_name is not None
+                                if regex_ref_name.lower() not in seen_refs:
+                                    ref_nid = table_nids.get(regex_ref_name.lower()) or _make_id(stem, regex_ref_name)
                                     _add_edge(nid, ref_nid, "references", line)
-                                    seen_refs.add(ref_name.lower())
+                                    seen_refs.add(regex_ref_name.lower())
 
         elif t == "create_view":
             name = _obj_name(node)

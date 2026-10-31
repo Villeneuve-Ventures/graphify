@@ -282,7 +282,8 @@ def test_supervisor_refuses_wrong_success_binding(tmp_path, monkeypatch, operati
     """Reject structurally valid worker results bound to different repair evidence."""
     import subprocess
     from graphify.workspace.cli_contracts import WorkspaceCommandRequest
-    p = {"operation": "preview", "repo_uuid": REPO_UUID} if operation == "preview" else execute_parameters(approval_fixture())
+    approval = approval_fixture()
+    p = {"operation": "preview", "repo_uuid": REPO_UUID} if operation == "preview" else execute_parameters(approval)
     req = WorkspaceCommandRequest.from_mapping(request(tmp_path.resolve(), p))
     if operation == "preview":
         result = {"approval": approval_fixture()}
@@ -290,7 +291,7 @@ def test_supervisor_refuses_wrong_success_binding(tmp_path, monkeypatch, operati
         result = {"pointer": {"contract": "graphify.workspace.pointer_set", "schema_version": 2,
             "repo_uuid": REPO_UUID, "pointer_revision": 99, "active_source_revision": 1,
             "source_epoch": 1, "operation_epoch": 3, "fence_token": 3, "state_schema_version": 2,
-            "current": p["approval"]["plan"]["candidate"], "last_good": None}}
+            "current": approval["plan"]["candidate"], "last_good": None}}
     raw = response("repair", "s6-repair", result=result).canonical
     real_popen = subprocess.Popen
     def worker(*args, **kwargs):

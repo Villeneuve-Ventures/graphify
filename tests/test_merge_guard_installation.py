@@ -86,16 +86,22 @@ def test_five_hook_interruption_resumes_exact_request(repo, monkeypatch, operati
     assert "pending" not in hooks.status(repo, merge_guard=True)
     finished = live(repo)
     for name in publication.NAMES:
-        assert finished[name][0].startswith(USER_HOOK)
-        assert finished[name][1] == 0o751
+        entry = finished[name]
+        assert entry is not None
+        assert entry[0].startswith(USER_HOOK)
+        assert entry[1] == 0o751
     for name in ("pre-merge-commit", "pre-commit"):
         if operation == "install":
-            assert finished[name] is not None
-            assert finished[name][1] & 0o111
+            entry = finished[name]
+            assert entry is not None
+            assert entry[1] & 0o111
         else:
             assert finished[name] is None
     if operation == "uninstall":
-        assert all(b"graphify-" not in finished[name][0] for name in publication.NAMES)
+        for name in publication.NAMES:
+            entry = finished[name]
+            assert entry is not None
+            assert b"graphify-" not in entry[0]
     # Exact hook publication retries preserve live inodes and recovery evidence.
     # Existing driver registration can replace Git's config with identical bytes.
     before_retry = (snapshot(repo / ".git/hooks"), snapshot(publication._state_root()))

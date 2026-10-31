@@ -228,7 +228,9 @@ def test_completed_inventory_keeps_preimages_and_displaced_originals(repo):
     for index, name in enumerate(publication.NAMES):
         for member in (str(index), "pre-" + str(index)):
             assert (stage / member).read_bytes() == original[name]
-            assert record["inventory"][member]["sha256"] == hashlib.sha256(original[name]).hexdigest()
+            original_data = original[name]
+            assert original_data is not None
+            assert record["inventory"][member]["sha256"] == hashlib.sha256(original_data).hexdigest()
 
 
 def test_new_guards_keep_hooks_directory_native_creation_group(repo):

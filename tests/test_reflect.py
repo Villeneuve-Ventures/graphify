@@ -1247,6 +1247,7 @@ def test_cli_managed_reflect_if_stale_keeps_generation(tmp_path):
     third = _run(["reflect", "--if-stale"], tmp_path)
     assert third.returncode == 0, third.stderr
     assert "up to date" not in third.stdout.lower()
+    assert generation is not None
     assert open_graph_snapshot(graph_path, purpose="serve").generation == generation + 1
     assert lessons_fresh(lessons, memory, graph_path)
 
@@ -1291,6 +1292,7 @@ def test_missing_learning_sidecar_checks_receipt_before_fallback(
         assert load_learning_overlay(graph_path) == {}
     elif consumer == "report":
         learning = load_learning_for_report(graph_path)
+        assert learning is not None
         assert learning["overlay"] == {}
         assert learning["dead_ends"][0]["question"] == "dead path"
     else:

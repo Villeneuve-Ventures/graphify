@@ -11,6 +11,7 @@ with no API keys, no network, and no `claude` binary.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import sys
 import types
 from types import SimpleNamespace
@@ -187,7 +188,8 @@ def test_chunk_packing_caps_images_per_chunk(tmp_path):
     chunks = llm._pack_chunks_by_tokens(imgs, token_budget=10_000_000)
     assert len(chunks) >= 3  # would be 1 chunk without the cap
     for chunk in chunks:
-        n_imgs = sum(1 for p in chunk if llm._is_vision_image(p))
+        assert all(isinstance(p, Path) for p in chunk)
+        n_imgs = sum(1 for p in chunk if isinstance(p, Path) and llm._is_vision_image(p))
         assert n_imgs <= llm._MAX_IMAGES_PER_CHUNK
 
 
@@ -209,6 +211,7 @@ def test_openai_content_has_data_uri(tmp_path):
     img, _, _ = _make_corpus(tmp_path)
     refs = llm._build_image_refs([img], tmp_path)
     content = llm._openai_content("CORPUS", refs)
+    assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"] == f"data:image/png;base64,{refs[0].b64}"
@@ -242,17 +245,18 @@ def test_no_images_is_byte_identical(tmp_path):
 
 # ── fake SDK modules ──────────────────────────────────────────────────────────
 
-def _fake_anthropic(monkeypatch, captured):
+def _fake_anthropic(monkeypatch, captured, *, response_type="text"):
     class _Messages:
         def create(self, **kw):
             captured.update(kw)
             return SimpleNamespace(
-                content=[SimpleNamespace(text=_NODE_JSON)],
+                content=[SimpleNamespace(type="text", text=_NODE_JSON) if response_type == "text" else
+                         SimpleNamespace(type="thinking", thinking="internal reasoning")],
                 usage=SimpleNamespace(input_tokens=5, output_tokens=7),
                 stop_reason="end_turn",
             )
     mod = types.ModuleType("anthropic")
-    mod.Anthropic = lambda **kw: SimpleNamespace(messages=_Messages())
+    setattr(mod, 'Anthropic', lambda **kw: SimpleNamespace(messages=_Messages()))
     monkeypatch.setitem(sys.modules, "anthropic", mod)
 
 
@@ -266,7 +270,7 @@ def _fake_openai(monkeypatch, captured):
                 usage=SimpleNamespace(prompt_tokens=3, completion_tokens=4),
             )
     mod = types.ModuleType("openai")
-    mod.OpenAI = lambda **kw: SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+    setattr(mod, 'OpenAI', lambda **kw: SimpleNamespace(chat=SimpleNamespace(completions=_Completions())))
     monkeypatch.setitem(sys.modules, "openai", mod)
 
 
@@ -280,12 +284,12 @@ def _fake_boto3(monkeypatch, captured):
                 "stopReason": "end_turn",
             }
     boto3 = types.ModuleType("boto3")
-    boto3.Session = lambda **kw: SimpleNamespace(client=lambda svc: _Client())
+    setattr(boto3, 'Session', lambda **kw: SimpleNamespace(client=lambda svc: _Client()))
     monkeypatch.setitem(sys.modules, "boto3", boto3)
     botocore = types.ModuleType("botocore")
     exc = types.ModuleType("botocore.exceptions")
-    exc.ClientError = type("ClientError", (Exception,), {})
-    botocore.exceptions = exc
+    setattr(exc, 'ClientError', type("ClientError", (Exception,), {}))
+    setattr(botocore, 'exceptions', exc)
     monkeypatch.setitem(sys.modules, "botocore", botocore)
     monkeypatch.setitem(sys.modules, "botocore.exceptions", exc)
 
@@ -300,6 +304,12 @@ def test_call_claude_sends_image_block(tmp_path, monkeypatch):
     llm._call_claude("k", "claude-sonnet-4-6", "CORPUS", images=refs)
     content = captured["messages"][0]["content"]
     assert any(b.get("type") == "image" for b in content)
+
+
+def test_call_claude_rejects_non_text_first_block(monkeypatch):
+    _fake_anthropic(monkeypatch, {}, response_type="thinking")
+    with pytest.raises(ValueError, match="did not begin with a text block"):
+        llm._call_claude("fixture-key", "fixture-model", "CORPUS")
 
 
 def test_call_openai_compat_sends_image_url(tmp_path, monkeypatch):

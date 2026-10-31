@@ -9,6 +9,7 @@ type-reference resolver below — and is where ``extract_csharp`` will land when
 the core migration happens.
 """
 from __future__ import annotations
+from typing import TypeGuard
 
 import html
 from pathlib import Path
@@ -139,7 +140,7 @@ def _resolve_cross_file_csharp_imports(
     if not repointed_from:
         return
 
-    still_referenced: set[str] = set()
+    still_referenced: set[str | None] = set()
     for edge in all_edges:
         still_referenced.add(edge.get("source"))
         still_referenced.add(edge.get("target"))
@@ -164,7 +165,7 @@ def _resolve_csharp_type_references(
     """
     _ = (per_file, paths)
 
-    def _is_cs_file(value: object) -> bool:
+    def _is_cs_file(value: object) -> TypeGuard[str]:
         return isinstance(value, str) and value.endswith(".cs")
 
     def _metadata(value: object) -> dict:
@@ -296,7 +297,7 @@ def _resolve_csharp_type_references(
             return type_def_index.get((qualifier, label))
         return None
 
-    def _is_placeholder(node: dict | None) -> bool:
+    def _is_placeholder(node: dict | None) -> TypeGuard[dict]:
         return bool(node) and not node.get("source_file")
 
     def _is_csharp_relevant_target(node: dict) -> bool:
@@ -383,7 +384,7 @@ def _resolve_csharp_type_references(
     if not repointed_from:
         return
 
-    still_referenced: set[str] = set()
+    still_referenced: set[str | None] = set()
     for edge in all_edges:
         still_referenced.add(edge.get("source"))
         still_referenced.add(edge.get("target"))

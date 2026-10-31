@@ -1,6 +1,7 @@
 """Generation admission and certification capacity regressions from PR 163."""
 
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import TypedDict
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,16 @@ from graphify.workspace.lifecycle_contracts import CapacityPolicy, StructuralBui
 from tests import test_workspace_lifecycle_s3 as fixtures
 from tests.test_workspace_coordination_review import acquire
 from tests.workspace_s3_helpers import COMPATIBILITY_MANIFEST, REPO_UUID, START, tree_snapshot
+
+
+class AllocationKwargs(TypedDict):
+    expected_payload_bytes: int
+    capacity_policy: CapacityPolicy
+    generation_id: str
+    occurred_at: datetime
+    monotonic_ns: int
+
+
 
 
 @pytest.mark.parametrize("operation", ["BUILD", "MIGRATE"])
@@ -46,7 +57,7 @@ def test_capacity_queries_actual_state_volume(tmp_path, monkeypatch, root_free):
 
     monkeypatch.setattr("graphify.workspace.generations.shutil.disk_usage", disk_usage)
     before = tree_snapshot(harness.state_root)
-    kwargs = dict(expected_payload_bytes=request.expected_payload_bytes,
+    kwargs = AllocationKwargs(expected_payload_bytes=request.expected_payload_bytes,
                   capacity_policy=fixtures.POLICY, generation_id=fixtures.GENERATION_ID,
                   occurred_at=START, monotonic_ns=10_001)
     if root_free:
@@ -107,7 +118,7 @@ def test_receipt_charged_with_payload_before_any_certification_write(tmp_path, m
     _, attempt, completion = fixtures._complete(harness, generations, observations)
     request = _certification(generations, attempt, completion, observations)
     before = tree_snapshot(harness.state_root)
-    kwargs = dict(source_observations=observations, declared_entries=completion.entries,
+    kwargs = fixtures.CertificationKwargs(source_observations=observations, declared_entries=completion.entries,
                   staged_completion=completion, occurred_at=START + timedelta(seconds=1),
                   monotonic_ns=10_006)
     if shortfall:

@@ -12,6 +12,7 @@ def introspect_postgres(dsn: str | None = None) -> dict:
     """Connect to PostgreSQL, reconstruct DDL, and extract via extract_sql()."""
     try:
         import psycopg
+        from psycopg import conninfo
     except ModuleNotFoundError:
         raise ImportError(
             "psycopg is required for --postgres. "
@@ -141,7 +142,7 @@ def introspect_postgres(dsn: str | None = None) -> dict:
     ddl_string = "\n".join(ddl)
 
     # Determine host/dbname for virtual path DSN sanitization
-    info = psycopg.conninfo.conninfo_to_dict(dsn or "")
+    info = conninfo.conninfo_to_dict(dsn or "")
     host = info.get("host", "localhost")
     dbname = info.get("dbname", "db")
     virtual_path = PurePosixPath(f"postgresql://{host}/{dbname}")

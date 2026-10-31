@@ -231,6 +231,7 @@ def test_global_source_limits_are_not_widened(tmp_path, name, reader, xml, cap, 
         with pytest.raises(ExtractionIncomplete) as caught:
             extract([path], source_io=inputs, ambient_output=False, quiet=True)
         assert caught.value.outcomes[0]['status'] == 'unsupported_input'
+        assert caught.value.failure is not None
         assert caught.value.failure['status'] == 'unsupported_input'
         assert inputs._bytes == 0
         assert not any(r['operation'] == 'read' for r in inputs.evidence)
@@ -325,6 +326,7 @@ def test_scoped_mutation_latches_failure_and_withholds_evidence(tmp_path, monkey
             extract([path], source_io=inputs, ambient_output=False, quiet=True)
         status = 'unsupported_input' if mutation == 'growth' else 'inconsistent_input'
         assert caught.value.outcomes[0]['status'] == status
+        assert caught.value.failure is not None
         assert caught.value.failure['status'] == status
         assert not any(r['operation'] == 'read' for r in inputs.evidence)
         assert inputs._bytes <= cap + 1

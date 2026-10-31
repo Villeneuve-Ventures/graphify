@@ -362,10 +362,9 @@ def test_ast_refresh_requires_proved_retirement_for_retained_endpoints(tmp_path,
     before = graph.read_bytes()
     fresh = {"nodes": [{**ast, "source_file": str(live)}] if case == "fresh_endpoint" else [],
              "edges": []}
-    kwargs = dict(root=root, ast_refresh_sources=[], prune_sources=[str(deleted)],
-                  ast_refresh_source_map=source_map)
     if case == "fresh_endpoint":
-        actual = build_merge([fresh], graph, **kwargs)
+        actual = build_merge([fresh], graph, root=root, ast_refresh_sources=[],
+                             prune_sources=[str(deleted)], ast_refresh_source_map=source_map)
         assert "symbol" in actual
         assert actual.has_edge("fact", "symbol"), "unproved retirement cannot discard a live evidence edge"
         assert dict(actual.edges["fact", "symbol"]) == {
@@ -376,5 +375,6 @@ def test_ast_refresh_requires_proved_retirement_for_retained_endpoints(tmp_path,
     else:
         message = "retained evidence endpoint" if case == "missing_edge" else "retained hyperedge endpoint"
         with pytest.raises(ValueError, match=message):
-            build_merge([fresh], graph, **kwargs)
+            build_merge([fresh], graph, root=root, ast_refresh_sources=[],
+                             prune_sources=[str(deleted)], ast_refresh_source_map=source_map)
     assert graph.read_bytes() == before

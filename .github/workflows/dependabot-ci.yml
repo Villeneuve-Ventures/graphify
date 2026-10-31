@@ -226,6 +226,12 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras --frozen
 
+      - name: Lint locked dependencies
+        run: uv run --frozen ruff check .
+
+      - name: Typecheck locked dependencies
+        run: uv run --frozen pyright
+
       - name: Install acceptance-pinned Git 2.55.0
         run: |
           set -euo pipefail

@@ -38,6 +38,7 @@ def test_automatic_guard_refuses_captured_pending_after_external_index_change(tm
     git(repo, "commit", "-m", "main")
     old_head = git(repo, "rev-parse", "HEAD").stdout.strip()
     real_git = shutil.which("git")
+    assert real_git is not None
     active = json.loads(json.dumps(pending))
     active["graph"]["_graphify_protocol"]["state"] = "active"
     active_oid = subprocess.run(
