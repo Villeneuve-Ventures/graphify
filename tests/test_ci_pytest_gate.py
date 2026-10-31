@@ -63,7 +63,8 @@ def test_matrix_and_gate_preserve_execution_and_environment():
     assert gate["name"] == "Python quality gate" and gate["needs"] == ["test"]
     assert gate["if"] == (
         "${{ always() && (github.event_name != 'pull_request' || "
-        "github.event.pull_request.draft == false) }}"
+        "(github.event.pull_request.user.login != 'dependabot[bot]' && "
+        "github.event.pull_request.draft == false)) }}"
     )
     assert "continue-on-error" not in gate
     gate_steps = {step.get("name"): step for step in gate["steps"]}
@@ -235,7 +236,7 @@ def test_workflow_gate_command_executes_fail_closed(receipts, success):
     assert ("All four pytest shard executions succeeded" in result.stdout) == success
 
 
-def test_non_shard_job_policies_preserve_baseline_except_action_updates():
+def test_non_shard_job_policies_preserve_baseline_except_author_guard_and_action_updates():
     baseline = subprocess.check_output([
         "git", "show", "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984:.github/workflows/ci.yml"
     ], cwd=ROOT, text=True)
@@ -248,6 +249,15 @@ def test_non_shard_job_policies_preserve_baseline_except_action_updates():
         "actions/upload-artifact@v4": "actions/upload-artifact@v7.0.2",
     }
     for name in ("skillgen-check", "security-scan", "leiden-binary-smoke"):
+        assert old["jobs"][name]["if"] == (
+            "${{ github.event_name != 'pull_request' || "
+            "github.event.pull_request.draft == false }}"
+        )
+        old["jobs"][name]["if"] = (
+            "${{ github.event_name != 'pull_request' || "
+            "(github.event.pull_request.user.login != 'dependabot[bot]' && "
+            "github.event.pull_request.draft == false) }}"
+        )
         for step in old["jobs"][name]["steps"]:
             previous_action = step.get("uses")
             if previous_action in action_updates:
