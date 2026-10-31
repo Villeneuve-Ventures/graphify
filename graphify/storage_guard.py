@@ -98,6 +98,8 @@ def require_ordinary_output(path: str | os.PathLike[str]) -> None:
     its target; callers must repeat admission at their final write boundary.
     Unknown or racing ancestry refuses instead of granting a writable path.
     """
+    from .canonical_replacement import guard_output
+    guard_output(path, mutation=True)
     supplied = Path(path).expanduser().absolute()
     resolved = Path(os.path.realpath(supplied))
     if os.name == "nt":
