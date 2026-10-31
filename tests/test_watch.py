@@ -3837,3 +3837,115 @@ else:
     assert _rebuild_code(root, changed_paths=[], no_cluster=True, block_on_lock=True)
     snapshot = tx.open_graph_snapshot(output / "graph.json", purpose="entrypoint-replay")
     assert "late_late" in {node["id"] for node in snapshot.data["nodes"]}
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("no_cluster", [False, True])
+@pytest.mark.parametrize("managed", [False, True])
+def test_rebuild_preserves_saved_direction(tmp_path, directed, no_cluster, managed):
+    from graphify.build import build_from_json
+    from graphify.export import to_json
+    from graphify.extract import extract
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "lib.py"
+    source.write_text("def alpha(): return beta()\ndef beta(): return alpha()\n")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    extraction = extract([source], cache_root=tmp_path, source_root=tmp_path, parallel=False)
+    graph = build_from_json(extraction, directed=directed, root=tmp_path)
+    graph.graph["hyperedges"] = [{
+        "id": "lib_cycle", "label": "Mutual calls", "nodes": list(graph.nodes),
+        "source_file": "lib.py", "relation": "participate_in",
+        "confidence": "INFERRED", "confidence_score": 0.85,
+    }]
+    assert to_json(graph, {}, str(output / "graph.json"))
+    source.write_text(source.read_text() + "def gamma(): return alpha()\n")
+    assert _rebuild_code(tmp_path, changed_paths=[source], no_cluster=no_cluster,
+                         acquire_lock=managed, block_on_lock=True)
+    saved = json.loads((output / "graph.json").read_text())
+    assert saved.get("directed", False) is directed
+    assert {"graph", "directed", "multigraph"} <= saved.keys()
+    assert saved["multigraph"] is False
+    assert saved["graph"].get("hyperedges", []) == saved.get("hyperedges", [])
+    assert [group["id"] for group in saved["hyperedges"]] == ["lib_cycle"]
+    calls = {(edge["source"], edge["target"]) for edge in saved["links"]
+             if edge.get("relation") == "calls"}
+    assert ("lib_alpha", "lib_beta") in calls
+    if directed:
+        assert ("lib_beta", "lib_alpha") in calls
+
+
+@pytest.mark.parametrize("directed", [False, True])
+@pytest.mark.parametrize("managed", [False, True])
+def test_rebuild_reports_undirected_cohesion(tmp_path, monkeypatch, directed, managed):
+    from graphify import cluster as cluster_mod
+    from graphify.build import build_from_json
+    from graphify.export import to_json
+    from graphify.extract import extract
+    from graphify.watch import _rebuild_code
+
+    source = tmp_path / "lib.py"
+    source.write_text("def alpha(): return 1\n")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    extraction = extract([source], cache_root=tmp_path, source_root=tmp_path, parallel=False)
+    graph = build_from_json(extraction, directed=directed, root=tmp_path)
+    assert to_json(graph, {}, str(output / "graph.json"))
+    source.write_text(
+        "def alpha(): return beta() + gamma()\n"
+        "def beta(): return alpha() + gamma()\n"
+        "def gamma(): return alpha() + beta()\n"
+    )
+    monkeypatch.setattr(cluster_mod, "cluster", lambda _G: {
+        0: ["lib_alpha", "lib_beta", "lib_gamma"],
+    })
+
+    assert _rebuild_code(tmp_path, changed_paths=[source], acquire_lock=managed,
+                         block_on_lock=True)
+    assert "Cohesion: 1.00" in (output / "GRAPH_REPORT.md").read_text()
+    saved = json.loads((output / "graph.json").read_text())
+    assert saved["directed"] is directed
+    calls = {(edge["source"], edge["target"]) for edge in saved["links"]
+             if edge.get("relation") == "calls"}
+    assert len(calls) == (6 if directed else 3)
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_rebuild_recreates_missing_report_with_unchanged_topology(tmp_path, monkeypatch, managed):
+    from graphify import cluster as cluster_mod
+    from graphify.build import build_from_json
+    from graphify.export import to_json
+    from graphify.extract import extract
+    from graphify.watch import _canonical_topology_for_compare, _rebuild_code
+
+    source = tmp_path / "lib.py"
+    source.write_text("def alpha(): return beta()\ndef beta(): return alpha()\n")
+    output = tmp_path / "graphify-out"
+    output.mkdir()
+    extraction = extract([source], cache_root=tmp_path, source_root=tmp_path, parallel=False)
+    graph = build_from_json(extraction, directed=True, root=tmp_path)
+    assert to_json(graph, {}, str(output / "graph.json"))
+    before = json.loads((output / "graph.json").read_text())
+    report_path = output / "GRAPH_REPORT.md"
+    report_path.write_text("Previous report\n")
+    report_path.unlink()
+    cluster_calls = []
+
+    def cluster_once(G):
+        cluster_calls.append(True)
+        return {0: sorted(G.nodes())}
+
+    monkeypatch.setattr(cluster_mod, "cluster", cluster_once)
+    assert _rebuild_code(tmp_path, acquire_lock=managed, block_on_lock=True)
+    assert report_path.is_file()
+    assert "# Graph Report" in report_path.read_text()
+    after = json.loads((output / "graph.json").read_text())
+    assert _canonical_topology_for_compare(after) == _canonical_topology_for_compare(before)
+    assert cluster_calls == [True]
+
+    # Once the report exists, unchanged topology still avoids reclustering.
+    report = report_path.read_bytes()
+    assert _rebuild_code(tmp_path, acquire_lock=managed, block_on_lock=True)
+    assert report_path.read_bytes() == report
+    assert cluster_calls == [True]
