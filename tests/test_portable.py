@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import os
+import operator
 from pathlib import Path
 import subprocess
 import sys
 import types
 
+from collections.abc import Callable
+
 import pytest
 
 from graphify import portable
 from graphify.transaction import GRAPH_WATERMARK_KEY, PendingTransactionError, open_graph_snapshot
+
+
+def _invoke_unvalidated(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+    """Exercise runtime rejection with inputs outside the static API contract."""
+    return function(*args, **kwargs)
 
 
 def git(root: Path, *args: str) -> bytes:
@@ -79,7 +87,7 @@ def test_fresh_clone_portable_read_preserves_all_output_and_index(repository, tm
     data["nodes"].clear()
     assert snapshot.data["nodes"]
     with pytest.raises(TypeError):
-        snapshot.artifacts["graph.json"] = b"changed"
+        _invoke_unvalidated(operator.setitem, snapshot.artifacts, "graph.json", b"changed")
     assert state(clone) == before
     assert (clone / ".git/index").read_bytes() == index
     assert git(clone, "status", "--porcelain") == b""

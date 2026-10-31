@@ -250,8 +250,8 @@ def extract_powershell(path: Path) -> dict:
                     module_tokens = [t for t in tokens
                                      if t.lower() not in ("namespace", "module", "assembly")]
                     if module_tokens:
-                        module_name = module_tokens[-1].split(".")[-1]
-                        add_edge(file_nid, _make_id(module_name), "imports_from",
+                        using_module_name = module_tokens[-1].split(".")[-1]
+                        add_edge(file_nid, _make_id(using_module_name), "imports_from",
                                  node.start_point[0] + 1)
                 elif cmd_text == "import-module":
                     # Collect generic_token args; skip command_parameter flags like -Name

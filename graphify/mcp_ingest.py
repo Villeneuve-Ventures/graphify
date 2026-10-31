@@ -93,8 +93,9 @@ def extract_mcp_config(path: Path) -> dict[str, Any]:
         failure, oversize file, or missing ``mcpServers`` map
     """
     try:
-        if current_source_io() is not None:
-            raw = current_source_io().read_bytes(path, max_bytes=_MAX_BYTES)
+        source_io = current_source_io()
+        if source_io is not None:
+            raw = source_io.read_bytes(path, max_bytes=_MAX_BYTES)
         else:
             with path.open("rb") as fh:
                 raw = fh.read(_MAX_BYTES + 1)

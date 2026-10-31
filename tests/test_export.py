@@ -866,6 +866,7 @@ def test_backup_same_day_changed_content(tmp_path):
     b1 = backup_if_protected(tmp_path)
     (tmp_path / "graph.json").write_text('{"nodes":[{"id":"x"}],"links":[]}')
     b2 = backup_if_protected(tmp_path)
+    assert b2 is not None
     assert b1 == b2  # still one folder per day
     assert (b2 / "graph.json").read_text() == '{"nodes":[{"id":"x"}],"links":[]}'
 

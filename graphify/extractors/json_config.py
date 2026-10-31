@@ -68,8 +68,9 @@ def extract_json(path: Path) -> dict:
     try:
         # SourceIO checks the complete read against the cap, including growth.
         # Ordinary reads retain a one-byte sentinel to detect oversized files.
-        if current_source_io() is not None:
-            source = current_source_io().read_bytes(path, max_bytes=_JSON_MAX_BYTES)
+        scope = current_source_io()
+        if scope is not None:
+            source = scope.read_bytes(path, max_bytes=_JSON_MAX_BYTES)
         else:
             with path.open("rb") as _f:
                 source = _f.read(_JSON_MAX_BYTES + 1)

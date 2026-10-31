@@ -10,7 +10,9 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
+from email.message import Message
+import ssl
 
 import ipaddress
 import socket
@@ -165,6 +167,8 @@ def _resolve_and_validate(host: str, port: int) -> tuple[int, str]:
     infos = socket.getaddrinfo(host, port, socket.AF_UNSPEC, socket.SOCK_STREAM)
     for family, _type, _proto, _canon, sockaddr in infos:
         addr = sockaddr[0]
+        if not isinstance(addr, str):
+            continue
         try:
             ip = ipaddress.ip_address(addr)
         except ValueError:
@@ -180,6 +184,12 @@ def _resolve_and_validate(host: str, port: int) -> tuple[int, str]:
 class _SSRFGuardedHTTPConnection(http.client.HTTPConnection):
     """HTTPConnection that resolves + validates DNS once, then connects to the
     exact validated IP (no second resolution = no DNS-rebind TOCTOU)."""
+
+    # Initialized by http.client; its stubs omit these implementation attributes.
+    source_address: tuple[str, int] | None
+    _tunnel_host: str | None
+    if TYPE_CHECKING:
+        _tunnel: Callable[[], None]
 
     def connect(self) -> None:
         family, ip = _resolve_and_validate(self.host, self.port)
@@ -199,6 +209,13 @@ class _SSRFGuardedHTTPSConnection(http.client.HTTPSConnection):
     server_hostname set to the original hostname so SNI / certificate
     validation work correctly (validating against the IP would break TLS).
     """
+
+    # Initialized by http.client; its stubs omit these implementation attributes.
+    source_address: tuple[str, int] | None
+    _tunnel_host: str | None
+    _context: ssl.SSLContext
+    if TYPE_CHECKING:
+        _tunnel: Callable[[], None]
 
     def connect(self) -> None:
         family, ip = _resolve_and_validate(self.host, self.port)
@@ -280,7 +297,7 @@ def safe_fetch(url: str, max_bytes: int = _MAX_FETCH_BYTES, timeout: int = 30) -
         # with a custom opener we check manually to be safe.
         status = getattr(resp, "status", None) or getattr(resp, "code", None)
         if status is not None and not (200 <= status < 300):
-            raise urllib.error.HTTPError(url, status, f"HTTP {status}", {}, None)
+            raise urllib.error.HTTPError(url, status, f"HTTP {status}", Message(), None)
 
         chunks: list[bytes] = []
         total = 0

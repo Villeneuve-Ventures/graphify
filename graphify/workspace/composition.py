@@ -18,11 +18,23 @@ import os
 from pathlib import Path
 import stat
 import sysconfig
+from typing import TYPE_CHECKING
 
 from .adapters import AdapterIntent, CompatibilityTuple, select_adapter
 from .contracts import (CompatibilityManifest, ContractError, Document, canonical_json_bytes,
                         DISTRIBUTION_VERSION, INSTALLATION_METADATA,
                         SUPPORTED_CONSOLE_SCRIPTS, exact, integer)
+
+if TYPE_CHECKING:
+    from .adapters.base import EngineAdapter
+    from .gc import GcStore
+    from .generations import GenerationStore
+    from .journal import JournalStore
+    from .leases import LeaseStore
+    from .lifecycle_contracts import CapacityPolicy
+    from .pointers import PointerStore
+    from .registry import RegistryStore
+    from .semantic_queue import SemanticQueuePolicy, SemanticQueueStore
 
 RUNTIME_AUTHORITY_FILENAME = "runtime-manifest.json"
 RUNTIME_AUTHORITY_MAX_BYTES = 1024 * 1024
@@ -653,15 +665,15 @@ class StructuralComposition:
 
 @dataclass(frozen=True)
 class LifecycleStores:
-    registry: object
-    leases: object
-    journal: object
-    queue: object
-    generations: object
-    pointers: object
-    gc: object
-    capacity_policy: object
-    queue_policy: object
+    registry: RegistryStore
+    leases: LeaseStore
+    journal: JournalStore
+    queue: SemanticQueueStore
+    generations: GenerationStore
+    pointers: PointerStore
+    gc: GcStore
+    capacity_policy: CapacityPolicy
+    queue_policy: SemanticQueuePolicy
 
 
 def compose_workspace_runtime(inputs):
@@ -678,7 +690,7 @@ class StructuralRuntime:
     """Qualified structural library runtime; no public CLI or semantic service."""
     inputs: WorkspaceRuntimeInputs
     stores: LifecycleStores
-    adapter: object
+    adapter: EngineAdapter
 
     def validate_authority(self, *, deadline_ns=None):
         if deadline_ns is not None:

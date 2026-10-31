@@ -35,7 +35,9 @@ def test_unchanged_certified_replay_promotes_once(tmp_path, monkeypatch):
     runtime, _repo, _support, request, _manifest = certified(tmp_path, monkeypatch)
     result = synchronize_structural(runtime, request, attempt_sha256="b" * 64)
     assert result.pointer_revision == 1
-    assert _staged(runtime).lifecycle_state == "PROMOTED"
+    staged = _staged(runtime)
+    assert staged is not None
+    assert staged.lifecycle_state == "PROMOTED"
     assert synchronize_structural(runtime, request, attempt_sha256="c" * 64) == result
 
 
@@ -161,6 +163,7 @@ def test_consumed_change_intent_restarts_with_bound_proof(tmp_path, monkeypatch)
     with pytest.raises(InjectedFault):
         synchronize_structural(runtime, request, attempt_sha256="b" * 64)
     pending = _staged(runtime)
+    assert pending is not None
     assert pending.lifecycle_state == "CERTIFIED"
     assert pending.abandonment_intent is not None
     proof = pending.abandonment_intent.evidence.consumed_input_change
@@ -192,8 +195,10 @@ def test_consumed_change_intent_restarts_with_bound_proof(tmp_path, monkeypatch)
     with pytest.raises(GenerationConflict, match="abandoned"):
         synchronize_structural(runtime, request, attempt_sha256="c" * 64)
     final = _staged(runtime)
+    assert final is not None
     assert final.lifecycle_state == "ABANDONED"
     assert final.abandon_reason == "SOURCE_CHANGED"
+    assert final.abandon_evidence is not None
     assert final.abandon_evidence.consumed_input_change == proof
     assert StagedBuildState.from_json(final.canonical) == final
     assert runtime.stores.pointers.load(REPO_UUID, allow_missing=True) is None

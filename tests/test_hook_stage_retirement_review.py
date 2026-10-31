@@ -702,7 +702,9 @@ def test_pending_legacy_completion_preservation_is_not_reconstructed(repo, monke
             store.body["maintenance"].pop("completions", None)
         else:
             store.body["maintenance"]["completions"] = captured
-            del captured[record["retired"]][missing]
+            completion = captured[record["retired"]]
+            assert completion is not None
+            del completion[missing]
         store.save()
     finally:
         os.close(child)

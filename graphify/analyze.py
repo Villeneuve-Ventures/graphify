@@ -463,7 +463,7 @@ def suggest_questions(
             neighbors = list(G.neighbors(node_id))
             neighbor_comms = {node_community.get(n) for n in neighbors if node_community.get(n) != cid}
             if neighbor_comms:
-                other_labels = [community_labels.get(c, f"Community {c}") for c in neighbor_comms]
+                other_labels = [community_labels.get(c, f"Community {c}") if c is not None else f"Community {c}" for c in neighbor_comms]
                 questions.append({
                     "type": "bridge_node",
                     "question": f"Why does `{label}` connect `{comm_label}` to {', '.join(f'`{l}`' for l in other_labels)}?",

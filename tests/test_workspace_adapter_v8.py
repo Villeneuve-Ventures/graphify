@@ -30,6 +30,7 @@ def test_v8_operational_adapter_builds_and_queries_known_relation(tmp_path):
         final = engine.observe(repo, input_manifest=built.input_manifest)
         assert final.initial_detection == initial.initial_detection
         assert final.consumed_inputs == built.input_manifest
+        assert final.consumed_inputs is not None
         assert final.consumed_inputs.complete
         assert built.node_count > 0 and built.edge_count > 0
         text = engine.query_structural(fd, QueryRequest("caller"))

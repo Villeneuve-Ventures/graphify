@@ -40,7 +40,7 @@ def normalize_id(s: str) -> str:
     return s.strip("_").casefold()
 
 
-def make_id(*parts: str) -> str:
+def make_id(*parts: str | None) -> str:
     """Build a canonical node ID from one or more name parts.
 
     Parts are joined with ``_`` (after stripping stray ``_``/``.`` edges from each

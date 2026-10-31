@@ -17,6 +17,8 @@
 #    before any graph construction happens.
 #
 from __future__ import annotations
+
+from typing import overload
 import json
 import os
 import re
@@ -182,6 +184,18 @@ def _normalize_hyperedge_members(he: object) -> None:
     # Drop any leftover alias keys regardless of which branch ran above.
     for alias in _HE_MEMBER_ALIASES:
         he.pop(alias, None)
+
+
+@overload
+def _norm_source_file(p: str, root: str | None = None) -> str: ...
+
+
+@overload
+def _norm_source_file(p: None, root: str | None = None) -> None: ...
+
+
+@overload
+def _norm_source_file(p: str | None, root: str | None = None) -> str | None: ...
 
 
 def _norm_source_file(p: str | None, root: str | None = None) -> str | None:
@@ -745,11 +759,14 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
     norm_to_id = _endpoint_aliases(G.nodes, node_source, _ghost_remap,
                                   strict=_retained_nodes is not None)
     if _validate_raw_edges is not None:
-        def resolve_endpoint(identity):
+        def resolve_endpoint(identity: str) -> str:
+            assert _rekey is not None and _doc_remap is not None
             identity = _rekey.get(identity, identity)
             identity = _doc_remap.get(identity, identity)
             if identity not in node_set:
-                identity = norm_to_id.get(_normalize_id(identity), identity)
+                normalized_identity = _normalize_id(identity)
+                if normalized_identity is not None:
+                    identity = norm_to_id.get(normalized_identity, identity)
             return identity
         _validate_raw_edges(resolve_endpoint, node_source, G.nodes)
     # Iterate edges in a deterministic order. The graph is undirected and stores
@@ -829,6 +846,7 @@ def build_from_json(extraction: dict, *, directed: bool = False, root: str | Pat
         # and callee. First-seen direction wins instead — drop the redundant
         # reverse-direction duplicate so the original direction is preserved (#1061).
         if not G.is_directed() and G.has_edge(src, tgt):
+            assert isinstance(src, str) and isinstance(tgt, str)  # Endpoints were admitted above.
             existing = edge_data(G, src, tgt)
             if existing.get("relation") == attrs.get("relation") and (
                 existing.get("_src") == tgt and existing.get("_tgt") == src
@@ -1073,6 +1091,18 @@ def _hashable(value):
     return True
 
 
+@overload
+def _merge_source_file(source: str, root) -> str: ...
+
+
+@overload
+def _merge_source_file(source: None, root) -> None: ...
+
+
+@overload
+def _merge_source_file(source: str | None, root) -> str | None: ...
+
+
 def _merge_source_file(source, root):
     """Canonical ownership key; retained payloads stay unchanged."""
     if source is None:
@@ -1268,10 +1298,11 @@ def _compose_semantic_update(chunks, nodes, edges, hyperedges, pruned, *, root,
             return
         old = occupied.get(slot(source, target))
         if old is not None:
+            assert source_for is not None  # Bound before check_edge is called.
             normalized = {k: v for k, v in incoming.items() if k not in {"from", "to"}}
             normalized.update(source=source, target=target)
             endpoint_sources = [node_owner(retained_by_id[endpoint])
-                if endpoint in retained_by_id else source_for(resolve(remap.get(endpoint, endpoint)) if raw else endpoint)
+                if endpoint in retained_by_id else source_for(resolve(remap.get(endpoint, endpoint)) if raw and resolve is not None else endpoint)
                 for endpoint in (source, target)]
             if edge_facts(old, endpoint_sources) != edge_facts(normalized, endpoint_sources):
                 raise ValueError("Semantic update conflicts with retained edge slot")

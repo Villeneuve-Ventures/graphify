@@ -42,11 +42,11 @@ class SourceEnumerationFailed(SourceUnavailable):
     code = 'partial_enumeration'
 
 
-_ACTIVE = ContextVar('graphify_source_io', default=None)
+_ACTIVE: ContextVar[SourceIO | None] = ContextVar('graphify_source_io', default=None)
 _QUIET = ContextVar('graphify_quiet', default=False)
 
 
-def current_source_io():
+def current_source_io() -> SourceIO | None:
     return _ACTIVE.get()
 
 
