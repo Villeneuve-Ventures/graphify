@@ -169,6 +169,7 @@ def test_report_malformed_optional_sidecar_keeps_dead_ends(tmp_path, capsys):
         'outcome: "dead_end"\nsource_nodes: []\n---\nanswer\n'
     )
     result = load_learning_for_report(graph_path)
+    assert result is not None
     assert result["overlay"] == {}
     assert result["dead_ends"][0]["question"] == "dead path"
     assert "learning admission failed" in capsys.readouterr().err

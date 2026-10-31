@@ -29,9 +29,11 @@ def _write(path: Path, text: str) -> Path:
 
 
 def test_unresolved_bare_import_is_ref_namespaced():
-    tgt, resolved_path = _resolve_js_import_target(
+    resolved = _resolve_js_import_target(
         "tailwindcss/colors", "frontend/src/SomeChart.tsx"
     )
+    assert resolved is not None
+    tgt, resolved_path = resolved
     assert resolved_path is None
     # Must not be the bare last-segment id that collides with a local `colors` file.
     assert tgt != _make_id("colors")
@@ -40,9 +42,11 @@ def test_unresolved_bare_import_is_ref_namespaced():
 
 
 def test_scoped_package_import_is_ref_namespaced():
-    tgt, resolved_path = _resolve_js_import_target(
+    resolved = _resolve_js_import_target(
         "@scope/utils", "src/thing.ts"
     )
+    assert resolved is not None
+    tgt, resolved_path = resolved
     assert resolved_path is None
     assert tgt != _make_id("utils")
     assert tgt.startswith("ref")

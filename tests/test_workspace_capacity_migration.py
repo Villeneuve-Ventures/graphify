@@ -35,11 +35,13 @@ def test_capacity_updates_retain_legacy_format_until_last_unbound_reservation_le
 
         generations._clear_reservation_locked(REPO_UUID, legacy_a.generation_id)
         remaining = generations._load_capacity_locked()
+        assert remaining is not None
         assert remaining.format_version == 1
         assert remaining.reservations == (legacy_b, bound)
 
         generations._clear_reservation_locked(REPO_UUID, legacy_b.generation_id)
         upgraded = generations._load_capacity_locked()
+        assert upgraded is not None
         assert upgraded.format_version == 2
         assert upgraded.reservations == (bound,)
         assert upgraded.revision == 4

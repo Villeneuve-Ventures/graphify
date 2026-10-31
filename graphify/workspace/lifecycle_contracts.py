@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Any, ClassVar, TypeVar, cast, overload
+from typing import Any, ClassVar, Self, TypeVar, cast, overload
 from urllib.parse import urlsplit, urlunsplit
 
 from graphify.workspace.contracts import CompletionBinding
@@ -840,7 +840,7 @@ class ContractDocument:
     CONTRACT: ClassVar[str | None] = None
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "ContractDocument":
+    def from_mapping(cls, value: Mapping[str, object]) -> Self:
         raw_contract = _string(value.get("contract"), "$.contract")
         if cls.CONTRACT is not None and raw_contract != cls.CONTRACT:
             raise ContractError(
@@ -874,7 +874,7 @@ class ContractDocument:
         return cls(contract=contract, schema_version=version, canonical=canonical_json_bytes(normalised))
 
     @classmethod
-    def from_json(cls, value: str | bytes) -> "ContractDocument":
+    def from_json(cls, value: str | bytes) -> Self:
         parsed = _parse_json(value)
         if not isinstance(parsed, Mapping):
             raise ContractError("$: expected object")
@@ -1614,8 +1614,10 @@ class StagedBuildAbandonmentEvidence:
             change = _mapping(data["consumed_input_change"], "$.abandon_evidence.consumed_input_change")
             keys = ("sealed_manifest_sha256", "previous_evidence_sha256", "observed_evidence_sha256")
             _exact_keys(change, "$.abandon_evidence.consumed_input_change", set(keys))
-            consumed_input_change = tuple(
-                _digest(change[key], f"$.abandon_evidence.consumed_input_change.{key}") for key in keys
+            consumed_input_change = (
+                _digest(change[keys[0]], f"$.abandon_evidence.consumed_input_change.{keys[0]}"),
+                _digest(change[keys[1]], f"$.abandon_evidence.consumed_input_change.{keys[1]}"),
+                _digest(change[keys[2]], f"$.abandon_evidence.consumed_input_change.{keys[2]}"),
             )
             if consumed_input_change[1] == consumed_input_change[2]:
                 raise ContractError("$.abandon_evidence.consumed_input_change: unchanged evidence")

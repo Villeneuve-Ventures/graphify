@@ -14,13 +14,31 @@ from pathlib import Path
 import pytest
 
 from graphify import transaction as tx
-from tests.skill_runbook_helpers import prepared_path, python_bodies, run_body
+from tests.skill_runbook_helpers import prepared_path, python_bodies, resolve_parent_recipes, run_body
 from tools.skillgen import gen
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="native POSIX transaction backend")
 
 DISK_HOSTS = ["claude", "windows", "kilo", "copilot", "claw", "droid", "amp",
               "agents", "trae", "kiro", "pi", "vscode"]
+
+
+@pytest.mark.parametrize("host", DISK_HOSTS)
+def test_parent_recipes_are_mandatory_sidecar_links_with_no_staging_fast_path(host):
+    artifacts = gen.render(gen.load_platforms()[host])
+    core = artifacts[0].content
+    reference = next(a.content for a in artifacts if a.path.endswith("/extraction-spec.md"))
+    assert "Merged {len(chunks)} chunks:" not in core
+    assert "Retained disk staging evidence:" not in core
+    assert "#parent-collection-step-b3" in core
+    step9 = core.split("### Step 9", 1)[1].split("## Interpreter guard", 1)[0]
+    assert step9.index("#parent-staging-retention-step-9") < step9.index("save_manifest(")
+    assert "If none exist, skip this staging-only recipe" in step9
+    assert "including an all-cache-hit B0 batch" in step9
+    assert "Stop on any failure" in step9
+    expanded = resolve_parent_recipes(core, reference)
+    assert "Merged {len(chunks)} chunks:" in expanded
+    assert "Retained disk staging evidence:" in expanded
 
 
 def _body(reference: str, marker: str) -> str:
@@ -56,6 +74,7 @@ def _fixture(tmp_path, monkeypatch, host="pi"):
     artifacts = gen.render(gen.load_platforms()[host])
     core = artifacts[0].content
     spec = next(a.content for a in artifacts if a.path.endswith("/extraction-spec.md"))
+    core = resolve_parent_recipes(core, spec)
     run = lambda body: run_body(body, token=token.path, root=root)
     run("from pathlib import Path; Path('.graphify_detect.json').write_text(" + repr(json.dumps(
         {"files": {"document": [str(source)]}})) + ")")
@@ -67,7 +86,7 @@ def _fixture(tmp_path, monkeypatch, host="pi"):
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "01")
     monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(source)]))
     monkeypatch.setenv("GRAPHIFY_CHUNK_USAGE_JSON", json.dumps({"input_tokens": 7, "output_tokens": 3}))
-    setup = _body(spec, "tempfile.mkdtemp")
+    setup = _body(spec, "graphify-chunk-")
     collect = _body(spec, "# Existing native no-follow regular-file reader")
     run(setup)
     plan = json.loads((prepared / ".graphify_intake_plan_01.json").read_text())
@@ -194,7 +213,7 @@ def test_allocation_refuses_invalid_current_assignment(tmp_path, monkeypatch, as
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
     monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps(assignment))
     with pytest.raises(ValueError, match="current uncached"):
-        run(_body(spec, "tempfile.mkdtemp"))
+        run(_body(spec, "graphify-chunk-"))
     assert not (prepared / ".graphify_intake_plan_02.json").exists()
 
 
@@ -229,7 +248,7 @@ def test_intake_storage_cannot_be_inside_either_output(tmp_path, monkeypatch, lo
     spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
                 if a.path.endswith("/extraction-spec.md"))
     with pytest.raises(ValueError, match="outside public and prepared"):
-        run(_body(spec, "tempfile.mkdtemp"))
+        run(_body(spec, "graphify-chunk-"))
     assert not (prepared / ".graphify_intake_plan_02.json").exists()
     assert not list(out.glob("graphify-chunk-*"))
     assert not list(prepared.glob("graphify-chunk-*"))
@@ -311,7 +330,7 @@ def test_disk_parent_runs_actual_quoted_shell_import_with_no_public_chunk(tmp_pa
                    "GRAPHIFY_CHUNK_NUMBER": "02", "GRAPHIFY_CHUNK_FILES_JSON": json.dumps([str(source)]),
                    "GRAPHIFY_TRANSACTION_TOKEN": str(tx.active_transaction_token_path(out))}
     allocation = next(b for b in re.findall(r"```bash\n(.*?)\n```", reference, re.S)
-                      if "tempfile.mkdtemp" in b)
+                      if "graphify-chunk-" in b)
     allocated = subprocess.run(["/bin/bash", "-c", _shell_input(allocation, root)], cwd=root, text=True,
                                capture_output=True, env=environment, check=False, timeout=30)
     assert allocated.returncode == 0, allocated.stderr
@@ -339,7 +358,7 @@ def test_staging_rebinds_live_token_in_separate_shell_calls(tmp_path, monkeypatc
     reference = next(a.content for a in gen.render(gen.load_platforms()[host])
                      if a.path.endswith("/extraction-spec.md"))
     blocks = re.findall(r"```bash\n(.*?)\n```", reference, re.S)
-    allocation = next(b for b in blocks if "tempfile.mkdtemp" in b)
+    allocation = next(b for b in blocks if "graphify-chunk-" in b)
     collect = next(b for b in blocks if "# Existing native no-follow regular-file reader" in b)
     # Earlier tool-call exports do not reach either of these fresh shells.
     environment = {**os.environ, "VIRTUAL_ENV": sys.prefix, "TMPDIR": str(tmp_path / "intakes"),
@@ -483,7 +502,9 @@ def test_compact_disk_prompt_itself_contains_intake_write_and_notice(host):
 
 @pytest.mark.parametrize("host", DISK_HOSTS)
 def test_disk_collection_uses_prepared_manifest_and_imported_usage(host):
-    core = gen.render(gen.load_platforms()[host])[0].content
+    artifacts = gen.render(gen.load_platforms()[host])
+    core = resolve_parent_recipes(artifacts[0].content, next(
+        a.content for a in artifacts if a.path.endswith("/extraction-spec.md")))
     b3 = core.split("**Step B3", 1)[1].split("#### Part C", 1)[0]
     assert "graphify-out/.graphify_chunk_NN.json" not in b3
     assert "skip that chunk" not in b3
@@ -499,7 +520,7 @@ def test_allocation_rejects_overlapping_chunks_only_in_current_batch(tmp_path, m
     _, source, out, baseline, _, prepared, run, intake, _, b0, _ = _fixture(tmp_path, monkeypatch)
     reference = next(a.content for a in gen.render(gen.load_platforms()["pi"])
                      if a.path.endswith("/extraction-spec.md"))
-    allocate = _body(reference, "tempfile.mkdtemp")
+    allocate = _body(reference, "graphify-chunk-")
     before = sorted(intake.parent.parent.iterdir())
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
     with pytest.raises(ValueError, match="already assigned"):
@@ -587,7 +608,7 @@ def test_b3_requires_exactly_the_current_batchs_registered_plans(tmp_path, monke
         monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(other)]))
         spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
                     if a.path.endswith("/extraction-spec.md"))
-        run(_body(spec, "tempfile.mkdtemp"))
+        run(_body(spec, "graphify-chunk-"))
     elif damage == "duplicate":
         run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text(" +
             repr(json.dumps([chunk, chunk])) + ")")
@@ -638,7 +659,7 @@ def test_b3_ignores_prior_batch_plans_without_merging_old_chunks(tmp_path, monke
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
     spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
                 if a.path.endswith("/extraction-spec.md"))
-    run(_body(spec, "tempfile.mkdtemp"))
+    run(_body(spec, "graphify-chunk-"))
     plan = json.loads((prepared / ".graphify_intake_plan_02.json").read_text())
     Path(plan["intake"], "result.json").write_text(json.dumps(_payload(source)))
     run(collect)
@@ -694,12 +715,12 @@ def test_new_batch_cannot_overwrite_a_retained_chunk_plan(tmp_path, monkeypatch)
     spec = next(a.content for a in gen.render(gen.load_platforms()["pi"])
                 if a.path.endswith("/extraction-spec.md"))
     with pytest.raises(ValueError, match="retain|already"):
-        run(_body(spec, "tempfile.mkdtemp"))
+        run(_body(spec, "graphify-chunk-"))
     assert (prepared / ".graphify_intake_plan_01.json").read_bytes() == plan
     assert sorted(intake.parent.parent.iterdir()) == before
     monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
     monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(source)]))
-    run(_body(spec, "tempfile.mkdtemp"))
+    run(_body(spec, "graphify-chunk-"))
     assert (prepared / ".graphify_intake_plan_02.json").is_file()
     assert {name: (out / name).read_bytes() for name in baseline} == baseline
 
@@ -718,7 +739,7 @@ def _numbered_chunks(tmp_path, monkeypatch, numbers):
         monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", number)
         monkeypatch.setenv("GRAPHIFY_CHUNK_FILES_JSON", json.dumps([str(current)]))
         if number != "01":
-            run(_body(spec, "tempfile.mkdtemp"))
+            run(_body(spec, "graphify-chunk-"))
             plan = json.loads((prepared / (".graphify_intake_plan_" + number + ".json")).read_text())
             intake = Path(plan["intake"]) / "result.json"
         payload = _payload(current)
@@ -794,7 +815,7 @@ def test_finalization_keeps_staging_evidence_private_and_preserves_intended_outp
         monkeypatch.setenv("GRAPHIFY_CHUNK_NUMBER", "02")
         spec = next(a.content for a in gen.render(gen.load_platforms()[host])
                     if a.path.endswith("/extraction-spec.md"))
-        run(_body(spec, "tempfile.mkdtemp"))
+        run(_body(spec, "graphify-chunk-"))
         plan = json.loads((prepared / ".graphify_intake_plan_02.json").read_text())
         Path(plan["intake"], "result.json").write_bytes(raw)
         run(collect)

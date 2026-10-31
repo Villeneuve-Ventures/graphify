@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 
 import networkx as nx
+from networkx.readwrite import json_graph
 
 from graphify.serve import (
     _get_trigram_index,
@@ -93,9 +94,9 @@ def _load_real_graph(path: str) -> nx.Graph:
         data = dict(data, links=data["edges"])
     data = {**data, "directed": True}
     try:
-        return nx.readwrite.json_graph.node_link_graph(data, edges="links")
+        return json_graph.node_link_graph(data, edges="links")
     except TypeError:
-        return nx.readwrite.json_graph.node_link_graph(data)
+        return json_graph.node_link_graph(data)
 
 
 def _legacy_score_and_pick(G, terms):

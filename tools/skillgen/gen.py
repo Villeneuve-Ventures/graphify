@@ -1454,11 +1454,11 @@ def _render_core(platform: Platform) -> str:
         prefix, collection = body.split("**Step B3 - Collect, cache, and merge**", 1)
         _, commands = collection.split("Save new results to cache:", 1)
         body = (prefix + "**Step B3 - Collect, cache, and merge**\n\n"
-                + _read_fragment("collection/disk.md") + "\nSave new results to cache:" + commands)
+                + _read_fragment("collection/disk-stub.md") + "\nSave new results to cache:" + commands)
         step9 = "### Step 9 - Save manifest, update cost tracker, clean up, and report\n\n"
         if body.count(step9) != 1:
             raise ValueError("disk staging retention needs exactly one Step 9 boundary")
-        body = body.replace(step9, step9 + _read_fragment("collection/disk-publication.md") + "\n", 1)
+        body = body.replace(step9, step9 + _read_fragment("collection/disk-publication-stub.md") + "\n", 1)
     if platform.key == "windows":
         if body.count(_PORTABLE_NAMESPACE_MIGRATION) != 1:
             raise ValueError("Windows core must have exactly one portable namespace target")
@@ -1610,6 +1610,12 @@ def render(platform: Platform) -> list[RenderedArtifact]:
                     1,
                 )
             body += "\n" + _render_chunk_staging(platform)
+            body += "\n## Parent collection (Step B3)\n\n" + _route_prepared_python_blocks(
+                _read_fragment("collection/disk.md")
+            )
+            body += "\n## Parent staging retention (Step 9)\n\n" + _route_prepared_python_blocks(
+                _read_fragment("collection/disk-publication.md")
+            )
         body = _render_saved_interpreter_commands(body, platform, artifact_role="reference")
         rel = f"{platform.refs_dst}/{name}.md"
         artifacts.append(RenderedArtifact(rel, body))

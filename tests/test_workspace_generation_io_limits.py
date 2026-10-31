@@ -80,7 +80,9 @@ def test_completion_stops_before_reading_payload_over_reservation(
             preparation, source_observations=observations, monotonic_ns=10_003,
         )
     assert target_reads == []
-    assert generations.recover_staged_build(REPO_UUID).lifecycle_state == "ABANDONED"
+    recovered = generations.recover_staged_build(REPO_UUID)
+    assert recovered is not None
+    assert recovered.lifecycle_state == "ABANDONED"
 
 
 def test_completion_bounds_reads_when_payload_grows_after_stat(tmp_path, monkeypatch):
@@ -115,4 +117,6 @@ def test_completion_bounds_reads_when_payload_grows_after_stat(tmp_path, monkeyp
     assert grew
     # One excess byte may be read to prove that the reservation was exceeded.
     assert bytes_read <= limit + 1
-    assert generations.recover_staged_build(REPO_UUID).lifecycle_state == "ABANDONED"
+    recovered = generations.recover_staged_build(REPO_UUID)
+    assert recovered is not None
+    assert recovered.lifecycle_state == "ABANDONED"

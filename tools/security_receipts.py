@@ -126,7 +126,7 @@ def inventory(root, exported, installed, marker_environment):
             'marker_environment': marker_environment}
 
 
-def execute(command, root, directory, stem, timeout=300):
+def execute(command, root, directory, stem, timeout: float = 300):
     started = time.monotonic()
     error = None
     code = None
@@ -218,9 +218,13 @@ def audit_result(scanner, payload, exit_code, stderr, coverage):
                 'scanner exit code inconsistent with completed result')
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         errors.append(f'invalid/incomplete scanner result: {exc}')
+    finding_count = None
+    if not errors:
+        assert findings is not None
+        finding_count = len(findings)
     return {'completion': 'incomplete' if errors else 'complete',
             'result': 'incomplete' if errors else ('findings' if findings else 'clean'),
-            'findings': findings, 'finding_count': len(findings) if not errors else None,
+            'findings': findings, 'finding_count': finding_count,
             'errors': errors}
 
 

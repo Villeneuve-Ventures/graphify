@@ -89,7 +89,7 @@ def _sorted_nodes(nodes: Iterable[NodeIdT]) -> list[NodeIdT]:
 
 
 def _native_edges(
-    G: nx.Graph[NodeIdT, Any, Any],
+    G: nx.Graph[NodeIdT],
 ) -> tuple[list[tuple[str, str, float]], dict[str, NodeIdT]]:
     """Encode a NetworkX graph as insertion-order-independent native edges."""
     keyed_nodes = _validated_keyed_nodes(G.nodes())
@@ -107,7 +107,7 @@ def _native_edges(
 
 
 def _partition(
-    G: nx.Graph[NodeIdT, Any, Any], resolution: float = 1.0
+    G: nx.Graph[NodeIdT], resolution: float = 1.0
 ) -> dict[NodeIdT, int]:
     """Run community detection. Returns {node_id: community_id}.
 
@@ -180,7 +180,7 @@ _COHESION_SPLIT_MIN_SIZE = 50    # only cohesion-split if community has at least
 
 
 def label_communities_by_hub(
-    G: nx.Graph[NodeIdT, Any, Any],
+    G: nx.Graph[NodeIdT],
     communities: Mapping[int, Sequence[NodeIdT]],
 ) -> dict[int, str]:
     """LLM-free community labels: name each community after its
@@ -239,7 +239,7 @@ def community_member_sigs(
 
 
 def cluster(
-    G: nx.Graph[NodeIdT, Any, Any],
+    G: nx.Graph[NodeIdT],
     resolution: float = 1.0,
     exclude_hubs_percentile: float | None = None,
 ) -> dict[int, list[NodeIdT]]:
@@ -359,7 +359,7 @@ def cluster(
 
 
 def _split_community(
-    G: nx.Graph[NodeIdT, Any, Any], nodes: Sequence[NodeIdT]
+    G: nx.Graph[NodeIdT], nodes: Sequence[NodeIdT]
 ) -> list[list[NodeIdT]]:
     """Run a second Leiden pass on a community subgraph to split it further."""
     subgraph = G.subgraph(nodes)
@@ -376,7 +376,7 @@ def _split_community(
 
 
 def cohesion_score(
-    G: nx.Graph[NodeIdT, Any, Any], community_nodes: Sequence[NodeIdT]
+    G: nx.Graph[NodeIdT], community_nodes: Sequence[NodeIdT]
 ) -> float:
     """Ratio of actual intra-community edges to maximum possible."""
     n = len(community_nodes)
@@ -389,7 +389,7 @@ def cohesion_score(
 
 
 def score_all(
-    G: nx.Graph[NodeIdT, Any, Any],
+    G: nx.Graph[NodeIdT],
     communities: Mapping[int, Sequence[NodeIdT]],
 ) -> dict[int, float]:
     return {cid: cohesion_score(G, nodes) for cid, nodes in communities.items()}

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import os
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 import time
+from typing import TypedDict
 
 import pytest
 
@@ -19,7 +21,7 @@ from graphify.workspace.adapters.base import SourceObservation as StructuralObse
 from graphify.workspace.contracts import InputManifest
 from graphify.workspace.generations import (
     CapacityExceeded, CertificationRequest, GenerationError, GenerationStore,
-    StructuralBuildRequest,
+    StructuralBuildRequest, StagedBuildCompletion,
 )
 from graphify.workspace.gc import GcPlanStale, GcProtection, GcRecoveryRequired, GcStore
 from graphify.workspace.identity import IdentityAction, OperatorAuthorization, discover_source
@@ -27,7 +29,7 @@ from graphify.workspace.journal import JournalRecoveryProjection, JournalSnapsho
 from graphify.workspace.leases import StagedBuildLeaseRecoveryRequired, StaleLease
 from graphify.workspace.lifecycle_contracts import (
     CapacityPolicy, ContractError, GcCompletionState, GenerationReceipt, PointerSet, PriorPointerRecord,
-    payload_manifest_sha256,
+    payload_manifest_sha256, JournalEvent, canonical_json_bytes,
 )
 from graphify.workspace.lifecycle_observation import SourceObservation
 from graphify.workspace.persistence import CommitUnknown, InjectedFault, LockTimeout
@@ -44,6 +46,33 @@ from tests.workspace_s3_helpers import (
     COMPATIBILITY_MANIFEST, REPO_UUID, START, create_harness, git_output,
     tree_snapshot, trust_source_observations,
 )
+
+
+def _invoke_unvalidated(function: Callable[..., object], *args: object, **kwargs: object) -> object:
+    """Call a deliberately malformed test input through its runtime validation boundary.
+
+    Valid fixture calls stay statically checked. This helper is only for tests
+    which must prove that Python callers cannot bypass the runtime rejection.
+    """
+    return function(*args, **kwargs)
+
+
+def _journal_event(*, to_dict: Callable[[], dict[str, object]], sha256: str | None = None) -> JournalEvent:
+    """Represent the partial journal record provided by a mocked storage seam."""
+    class FixtureJournalEvent(JournalEvent):
+        @property
+        def sha256(self) -> str:
+            return sha256 if sha256 is not None else super().sha256
+
+    return FixtureJournalEvent("graphify.workspace.journal_event", 2, canonical_json_bytes(to_dict()))
+
+
+class CertificationKwargs(TypedDict):
+    source_observations: Sequence[SourceObservation]
+    declared_entries: Sequence[Mapping[str, object]]
+    staged_completion: StagedBuildCompletion
+    occurred_at: datetime
+    monotonic_ns: int
 
 
 POLICY = CapacityPolicy.from_mapping({
@@ -164,6 +193,7 @@ def test_s3_completion_refuses_unobserved_consumed_inputs(tmp_path, missing_cons
         staged = observations[0].consumed_inputs
     else:
         trusted = observations
+        assert observations[0].consumed_inputs is not None
         changed = observations[0].consumed_inputs.to_dict()
         changed["outcomes"][0]["status"] = "empty"
         staged = InputManifest.from_mapping(changed)
@@ -183,6 +213,7 @@ def test_s3_completion_refuses_unobserved_consumed_inputs(tmp_path, missing_cons
 def test_s3_certification_refuses_changed_trusted_consumed_inputs(tmp_path, missing_consumed):
     harness, generations, _pointers, observations = _runtime(tmp_path)
     _request_value, attempt, completion = _complete(harness, generations, observations)
+    assert observations[0].consumed_inputs is not None
     changed = observations[0].consumed_inputs.to_dict()
     changed["outcomes"][0]["status"] = "empty"
     consumed = InputManifest.from_mapping(changed)
@@ -195,6 +226,7 @@ def test_s3_certification_refuses_changed_trusted_consumed_inputs(tmp_path, miss
     trusted = (final, final)
     trust_source_observations(generations, trusted)
     queue = generations.semantic_queue
+    assert queue is not None
     queue.reconcile(
         attempt.grant, (), source_epoch=1, policy_sha256=final.policy_sha256,
         source_observations=trusted, desired_watermark=1, semantic_required=False,
@@ -230,8 +262,10 @@ def test_s3_stage_persists_exact_input_completion_and_queue_barrier(
 ):
     harness, generations, pointers, observations = _runtime(tmp_path)
     request, attempt, completion = _complete(harness, generations, observations)
+    assert completion.state.completion_binding is not None
     binding = completion.state.completion_binding.to_dict()
     assert binding["initial_detection_sha256"] == observations[0].initial_detection.sha256
+    assert observations[0].consumed_inputs is not None
     assert binding["consumed_inputs_sha256"] == observations[0].consumed_inputs.sha256
     assert completion.state.request.sha256 == request.sha256
     assert generations._reuse_staged_completion_locked(completion.state, completion.allocation).state == completion.state
@@ -490,7 +524,7 @@ def test_exact_rollback_replay_uses_journal_and_retained_prior(tmp_path, monkeyp
             "source_epoch": 1,
         },
     )
-    event = SimpleNamespace(to_dict=lambda: {
+    event = _journal_event(to_dict=lambda: {
         "transition": "ROLLED_BACK", "generation_id": "gen-older",
         "receipt_sha256": "a" * 64, "pointer_revision": 2,
         "operation_epoch": grant.operation_epoch,
@@ -552,6 +586,8 @@ def test_promotion_refuses_visible_pointer_without_journal_authority(
     tmp_path, monkeypatch, missing_pointer,
 ):
     harness, _generations, pointers, _observations = _runtime(tmp_path)
+    from tests.test_workspace_coordination_review import acquire
+    grant = acquire(harness, "BUILD")
     visible = None if missing_pointer else PointerSet.from_mapping({
         "contract": "graphify.workspace.pointer_set", "schema_version": 2,
         "repo_uuid": REPO_UUID, "pointer_revision": 1,
@@ -560,7 +596,7 @@ def test_promotion_refuses_visible_pointer_without_journal_authority(
         "current": {"generation_id": "gen-older", "receipt_sha256": "a" * 64},
         "last_good": None,
     })
-    event = SimpleNamespace(to_dict=lambda: {
+    event = _journal_event(to_dict=lambda: {
         "transition": "PROMOTED", "generation_id": "gen-newer",
         "receipt_sha256": "b" * 64, "pointer_revision": 3,
         "operation_epoch": 3, "fence_token": 3,
@@ -597,7 +633,7 @@ def test_promotion_refuses_visible_pointer_without_journal_authority(
     before = tree_snapshot(harness.state_root)
     with pytest.raises(PointerCorrupt, match="visible pointer"):
         pointers.promote(
-            SimpleNamespace(), cas,
+            grant, cas,
             occurred_at=START, monotonic_ns=10_000,
         )
     assert touched == []
@@ -685,7 +721,7 @@ def test_certification_recovers_exact_receipt_after_durable_fault(tmp_path, faul
         compatibility_sha256=COMPATIBILITY_MANIFEST.sha256,
         validations=("payload_manifest", "coordination_lock_precreated", "stable_semantic_queue"),
     )
-    kwargs = dict(
+    kwargs = CertificationKwargs(
         source_observations=observations, declared_entries=completion.entries,
         staged_completion=completion, occurred_at=START + timedelta(seconds=1),
         monotonic_ns=10_006,
@@ -876,8 +912,10 @@ def test_promotion_retains_only_current_source_last_good(
         pointers, "_persist_move", lambda _operation, *, pointer, **_kw: pointer,
     )
     cas = PointerCAS(1, 2, 1, 2, 0, 2, 2, "gen-new", "b" * 64, "a" * 64)
+    from tests.test_workspace_coordination_review import acquire
+    grant = acquire(_harness, "BUILD")
     moved = pointers.promote(
-        SimpleNamespace(), cas, occurred_at=START, monotonic_ns=10_001,
+        grant, cas, occurred_at=START, monotonic_ns=10_001,
     )
     expected = None if old_source_revision == 1 else {
         "generation_id": "gen-older" if current_corrupt else "gen-old",
@@ -936,11 +974,13 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(
         payload = preparation.staging_path / "graphify-out"
         payload.mkdir(mode=0o700)
         (payload / "graph.json").write_bytes(b"{}\n")
+        assert observations[0].consumed_inputs is not None
         (payload / "input-manifest.json").write_bytes(observations[0].consumed_inputs.canonical)
         completion = generations.complete_staged_build(
             preparation, source_observations=observations, monotonic_ns=tick + 3,
         )
         queue = generations.semantic_queue
+        assert queue is not None
         queue.reconcile(
             attempt.grant, (), source_epoch=1, policy_sha256=observations[0].policy_sha256,
             source_observations=observations,
@@ -1026,15 +1066,19 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(
         return pointer
 
     first = certify_and_promote("gen-a1", 10_000)
+    assert isinstance(first, PointerSet)
     second = certify_and_promote("gen-a2", 3_000_000, first)
+    assert isinstance(second, PointerSet)
     assert second.to_dict()["last_good"] == first.to_dict()["current"]
     if isinstance(corrupt_current, str):
         if corrupt_current == "restored":
             visible = first
         elif corrupt_current in {"orphan", "orphan_last_good"}:
-            orphan, repair = certify_and_promote(
+            certified_orphan = certify_and_promote(
                 "gen-orphan", 8_000_000, second, certify_only=True,
             )
+            assert isinstance(certified_orphan, tuple)
+            orphan, repair = certified_orphan
             visible = PointerSet.from_mapping({
                 **second.to_dict(),
                 ("current" if corrupt_current == "orphan" else "last_good"): pointers._ref(orphan),
@@ -1178,6 +1222,7 @@ def test_successor_pointer_recovery_retains_only_active_source_last_good(
         observations = _observations(linked)
         trust_source_observations(generations, observations)
     recovered = certify_and_promote("gen-new", 7_000_000, second, interrupt=True)
+    assert isinstance(recovered, PointerSet)
     value = recovered.to_dict()
     assert value["current"]["generation_id"] == "gen-new"
     assert value["active_source_revision"] == (2 if switch_source else 1)
@@ -1229,7 +1274,7 @@ def test_operator_repair_replays_only_matching_durable_result(tmp_path, monkeypa
         "current": {"generation_id": "gen-repaired", "receipt_sha256": "a" * 64},
         "last_good": None,
     })
-    event = SimpleNamespace(to_dict=lambda: {
+    event = _journal_event(to_dict=lambda: {
         "transition": "REPAIRED", "generation_id": "gen-repaired",
         "receipt_sha256": "a" * 64, "pointer_revision": 3,
         "operation_epoch": grant.operation_epoch, "fence_token": fence_token,
@@ -1398,7 +1443,7 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
         transition, revision, *, operation_epoch=3, fence_token=3,
         generation_id="gen-older", receipt_sha256="a" * 64,
     ):
-        return SimpleNamespace(
+        return _journal_event(
             to_dict=lambda: {
                 "transition": transition, "generation_id": generation_id,
                 "receipt_sha256": receipt_sha256, "pointer_revision": revision,
@@ -1551,7 +1596,7 @@ def test_repair_accepts_authoritative_rollback_after_superseded_attempt(tmp_path
     assert not pointers._rollback_authorizes_superseded(
         repaired_snapshot, repaired, None, unrelated_prior, deadline_ns=None,
     )
-    unrelated_move = SimpleNamespace(to_dict=lambda: {
+    unrelated_move = _journal_event(to_dict=lambda: {
         "transition": "PROMOTED", "generation_id": "gen-unrelated",
         "receipt_sha256": "f" * 64, "pointer_revision": 3,
         "operation_epoch": 3, "fence_token": 3,
@@ -1653,7 +1698,7 @@ def test_gc_plan_rejects_pointer_behind_durable_journal(
         pointers, "load", lambda *args, **kw: None if missing_pointer else stale_pointer,
     )
     monkeypatch.setattr(pointers, "verify_pointer", lambda *args, **kw: {})
-    event = SimpleNamespace(to_dict=lambda: {
+    event = _journal_event(to_dict=lambda: {
         "transition": "PROMOTED", "pointer_revision": 2,
     })
     monkeypatch.setattr(

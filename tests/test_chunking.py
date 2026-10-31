@@ -31,7 +31,8 @@ def test_pack_chunks_packs_small_files_together(tmp_path):
 
     chunks = _pack_chunks_by_tokens(files, token_budget=10_000)
     assert len(chunks) == 1
-    assert sorted(chunks[0]) == sorted(files)
+    assert all(isinstance(item, Path) for item in chunks[0])
+    assert sorted(chunks[0], key=str) == sorted(files, key=str)
 
 
 def test_pack_chunks_starts_new_chunk_when_budget_would_overflow(tmp_path, no_tokenizer):
@@ -75,8 +76,9 @@ def test_pack_chunks_groups_by_directory(tmp_path):
     chunks = _pack_chunks_by_tokens([a1, b1, a2, b2], token_budget=1_000_000)
     assert len(chunks) == 1
     chunk = chunks[0]
-    a_indices = [i for i, p in enumerate(chunk) if p.parent == dir_a]
-    b_indices = [i for i, p in enumerate(chunk) if p.parent == dir_b]
+    assert all(isinstance(item, Path) for item in chunk)
+    a_indices = [i for i, p in enumerate(chunk) if isinstance(p, Path) and p.parent == dir_a]
+    b_indices = [i for i, p in enumerate(chunk) if isinstance(p, Path) and p.parent == dir_b]
     assert a_indices == sorted(a_indices)
     assert b_indices == sorted(b_indices)
     # all of one directory comes before all of the other
@@ -318,6 +320,7 @@ def test_checkpoint_scopes_cache_writes_to_chunk_files(tmp_path):
 
     # B.py's cache is unchanged: the stray node was rejected, not merged in.
     after = load_cached(b, tmp_path, kind="semantic")
+    assert after is not None
     assert [n["id"] for n in after["nodes"]] == ["b_real"], (
         f"B.py cache was clobbered by an out-of-chunk node: {after}"
     )
