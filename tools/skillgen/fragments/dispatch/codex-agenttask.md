@@ -15,7 +15,13 @@ After all agents are dispatched, collect results sequentially in memory:
 result = wait_agent(handle); close_agent(handle)   # repeat per handle
 ```
 
-Parse each result as JSON. Accumulate nodes/edges/hyperedges and validated completed_sources across current successful results and stage `.graphify_semantic_new.json` inside the prepared output directory through the exact prepared-token runner used by B3. Codex collects in memory; skip the disk-concatenation block in Step B3 and keep this in-memory result for cache and Part C. The disk-based success checks do not apply — a chunk that returns invalid JSON is the failure signal instead.
+Parse each result as JSON. Accumulate nodes/edges/hyperedges and validated completed_sources across current successful results and stage `.graphify_semantic_new.json` inside the prepared output directory through the exact prepared-token runner used by B3. Codex collects in memory; run B3 validation, cache saving and merging on this staged aggregate. No disk chunk files are required. A chunk that returns invalid JSON is a failure.
+
+If any dispatch fails, has no result, or returns invalid/truncated output, retain
+the responses and diagnostics and stop before B3. Keep `incomplete_sources` and
+any `_partial` flags in the aggregate so B3 can withhold completion. Do not drop
+a failure while combining siblings or turn an absent response into empty success.
+Run B3 validation for the staged aggregate; only its serial fallback is skipped.
 
 Subagent prompt template:
 
