@@ -404,6 +404,7 @@ def _operation(journal_path, digest):
 def _coordinator_lock(request):
     """Serialize journal creation/replay before any mutable operation observation."""
     import fcntl
+    deadline = time.monotonic() + 30
     journal_slot = Path(request["journal"]).name
     _validate_parents(request)
     path = Path(request["journal"]).parent / (".replacement-lock-" + _sha(os.fsencode(journal_slot)))
@@ -411,16 +412,37 @@ def _coordinator_lock(request):
         _require(parent.identity.json() == request["parent_identities"]["control"],
                  "replacement control parent changed")
         parent.validate()
-        fd = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent.fd)
+        _require(time.monotonic() < deadline, "replacement operation lock deadline")
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
-            deadline = time.monotonic() + 30
+            fd = os.open(path.name, flags | os.O_CREAT, 0o600, dir_fd=parent.fd)
+        except FileNotFoundError:
+            # Concurrent first creation can report ENOENT on macOS/APFS.
+            # Reopen the peer's lock; never create a replacement during recovery.
             while True:
+                _require(time.monotonic() < deadline, "replacement operation lock deadline")
+                _validate_parents(request)
+                parent.validate()
+                try:
+                    fd = os.open(path.name, flags, dir_fd=parent.fd)
+                    break
+                except FileNotFoundError:
+                    remaining = deadline - time.monotonic()
+                    _require(remaining > 0, "replacement operation lock deadline")
+                    time.sleep(min(0.01, remaining))
+        try:
+            _validate_parents(request)
+            parent.validate()
+            while True:
+                _require(time.monotonic() < deadline, "replacement operation lock deadline")
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    _require(time.monotonic() < deadline, "replacement operation lock deadline")
-                    time.sleep(0.01)
+                    remaining = deadline - time.monotonic()
+                    _require(remaining > 0, "replacement operation lock deadline")
+                    time.sleep(min(0.01, remaining))
+            _require(time.monotonic() < deadline, "replacement operation lock deadline")
             _validate_parents(request)
             info = os.fstat(fd)
             parent.validate()
