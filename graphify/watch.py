@@ -1518,7 +1518,7 @@ def _rebuild_code(
                 )
             except Exception:
                 same_topology = False
-            if same_topology:
+            if same_topology and (out / "GRAPH_REPORT.md").is_file():
                 try:
                     from graphify.detect import save_manifest
                     # Full-scan save: prune excluded-but-alive rows (#1908).
@@ -1538,7 +1538,9 @@ def _rebuild_code(
         previous_node_community = _node_community_map(existing_graph_data)
         if previous_node_community:
             communities = remap_communities_to_previous(communities, previous_node_community)
-        cohesion = score_all(G, communities)
+        # Cohesion uses the same undirected relationships as clustering.
+        cohesion_graph = G.to_undirected(as_view=True) if G.is_directed() else G
+        cohesion = score_all(cohesion_graph, communities)
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         labels_file = out / ".graphify_labels.json"
