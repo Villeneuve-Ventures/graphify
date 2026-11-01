@@ -138,7 +138,8 @@ def test_validation_job_bodies_remain_equal_to_original_ci():
             for step in old["steps"]:
                 if step.get("name") == "Reject whole-run cancellation":
                     continue
-                assert step.pop("if") == "${{ needs.validation-route.outputs.lane == 'full' }}"
+                step_if = step.pop("if")
+                assert step_if == "${{ needs.validation-route.outputs.lane == 'full' }}"
         for job in (old, new):
             job.pop("if", None)
             job.pop("needs", None)
