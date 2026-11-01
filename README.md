@@ -908,7 +908,7 @@ uv run --frozen pytest tests/ -q -k "python" --tb=short    # filter by name
 ```
 
 The [CI workflow](.github/workflows/ci.yml) also defines separate generated-skill,
-protected-verifier, and native-Leiden checks. The full CI test environment pins
+locked Ruff/Pyright, protected-verifier, install, and native-Leiden checks. The full CI test environment pins
 Git 2.55.0 for the acceptance-sensitive tests; follow the workflow when
 reproducing those checks.
 

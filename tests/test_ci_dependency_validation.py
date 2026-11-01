@@ -30,6 +30,7 @@ def test_quality_checks_use_locked_environment_and_fail_closed(tmp_path, workflo
     expected = {"name": name, "run": command}
     if workflow == "ci.yml":
         expected["if"] = "${{ needs.validation-route.outputs.lane == 'full' }}"
+        assert install["if"] == expected["if"]
     assert step == expected
     assert "continue-on-error" not in job
     # Run the workflow shell with a failing tool, without another environment sync.

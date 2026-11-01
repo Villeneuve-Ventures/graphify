@@ -45,8 +45,9 @@ Generated/runtime skills, skill fragments, corpora and fixtures are not ordinary
 docs. Any mixed, unknown, unsafe, or incompletely inspected change requires the
 full `make review-ready` path. Missing base evidence cannot admit a docs lane.
 The full command retains complete pytest selection, with whitespace preflights;
-CI retains separate generated-skill, optimized-verifier, install and native smoke
-checks for full changes. Branch pushes and manual CI dispatch always run full.
+CI retains separate generated-skill, locked Ruff/Pyright, optimized-verifier,
+install and native smoke checks for full changes. Branch pushes and manual CI
+dispatch always run full.
 
 Use `BASE=<ref>` for a different PR base (default `origin/v8`). Preserve the
 complete receipt; changed inputs, modes, Git identity or environment invalidate

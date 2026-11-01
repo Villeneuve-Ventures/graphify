@@ -77,8 +77,9 @@ replace the final routing receipt.
 
 PR CI runs the same classifier against the event's base SHA, with complete Git
 history. Eligible docs run their selected checks in the routing job. Full changes
-delegate to the existing four pytest shards, generated-skill checks, optimized
-protected-verifier conformance, install smoke, native Leiden smoke and advisory
+delegate to the existing four pytest shards, generated-skill checks, locked Ruff
+and Pyright checks, optimized protected-verifier conformance, install smoke,
+native Leiden smoke and advisory
 security scans. No full command is replaced by docs checks for mixed or uncertain
 changes. The stable **Python quality gate** rejects missing routing outputs or
 failed docs checks and still requires all four successful shard receipts for the
