@@ -235,7 +235,7 @@ def test_workflow_gate_command_executes_fail_closed(receipts, success):
     assert ("All four pytest shard executions succeeded" in result.stdout) == success
 
 
-def test_non_shard_job_policies_preserve_baseline_except_action_updates():
+def test_non_shard_job_policies_preserve_baseline_except_action_and_python_updates():
     baseline = subprocess.check_output([
         "git", "show", "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984:.github/workflows/ci.yml"
     ], cwd=ROOT, text=True)
@@ -254,6 +254,13 @@ def test_non_shard_job_policies_preserve_baseline_except_action_updates():
                 step["uses"] = action_updates[previous_action]
             if previous_action == "astral-sh/setup-uv@v8.1.0":
                 step["with"]["prune-cache"] = "true"
+            if step.get("with", {}).get("python-version") == "3.14":
+                step["with"]["python-version"] = "3.14.10"
+            if step.get("name") == "Install uv and Python 3.14":
+                step["name"] = "Install uv and Python 3.14.10"
+            if step.get("name") == "Install Graphify with the native Leiden wheel only":
+                step["run"] = step["run"].replace(
+                    "uv venv --python 3.14\n", "uv venv --python 3.14.10\n")
         assert current["jobs"][name] == old["jobs"][name]
     for field in ("name", "on", "concurrency"):
         assert current[field] == old[field]
