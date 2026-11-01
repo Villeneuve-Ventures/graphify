@@ -33,7 +33,7 @@ def workflow():
 
 def test_matrix_and_gate_preserve_execution_and_environment():
     ci = workflow()
-    assert set(ci["jobs"]) == {"skillgen-check", "test", "quality", "security-scan", "leiden-binary-smoke"}
+    assert set(ci["jobs"]) == {"validation-route", "skillgen-check", "test", "quality", "security-scan", "leiden-binary-smoke"}
     matrix = ci["jobs"]["test"]
     assert matrix["strategy"] == {"fail-fast": "false", "matrix": {
         "python-version": ["3.14"], "shard": ["1", "2", "3", "4"]}}
@@ -60,7 +60,7 @@ def test_matrix_and_gate_preserve_execution_and_environment():
         "pytest-timings-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}"
     )
     gate = ci["jobs"]["quality"]
-    assert gate["name"] == "Python quality gate" and gate["needs"] == ["test"]
+    assert gate["name"] == "Python quality gate" and gate["needs"] == ["validation-route", "test"]
     assert gate["if"] == (
         "${{ always() && (github.event_name != 'pull_request' || "
         "github.event.pull_request.draft == false) }}"
@@ -254,6 +254,9 @@ def test_non_shard_job_policies_preserve_baseline_except_action_updates():
                 step["uses"] = action_updates[previous_action]
             if previous_action == "astral-sh/setup-uv@v8.1.0":
                 step["with"]["prune-cache"] = "true"
+        old["jobs"][name]["needs"] = ["validation-route"]
+        old["jobs"][name]["if"] = current["jobs"][name]["if"]
+        assert "needs.validation-route.outputs.lane == 'full'" in old["jobs"][name]["if"]
         assert current["jobs"][name] == old["jobs"][name]
     for field in ("name", "on", "concurrency"):
         assert current[field] == old[field]
@@ -271,7 +274,8 @@ def test_quality_installs_the_acceptance_git_before_conformance():
                           if step.get("name") ==
                           "Run protected verifier conformance with optimized Python")
     assert git_index < verifier_index
-    assert gate_steps[git_index] == matrix_step
+    assert {key: value for key, value in gate_steps[git_index].items() if key != "if"} == matrix_step
+    assert gate_steps[git_index]["if"] == "${{ needs.validation-route.outputs.lane == 'full' }}"
     assert "if" not in matrix_step and "continue-on-error" not in matrix_step
     assert "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357" in matrix_step["run"]
     assert '"$git_build/install/bin" >> "$GITHUB_PATH"' in matrix_step["run"]

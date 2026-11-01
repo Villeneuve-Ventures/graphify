@@ -1,9 +1,10 @@
 # Dependency validation and tool ownership
 
-The repository has no Makefile. Its dependency-validation entry points are
+The [validation routing policy](../validation-routing.md) defines the Makefile
+entry points. Dependency validation retains the separate locked commands
 `uv sync --all-extras --frozen`, `uv run --frozen ruff check .`,
 `uv run --frozen pyright`, and the pytest commands in the two CI workflows.
-The proposed quality-job additions run Ruff and Pyright after installing the
+The full CI quality jobs run Ruff and Pyright after installing the
 PR's locked dependencies. Neither check permits failure. The existing pytest
 matrix, execution receipts, admission jobs, and final gate retain their behavior.
 

@@ -29,5 +29,11 @@ def test_draft_transition_cancels_only_the_same_pull_requests_ci():
                 "${{ always() && (github.event_name != 'pull_request' || "
                 "github.event.pull_request.draft == false) }}"
             )
-        else:
+        elif name == "validation-route":
             assert job["if"] == draft_condition
+        else:
+            assert job["if"] == (
+                "${{ needs.validation-route.outputs.lane == 'full' && "
+                "(github.event_name != 'pull_request' || "
+                "github.event.pull_request.draft == false) }}"
+            )
