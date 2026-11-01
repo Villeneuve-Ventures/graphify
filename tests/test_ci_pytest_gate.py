@@ -36,7 +36,7 @@ def test_matrix_and_gate_preserve_execution_and_environment():
     assert set(ci["jobs"]) == {"skillgen-check", "test", "quality", "security-scan", "leiden-binary-smoke"}
     matrix = ci["jobs"]["test"]
     assert matrix["strategy"] == {"fail-fast": "false", "matrix": {
-        "python-version": ["3.14"], "shard": ["1", "2", "3", "4"]}}
+        "python-version": ["3.14.10"], "shard": ["1", "2", "3", "4"]}}
     assert matrix["runs-on"] == "ubuntu-latest"
     assert "continue-on-error" not in matrix
     steps = {step.get("name"): step for step in matrix["steps"]}
