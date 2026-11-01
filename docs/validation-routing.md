@@ -20,8 +20,13 @@ Only selected root documents, issue/PR template docs, and regular text documents
 under `docs/` can qualify. Governance names, instructions, code blocks, commands,
 and removed command content select contract docs. README naming remains a
 repository-wide inventory check; it does not check prose accuracy or links.
-Changes to the protected-change policy run its verifier tests; template changes
-run the routing contract tests. An explicitly designated protected change still
+Changes to the protected-change policy select full validation. Its verifier's
+real-Git oracle requires exactly Git 2.55.0, which the full CI jobs install before
+tests; the routing job does not supply that prerequisite. Local full validation
+also requires that Git version. Template changes run the routing contract tests.
+Instruction filenames qualify only at the root or in maintained docs and template
+directories; they do not bypass excluded or unknown path ownership.
+An explicitly designated protected change still
 requires its independent protected review. Classification never activates that
 workflow or establishes review passage.
 

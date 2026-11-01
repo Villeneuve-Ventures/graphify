@@ -77,6 +77,97 @@ def test_path_and_content_contracts(repository, path, content, lane):
     assert route.classify_repository(base).lane == lane
 
 
+@pytest.mark.parametrize("name", ["AGENTS.md", "AGENTS.override.md"])
+@pytest.mark.parametrize("directory", [
+    "", "docs", "docs/operators", ".github/ISSUE_TEMPLATE",
+    ".github/PULL_REQUEST_TEMPLATE",
+])
+def test_maintained_instruction_documents_keep_contract_lane(repository, name, directory):
+    root, base = repository
+    path = root / directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Review rules.\n")
+    result = route.classify_repository(base)
+    assert result.lane == route.CONTRACT_DOCS
+    assert not result.fallback_reasons
+
+
+@pytest.mark.parametrize("name", ["AGENTS.md", "AGENTS.override.md"])
+@pytest.mark.parametrize("directory", [
+    "tests/fixtures", "worked/example/raw", "tools/skillgen/fragments",
+    "graphify", "src", "configs", "scripts", "unknown",
+])
+@pytest.mark.parametrize("surface", ["committed", "staged", "unstaged", "untracked"])
+def test_excluded_instruction_documents_delegate_full_ci(
+    repository, monkeypatch, tmp_path, name, directory, surface,
+):
+    root, base = repository
+    path = root / directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("Original instructions.\n")
+    if surface != "untracked":
+        git(root, "add", ".")
+        git(root, "commit", "-qm", "original instructions")
+        base = git(root, "rev-parse", "HEAD")
+    path.write_text("Revised instructions.\n")
+    if surface in {"committed", "staged"}:
+        git(root, "add", ".")
+    if surface == "committed":
+        git(root, "commit", "-qm", "revise instructions")
+    calls = []
+    monkeypatch.setattr(route, "run_commands", lambda commands, admission=None: calls.extend(commands) or 0)
+    output = tmp_path / "github-output"
+    assert route.main(["--base", base, "--ci-plan", "--github-output", str(output)]) == 0
+    assert not calls
+    assert output.read_text() == "lane=full\nstatus=deferred\n"
+
+
+@pytest.mark.parametrize("surface", ["committed", "staged", "unstaged", "untracked"])
+@pytest.mark.parametrize("ci_plan", [False, True])
+def test_protected_policy_uses_full_lane_with_pinned_git(
+    repository, monkeypatch, tmp_path, surface, ci_plan,
+):
+    root, base = repository
+    path = root / "docs/protected-change-review.md"
+    path.write_text("Original review policy.\n")
+    if surface != "untracked":
+        git(root, "add", ".")
+        git(root, "commit", "-qm", "original policy")
+        base = git(root, "rev-parse", "HEAD")
+    path.write_text("Revised review policy.\n")
+    if surface in {"committed", "staged"}:
+        git(root, "add", ".")
+    if surface == "committed":
+        git(root, "commit", "-qm", "revise policy")
+    calls = []
+    monkeypatch.setattr(route, "run_commands", lambda commands, admission=None: calls.extend(commands) or 0)
+    output = tmp_path / "github-output"
+    argv = ["--base", base]
+    if ci_plan:
+        argv.extend(["--ci-plan", "--github-output", str(output)])
+    assert route.main(argv) == 0
+    if ci_plan:
+        assert not calls
+        assert output.read_text() == "lane=full\nstatus=deferred\n"
+    else:
+        assert [command.argv[-1] for command in calls] == ["review-ready"]
+    # Full CI installs the oracle's exact Git before either normal or optimized tests.
+    jobs = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)["jobs"]
+    for job_name, test_name in (
+        ("test", "Run tests"),
+        ("quality", "Run protected verifier conformance with optimized Python"),
+    ):
+        steps = jobs[job_name]["steps"]
+        names = [step.get("name") for step in steps]
+        assert names.index("Install acceptance-pinned Git 2.55.0") < names.index(test_name)
+        if job_name == "test":
+            assert "needs.validation-route.outputs.lane == 'full'" in jobs[job_name]["if"]
+        else:
+            assert steps[names.index("Install acceptance-pinned Git 2.55.0")]["if"] == (
+                "${{ needs.validation-route.outputs.lane == 'full' }}"
+            )
+
+
 def test_mixed_change_is_full_even_when_code_is_untracked(repository):
     root, base = repository
     (root / "docs/notes.md").write_text("New prose.\n")
@@ -206,7 +297,8 @@ def test_ambient_options_preserve_nonfinal_helpers(repository, monkeypatch, caps
 
 def test_contract_tests_are_path_bound_not_pytest_cache(repository, monkeypatch):
     root, base = repository
-    (root / "docs/protected-change-review.md").write_text("Review policy.\n")
+    (root / ".github").mkdir()
+    (root / ".github/pull_request_template.md").write_text("Review template.\n")
     cache = root / ".pytest_cache/v/cache"
     cache.mkdir(parents=True)
     (cache / "lastfailed").write_text('{"tests/test_unrelated.py::test_old": true}')
@@ -220,7 +312,7 @@ def test_contract_tests_are_path_bound_not_pytest_cache(repository, monkeypatch)
     commands = route.build_plan(result, base, False, None, 1)
     assert result.lane == route.CONTRACT_DOCS
     argv = [value for command in commands for value in command.argv]
-    assert "tests/test_protected_change_verifier.py" in argv
+    assert "tests/test_validation_route.py" in argv
     assert "tests/test_unrelated.py" not in argv
 
 

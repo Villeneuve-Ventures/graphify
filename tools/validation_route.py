@@ -29,7 +29,10 @@ CONTRACT_DOCS = "contract-docs"
 FULL = "full"
 
 DOCUMENT_EXTENSIONS = {".md", ".rst", ".txt", ".adoc"}
-FULL_GATE_EXACT_PATHS = {".gitignore", ".pr_agent.toml", "Makefile", "pyproject.toml"}
+FULL_GATE_EXACT_PATHS = {
+    ".gitignore", ".pr_agent.toml", "Makefile", "pyproject.toml",
+    "docs/protected-change-review.md",
+}
 FULL_GATE_PREFIXES = (".github/workflows/", "configs/", "scripts/", "src/", "tests/")
 FULL_GATE_EXTENSIONS = {
     ".bash",
@@ -72,7 +75,6 @@ CONTRACT_DOCUMENTS = {
     "SECURITY.md",
     "docs/CODEBASE_MAP.md",
     "docs/ROADMAP.md",
-    "docs/protected-change-review.md",
     "docs/local-resource-retention.md",
 }
 CONTRACT_NAME_TOKENS = {
@@ -141,7 +143,6 @@ MAX_DOCUMENT_BYTES = 1_000_000
 CONTRACT_TESTS_BY_PATH = {
     "AGENTS.md": ("tests/test_readme_policy.py",),
     "README.md": ("tests/test_readme_policy.py",),
-    "docs/protected-change-review.md": ("tests/test_protected_change_verifier.py",),
     ".github/pull_request_template.md": ("tests/test_validation_route.py",),
 }
 CONTRACT_TESTS_BY_PREFIX = ()
@@ -409,7 +410,9 @@ def _document_path_kind(path: Path) -> str | None:
     text = path.as_posix()
     if not _safe_repo_path(path):
         return None
-    if path.name in {"AGENTS.md", "AGENTS.override.md"}:
+    if path.name in {"AGENTS.md", "AGENTS.override.md"} and (
+        path.parent == Path(".") or text.startswith("docs/")
+    ):
         return CONTRACT_DOCS
     if text in CONTRACT_DOCUMENTS:
         return CONTRACT_DOCS
@@ -460,15 +463,16 @@ def _historical_document(path: Path, base: str | None) -> tuple[bytes | None, st
 
 
 def _inspect_document(path: Path, base: str | None) -> tuple[str | None, str | None]:
+    text = path.as_posix()
+    # Full-gate ownership takes precedence over documentation names.
+    if (
+        text in FULL_GATE_EXACT_PATHS
+        or text.startswith(FULL_GATE_PREFIXES)
+        or path.suffix in FULL_GATE_EXTENSIONS
+    ):
+        return None, f"full-gate-path:{text}"
     kind = _document_path_kind(path)
     if kind is None:
-        text = path.as_posix()
-        if (
-            text in FULL_GATE_EXACT_PATHS
-            or text.startswith(FULL_GATE_PREFIXES)
-            or path.suffix in FULL_GATE_EXTENSIONS
-        ):
-            return None, f"full-gate-path:{text}"
         return None, f"unknown-path-or-type:{text}"
 
     absolute = ROOT / path
