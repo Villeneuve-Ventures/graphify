@@ -27,7 +27,10 @@ def test_quality_checks_use_locked_environment_and_fail_closed(tmp_path, workflo
     install = next(step for step in steps if step.get("name") == "Install dependencies")
     assert install["run"] == "uv sync --all-extras --frozen"
     assert steps.index(install) < steps.index(step)
-    assert step == {"name": name, "run": command}
+    expected = {"name": name, "run": command}
+    if workflow == "ci.yml":
+        expected["if"] = "${{ needs.validation-route.outputs.lane == 'full' }}"
+    assert step == expected
     assert "continue-on-error" not in job
     # Run the workflow shell with a failing tool, without another environment sync.
     uv = tmp_path / "uv"

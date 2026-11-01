@@ -29,6 +29,34 @@ the policy does not authorize its own approval, commit, publication, merge, or
 cleanup. Keep the detailed policy, acceptance packet, and complete candidate
 manifest available to every independent reviewer.
 
+## Validation routing
+
+Run `make fast-feedback` before claiming PR readiness. It inspects the complete
+base-to-HEAD, staged, unstaged, and non-ignored untracked change set and emits a
+versioned, snapshot-bound routing receipt. A successful `editorial-docs` or
+`contract-docs` receipt is final local validation only when every selected check
+passes. `make docs-check` and dry-run receipts are not final validation.
+
+Editorial docs run complete-set whitespace/conflict checks and the existing
+README naming guard. Contract docs add tests directly bound to the affected
+policy or template. This does not validate prose accuracy or links, activate a
+protected workflow, or replace an explicitly required protected review.
+Generated/runtime skills, skill fragments, corpora and fixtures are not ordinary
+docs. Any mixed, unknown, unsafe, or incompletely inspected change requires the
+full `make review-ready` path. Missing base evidence cannot admit a docs lane.
+The full command retains complete pytest selection, with whitespace preflights;
+CI retains separate generated-skill, optimized-verifier, install and native smoke
+checks for full changes. Branch pushes and manual CI dispatch always run full.
+
+Use `BASE=<ref>` for a different PR base (default `origin/v8`). Preserve the
+complete receipt; changed inputs, modes, Git identity or environment invalidate
+applicable evidence. Do not use pytest lastfailed state to select docs checks.
+Protected changes retain their independently applicable acceptance requirements.
+Routed and direct full checks share checkout-bound environment admission. An
+external environment requires its Python plus explicit `VALIDATION_ENVIRONMENT`
+selection; ambient uv overrides cannot select it. See
+[validation routing](docs/validation-routing.md) for admission and setup rules.
+
 ## Local resource retention
 
 Follow [the local resource retention rule](docs/local-resource-retention.md) when

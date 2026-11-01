@@ -32,10 +32,18 @@ def test_draft_transition_cancels_only_the_same_pull_requests_ci():
                 "(github.event.pull_request.user.login != 'dependabot[bot]' && "
                 "github.event.pull_request.draft == false)) }}"
             )
-        else:
+        elif name == "validation-route":
             assert job["if"] == draft_condition
+        else:
+            assert job["if"] == (
+                "${{ needs.validation-route.outputs.lane == 'full' && "
+                "(github.event_name != 'pull_request' || "
+                "(github.event.pull_request.user.login != 'dependabot[bot]' && "
+                "github.event.pull_request.draft == false)) }}"
+            )
 
 
+@pytest.mark.parametrize("lane", ["full", "editorial-docs", "contract-docs", ""])
 @pytest.mark.parametrize("event,author,draft,expected", [
     ("pull_request", "human", False, True),
     ("pull_request", "human", True, False),
@@ -44,7 +52,7 @@ def test_draft_transition_cancels_only_the_same_pull_requests_ci():
     ("push", "dependabot[bot]", True, True),
     ("workflow_dispatch", "dependabot[bot]", True, True),
 ])
-def test_normal_ci_routes_humans_and_keeps_dependabot_in_opt_in_lane(event, author, draft, expected):
+def test_normal_ci_routes_humans_and_keeps_dependabot_in_opt_in_lane(event, author, draft, expected, lane):
     workflow = yaml.load(
         (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(),
         Loader=yaml.BaseLoader,
@@ -52,6 +60,7 @@ def test_normal_ci_routes_humans_and_keeps_dependabot_in_opt_in_lane(event, auth
     for name, job in workflow["jobs"].items():
         condition = job["if"].removeprefix("${{").removesuffix("}}").strip()
         for key, value in {
+            "needs.validation-route.outputs.lane": lane,
             "github.event_name": event,
             "github.event.pull_request.user.login": author,
             "github.event.pull_request.draft": draft,
@@ -61,4 +70,5 @@ def test_normal_ci_routes_humans_and_keeps_dependabot_in_opt_in_lane(event, auth
             condition = condition.replace(key, repr(value))
         # These guards use only comparisons and boolean operators shared with Python.
         condition = condition.replace("&&", " and ").replace("||", " or ")
-        assert eval(condition, {"__builtins__": {}}) is expected, name
+        selected = expected and (name in {"validation-route", "quality"} or lane == "full")
+        assert eval(condition, {"__builtins__": {}}) is selected, name
