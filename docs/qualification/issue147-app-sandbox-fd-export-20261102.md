@@ -61,6 +61,11 @@ container was selected or removed.
 | Signed sandbox sender | `8e933562d8441d647eda68bbc39a151b01dc0c47a88fb18348f6c1d4ea1b1e21` |
 | Complete native receipt | `e87553525dea8fd5460cc8e1dc65cfbb59ca71c2ce538178b062db69e5197f67` |
 
+These hashes identify the original measured inputs. Subsequent runner changes
+retain diagnostics on command timeout or launch failure and were checked with
+mocked commands only. The native experiment was not rerun; the retained failed
+counterexample remains bound to the original source hashes above.
+
 The machine-local retention packet is
 `graphify-app-sandbox-fd-probe-20261102-01a18acd`, with `native-01/receipt.json`,
 two per-case receipts, complete command/signing output and the signed bundles.
