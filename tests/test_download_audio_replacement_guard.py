@@ -159,7 +159,8 @@ def test_audio_normal_download_is_private_then_published(tmp_path, downloader, e
     assert downloaded.is_relative_to(downloader.private_root)
     assert not downloaded.exists()
     options = dict(downloader.options[0])
-    assert options.pop("outtmpl") == str(downloaded.parent / f"{STEM}.%(ext)s")
+    outtmpl = options.pop("outtmpl")
+    assert outtmpl == str(downloaded.parent / f"{STEM}.%(ext)s")
     assert options == {
         "format": "bestaudio[ext=m4a]/bestaudio/best", "quiet": True,
         "no_warnings": True, "noplaylist": True, "postprocessors": [],

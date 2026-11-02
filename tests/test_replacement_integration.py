@@ -18,9 +18,81 @@ def registration(tmp_path):
     journal.write_text(json.dumps({'request_digest': digest, 'state': 'COMMITTED'}))
     marker = parent / replacement.GUARD
     marker.write_text(json.dumps({'schema': 1, 'entries': {
-        'graphify-out': {'journal': str(journal), 'digest': digest, 'role': 'canonical'},
+        'graphify-out': {'journal': str(journal), 'digest': digest, 'role': 'target'},
     }}))
     return parent, marker, journal
+
+
+@pytest.mark.parametrize('change', ['missing-role', 'unknown-role', 'non-string-role',
+                                    'null-entry', 'list-entry', 'non-object-journal'])
+@pytest.mark.parametrize('authority', [False, True])
+def test_malformed_selected_registration_refuses_before_creation(registration, change, authority):
+    import json
+
+    parent, marker, journal = registration
+    record = json.loads(marker.read_text())
+    entry = record['entries']['graphify-out']
+    if change == 'missing-role':
+        del entry['role']
+    elif change == 'unknown-role':
+        entry['role'] = 'canonical'
+    elif change == 'non-string-role':
+        entry['role'] = ['archive']
+    elif change == 'null-entry':
+        record['entries']['graphify-out'] = None
+    elif change == 'list-entry':
+        record['entries']['graphify-out'] = []
+    else:
+        journal.write_text('[]')
+    marker.write_text(json.dumps(record))
+    before = marker.read_bytes(), journal.read_bytes()
+    target = parent / 'graphify-out' / 'new-child'
+    token = replacement._AUTHORITY.set((str(journal), entry['digest'])) if authority else None
+    try:
+        with pytest.raises(tx.PendingTransactionError):
+            with tx.pin_output(target, create=True):
+                pass
+    finally:
+        if token is not None:
+            replacement._AUTHORITY.reset(token)
+    assert (marker.read_bytes(), journal.read_bytes()) == before
+    assert not target.exists()
+
+
+@pytest.mark.parametrize('failure', [tx.PendingTransactionError, KeyboardInterrupt])
+def test_pin_output_closes_directory_after_late_admission_failure(tmp_path, monkeypatch, failure):
+    import contextlib
+    import os
+
+    target = tmp_path / 'output'
+    target.mkdir()
+    opened = []
+    real_open = os.open
+    calls = 0
+
+    def observe(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == target:
+            opened.append(fd)
+        return fd
+
+    def admit(_path):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise failure('late replacement registration')
+
+    monkeypatch.setattr(os, 'open', observe)
+    monkeypatch.setattr(tx, 'require_ordinary_output', admit)
+    with pytest.raises(failure, match='late replacement registration'):
+        tx.pin_output(target)
+    assert len(opened) == 1
+    try:
+        with pytest.raises(OSError):
+            os.fstat(opened[0])
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(opened[0])
 
 
 def test_guard_marker_reads_are_relative_to_the_pinned_parent(registration, monkeypatch):

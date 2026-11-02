@@ -717,6 +717,8 @@ def pin_output(
     Read admission (``mutation=False``) is retained for lock rechecks. Creation
     always requires mutating admission, even when read admission was requested.
     Replacement guards can refuse either admission before returning a capability.
+    Post-construction admission or validation failures close the directory before
+    propagating the error.
 
     Windows reads use identity-pinned, handle-relative admission. Mutation is
     intentionally blocked until the final replace/unlink primitive is proven
@@ -756,19 +758,18 @@ def pin_output(
         path.resolve(strict=True), OutputIdentity(info.st_dev, info.st_ino), fd,
         mutation=mutation or create,
     )
-    if mutation or create:
-        try:
-            require_ordinary_output(capability.path)
-        except ManagedWorkspaceOutputError as exc:
-            capability.close()
-            raise ManagedAuthorityError(str(exc)) from exc
-    capability.validate()
-    if mutation or create:
-        try:
+    try:
+        if mutation or create:
+            try:
+                require_ordinary_output(capability.path)
+            except ManagedWorkspaceOutputError as exc:
+                raise ManagedAuthorityError(str(exc)) from exc
+        capability.validate()
+        if mutation or create:
             _reject_portable_authority(capability)
-        except BaseException:
-            capability.close()
-            raise
+    except BaseException:
+        capability.close()
+        raise
     return capability
 
 

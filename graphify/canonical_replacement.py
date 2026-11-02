@@ -490,11 +490,17 @@ def _guard_path(path, *, mutation=True):
             _require(isinstance(record, dict) and record.get("schema") == 1
                      and isinstance(record.get("entries"), dict), "malformed replacement guard")
             name = path.relative_to(parent).parts[0]
-            entry = record["entries"].get(name)
-            if entry is None:
+            if name not in record["entries"]:
                 continue
+            entry = record["entries"][name]
+            _require(isinstance(entry, dict) and set(entry) == {"journal", "digest", "role"}
+                     and isinstance(entry["role"], str) and entry["role"] in {"target", "archive"}
+                     and isinstance(entry["journal"], str) and Path(entry["journal"]).is_absolute()
+                     and isinstance(entry["digest"], str) and bool(entry["digest"]),
+                     "malformed replacement guard entry")
             journal = _load(entry["journal"])
-            _require(journal.get("request_digest") == entry.get("digest"), "replacement guard changed")
+            _require(isinstance(journal, dict) and journal.get("request_digest") == entry["digest"],
+                     "replacement guard changed")
             if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
                 continue
             if entry.get("role") == "archive":
