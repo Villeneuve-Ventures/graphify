@@ -392,7 +392,7 @@ def test_workflow_preserves_scope_and_observes_actual_tolerated_results():
     steps = job['steps']
     python = next(s for s in steps if s.get('id') == 'reporting_python')
     uv = next(s for s in steps if s.get('name') == 'Install uv')
-    assert python['with']['python-version'] == '3.14'
+    assert python['with']['python-version'] == '3.14.10'
     assert steps.index(python) < steps.index(uv)
     install = next(s for s in steps if s.get('name') == 'Install dependencies')
     assert install['run'] == 'uv sync --frozen'

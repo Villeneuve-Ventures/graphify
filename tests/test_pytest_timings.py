@@ -455,7 +455,7 @@ def test_finalizer_exit_status_is_observed(suite):
 def test_workflow_keeps_full_suite_and_uploads_failed_run_diagnostics():
     workflow = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["test"]
-    assert job["strategy"]["matrix"] == {"python-version": ["3.14"], "shard": ["1", "2", "3", "4"]}
+    assert job["strategy"]["matrix"] == {"python-version": ["3.14.10"], "shard": ["1", "2", "3", "4"]}
     steps = {step.get("name"): step for step in job["steps"]}
     assert steps["Install dependencies"]["run"] == "uv sync --all-extras --frozen"
     assert "git version 2.55.0" in steps["Install acceptance-pinned Git 2.55.0"]["run"]
