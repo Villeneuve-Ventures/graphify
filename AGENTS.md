@@ -1,3 +1,17 @@
+## Contract navigation
+
+Read only the section needed for the task before selecting changes or proof:
+
+| Before changing | Read |
+| --- | --- |
+| Graph construction, edge traversal, clustering, reports or serialization | [Graph representation](docs/agent-contracts.md#graph-representation) |
+| Extraction completion, incremental replacement or source ownership | [Source contributions](docs/agent-contracts.md#source-contributions) |
+| Platform skills, generated instructions or install/remove integration | [Instruction source ownership](docs/agent-contracts.md#instruction-source-ownership) |
+
+These sections route to owning source and existing tests; they grant no authority
+to implement outstanding work. Keep repository maintenance guidance outside the
+installer-owned `## graphify` section below. Global instructions still apply.
+
 ## Protected changes
 
 Use [the protected-change review policy](docs/protected-change-review.md) only when
