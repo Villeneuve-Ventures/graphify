@@ -90,14 +90,21 @@ def _read(path, limit=MAX_BYTES, *, parent_fd=None, expected=None):
         os.close(fd)
 
 
-def _load(path):
+def _load(path, *, parent=None):
+    """Decode bounded JSON, optionally relative to an already pinned directory."""
     def pairs(items):
         result = {}
         for key, value in items:
             _require(key not in result, "duplicate replacement JSON field")
             result[key] = value
         return result
-    return json.loads(_read(path, limit=MAX_BYTES), object_pairs_hook=pairs,
+    if parent is None:
+        data = _read(path, limit=MAX_BYTES)
+    elif os.name == "nt":
+        data = tx._read_bytes(parent, path, MAX_BYTES)
+    else:
+        data = _read(path, limit=MAX_BYTES, parent_fd=parent.fd)
+    return json.loads(data, object_pairs_hook=pairs,
                       parse_constant=lambda _: _require(False, "nonfinite replacement JSON"))
 
 
@@ -408,37 +415,97 @@ def _identity_at(path):
         return None
 
 
+@contextlib.contextmanager
+def _guard_parent(parent):
+    """Pin an existing guard ancestor without recursively invoking output admission.
+
+    Missing ancestors yield None so their existing parents can still fence an
+    absent target. Other admission failures propagate. Directory aliases retain
+    their selected physical mapping through the read; no mutation is performed.
+    """
+    try:
+        resolved = parent.resolve(strict=True)
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = tx._open_windows_read_directory(resolved) if os.name == "nt" else os.open(resolved, flags)
+    except FileNotFoundError:
+        yield None
+        return
+    try:
+        info = os.fstat(fd)
+        cap = tx.OutputCapability(resolved, tx.OutputIdentity(info.st_dev, info.st_ino), fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    with cap:
+        cap.validate()
+        _require(parent.resolve(strict=True) == resolved, "replacement guard parent changed")
+        yield cap
+        cap.validate()
+        _require(parent.resolve(strict=True) == resolved, "replacement guard parent changed")
+
+
+def _guard_entry(cap):
+    """Observe a marker with host filesystem primitives, independent of mutation adapters."""
+    if os.name == "nt":
+        return tx._entry_stat(cap, GUARD)
+    try:
+        info = os.stat(GUARD, dir_fd=cap.fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    _require(stat.S_ISREG(info.st_mode), "unsafe non-regular replacement guard")
+    return info
+
+
 def _guard_path(path, *, mutation=True):
-    """Fail closed at parent registrations, including absent/descendant paths."""
+    """Read ancestor registrations through pinned directories, including absent targets."""
     path = Path(os.path.abspath(path))
     for parent in path.parents:
-        marker = parent / GUARD
-        if not os.path.lexists(marker):
-            continue
-        record = _load(marker)
-        _require(isinstance(record, dict) and record.get("schema") == 1
-                 and isinstance(record.get("entries"), dict), "malformed replacement guard")
-        name = path.relative_to(parent).parts[0]
-        entry = record["entries"].get(name)
-        if entry is None:
-            continue
-        journal = _load(entry["journal"])
-        _require(journal.get("request_digest") == entry.get("digest"), "replacement guard changed")
-        if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
-            continue
-        if entry.get("role") == "archive":
-            _require(not mutation, "preserved graph archive is read-only")
-        else:
-            _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
-                     "canonical replacement is incomplete")
+        with _guard_parent(parent) as cap:
+            if cap is None:
+                continue
+            before = _guard_entry(cap)
+            if before is None:
+                continue
+            _require(before.st_nlink == 1 and before.st_size <= MAX_BYTES,
+                     "unsafe or oversized replacement file")
+            record = _load(GUARD, parent=cap)
+            after = _guard_entry(cap)
+            _require(after is not None and _stable(after) == _stable(before), "replacement guard changed")
+            cap.validate()
+            _require(isinstance(record, dict) and record.get("schema") == 1
+                     and isinstance(record.get("entries"), dict), "malformed replacement guard")
+            name = path.relative_to(parent).parts[0]
+            entry = record["entries"].get(name)
+            if entry is None:
+                continue
+            journal = _load(entry["journal"])
+            _require(journal.get("request_digest") == entry.get("digest"), "replacement guard changed")
+            if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
+                continue
+            if entry.get("role") == "archive":
+                _require(not mutation, "preserved graph archive is read-only")
+            else:
+                _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
+                         "canonical replacement is incomplete")
 
 
 def guard_output(path, *, mutation=True):
-    for candidate in {os.path.abspath(path), os.path.realpath(path)}:
-        try:
+    """Refuse disallowed replacement/archive access without filesystem mutation.
+
+    Both lexical and resolved aliases are checked, including descendants and
+    absent targets. Markers are read relative to pinned ancestors and revalidated;
+    malformed, replaced or unavailable registrations raise PendingTransactionError.
+    Return None if admission succeeds; mutation=False permits archive reads.
+    This preflight does not grant maintenance authority or fence arbitrary writers.
+    """
+    try:
+        absolute = os.path.abspath(path)
+        resolved = os.path.realpath(absolute)
+        for candidate in dict.fromkeys((absolute, resolved)):
             _guard_path(candidate, mutation=mutation)
-        except (KeyError, TypeError, ValueError, OSError) as exc:
-            raise tx.PendingTransactionError("malformed or unavailable replacement guard") from exc
+        _require(os.path.realpath(absolute) == resolved, "replacement guard path changed")
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise tx.PendingTransactionError("malformed or unavailable replacement guard") from exc
 
 
 @contextlib.contextmanager

@@ -96,6 +96,10 @@ This derived profile is ineligible for ordinary checkpoint capture; it does not
 extend checkpoint-store semantics.
 
 Parent guards fence absent creation as well as existing readers and writers.
+Guard markers are read relative to pinned ancestor directories and checked for
+entry and parent substitution. Both lexical and resolved aliases are checked;
+a changed physical target refuses admission. These checks perform no mutation
+and do not enable the maintenance backend.
 Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases. Older strict readers reject the new binding.
 Maintenance exclusion, including legacy restart inhibition, remains essential:
