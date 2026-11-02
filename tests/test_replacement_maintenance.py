@@ -27,16 +27,35 @@ def operation():
 def identity():
     binding = maintenance.TargetBinding((1, 10), (1, 20), "c" * 64)
     return maintenance.GrantIdentity("enrollment-one", "boot-one", 1,
-                                     "coordinator-incarnation-one", "d" * 64, binding)
+                                     "mutator-incarnation-one", "d" * 64, binding,
+                                     "controller-incarnation-one", "6" * 64)
 
 
 def registry_for(operation, identity, persist):
     return maintenance.ModelRegistry(operation.target, identity.enrollment, identity.boot,
-                                     identity.runtime_sha256, identity.target_binding, persist)
+                                     identity.runtime_sha256, identity.target_binding, persist,
+                                     controller=identity.controller, policy_sha256=identity.policy_sha256)
+
+
+def admission_for(operation, identity):
+    return maintenance.BrokerAdmission(operation.sha256, identity, exclusive_mutator=True,
+                                       trusted_runtime=True, protected_namespace=True,
+                                       authenticated_peer=True, data_only_transport=True,
+                                       workers_without_capabilities=True, no_children=True)
+
+
+def grant(registry, operation, identity):
+    return registry.grant(operation, identity, admission_for(operation, identity))
+
+
+def retirement_for(handle):
+    return maintenance.BrokerRetirement(handle.operation.sha256, handle.identity,
+                                        mutator_exited=True, requests_quiesced=True,
+                                        capabilities_closed=True, workers_without_capabilities=True)
 
 
 def retire(registry, handle):
-    registry.confirm_exit(handle, maintenance.CohortExit(handle.operation.sha256, handle.identity))
+    registry.confirm_retirement(handle, retirement_for(handle))
     registry.withdraw_access(handle)
 
 
@@ -176,13 +195,13 @@ def test_rollback_selectors_are_distinct_and_complete(operation):
 def test_different_journals_compete_for_one_target(operation, identity):
     saved = []
     registry = registry_for(operation, identity, saved.append)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     request = json.loads(operation.request_json)
     request["journal"] = "/enrolled/control/other.json"
     other = maintenance.OperationDescriptor.from_request(
         "execute", request, preview_sha256=operation.preview_sha256, seal_sha256=operation.seal_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
-        registry.grant(other, replace(identity, epoch=2, coordinator="competitor"))
+        grant(registry, other, replace(identity, epoch=2, mutator="competitor"))
     assert registry.snapshot.operation == handle.operation
     assert [item.state for item in saved] == ["GRANTING", "ACTIVE"]
 
@@ -197,15 +216,153 @@ def test_different_journals_compete_for_one_target(operation, identity):
 def test_changed_grant_context_cannot_start(operation, identity, change):
     registry = registry_for(operation, identity, lambda _: None)
     with pytest.raises(maintenance.MaintenanceContractError, match="binding or epoch"):
-        registry.grant(operation, replace(identity, **change))
+        grant(registry, operation, replace(identity, **change))
     assert registry.snapshot.state == "HELD"
+
+
+@pytest.mark.parametrize("change", [{"controller": "other-controller"}, {"policy_sha256": "8" * 64}])
+def test_broker_policy_and_controller_are_pinned_at_admission(operation, identity, change):
+    registry = registry_for(operation, identity, lambda _: None)
+    changed = replace(identity, **change)
+    with pytest.raises(maintenance.MaintenanceContractError, match="binding or epoch"):
+        grant(registry, operation, changed)
+    assert registry.snapshot.admission is None
+
+
+@pytest.mark.parametrize("field", [
+    "exclusive_mutator", "trusted_runtime", "protected_namespace", "authenticated_peer",
+    "data_only_transport", "workers_without_capabilities", "no_children",
+])
+@pytest.mark.parametrize("value", [False, None, 1])
+def test_missing_broker_boundary_evidence_cannot_start(operation, identity, field, value):
+    saved = []
+    registry = registry_for(operation, identity, saved.append)
+    witness = replace(admission_for(operation, identity), **{field: value})
+    with pytest.raises(maintenance.MaintenanceContractError, match="broker-only admission"):
+        registry.grant(operation, identity, witness)
+    assert not saved
+    assert registry.snapshot.state == "HELD"
+
+
+@pytest.mark.parametrize("field", ["operation_sha256", "identity"])
+def test_admission_evidence_cannot_be_replayed_for_another_operation(operation, identity, field):
+    registry = registry_for(operation, identity, lambda _: None)
+    value = "8" * 64 if field == "operation_sha256" else replace(identity, mutator="other")
+    with pytest.raises(maintenance.MaintenanceContractError, match="broker-only admission"):
+        registry.grant(operation, identity, replace(admission_for(operation, identity), **{field: value}))
+    assert registry.snapshot.identity is None
+
+
+@pytest.mark.parametrize("field", [
+    "mutator_exited", "requests_quiesced", "capabilities_closed", "workers_without_capabilities",
+])
+def test_a_reap_without_complete_capability_retirement_cannot_release(operation, identity, field):
+    registry = registry_for(operation, identity, lambda _: None)
+    handle = grant(registry, operation, identity)
+    witness = replace(retirement_for(handle), **{field: False})
+    with pytest.raises(maintenance.MaintenanceContractError, match="complete broker retirement"):
+        registry.confirm_retirement(handle, witness)
+    assert registry.snapshot.state == "RECOVERY_HELD"
+    assert registry.snapshot.retirement is None
+    with pytest.raises(maintenance.MaintenanceContractError, match="exit must precede"):
+        registry.withdraw_access(handle)
+    with pytest.raises(maintenance.MaintenanceContractError, match="post-exit"):
+        registry.validate_terminal(handle, terminal_for(handle))
+    with pytest.raises(maintenance.MaintenanceContractError, match="cohort"):
+        grant(registry, operation, replace(identity, epoch=2, mutator="successor"))
+
+
+def test_controller_restart_retains_uncertain_predecessor_and_exact_selectors(operation, identity):
+    registry = registry_for(operation, identity, lambda _: None)
+    handle = grant(registry, operation, identity)
+    registry.restart("controller-two")
+    successor = replace(identity, controller="controller-two", epoch=2, mutator="successor")
+    assert registry.snapshot.epoch == 1
+    assert registry.snapshot.identity == identity
+    assert registry.snapshot.admission == admission_for(operation, identity)
+    with pytest.raises(maintenance.MaintenanceContractError, match="cohort"):
+        grant(registry, operation, successor)
+    retire(registry, handle)
+    changed = replace(operation, action="resume", journal_sha256="7" * 64, seal_sha256="8" * 64)
+    with pytest.raises(maintenance.MaintenanceContractError, match="data selectors"):
+        grant(registry, changed, successor)
+    resumed = replace(operation, action="resume", journal_sha256="7" * 64)
+    grant(registry, resumed, successor)
+    assert registry.snapshot.mutator_incarnations == (identity.mutator, successor.mutator)
+    assert registry.snapshot.controller_incarnations == (identity.controller, "controller-two")
+
+
+def test_restart_cannot_erase_first_writer_history_or_reuse_a_release(operation, identity):
+    registry = registry_for(operation, identity, lambda _: None)
+    handle = grant(registry, operation, identity)
+    terminal = prepare_release(registry, handle)
+    record = registry.release(handle)
+    registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+    registry.restart("controller-two")
+    assert registry.snapshot.writers_admitted
+    assert registry.snapshot.release == record
+    with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
+        grant(registry, operation, replace(identity, controller="controller-two", epoch=2, mutator="successor"))
+    with pytest.raises(maintenance.MaintenanceContractError, match="retired controller"):
+        registry.release(handle)
+    with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
+        registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+    with pytest.raises(maintenance.MaintenanceContractError, match="fresh controller"):
+        registry.restart(identity.controller)
+
+
+def test_retired_mutator_incarnation_cannot_be_reused(operation, identity):
+    registry = registry_for(operation, identity, lambda _: None)
+    handle = grant(registry, operation, identity)
+    retire(registry, handle)
+    with pytest.raises(maintenance.MaintenanceContractError, match="already used"):
+        grant(registry, operation, replace(identity, epoch=2))
+
+
+@pytest.mark.parametrize("failed_state", ["GRANTING", "ACTIVE"])
+def test_uncertain_grant_persistence_retains_the_attempted_mutator(operation, identity, failed_state):
+    def persist(state):
+        if state.state == failed_state:
+            raise OSError("uncertain durable write")
+
+    registry = registry_for(operation, identity, persist)
+    with pytest.raises(OSError, match="uncertain durable write"):
+        grant(registry, operation, identity)
+    registry.restart("controller-two")
+    assert registry.snapshot.epoch == identity.epoch
+    assert registry.snapshot.identity == identity
+    assert registry.snapshot.mutator_incarnations == (identity.mutator,)
+    with pytest.raises(maintenance.MaintenanceContractError, match="cohort"):
+        grant(registry, operation, replace(identity, controller="controller-two", epoch=2, mutator="successor"))
+
+
+def test_uncertain_restart_persistence_cannot_restore_a_prior_release(operation, identity):
+    def persist(state):
+        if state.controller == "controller-two":
+            raise OSError("uncertain restart acknowledgment")
+
+    registry = registry_for(operation, identity, persist)
+    handle = grant(registry, operation, identity)
+    terminal = prepare_release(registry, handle)
+    record = registry.release(handle)
+    registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+    with pytest.raises(OSError, match="restart acknowledgment"):
+        registry.restart("controller-two")
+    assert registry.snapshot.state == "RECOVERY_HELD"
+    assert registry.snapshot.controller == "controller-two"
+    assert registry.snapshot.writers_admitted
+    assert registry.snapshot.release == record
+    with pytest.raises(maintenance.MaintenanceContractError, match="retired controller"):
+        registry.release(handle)
+    with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
+        registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
 
 
 def test_copying_handle_cannot_transfer_a_grant(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     with pytest.raises(maintenance.MaintenanceContractError, match="copied"):
-        registry.confirm_exit(copy(handle), maintenance.CohortExit(operation.sha256, identity))
+        registry.confirm_retirement(copy(handle), retirement_for(handle))
     assert registry.snapshot.state == "ACTIVE"
 
 
@@ -213,7 +370,7 @@ def test_copying_handle_cannot_transfer_a_grant(operation, identity):
 def test_context_exit_never_releases_or_regrants(operation, identity, failure):
     registry = registry_for(operation, identity, lambda _: None)
     try:
-        with registry.grant(operation, identity):
+        with grant(registry, operation, identity):
             if failure:
                 raise failure
     except RuntimeError:
@@ -221,23 +378,23 @@ def test_context_exit_never_releases_or_regrants(operation, identity, failure):
     assert registry.snapshot.state == "RECOVERY_HELD"
     assert registry.snapshot.release is None
     with pytest.raises(maintenance.MaintenanceContractError, match="cohort"):
-        registry.grant(operation, replace(identity, epoch=2, coordinator="successor"))
+        grant(registry, operation, replace(identity, epoch=2, mutator="successor"))
 
 
 def test_retirement_requires_exact_exit_and_access_withdrawal(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     handle.close()  # A timeout/closed connection is not process-exit evidence.
     with pytest.raises(maintenance.MaintenanceContractError, match="exit must precede"):
         registry.withdraw_access(handle)
     with pytest.raises(maintenance.MaintenanceContractError, match="exact cohort"):
-        registry.confirm_exit(handle, maintenance.CohortExit(operation.sha256, replace(identity, coordinator="other")))
-    registry.confirm_exit(handle, maintenance.CohortExit(operation.sha256, identity))
+        registry.confirm_retirement(handle, replace(retirement_for(handle), identity=replace(identity, mutator="other")))
+    registry.confirm_retirement(handle, retirement_for(handle))
     with pytest.raises(maintenance.MaintenanceContractError, match="cohort"):
-        registry.grant(operation, replace(identity, epoch=2, coordinator="successor"))
+        grant(registry, operation, replace(identity, epoch=2, mutator="successor"))
     registry.withdraw_access(handle)
-    successor = registry.grant(replace(operation, action="resume", journal_sha256="7" * 64),
-                               replace(identity, epoch=2, coordinator="successor"))
+    successor = grant(registry, replace(operation, action="resume", journal_sha256="7" * 64),
+                               replace(identity, epoch=2, mutator="successor"))
     with pytest.raises(maintenance.MaintenanceContractError, match="stale"):
         handle.close()
     assert registry.snapshot.identity == successor.identity
@@ -245,7 +402,7 @@ def test_retirement_requires_exact_exit_and_access_withdrawal(operation, identit
 
 def test_retired_operation_cannot_adopt_a_different_request(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     retire(registry, handle)
     request = json.loads(operation.request_json)
     request["journal"] += ".other"
@@ -253,22 +410,22 @@ def test_retired_operation_cannot_adopt_a_different_request(operation, identity)
         "resume", request, preview_sha256=operation.preview_sha256, seal_sha256=operation.seal_sha256,
         journal_sha256="7" * 64)
     with pytest.raises(maintenance.MaintenanceContractError, match="request changed"):
-        registry.grant(other, replace(identity, epoch=2, coordinator="successor"))
+        grant(registry, other, replace(identity, epoch=2, mutator="successor"))
 
 
 def test_retired_operation_cannot_change_its_seal(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     retire(registry, handle)
     changed = replace(operation, action="resume", journal_sha256="7" * 64, seal_sha256="8" * 64)
     with pytest.raises(maintenance.MaintenanceContractError, match="data selectors changed"):
-        registry.grant(changed, replace(identity, epoch=2, coordinator="successor"))
+        grant(registry, changed, replace(identity, epoch=2, mutator="successor"))
 
 
 def test_release_requires_exit_withdrawal_and_independent_validation(operation, identity):
     saved = []
     registry = registry_for(operation, identity, saved.append)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     terminal = terminal_for(handle)
     with pytest.raises(maintenance.MaintenanceContractError, match="post-exit"):
         registry.validate_terminal(handle, terminal)
@@ -290,7 +447,7 @@ def test_release_requires_exit_withdrawal_and_independent_validation(operation, 
 
 def test_release_retry_uses_separate_record_after_generation_two(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     terminal = prepare_release(registry, handle)
     record = registry.release(handle)
     assert registry.admit_client(identity.runtime_sha256, current_for(terminal, 2)) == record
@@ -303,7 +460,7 @@ def test_release_retry_uses_separate_record_after_generation_two(operation, iden
     with pytest.raises(maintenance.MaintenanceContractError, match="runtime"):
         registry.admit_client("8" * 64, current_for(terminal, 2))
     with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
-        registry.grant(operation, replace(identity, epoch=2, coordinator="later"))
+        grant(registry, operation, replace(identity, epoch=2, mutator="later"))
 
 
 def test_rollback_is_terminal_held_service(operation, identity):
@@ -311,7 +468,7 @@ def test_rollback_is_terminal_held_service(operation, identity):
         "rollback", json.loads(operation.request_json), journal_sha256="1" * 64,
         quarantine="/enrolled/quarantine/new", quarantine_parent=(1, 40))
     registry = registry_for(rollback, identity, lambda _: None)
-    handle = registry.grant(rollback, identity)
+    handle = grant(registry, rollback, identity)
     retire(registry, handle)
     with pytest.raises(maintenance.MaintenanceContractError, match="rollback cannot release"):
         registry.validate_terminal(handle, terminal_for(handle))
@@ -320,7 +477,7 @@ def test_rollback_is_terminal_held_service(operation, identity):
     with pytest.raises(maintenance.MaintenanceContractError, match="healthy release"):
         registry.release(handle)
     with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
-        registry.grant(operation, replace(identity, epoch=2, coordinator="later"))
+        grant(registry, operation, replace(identity, epoch=2, mutator="later"))
 
 
 @pytest.mark.parametrize("action", ["execute", "resume"])
@@ -328,7 +485,7 @@ def test_forward_operation_cannot_certify_an_unselected_rollback(operation, iden
     selected = operation if action == "execute" else replace(
         operation, action="resume", journal_sha256="7" * 64)
     registry = registry_for(selected, identity, lambda _: None)
-    handle = registry.grant(selected, identity)
+    handle = grant(registry, selected, identity)
     retire(registry, handle)
     with pytest.raises(maintenance.MaintenanceContractError, match="forward terminal outcome"):
         registry.validate_terminal(handle, terminal_for(handle, outcome="rolled-back-unrecovered"))
@@ -337,7 +494,7 @@ def test_forward_operation_cannot_certify_an_unselected_rollback(operation, iden
 
 def test_committed_replacement_cannot_reuse_preserved_directory_identity(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     retire(registry, handle)
     wrong = replace(terminal_for(handle), output_identity=identity.target_binding.old_output_identity)
     with pytest.raises(maintenance.MaintenanceContractError, match="replacement output identity"):
@@ -350,7 +507,7 @@ def test_rollback_requires_the_original_directory_identity(operation, identity):
         "rollback", json.loads(operation.request_json), journal_sha256="1" * 64,
         quarantine="/enrolled/quarantine/new", quarantine_parent=(1, 40))
     registry = registry_for(rollback, identity, lambda _: None)
-    handle = registry.grant(rollback, identity)
+    handle = grant(registry, rollback, identity)
     retire(registry, handle)
     wrong = replace(terminal_for(handle, outcome="rolled-back-unrecovered"), output_identity=(1, 99))
     with pytest.raises(maintenance.MaintenanceContractError, match="rollback restored output identity"):
@@ -367,13 +524,13 @@ def test_incomplete_rollback_cannot_change_action_or_retention_selection(operati
         "rollback", json.loads(operation.request_json), journal_sha256="1" * 64,
         quarantine="/enrolled/quarantine/new", quarantine_parent=(1, 40), new_tree_sha256="2" * 64)
     registry = registry_for(rollback, identity, lambda _: None)
-    handle = registry.grant(rollback, identity)
+    handle = grant(registry, rollback, identity)
     retire(registry, handle)
     changed = operation if change == "forward" else replace(rollback, **change)
-    successor = replace(identity, epoch=2, coordinator="successor")
+    successor = replace(identity, epoch=2, mutator="successor")
     with pytest.raises(maintenance.MaintenanceContractError, match="incomplete rollback selectors"):
-        registry.grant(changed, successor)
-    assert registry.grant(rollback, successor).operation == rollback
+        grant(registry, changed, successor)
+    assert grant(registry, rollback, successor).operation == rollback
 
 
 @pytest.mark.parametrize("failed_state", ["GRANTING", "ACTIVE", "RELEASED", "writer-admission"])
@@ -384,13 +541,12 @@ def test_persistence_failure_never_admits_a_writer(operation, identity, failed_s
 
     registry = registry_for(operation, identity, persist)
     with pytest.raises(OSError, match="acknowledgment"):
-        handle = registry.grant(operation, identity)
+        handle = grant(registry, operation, identity)
         terminal = prepare_release(registry, handle)
         registry.release(handle)
         registry.admit_client(identity.runtime_sha256, current_for(terminal))
     assert registry.snapshot.state == "RECOVERY_HELD"
-    # A failed acknowledgment cannot erase an attempted writer-admission latch.
-    assert registry.snapshot.writers_admitted is (failed_state == "writer-admission")
+    assert registry.snapshot.writers_admitted == (failed_state == "writer-admission")
     with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
         registry.admit_client(identity.runtime_sha256, maintenance.CurrentPublication((1, 30), "binding", 2, "9" * 64))
 
@@ -406,11 +562,11 @@ def test_uncertain_first_grant_retains_selection_and_epoch(operation, identity, 
 
     registry = registry_for(operation, identity, persist)
     with pytest.raises(failure, match="without acknowledgment"):
-        registry.grant(operation, identity)
+        grant(registry, operation, identity)
     assert registry.snapshot.state == "RECOVERY_HELD"
     assert registry.snapshot.epoch == identity.epoch
     assert registry.snapshot.operation == operation
-    assert not registry.snapshot.cohort_exited
+    assert registry.snapshot.retirement is None
     assert not registry.snapshot.access_withdrawn
     request = json.loads(operation.request_json)
     request["journal"] = "/enrolled/control/other-journal.json"
@@ -420,7 +576,7 @@ def test_uncertain_first_grant_retains_selection_and_epoch(operation, identity, 
     for candidate in (operation, changed):
         for epoch in (identity.epoch, identity.epoch + 1):
             with pytest.raises(maintenance.MaintenanceContractError):
-                registry.grant(candidate, replace(identity, epoch=epoch))
+                grant(registry, candidate, replace(identity, epoch=epoch))
     assert len(persisted) == 1
 
 
@@ -432,7 +588,7 @@ def test_constructed_model_and_environment_cannot_enable_live_entrypoints(case, 
     descriptor = maintenance.OperationDescriptor.from_request(
         "execute", request, preview_sha256=plan["preview_sha256"], seal_sha256=replacement._sha(replacement._bytes(seal)))
     registry = registry_for(descriptor, identity, lambda _: None)
-    registry.grant(descriptor, identity)
+    grant(registry, descriptor, identity)
     monkeypatch.setenv("GRAPHIFY_MAINTENANCE_BACKEND", "modeled")
     monkeypatch.setenv("GRAPHIFY_MAINTENANCE_GRANT", json.dumps(asdict(registry.snapshot)))
     before = replacement._tree(request["output"])
