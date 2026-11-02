@@ -33,8 +33,11 @@ which model produced text. The trusted host collects Codex results; the product
 validates source coverage, digests and topology. A seal supplies integrity, not
 independent authority to import an arbitrary old graph. Preview reconstructs
 fresh data from the selected source and supplied fragments and compares the
-entire seal, including consumed policy reads. Source additions, removals,
-policy changes or altered payloads refuse before cutover.
+entire seal, including consumed policy reads. The coordinator revalidates source
+and sealed data before archiving the original output and again after installing
+the new container. These checks do not freeze mutable source contents. Drift
+detected after the namespace changes leaves publication held; exact resume with
+the original seal requires matching source again, or explicit rollback is needed.
 
 Use the read-only `bind-request` operation once to freeze strict device/inode
 identities for the canonical, archive, control and stage parents. Those
@@ -49,8 +52,10 @@ are external to every source/policy root and cannot contain one another. Archive
 and output, including the preallocation/control parent, must share a filesystem.
 Rollback quarantine is checked against all source/policy roots and rename devices
 before any journal or guard change. Bounds include 100,000 preserved entries,
-2 GiB preserved bytes, 128 MiB sealed data, existing SourceIO read bounds and a
-30-second lock deadline. The profile's exact guard namespace is excluded from
+128 MiB per preserved file, 2 GiB aggregate preserved bytes, 128 MiB sealed data,
+existing SourceIO read bounds and a 30-second lock deadline. A tree can be below
+the aggregate bound and still refuse because one file exceeds its own bound.
+The profile's exact guard namespace is excluded from
 source selection; it is never graph input.
 
 ## Candidate lifecycle

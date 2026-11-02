@@ -44,6 +44,13 @@ def _stable(info):
     return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _safe_platform():
+    _require(os.name == "posix"
+             and all(hasattr(os, flag) for flag in ("O_NOFOLLOW", "O_NONBLOCK", "O_DIRECTORY"))
+             and os.open in os.supports_dir_fd,
+             "safe replacement filesystem operations unavailable")
+
+
 def _read(path, limit=MAX_BYTES, *, parent_fd=None, expected=None):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
     try:
@@ -92,8 +99,30 @@ def _parent_paths(request):
             "stage": Path(request["stage"]).parent}
 
 
+def _request_paths(raw):
+    _require(isinstance(raw, dict) and all(isinstance(raw.get(field), str)
+             and raw[field] and "\x00" not in raw[field]
+             for field in ("root", "output", "archive", "stage", "journal")),
+             "replacement paths must be nonempty strings without NUL")
+    _require(isinstance(raw.get("extra_roots"), list) and len(raw["extra_roots"]) <= 2,
+             "invalid replacement policy roots")
+    for entry in raw["extra_roots"]:
+        _require(isinstance(entry, dict) and set(entry) == {"label", "path"}
+                 and isinstance(entry["label"], str)
+                 and entry["label"] in {"git", "policy"}, "invalid policy root")
+        _require(isinstance(entry["path"], str) and entry["path"]
+                 and "\x00" not in entry["path"],
+                 "replacement policy path must be a nonempty string without NUL")
+
+
 def bind_request(raw):
-    """Freeze initial parent identities; never silently refresh an existing binding."""
+    """Validate explicit string paths and freeze their initial parent identities.
+
+    Existing bindings are checked, never refreshed. Malformed paths or changed
+    bindings raise PendingTransactionError; filesystem admission can raise
+    OSError. Binding does not publish graph data.
+    """
+    _request_paths(raw)
     if "parent_identities" in raw:
         return _request(raw)[0]
     bound = {**raw, "parent_identities": {name: _directory(path)
@@ -141,6 +170,7 @@ def _request(raw):
              and raw["schema"] == 1 and type(raw["directed"]) is bool
              and raw["extraction_profile"] == PROFILE and raw["artifact_profile"] == "core-v1",
              "complete replacement request required")
+    _request_paths(raw)
     output = Path(raw["output"])
     _require(output.name == "graphify-out", "replacement preserves configured graphify-out name")
     _directory(raw["root"])
@@ -164,11 +194,7 @@ def _request(raw):
     # existing directory, so validate the original request before cutover only.
     source._patterns(raw["include"], "include", nonempty=True)
     source._patterns(raw["exclude"], "exclude")
-    _require(isinstance(raw["extra_roots"], list) and len(raw["extra_roots"]) <= 2,
-             "invalid replacement policy roots")
     for entry in raw["extra_roots"]:
-        _require(isinstance(entry, dict) and set(entry) == {"label", "path"}
-                 and entry["label"] in {"git", "policy"}, "invalid policy root")
         _directory(entry["path"])
     for field in ("archive", "stage", "journal"):
         _external_path(raw, Path(raw[field]), allow_equal=field)
@@ -762,7 +788,38 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
             return {"status": "rolled-back-unrecovered", "new_graph_retained": str(quarantine)}
 
 
+def _seal_data(request, sealed):
+    """Create the stage under its frozen parent; retain incomplete files on refusal."""
+    path = Path(request["stage"])
+    with tx.pin_output(path.parent, mutation=True) as parent:
+        _require(parent.identity.json() == request["parent_identities"]["stage"],
+                 "replacement stage parent changed")
+        parent.validate()
+        fd = os.open(path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=parent.fd)
+        try:
+            parent.validate()
+            view = memoryview(_bytes(sealed))
+            while view:
+                count = os.write(fd, view)
+                _require(count > 0, "exclusive seal write made no progress")
+                view = view[count:]
+            parent.validate()
+            os.fsync(fd)
+            parent.validate()
+            os.fsync(parent.fd)
+            parent.validate()
+        finally:
+            os.close(fd)
+
+
 def main(argv=None):
+    """Return JSON success or blocked status for supported replacement commands.
+
+    Safe filesystem features are required before reading any request. Build-data
+    creates a seal exclusively under the frozen stage parent; interrupted writes
+    stay in place and cannot be adopted or overwritten by a retry.
+    """
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -779,23 +836,14 @@ def main(argv=None):
             command.add_argument("--new-tree-sha256")
     args = parser.parse_args(argv)
     try:
+        _safe_platform()
         request = _load(args.request)
+        _request_paths(request)
         if args.command == "bind-request":
             result = bind_request(request)
         elif args.command == "build-data":
             sealed = build_data(request, _load(args.fragments))
-            _require(not os.path.lexists(request["stage"]), "data seal destination occupied")
-            # Exclusive create; incomplete stage is retained and never adopted.
-            fd = os.open(request["stage"], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            try:
-                with os.fdopen(fd, "wb", closefd=False) as stream:
-                    stream.write(_bytes(sealed))
-                    stream.flush()
-                    os.fsync(fd)
-            finally:
-                os.close(fd)
-            with tx.pin_output(Path(request["stage"]).parent, mutation=False) as cap:
-                os.fsync(cap.fd)
+            _seal_data(request, sealed)
             result = {"status": "data-sealed", "seal_sha256": _sha(_bytes(sealed))}
         elif args.command == "status":
             result = status(request)

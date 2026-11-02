@@ -282,10 +282,19 @@ class ManagedEntryIdentity:
 
 @dataclass
 class OutputCapability:
+    """An owned directory descriptor with identity-bound lock admission.
+
+    ``mutation`` selects replacement-guard checks at every lock acquisition,
+    including reentrant locks. It defaults to mutating admission for callers
+    that construct capabilities directly; it does not replace the mutation
+    APIs' own authority checks. Closing the capability closes its descriptor.
+    """
+
     path: Path
     identity: OutputIdentity
     fd: int
     _closed: bool = False
+    mutation: bool = field(default=True, kw_only=True)
 
     def validate(self) -> None:
         if self._closed:
@@ -705,6 +714,10 @@ def pin_output(
 ) -> OutputCapability:
     """Pin one physical output directory for the operation lifetime.
 
+    Read admission (``mutation=False``) is retained for lock rechecks. Creation
+    always requires mutating admission, even when read admission was requested.
+    Replacement guards can refuse either admission before returning a capability.
+
     Windows reads use identity-pinned, handle-relative admission. Mutation is
     intentionally blocked until the final replace/unlink primitive is proven
     handle-relative on a native runner.
@@ -740,7 +753,8 @@ def pin_output(
         os.close(fd)
         raise PendingTransactionError("output directory identity changed while pinning")
     capability = OutputCapability(
-        path.resolve(strict=True), OutputIdentity(info.st_dev, info.st_ino), fd
+        path.resolve(strict=True), OutputIdentity(info.st_dev, info.st_ino), fd,
+        mutation=mutation or create,
     )
     if mutation or create:
         try:
@@ -1015,7 +1029,7 @@ def _locked(capability: OutputCapability) -> Iterator[None]:
             held = {}
             _FILE_LOCK_STATE.held = held
         if key in held:
-            _replacement_guard_output(capability.path)
+            _replacement_guard_output(capability.path, mutation=capability.mutation)
             held[key] += 1
             try:
                 yield
@@ -1028,7 +1042,7 @@ def _locked(capability: OutputCapability) -> Iterator[None]:
             if _PLATFORM != "windows":
                 fcntl.flock(lock_fd, fcntl.LOCK_EX)
             capability.validate()
-            _replacement_guard_output(capability.path)
+            _replacement_guard_output(capability.path, mutation=capability.mutation)
             held[key] = 1
             try:
                 yield
