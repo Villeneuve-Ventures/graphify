@@ -888,12 +888,16 @@ is CPython 3.14.2 through final 3.14.x releases.
 | --- | --- | --- |
 | Setup | `uv sync --all-extras --frozen` | Installs the checkout and development dependencies from the lockfile. |
 | Quick feedback | `uv run --frozen pytest tests/test_extract.py -q --tb=short` (choose the affected module) | Exercises the selected module only. |
-| Docs closeout | `uv run --frozen pytest tests/test_readme_policy.py -q --tb=short` for README path policy, plus the pre-PR procedure under [Git workflow](#git-workflow) | Checks README filenames and parent-directory names; does not validate prose or links. No separate docs-only closeout command is defined. |
-| Full readiness | `uv run --frozen pytest tests/ -q --tb=short` plus applicable separate CI checks below | The pytest result proves the suite ran; it does not certify the separate jobs. |
+| Docs closeout | `make fast-feedback` | Classifies the complete change set. Eligible docs run whitespace/conflict and README naming checks, plus path-bound tests for contract docs. A complete successful receipt is final for that snapshot; prose and links still need review. |
+| Full readiness | `make review-ready` plus applicable separate CI checks below | Runs complete-set whitespace checks and the unchanged full pytest selection. It does not certify separate CI jobs. |
 | Independent review | [Protected-change review policy](docs/protected-change-review.md), when explicitly applicable under [AGENTS.md](AGENTS.md) | Follow that policy's acceptance and review procedure; a passing test run does not activate or replace it. |
 
 Choose checks by purpose; setup and focused tests are not substitutes for the
-pre-PR procedure. Graphify has no `make review-ready` target.
+pre-PR procedure. `make fast-feedback` defaults to `BASE=origin/v8`; set the
+actual PR base when different. `make docs-check` is a low-level eligibility and
+whitespace check, and `--dry-run` prints a plan without proving completion.
+The [validation routing policy](docs/validation-routing.md) describes eligibility,
+receipts, focused checks, and CI behavior.
 
 ### Running tests
 
@@ -904,7 +908,7 @@ uv run --frozen pytest tests/ -q -k "python" --tb=short    # filter by name
 ```
 
 The [CI workflow](.github/workflows/ci.yml) also defines separate generated-skill,
-protected-verifier, and native-Leiden checks. The full CI test environment pins
+locked Ruff/Pyright, protected-verifier, install, and native-Leiden checks. The full CI test environment pins
 Git 2.55.0 for the acceptance-sensitive tests; follow the workflow when
 reproducing those checks.
 
@@ -914,10 +918,13 @@ reproducing those checks.
 
 - Active development happens on the `v8` branch.
 - Commit style: `fix: <description>` / `feat: <description>` / `docs: <description>`
-- Before opening a PR, ensure `uv run --frozen pytest tests/ -q --tb=short` has passed.
-  Reuse applicable passing evidence while relevant inputs, environment, and freshness
-  requirements remain satisfied; opening or pushing a PR alone does not require
-  another run. Protected changes must also satisfy the
+- Before opening a PR or claiming readiness, run `make fast-feedback` and keep
+  its complete versioned receipt. Eligible docs-only receipts are final when all
+  selected commands pass. Mixed, unknown, unsafe, or uncertain changes run
+  `make review-ready`; explicit full-readiness requests also use that command.
+  Reuse applicable passing evidence while relevant inputs, environment, and
+  freshness requirements remain satisfied; opening or pushing a PR alone does
+  not require another run. Protected changes must also satisfy the
   [protected-change review policy](docs/protected-change-review.md).
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
 

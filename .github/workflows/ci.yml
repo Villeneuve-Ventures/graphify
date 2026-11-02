@@ -13,8 +13,36 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validation-route:
+    name: Classify complete validation change set
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false) }}
+    runs-on: ubuntu-latest
+    outputs:
+      lane: ${{ steps.route.outputs.lane }}
+      status: ${{ steps.route.outputs.status }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.14.10"
+          prune-cache: true
+      - name: Classify and validate docs; retain full jobs for everything else
+        id: route
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          args=(--base "$BASE_SHA" --ci-plan --github-output "$GITHUB_OUTPUT")
+          if [ "$EVENT_NAME" != pull_request ]; then args+=(--full); fi
+          python3 -I -S -B -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tools.validation_route",run_name="__main__")' "${args[@]}"
+
   skillgen-check:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    needs: [validation-route]
+    if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
     # the fragments in tools/skillgen/. This fails if someone hand-edited a
     # generated file or forgot to re-run the generator and bless expected/, and it
@@ -33,7 +61,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.2
         with:
-          python-version: "3.14"
+          python-version: "3.14.10"
           prune-cache: true
 
       # --frozen keeps uv from re-resolving and rewriting uv.lock as a side
@@ -55,12 +83,13 @@ jobs:
 
   test:
     name: Pytest shard ${{ matrix.shard }}/4
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    needs: [validation-route]
+    if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.14"]
+        python-version: ["3.14.10"]
         shard: [1, 2, 3, 4]
 
     steps:
@@ -154,42 +183,61 @@ jobs:
 
   quality:
     name: Python quality gate
-    needs: [test]
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: [validation-route, test]
+    if: ${{ always() && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require a complete docs route or full validation selection
+        env:
+          ROUTE_RESULT: ${{ needs.validation-route.result }}
+          ROUTE_LANE: ${{ needs.validation-route.outputs.lane }}
+          ROUTE_STATUS: ${{ needs.validation-route.outputs.status }}
+        run: |
+          test "$ROUTE_RESULT" = success
+          case "$ROUTE_LANE:$ROUTE_STATUS" in
+            editorial-docs:complete|contract-docs:complete|full:deferred) ;;
+            *) echo "Missing or incomplete validation route" >&2; exit 1 ;;
+          esac
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      - name: Download individual shard execution outcomes
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Download individual shard execution outcomes
         uses: actions/download-artifact@v8.0.2
         with:
           pattern: pytest-result-${{ github.run_id }}-${{ github.run_attempt }}-shard-*
           path: ${{ runner.temp }}/pytest-results
           merge-multiple: false
 
-      - name: Require all four successful shard executions
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Require all four successful shard executions
         env:
           MATRIX_RESULT: ${{ needs.test.result }}
         run: python -m tools.ci_pytest_gate check --receipts "$RUNNER_TEMP/pytest-results"
 
-      - name: Install uv
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Install uv
         uses: astral-sh/setup-uv@v10.3.2
         with:
-          python-version: "3.14"
+          python-version: "3.14.10"
           prune-cache: true
 
-      - name: Install dependencies
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Install dependencies
         run: uv sync --all-extras --frozen
 
-      - name: Lint locked dependencies
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Lint locked dependencies
         run: uv run --frozen ruff check .
 
-      - name: Typecheck locked dependencies
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Typecheck locked dependencies
         run: uv run --frozen pyright
 
-      - name: Install acceptance-pinned Git 2.55.0
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Install acceptance-pinned Git 2.55.0
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -202,10 +250,12 @@ jobs:
           echo "$git_build/install/bin" >> "$GITHUB_PATH"
           test "$("$git_build/install/bin/git" --version)" = "git version 2.55.0"
 
-      - name: Run protected verifier conformance with optimized Python
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Run protected verifier conformance with optimized Python
         run: uv run --frozen python -O -m pytest tests/test_protected_change_verifier.py -q --tb=short
 
-      - name: Verify install works end-to-end
+      - if: ${{ needs.validation-route.outputs.lane == 'full' }}
+        name: Verify install works end-to-end
         run: uv run --frozen python -m tools.ci_pytest_gate smoke
 
       - name: Reject whole-run cancellation
@@ -213,7 +263,8 @@ jobs:
         run: exit 1
 
   security-scan:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    needs: [validation-route]
+    if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
     # completion and coverage are validated independently of the job conclusion.
     permissions:
@@ -226,12 +277,12 @@ jobs:
         id: reporting_python
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          python-version: "3.14"
+          python-version: "3.14.10"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.3.2
         with:
-          python-version: "3.14"
+          python-version: "3.14.10"
           prune-cache: true
 
       # Preserve the existing default-plus-dev environment, without extras.
@@ -280,21 +331,22 @@ jobs:
         run: '"${{ steps.reporting_python.outputs.python-path }}" -I -S tools/security_receipts.py publish --output "$RUNNER_TEMP/security-receipts"'
 
   leiden-binary-smoke:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    needs: [validation-route]
+    if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     name: Leiden binary smoke (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install uv and Python 3.14
+      - name: Install uv and Python 3.14.10
         uses: astral-sh/setup-uv@v10.3.2
         with:
-          python-version: "3.14"
+          python-version: "3.14.10"
           prune-cache: true
 
       - name: Install Graphify with the native Leiden wheel only
         run: |
-          uv venv --python 3.14
+          uv venv --python 3.14.10
           uv pip install --only-binary=graspologic-native ".[leiden]"
 
       - name: Run a tiny weighted partition
