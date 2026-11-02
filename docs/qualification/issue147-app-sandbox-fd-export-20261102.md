@@ -43,9 +43,9 @@ inherit-only helper. Its inspected signed entitlements were exactly:
 
 The positive control used the same native source, transfer channel, revocation,
 death sequence and receiver write route without App Sandbox entitlements. The
-receiver and broker were separate unsandboxed controller children; the sender
-was the broker's child. The known helpers did not fork, daemonize or change
-sessions. This bounded cleanup arrangement is not a general containment system.
+receiver and broker were separate unsandboxed controller children, each started
+in a new session. The sender was the broker's child. The known actors did not
+daemonize. This bounded cleanup arrangement is not a general containment system.
 
 Both app signatures verified and the functional sandbox controls passed before
 transfer. The sandbox app created one unique OS container; its metadata and the
