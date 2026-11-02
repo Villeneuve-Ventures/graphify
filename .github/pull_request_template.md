@@ -13,12 +13,14 @@
 ## 🧪 How Has This Been Tested?
 
 <!-- List the exact commands, results, and relevant environment. Disclose skipped checks and known warnings. Select checks appropriate to the change and follow applicable repository requirements. -->
+- [ ] **Validation route:** `make fast-feedback` — selected lane, complete receipt and result:
 - [ ] **Focused tests:** `uv run --frozen pytest tests/<affected_test>.py -q --tb=short` — result:
 - [ ] **Manual or smoke testing:** steps and result:
 
 <!-- Common Graphify checks, when applicable:
 Dependencies: uv sync --all-extras --frozen
-Full suite: uv run --frozen pytest tests/ -q --tb=short
+Complete-diff routing: make fast-feedback BASE=origin/v8
+Full readiness (mixed/uncertain or explicitly requested): make review-ready BASE=origin/v8
 README policy: uv run --frozen pytest tests/test_readme_policy.py -q --tb=short
 Generated skills: uv run --frozen python -m tools.skillgen --check
 After code changes: graphify update .
