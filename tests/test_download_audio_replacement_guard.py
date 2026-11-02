@@ -1,7 +1,9 @@
 """Audio delegation downloads privately and admits its actual publication path."""
+import errno
 import hashlib
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -186,4 +188,89 @@ def test_audio_downloader_error_propagates_and_private_files_are_removed(tmp_pat
 
     assert caught.value is failure
     assert list(target.iterdir()) == []
+    assert list(downloader.private_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", [
+    OSError(errno.EIO, "intercepted I/O failure"),
+    OSError(errno.ENOSPC, "intercepted full filesystem"),
+    KeyboardInterrupt("intercepted interruption"),
+])
+def test_partial_audio_copy_does_not_poison_retry(tmp_path, monkeypatch, downloader, failure):
+    target = tmp_path / "raw"
+    selected = target / f"{STEM}.m4a"
+
+    def partial_copy(source, destination, *args, **kwargs):
+        if hasattr(destination, "write"):
+            destination.write(b"partial")
+        else:
+            Path(destination).write_bytes(b"partial")
+        raise failure
+
+    with monkeypatch.context() as copying:
+        copying.setattr(shutil, "copyfile", partial_copy)
+        copying.setattr(shutil, "copyfileobj", partial_copy)
+        with pytest.raises(type(failure)) as caught:
+            transcribe.download_audio(URL, target)
+    assert caught.value is failure
+    after_failure = list(target.iterdir())
+
+    out = transcribe.download_audio(URL, target)
+
+    assert out == selected
+    assert out.read_bytes() == b"local audio bytes"
+    assert after_failure == []
+    assert len(downloader.options) == 2
+    assert list(target.iterdir()) == [selected]
+    assert list(downloader.private_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", [OSError(errno.EIO, "copy failed"), KeyboardInterrupt()])
+def test_failed_copy_preserves_destination_created_during_download(
+    tmp_path, monkeypatch, downloader, failure,
+):
+    target = tmp_path / "raw"
+    selected = target / f"{STEM}.m4a"
+    downloader.before_write = lambda: selected.write_bytes(b"existing complete audio")
+
+    def partial_copy(source, destination, *args, **kwargs):
+        if hasattr(destination, "write"):
+            destination.write(b"partial")
+        else:
+            Path(destination).write_bytes(b"partial")
+        raise failure
+
+    monkeypatch.setattr(shutil, "copyfile", partial_copy)
+    monkeypatch.setattr(shutil, "copyfileobj", partial_copy)
+    with pytest.raises(type(failure)) as caught:
+        transcribe.download_audio(URL, target)
+
+    assert caught.value is failure
+    assert selected.read_bytes() == b"existing complete audio"
+    assert list(target.iterdir()) == [selected]
+    assert list(downloader.private_root.iterdir()) == []
+
+
+def test_audio_final_path_is_readmitted_after_copy(
+    tmp_path, monkeypatch, downloader, archive_registration,
+):
+    _, register = archive_registration
+    target = tmp_path / "raw"
+    selected = target / f"{STEM}.m4a"
+
+    def copy_then_register(source, destination, *args, **kwargs):
+        content = source.read() if hasattr(source, "read") else Path(source).read_bytes()
+        if hasattr(destination, "write"):
+            destination.write(content)
+        else:
+            Path(destination).write_bytes(content)
+        register(selected)
+
+    monkeypatch.setattr(shutil, "copyfile", copy_then_register)
+    monkeypatch.setattr(shutil, "copyfileobj", copy_then_register)
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        transcribe.download_audio(URL, target)
+
+    assert not selected.exists()
+    assert sorted(path.name for path in target.iterdir()) == [replacement.GUARD]
     assert list(downloader.private_root.iterdir()) == []
