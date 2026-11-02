@@ -15,6 +15,8 @@ from pathlib import PurePosixPath
 import threading
 from typing import Callable, Literal, Mapping, Protocol
 
+from graphify.replacement_guard_issuers import NamespaceIssuerPolicy
+
 Action = Literal["execute", "resume", "rollback"]
 State = Literal["HELD", "GRANTING", "ACTIVE", "RECOVERY_HELD", "RELEASE_READY", "RELEASED"]
 Identity = tuple[int, int]
@@ -43,9 +45,28 @@ def _canonical(value: object) -> str:
                       separators=(",", ":")) + "\n"
 
 
-def _identity(value: Identity) -> bool:
+def _identity(value: object) -> bool:
     return (type(value) is tuple and len(value) == 2
             and all(type(item) is int and item >= 0 for item in value))
+
+
+def issuer_policy_set_sha256(policies: tuple[NamespaceIssuerPolicy, ...]) -> str:
+    """Digest complete immutable namespace enrollment records, independent of epoch.
+
+    Record order has no meaning; duplicate namespace paths or physical identities
+    and non-tuple input
+    refuse. This models a protected registry fingerprint, without reading an
+    index or granting issuer trust on a filesystem.
+    """
+    _require(type(policies) is tuple
+             and all(isinstance(policy, NamespaceIssuerPolicy) for policy in policies),
+             "immutable issuer policy records required")
+    _require(len({policy.namespace_path for policy in policies}) == len(policies),
+             "duplicate issuer namespace enrollment")
+    _require(len({policy.namespace_identity for policy in policies}) == len(policies),
+             "duplicate physical issuer namespace enrollment")
+    return _digest(_canonical([policy.to_record() for policy in sorted(
+        policies, key=lambda policy: policy.namespace_path)]))
 
 
 @dataclass(frozen=True)
@@ -111,6 +132,39 @@ class OperationDescriptor:
         return json.loads(self.request_json)["output"]
 
     @property
+    def namespace_parents(self) -> tuple[tuple[str, Identity], ...]:
+        """Return exact modeled parent scopes, including rollback quarantine.
+
+        Frozen path and device/inode pairs must be complete and canonical. No
+        ancestor enrollment covers a nested parent; this performs no disk reads.
+        """
+        request = json.loads(self.request_json)
+        parents = request["parent_identities"]
+        fields = {"canonical": "output", "archive": "archive", "control": "journal", "stage": "stage"}
+        _require(set(parents) == set(fields), "complete issuer namespace parents required")
+        scopes = []
+        for name, field in fields.items():
+            value = request.get(field)
+            _require(type(value) is str and bool(value) and "\x00" not in value,
+                     "canonical issuer namespace path required")
+            path = PurePosixPath(value)
+            _require(path.is_absolute() and str(path) == value and ".." not in path.parts,
+                     "canonical issuer namespace path required")
+            frozen = parents[name]
+            _require(type(frozen) is dict and set(frozen) == {"device", "inode"},
+                     "frozen issuer namespace identity required")
+            identity = (frozen["device"], frozen["inode"])
+            _require(_identity(identity), "frozen issuer namespace identity required")
+            scopes.append((str(path.parent), identity))
+        if self.action == "rollback":
+            assert self.quarantine is not None and self.quarantine_parent is not None
+            path = PurePosixPath(self.quarantine)
+            _require(str(path) == self.quarantine and ".." not in path.parts
+                     and "\x00" not in self.quarantine, "canonical issuer quarantine path required")
+            scopes.append((str(path.parent), self.quarantine_parent))
+        return tuple(scopes)
+
+    @property
     def sha256(self) -> str:
         """Bind every action selector; this integrity value is not an authority token."""
         return _digest(_canonical(asdict(self)))
@@ -159,6 +213,9 @@ class GrantIdentity:
 
     ``runtime_sha256`` binds the complete trusted mutator runtime and dependencies;
     ``policy_sha256`` binds its launch, identity, namespace and transport policy.
+    ``issuer_policy_sha256`` separately binds the complete enrolled namespace
+    records, including each generation, identity and retained legacy issuer UID.
+    ``mutator_uid`` is the simulated actual dedicated UID, not a login-shell label.
     Controller and one-shot mutator incarnations are distinct from reusable PIDs.
     """
 
@@ -170,12 +227,16 @@ class GrantIdentity:
     target_binding: TargetBinding
     controller: str
     policy_sha256: str
+    issuer_policy_sha256: str
+    mutator_uid: int
 
     def __post_init__(self) -> None:
         _require(all(type(item) is str and bool(item)
                      for item in (self.enrollment, self.boot, self.mutator, self.controller))
                  and type(self.epoch) is int and self.epoch > 0 and _sha(self.runtime_sha256)
-                 and _sha(self.policy_sha256) and isinstance(self.target_binding, TargetBinding),
+                 and _sha(self.policy_sha256) and _sha(self.issuer_policy_sha256)
+                 and type(self.mutator_uid) is int and 0 < self.mutator_uid < 2**32
+                 and isinstance(self.target_binding, TargetBinding),
                  "complete grant identity required")
 
 
@@ -186,7 +247,8 @@ class BrokerAdmission:
     These flags represent independently required native facts; setting them does
     not establish any of those facts. Protected capabilities include metadata and
     namespace mutation, even through descriptors opened read-only. The initial
-    profile allows one trusted mutator without child processes.
+    profile allows one trusted mutator without child processes. The current
+    complete issuer fingerprint is separate from source/payload integrity.
     """
 
     operation_sha256: str
@@ -198,6 +260,7 @@ class BrokerAdmission:
     data_only_transport: bool
     workers_without_capabilities: bool
     no_children: bool
+    current_issuer_policy_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -271,12 +334,17 @@ class CurrentPublication:
 class ModelState:
     """Immutable simulation state passed to an injected persistence acknowledgment.
 
-    It is not a protected store, a resumable native journal or an enrollment
+    Retained immutable issuer records and their complete fingerprint model the
+    controller's enrollment snapshot; restart never refreshes or retires them.
+    It is not a protected store, a resumable native journal or a native enrollment
     record. In particular, deserializing or copying it grants no live authority.
     ``writers_admitted`` retains attempted admission history even when a durable
     write's acknowledgment fails; ``RECOVERY_HELD`` still denies client admission.
     """
 
+    issuer_policies: tuple[NamespaceIssuerPolicy, ...] = ()
+    issuer_policy_sha256: str | None = None
+    mutator_uid: int | None = None
     state: State = "HELD"
     controller: str = ""
     controller_incarnations: tuple[str, ...] = ()
@@ -318,6 +386,10 @@ class ModelHandle(AbstractContextManager["ModelHandle"]):
 class ModelRegistry:
     """One-target lifecycle simulation, never a production maintenance backend.
 
+    The issuer policy tuple is copied into immutable simulation state and must
+    match one enrollment and dedicated mutator UID. Every selected exact parent
+    must match a retained record. Omitted records permit construction only; grants
+    refuse. No policy rotation, record removal or identity refresh is modeled.
     Construction assumes a cold-start-enrolled target with no admitted writers;
     it does not prove that assumption. ``persist`` must return only after the
     simulated state is durable. Its exceptions retain the attempted selection
@@ -335,24 +407,57 @@ class ModelRegistry:
 
     def __init__(self, target: str, enrollment: str, boot: str, runtime_sha256: str,
                  target_binding: TargetBinding,
-                 persist: Callable[[ModelState], None], *, controller: str, policy_sha256: str):
+                 persist: Callable[[ModelState], None], *, controller: str, policy_sha256: str,
+                 issuer_policies: tuple[NamespaceIssuerPolicy, ...] = (), mutator_uid: int | None = None):
         _require(PurePosixPath(target).is_absolute() and PurePosixPath(target).name == "graphify-out"
                  and bool(enrollment) and bool(boot) and _sha(runtime_sha256)
                  and isinstance(target_binding, TargetBinding) and _sha(policy_sha256)
                  and type(controller) is str and bool(controller), "model enrollment required")
+        fingerprint = issuer_policy_set_sha256(issuer_policies)
+        _require((not issuer_policies and mutator_uid is None)
+                 or (type(mutator_uid) is int and mutator_uid > 0 and all(
+                     policy.enrollment_id == enrollment and policy.mutator_uid == mutator_uid
+                     for policy in issuer_policies)), "matching dedicated issuer enrollment required")
         self.target, self.enrollment, self.boot, self.runtime_sha256 = target, enrollment, boot, runtime_sha256
         self.target_binding = target_binding
         self.policy_sha256 = policy_sha256
         self._persist = persist
         self._persisting = False
         self._lock = threading.RLock()
-        self._state = ModelState(controller=controller, controller_incarnations=(controller,))
+        self._state = ModelState(controller=controller, controller_incarnations=(controller,),
+                                 issuer_policies=issuer_policies,
+                                 issuer_policy_sha256=fingerprint if issuer_policies else None,
+                                 mutator_uid=mutator_uid)
         self._handle: ModelHandle | None = None
 
     @property
     def snapshot(self) -> ModelState:
         """Return immutable modeled state, with no authority or serialization side effects."""
         return self._state
+
+    @property
+    def issuer_policies(self) -> tuple[NamespaceIssuerPolicy, ...]:
+        """Return the immutable retained issuer records; no rotation is modeled."""
+        return self._state.issuer_policies
+
+    @property
+    def issuer_policy_sha256(self) -> str | None:
+        """Return the complete pinned policy fingerprint, independent of operation epoch."""
+        return self._state.issuer_policy_sha256
+
+    def _require_current_issuers(self, fingerprint: str | None, *, hold: bool) -> None:
+        if (not self.issuer_policies or fingerprint != self.issuer_policy_sha256
+                or not _sha(fingerprint)):
+            if hold:
+                self._commit(replace(self._state, state="RECOVERY_HELD"))
+            raise MaintenanceContractError("exact current issuer policy evidence required")
+
+    def _require_namespace_enrollment(self, operation: OperationDescriptor) -> None:
+        policies = {policy.namespace_path: policy for policy in self.issuer_policies}
+        for path, identity in operation.namespace_parents:
+            policy = policies.get(path)
+            _require(policy is not None and policy.namespace_identity == identity,
+                     "exact issuer namespace enrollment required")
 
     def _commit(self, candidate: ModelState) -> None:
         """Persist one transition without letting callbacks replace its attempted state."""
@@ -391,6 +496,12 @@ class ModelRegistry:
                      and identity.controller == old.controller and identity.policy_sha256 == self.policy_sha256
                      and identity.target_binding == self.target_binding
                      and identity.epoch == old.epoch + 1, "grant binding or epoch changed")
+            _require(identity.issuer_policy_sha256 == old.issuer_policy_sha256
+                     and identity.mutator_uid == old.mutator_uid,
+                     "grant issuer policy or mutator UID changed")
+            self._require_current_issuers(
+                admission.current_issuer_policy_sha256 if isinstance(admission, BrokerAdmission) else None,
+                hold=False)
             _require(isinstance(admission, BrokerAdmission)
                      and admission.operation_sha256 == operation.sha256 and admission.identity == identity
                      and all(value is True for value in (
@@ -411,8 +522,11 @@ class ModelRegistry:
                     _require(operation.preview_sha256 == old.operation.preview_sha256
                              and operation.seal_sha256 == old.operation.seal_sha256,
                              "incomplete operation data selectors changed")
+            self._require_namespace_enrollment(operation)
             _require(identity.mutator not in old.mutator_incarnations, "mutator incarnation was already used")
-            candidate = ModelState(state="GRANTING", controller=old.controller,
+            candidate = ModelState(state="GRANTING", issuer_policies=old.issuer_policies,
+                                   issuer_policy_sha256=old.issuer_policy_sha256, mutator_uid=old.mutator_uid,
+                                   controller=old.controller,
                                    controller_incarnations=old.controller_incarnations,
                                    mutator_incarnations=(*old.mutator_incarnations, identity.mutator),
                                    epoch=identity.epoch, operation=operation, identity=identity, admission=admission)
@@ -491,11 +605,17 @@ class ModelRegistry:
             state: State = "RELEASE_READY" if terminal.outcome == "committed" else "HELD"
             self._commit(replace(old, state=state, terminal=terminal))
 
-    def release(self, handle: ModelHandle) -> ReleaseRecord:
-        """Persist explicit release before admitting clients; exact retries return its own record."""
+    def release(self, handle: ModelHandle, *, current_issuer_policy_sha256: str | None = None) -> ReleaseRecord:
+        """Persist release only with current policy evidence, including on exact retry.
+
+        Missing, stale or unknown complete fingerprints persist RECOVERY_HELD and
+        raise MaintenanceContractError; source or receipt bytes cannot supply it.
+        This call does not refresh policy or reconcile an existing hold.
+        """
         with self._lock:
             old = self._current(handle)
             _require(handle.identity.controller == old.controller, "retired controller cannot release service")
+            self._require_current_issuers(current_issuer_policy_sha256, hold=True)
             if old.state == "RELEASED" and old.release is not None:
                 return old.release
             _require(old.state == "RELEASE_READY" and old.terminal is not None
@@ -505,11 +625,14 @@ class ModelRegistry:
             self._commit(replace(old, state="RELEASED", release=record))
             return record
 
-    def admit_client(self, runtime_sha256: str, publication: CurrentPublication) -> ReleaseRecord:
+    def admit_client(self, runtime_sha256: str, publication: CurrentPublication, *,
+                     current_issuer_policy_sha256: str | None = None) -> ReleaseRecord:
         """Model compatible startup after durable release and normal receipt/origin validation.
 
-        Later generations retain the released identity/origin but may have a new
-        receipt. The first writer-admission bit is persisted before returning;
+        Missing, stale or unknown issuer fingerprints persist RECOVERY_HELD before
+        refusal. Fingerprints are explicit simulation evidence, never native
+        custody proof. Later generations retain the released identity/origin but may
+        have a new receipt. The first writer-admission bit is persisted before returning;
         a failed acknowledgment holds the target and grants no modeled launch.
         """
         with self._lock:
@@ -517,6 +640,7 @@ class ModelRegistry:
             _require(old.state == "RELEASED" and old.release is not None,
                      "service release has not been acknowledged")
             assert old.release is not None
+            self._require_current_issuers(current_issuer_policy_sha256, hold=True)
             terminal = old.release.terminal
             _require(runtime_sha256 == self.runtime_sha256
                      and publication.output_identity == terminal.output_identity

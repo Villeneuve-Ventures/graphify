@@ -17,6 +17,7 @@ from tests.test_canonical_replacement import case, modeled  # noqa: F401
 def operation():
     request = {"root": "/enrolled/source", "output": "/enrolled/source/graphify-out",
                "journal": "/enrolled/control/journal.json",
+               "archive": "/enrolled/archive/old", "stage": "/enrolled/stage/data.json",
                "parent_identities": {name: {"device": 1, "inode": number}
                                      for number, name in enumerate(("canonical", "archive", "control", "stage"), 1)}}
     return maintenance.OperationDescriptor.from_request(
@@ -24,24 +25,36 @@ def operation():
 
 
 @pytest.fixture
-def identity():
+def identity(operation):
     binding = maintenance.TargetBinding((1, 10), (1, 20), "c" * 64)
     return maintenance.GrantIdentity("enrollment-one", "boot-one", 1,
                                      "mutator-incarnation-one", "d" * 64, binding,
-                                     "controller-incarnation-one", "6" * 64)
+                                     "controller-incarnation-one", "6" * 64,
+                                     maintenance.issuer_policy_set_sha256(policies_for(operation)), 450)
+
+
+def policies_for(operation):
+    scopes = dict(operation.namespace_parents)
+    scopes.setdefault("/enrolled/quarantine", (1, 40))
+    return tuple(maintenance.NamespaceIssuerPolicy(
+        enrollment_id="enrollment-one", namespace_path=path, namespace_identity=identity,
+        policy_generation=1, mutator_uid=450, legacy_issuer_uids=(451,))
+        for path, identity in sorted(scopes.items()))
 
 
 def registry_for(operation, identity, persist):
     return maintenance.ModelRegistry(operation.target, identity.enrollment, identity.boot,
                                      identity.runtime_sha256, identity.target_binding, persist,
-                                     controller=identity.controller, policy_sha256=identity.policy_sha256)
+                                     controller=identity.controller, policy_sha256=identity.policy_sha256,
+                                     issuer_policies=policies_for(operation), mutator_uid=identity.mutator_uid)
 
 
 def admission_for(operation, identity):
     return maintenance.BrokerAdmission(operation.sha256, identity, exclusive_mutator=True,
                                        trusted_runtime=True, protected_namespace=True,
                                        authenticated_peer=True, data_only_transport=True,
-                                       workers_without_capabilities=True, no_children=True)
+                                       workers_without_capabilities=True, no_children=True,
+                                       current_issuer_policy_sha256=identity.issuer_policy_sha256)
 
 
 def grant(registry, operation, identity):
@@ -296,17 +309,17 @@ def test_restart_cannot_erase_first_writer_history_or_reuse_a_release(operation,
     registry = registry_for(operation, identity, lambda _: None)
     handle = grant(registry, operation, identity)
     terminal = prepare_release(registry, handle)
-    record = registry.release(handle)
-    registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+    record = registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
+    registry.admit_client(identity.runtime_sha256, current_for(terminal, 2), current_issuer_policy_sha256=identity.issuer_policy_sha256)
     registry.restart("controller-two")
     assert registry.snapshot.writers_admitted
     assert registry.snapshot.release == record
     with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
         grant(registry, operation, replace(identity, controller="controller-two", epoch=2, mutator="successor"))
     with pytest.raises(maintenance.MaintenanceContractError, match="retired controller"):
-        registry.release(handle)
+        registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
-        registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+        registry.admit_client(identity.runtime_sha256, current_for(terminal, 2), current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="fresh controller"):
         registry.restart(identity.controller)
 
@@ -344,8 +357,8 @@ def test_uncertain_restart_persistence_cannot_restore_a_prior_release(operation,
     registry = registry_for(operation, identity, persist)
     handle = grant(registry, operation, identity)
     terminal = prepare_release(registry, handle)
-    record = registry.release(handle)
-    registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+    record = registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
+    registry.admit_client(identity.runtime_sha256, current_for(terminal, 2), current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(OSError, match="restart acknowledgment"):
         registry.restart("controller-two")
     assert registry.snapshot.state == "RECOVERY_HELD"
@@ -353,9 +366,9 @@ def test_uncertain_restart_persistence_cannot_restore_a_prior_release(operation,
     assert registry.snapshot.writers_admitted
     assert registry.snapshot.release == record
     with pytest.raises(maintenance.MaintenanceContractError, match="retired controller"):
-        registry.release(handle)
+        registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
-        registry.admit_client(identity.runtime_sha256, current_for(terminal, 2))
+        registry.admit_client(identity.runtime_sha256, current_for(terminal, 2), current_issuer_policy_sha256=identity.issuer_policy_sha256)
 
 
 def test_copying_handle_cannot_transfer_a_grant(operation, identity):
@@ -434,14 +447,14 @@ def test_release_requires_exit_withdrawal_and_independent_validation(operation, 
         with pytest.raises(maintenance.MaintenanceContractError, match="validation"):
             registry.validate_terminal(handle, bad)
     with pytest.raises(maintenance.MaintenanceContractError, match="healthy release"):
-        registry.release(handle)
+        registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
     registry.validate_terminal(handle, terminal)
     with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
-        registry.admit_client(identity.runtime_sha256, current_for(terminal))
-    record = registry.release(handle)
+        registry.admit_client(identity.runtime_sha256, current_for(terminal), current_issuer_policy_sha256=identity.issuer_policy_sha256)
+    record = registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
     assert saved[-1].release == record
     assert not saved[-1].writers_admitted
-    assert registry.admit_client(identity.runtime_sha256, current_for(terminal)) == record
+    assert registry.admit_client(identity.runtime_sha256, current_for(terminal), current_issuer_policy_sha256=identity.issuer_policy_sha256) == record
     assert saved[-1].writers_admitted
 
 
@@ -449,16 +462,16 @@ def test_release_retry_uses_separate_record_after_generation_two(operation, iden
     registry = registry_for(operation, identity, lambda _: None)
     handle = grant(registry, operation, identity)
     terminal = prepare_release(registry, handle)
-    record = registry.release(handle)
-    assert registry.admit_client(identity.runtime_sha256, current_for(terminal, 2)) == record
-    assert registry.release(handle) is record
+    record = registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
+    assert registry.admit_client(identity.runtime_sha256, current_for(terminal, 2), current_issuer_policy_sha256=identity.issuer_policy_sha256) == record
+    assert registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256) is record
     for bad in (replace(current_for(terminal, 2), output_identity=(1, 31)),
                 replace(current_for(terminal, 2), replacement_binding="canonical-replacement-v1:" + "8" * 64),
                 replace(current_for(terminal), receipt_sha256="8" * 64)):
         with pytest.raises(maintenance.MaintenanceContractError, match="publication"):
-            registry.admit_client(identity.runtime_sha256, bad)
+            registry.admit_client(identity.runtime_sha256, bad, current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="runtime"):
-        registry.admit_client("8" * 64, current_for(terminal, 2))
+        registry.admit_client("8" * 64, current_for(terminal, 2), current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
         grant(registry, operation, replace(identity, epoch=2, mutator="later"))
 
@@ -475,7 +488,7 @@ def test_rollback_is_terminal_held_service(operation, identity):
     registry.validate_terminal(handle, terminal_for(handle, outcome="rolled-back-unrecovered"))
     assert registry.snapshot.state == "HELD"
     with pytest.raises(maintenance.MaintenanceContractError, match="healthy release"):
-        registry.release(handle)
+        registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
     with pytest.raises(maintenance.MaintenanceContractError, match="not eligible"):
         grant(registry, operation, replace(identity, epoch=2, mutator="later"))
 
@@ -543,12 +556,12 @@ def test_persistence_failure_never_admits_a_writer(operation, identity, failed_s
     with pytest.raises(OSError, match="acknowledgment"):
         handle = grant(registry, operation, identity)
         terminal = prepare_release(registry, handle)
-        registry.release(handle)
-        registry.admit_client(identity.runtime_sha256, current_for(terminal))
+        registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
+        registry.admit_client(identity.runtime_sha256, current_for(terminal), current_issuer_policy_sha256=identity.issuer_policy_sha256)
     assert registry.snapshot.state == "RECOVERY_HELD"
     assert registry.snapshot.writers_admitted == (failed_state == "writer-admission")
     with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
-        registry.admit_client(identity.runtime_sha256, maintenance.CurrentPublication((1, 30), "binding", 2, "9" * 64))
+        registry.admit_client(identity.runtime_sha256, maintenance.CurrentPublication((1, 30), "binding", 2, "9" * 64), current_issuer_policy_sha256=identity.issuer_policy_sha256)
 
 
 @pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
@@ -587,6 +600,7 @@ def test_constructed_model_and_environment_cannot_enable_live_entrypoints(case, 
     plan = replacement.preview(request, seal)
     descriptor = maintenance.OperationDescriptor.from_request(
         "execute", request, preview_sha256=plan["preview_sha256"], seal_sha256=replacement._sha(replacement._bytes(seal)))
+    identity = replace(identity, issuer_policy_sha256=maintenance.issuer_policy_set_sha256(policies_for(descriptor)))
     registry = registry_for(descriptor, identity, lambda _: None)
     grant(registry, descriptor, identity)
     monkeypatch.setenv("GRAPHIFY_MAINTENANCE_BACKEND", "modeled")

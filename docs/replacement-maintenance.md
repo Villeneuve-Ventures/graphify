@@ -97,6 +97,75 @@ These are deployment prerequisites, not account/service setup instructions or
 authority to change this host. Namespace durability, rollback, power-loss limits
 and the parent's other native acceptance requirements remain independently open.
 
+## Permanent namespace issuer enrollment
+
+The broker's issuer identity must be trusted through an independent namespace
+policy before it creates a guard or journal. A dedicated UID or non-login shell
+is insufficient. The shared `NamespaceIssuerPolicy` record is immutable data;
+constructing, copying or hashing it establishes no filesystem authority.
+
+Ordinary readers use the fixed administrator-owned issuer index at
+`/private/etc/graphify/replacement-guard-issuers.json` on macOS
+(`/etc/graphify/replacement-guard-issuers.json` on other supported hosts).
+Separate records live in the adjacent `replacement-guard-issuers.d` directory.
+The protected index pins each record's digest and policy generation, exact parent
+path and device/inode identity. Neither requests, environment variables, marker
+contents nor source/payload bytes can select this trust source. Root ownership,
+protected ancestors, restrictive write permissions, ACL checks and pinned reads
+are independent of a record's integrity digest. Native provisioning and permanent
+custody of this store remain deployment prerequisites.
+
+The administrator must publish the policy record and its index entry durably
+before the first broker-owned guard or journal can be visible. The controller
+retains permanent enrollment after the operation and mutator have retired; the
+one-shot mutator must not own policy publication or removal. A missing referenced
+record, wrong digest or generation, changed parent identity, unsafe store, or
+uncertain read denies access. Bootstrap absence permits the historical UID-0 /
+caller-real-UID issuer baseline only under the explicit trusted-administrator
+invariant that the permanent index is never removed while enrolled namespaces or
+their guards survive. Absence is not evidence of completed retirement. These
+checks cannot detect loss or rollback of the entire index; they make no index
+rollback-resistance claim.
+
+Enrollment applies to an exact parent namespace, not an ancestor subtree. A
+nested parent needs its own independently enrolled record. Issuers do not inherit
+across parent scopes; matching a dedicated UID in another namespace grants no
+trust. Each record retains the legacy issuer UIDs needed by surviving guards and
+journals. Migration must keep those issuers recognized alongside the selected
+mutator UID, including after release, retirement and controller restart. It must
+not rewrite guard ownership, weaken the coordinator's caller-real-UID lock rule,
+or make old records unreadable to compatible clients. Removing old issuer UIDs,
+rotating policies, refreshing device identities and reusing retired UIDs are not
+implemented migration paths.
+
+The model registry pins the complete immutable policy tuple, its digest and one
+dedicated mutator UID in every persisted `ModelState`. All policies must belong
+to that registry enrollment and UID. `issuer_policy_set_sha256` hashes the entire
+record set in path order, including generations, parent identities and legacy
+issuer sets. Its value is independent of the operation epoch. `GrantIdentity`
+binds both this digest and the simulated actual mutator UID. Grant admission
+matches every frozen canonical, archive, control and stage parent in the operation
+to an exact enrolled path and device/inode; rollback also binds its quarantine
+parent. Omitted enrollment permits model construction only and cannot grant
+maintenance.
+
+`BrokerAdmission.current_issuer_policy_sha256`, release and ordinary client
+startup must each supply the exact current complete fingerprint as simulation
+evidence. Missing, stale or unknown release/startup policy persists
+`RECOVERY_HELD` before refusal and cannot set the first-writer admission latch.
+Matching publication or payload bytes cannot replace policy evidence. Restart
+retains the original records, legacy issuers, fingerprint and mutator UID, keeps
+service held and never refreshes them or automatically reconciles a prior release.
+An administrator-controlled reader handoff must leave normal clients read access
+to the permanent index, applicable policy records, guards and journals while
+preserving archive mutation denial and independent verifier custody.
+
+The synthetic tests show these model bindings and refusal transitions only.
+Protected-index publication ordering, durable custody and recovery, whole-index
+rollback, UID reuse and stale OS identities, live ordinary-reader handoff, and
+native account/launch enforcement still need separate qualification. The model
+cannot enable the shipping `_maintenance()` entry point.
+
 ## Exact operation and authority boundary
 
 The operation descriptor freezes the graph request and action-specific
@@ -208,7 +277,8 @@ substitute for a defined handoff. The final output remains `graphify-out`.
 The contract/model checks cover selector drift, immutable capture, competing
 requests, stale epochs, failure holds, persistence failure, uncertain process
 termination, broker policy/identity drift, capability-free worker boundaries,
-incomplete retirement, controller restart holds, explicit release ordering,
+incomplete retirement, exact-parent issuer enrollment, stale-policy release/startup
+holds, retained legacy issuers, controller restart holds, explicit release ordering,
 later-generation release retries and unrecovered rollback. Their witnesses and
 persistence are modeled. They prove
 neither OS custody nor real restart inhibition.
