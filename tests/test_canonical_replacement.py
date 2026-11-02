@@ -43,6 +43,26 @@ def test_default_backend_never_grants_live_authority(case):
     assert (Path(request["output"]) / "graph.json").read_bytes() == old
 
 
+def test_maintenance_receives_exact_forward_selectors(case, monkeypatch):
+    request, fragments = case
+    seal = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, seal)
+
+    def refuse(operation):
+        assert operation.action == "execute"
+        assert operation.request_sha256 == replacement._sha(replacement._bytes(request))
+        assert operation.preview_sha256 == plan["preview_sha256"]
+        assert operation.seal_sha256 == replacement._sha(replacement._bytes(seal))
+        raise tx.PendingTransactionError("modeled refusal")
+
+    monkeypatch.setattr(replacement, "_maintenance", refuse)
+    before = replacement._tree(request["output"])
+    with pytest.raises(tx.PendingTransactionError, match="modeled refusal"):
+        replacement.execute(request, seal, plan["preview_sha256"])
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["journal"]).exists()
+
+
 def test_new_selected_input_invalidates_seal(case):
     request, fragments = case
     seal = replacement.build_data(request, fragments)
