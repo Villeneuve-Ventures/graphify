@@ -75,6 +75,11 @@ descendants have terminated. If that proof is unavailable, retain the hold.
 Across reboot, invalidate grants and retain denial; stale frozen identities are
 not refreshed or translated. This slice supplies no cross-boot recovery.
 
+A persistence exception can follow a durable write. The model retains the
+attempted epoch and operation selection in `RECOVERY_HELD`; it does not infer
+that the attempt was absent. No successful grant is returned, and subsequent
+admission still requires the prior cohort's exact retirement evidence.
+
 Successful publication is only a completion notification. Release requires:
 
 1. Confirm that the coordinator and every permitted descendant have exited and

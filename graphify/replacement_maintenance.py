@@ -233,6 +233,8 @@ class ModelState:
 
     It is not a protected store, a resumable native journal or an enrollment
     record. In particular, deserializing or copying it grants no live authority.
+    ``writers_admitted`` retains attempted admission history even when a durable
+    write's acknowledgment fails; ``RECOVERY_HELD`` still denies client admission.
     """
 
     state: State = "HELD"
@@ -270,8 +272,10 @@ class ModelRegistry:
 
     Construction assumes a cold-start-enrolled target with no admitted writers;
     it does not prove that assumption. ``persist`` must return only after the
-    simulated state is durable. Its exceptions force an in-memory recovery hold
-    and propagate. The caller may not treat returned records as filesystem grants.
+    simulated state is durable. Its exceptions retain the attempted selection
+    and epoch in an in-memory recovery hold and propagate; they do not prove
+    that no durable write occurred. The caller may not treat returned records
+    as filesystem grants.
     A lock serializes transitions within this one model, including different
     journal slots; it does not supply cross-process or OS exclusion.
     """
@@ -298,7 +302,9 @@ class ModelRegistry:
         try:
             self._persist(candidate)
         except BaseException:
-            self._state = replace(self._state, state="RECOVERY_HELD")
+            # A failed acknowledgment can follow a durable write. Retain the
+            # attempted epoch and selection without acknowledging a grant.
+            self._state = replace(candidate, state="RECOVERY_HELD")
             raise
         self._state = candidate
 

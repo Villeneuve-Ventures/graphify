@@ -315,9 +315,39 @@ def test_persistence_failure_never_admits_a_writer(operation, identity, failed_s
         registry.release(handle)
         registry.admit_client(identity.runtime_sha256, current_for(terminal))
     assert registry.snapshot.state == "RECOVERY_HELD"
-    assert not registry.snapshot.writers_admitted
+    # A failed acknowledgment cannot erase an attempted writer-admission latch.
+    assert registry.snapshot.writers_admitted is (failed_state == "writer-admission")
     with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
         registry.admit_client(identity.runtime_sha256, maintenance.CurrentPublication((1, 30), "binding", 2, "9" * 64))
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+def test_uncertain_first_grant_retains_selection_and_epoch(operation, identity, failure):
+    persisted = []
+
+    def persist(state):
+        persisted.append(state)
+        if len(persisted) == 1:
+            raise failure("durable write without acknowledgment")
+
+    registry = registry_for(operation, identity, persist)
+    with pytest.raises(failure, match="without acknowledgment"):
+        registry.grant(operation, identity)
+    assert registry.snapshot.state == "RECOVERY_HELD"
+    assert registry.snapshot.epoch == identity.epoch
+    assert registry.snapshot.operation == operation
+    assert not registry.snapshot.cohort_exited
+    assert not registry.snapshot.access_withdrawn
+    request = json.loads(operation.request_json)
+    request["journal"] = "/enrolled/control/other-journal.json"
+    changed = maintenance.OperationDescriptor.from_request(
+        "execute", request, preview_sha256=operation.preview_sha256,
+        seal_sha256=operation.seal_sha256)
+    for candidate in (operation, changed):
+        for epoch in (identity.epoch, identity.epoch + 1):
+            with pytest.raises(maintenance.MaintenanceContractError):
+                registry.grant(candidate, replace(identity, epoch=epoch))
+    assert len(persisted) == 1
 
 
 @pytest.mark.parametrize("action", ["execute", "resume", "rollback"])
