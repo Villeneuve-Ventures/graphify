@@ -12,6 +12,11 @@ replace that private backend with an explicitly modeled fixture; a test pass is
 not native qualification or proof that legacy clients cannot restart. There is
 no environment variable, confirmation flag, or request field that enables it.
 
+The [maintenance contract and qualification plan](replacement-maintenance.md)
+defines exact operation selection, modeled authority holds and explicit service
+release. It adds no native broker or production authority. Contract/model tests
+do not qualify process containment, legacy restart exclusion or live execution.
+
 ## Data profile
 
 `fresh-corpus-codex-v1` / `core-v1` reads the current explicit source request
