@@ -302,11 +302,18 @@ def save_query_result(
     signals: they are written both to the frontmatter (so `graphify reflect` can
     aggregate them deterministically) and to an ``## Outcome`` body section (so the
     signal round-trips into the graph on the next semantic re-extraction).
+    Mutating replacement admission checks the directory before creation and the
+    selected file before writing, including resolved aliases and registrations
+    added during formatting. Refusal raises PendingTransactionError before that
+    mutation; this preflight does not fence arbitrary concurrent writers.
     """
     if outcome is not None and outcome not in OUTCOMES:
         raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
 
+    from graphify.canonical_replacement import guard_output
+
     memory_dir = Path(memory_dir)
+    guard_output(memory_dir, mutation=True)
     memory_dir.mkdir(parents=True, exist_ok=True)
 
     now = datetime.now(timezone.utc)
@@ -349,6 +356,7 @@ def save_query_result(
 
     content = "\n".join(frontmatter_lines + body_lines)
     out_path = memory_dir / filename
+    guard_output(out_path, mutation=True)
     out_path.write_text(content, encoding="utf-8")
     return out_path
 

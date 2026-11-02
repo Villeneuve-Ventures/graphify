@@ -52,9 +52,11 @@ def download_audio(url: str, output_dir: Path) -> Path:
 
     Return an admitted cached file when available. Otherwise download into a
     private temporary directory, then copy the actual audio file to an owned
-    staging file in output_dir. Publish with os.replace only after the copy closes
-    successfully and the final path passes mutating admission again. Failed or
-    interrupted copies leave no cache file and preserve any existing destination.
+    staging file in output_dir. Publish with a no-replace hard link only after
+    the copy closes successfully and the final path passes mutating admission
+    again. A destination created meanwhile is preserved and raises FileExistsError.
+    Failed or interrupted copies leave no cache file; owned staging files are
+    removed after either successful publication or failure.
     This permits different filesystems without exposing selected output aliases
     to the downloader. Replacement refusals raise PendingTransactionError;
     download, copy and publication errors propagate.
@@ -114,7 +116,7 @@ def download_audio(url: str, output_dir: Path) -> Path:
             with os.fdopen(descriptor, "wb") as destination, downloaded.open("rb") as source:
                 shutil.copyfileobj(source, destination)
             guard_output(out, mutation=True)
-            os.replace(staging, out)
+            os.link(staging, out)
         finally:
             staging.unlink(missing_ok=True)
         return out

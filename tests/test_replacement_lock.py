@@ -35,14 +35,17 @@ def test_coordinator_reopens_peer_after_create_enoent(case, monkeypatch):
             if flags & os.O_CREAT:
                 os.close(fd)  # A peer has created the name before this caller sees ENOENT.
                 raise FileNotFoundError(errno.ENOENT, "concurrent first creation", name)
-            opened.append(fd)
+            if flags & os.O_RDWR:
+                opened.append(fd)
             return fd
         return original_open(name, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "open", raced_open)
     with replacement._coordinator_lock(request):
         assert path.read_bytes() == ("replacement-lock-v1:" + replacement._sha(os.fsencode(Path(request["journal"]).name))).encode()
-    assert [bool(flags & os.O_CREAT) for flags in calls] == [True, False]
+    # A new binding is re-read through the pinned parent before work is admitted.
+    admissions = [flags for flags in calls if flags & os.O_RDWR]
+    assert [bool(flags & os.O_CREAT) for flags in admissions] == [True, False]
     assert all(flags & os.O_NOFOLLOW and flags & os.O_NONBLOCK for flags in calls)
     assert len(opened) == 1
     _assert_closed(opened[0])

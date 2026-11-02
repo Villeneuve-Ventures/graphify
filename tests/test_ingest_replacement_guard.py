@@ -233,3 +233,77 @@ def test_add_cli_reports_guard_refusal(tmp_path, monkeypatch, capsys, archive_re
     assert "error: preserved graph archive is read-only" in captured.err
     assert captured.out == ""
     assert replacement._tree(archive) == before
+
+
+@pytest.mark.parametrize("slot", [
+    "archive", "descendant", "alias", "alias-descendant", "absent-archive",
+])
+def test_save_query_result_refuses_archive_before_directory_creation(
+    tmp_path, archive_registration, slot,
+):
+    archive, register = archive_registration
+    absent = tmp_path / "absent-archive"
+    register(absent)
+    alias = tmp_path / "alias"
+    alias.symlink_to(archive, target_is_directory=True)
+    target = {
+        "archive": archive, "descendant": archive / "new" / "memory",
+        "alias": alias, "alias-descendant": alias / "new" / "memory",
+        "absent-archive": absent / "memory",
+    }[slot]
+    before = replacement._tree(archive)
+
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        ingestion.save_query_result("what?", "answer", target)
+
+    assert replacement._tree(archive) == before
+    assert not absent.exists()
+    assert not (archive / "new").exists()
+
+
+@pytest.fixture
+def query_filename(monkeypatch):
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ingestion, "datetime", SimpleNamespace(
+        now=lambda tz: datetime(2026, 11, 2, 12, 0, 0, tzinfo=tz),
+    ))
+    return "query_20261102_120000_what.md"
+
+
+def test_save_query_result_selected_alias_is_guarded(
+    tmp_path, archive_registration, query_filename,
+):
+    archive, _ = archive_registration
+    target = tmp_path / "memory"
+    target.mkdir()
+    selected = target / query_filename
+    selected.symlink_to(archive / "old.txt")
+    before = replacement._tree(archive)
+
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        ingestion.save_query_result("what?", "answer", target)
+
+    assert replacement._tree(archive) == before
+    assert selected.is_symlink()
+
+
+def test_save_query_result_rechecks_late_registration(
+    tmp_path, monkeypatch, archive_registration, query_filename,
+):
+    _, register = archive_registration
+    target = tmp_path / "memory"
+    selected = target / query_filename
+    original = ingestion._yaml_str
+
+    def format_after_registration(value):
+        register(selected)
+        return original(value)
+
+    monkeypatch.setattr(ingestion, "_yaml_str", format_after_registration)
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        ingestion.save_query_result("what?", "answer", target)
+
+    assert not selected.exists()
+    assert [path.name for path in target.iterdir()] == [replacement.GUARD]

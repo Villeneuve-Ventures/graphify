@@ -25,6 +25,7 @@ PROFILE = "fresh-corpus-codex-v1"
 MAX_BYTES = 128 * 1024 * 1024
 # Root depth is zero; refuse deeper directories before opening them.
 MAX_PRESERVATION_DEPTH = 128
+MAX_GUARD_SCAN_ENTRIES = 100_000
 # Forward growth: one request copy, one container-path allowance, one bounded
 # native owner, plus allocation/identity/binding/receipt fields and state names.
 _FORWARD_JOURNAL_RESERVE = 3 * tx._MAX_STATE_BYTES + 64 * 1024
@@ -170,7 +171,7 @@ def _external_path(request, path, *, allow_equal=None):
     _require(path.is_absolute() and str(path) == os.path.abspath(path)
              and path.parent.resolve(strict=True) == path.parent
              and path.name not in {"", ".", ".."}, "noncanonical external replacement path")
-    _require(path.name != GUARD, "reserved replacement guard name")
+    _require(path.name != GUARD and not _guard_backup_name(path.name), "reserved replacement guard name")
     _directory(path.parent)
     roots = [Path(request[k]) for k in ("root", "output")]
     roots += [Path(entry["path"]) for entry in request["extra_roots"]]
@@ -263,7 +264,7 @@ def build_data(raw, fragments, *, _source_output=None):
         structural["output"] = str(_source_output)
     structural = source.validate_request(structural)
     root = Path(request["root"])
-    selected = lambda p: (p != GUARD and any(PurePosixPath(p).full_match(x) for x in request["include"])
+    selected = lambda p: (p != GUARD and not _guard_backup_name(Path(p).name) and any(PurePosixPath(p).full_match(x) for x in request["include"])
                           and not any(PurePosixPath(p).full_match(x) for x in request["exclude"]))
     with source._inputs(structural, source._BuildInputs) as inputs:
         detected = detect(root, source_io=inputs, strict=True, quiet=True,
@@ -318,7 +319,10 @@ def build_data(raw, fragments, *, _source_output=None):
                          and edge.get("source_file") in hashes, "invalid semantic edge")
             for group in fragment.get("hyperedges", []):
                 _confidence(group, hyperedge=True)
-                _require(isinstance(group.get("nodes"), list) and set(group["nodes"]) <= ids
+                members = group.get("nodes")
+                _require(isinstance(members, list)
+                         and all(isinstance(member, str) and member for member in members)
+                         and set(members) <= ids
                          and group.get("source_file") in hashes, "invalid semantic group")
             nodes.extend(part_nodes)
             edges.extend(fragment.get("edges", []))
@@ -478,6 +482,38 @@ def _guard_observation(info):
     return None if info is None else (_stable(info), info.st_uid, info.st_gid, info.st_nlink)
 
 
+def _guard_backup_name(name):
+    prefix = "." + GUARD + ".graphify-merge-backup."
+    token = name.removeprefix(prefix)
+    return name.startswith(prefix) and len(token) == 32 and all(c in "0123456789abcdef" for c in token)
+
+
+def _guard_recovery_entries(cap, issuers):
+    """Hold POSIX admission for trusted displaced guards without reading payloads.
+
+    Enumerate at most MAX_GUARD_SCAN_ENTRIES names per ancestor. Foreign backup
+    metadata is rechecked; trusted or uncertain evidence requires explicit
+    recovery. Windows retains its existing marker-only admission.
+    """
+    if os.name == "nt":
+        return {}
+    observed = {}
+    with os.scandir(cap.fd) as entries:
+        for count, entry in enumerate(entries, 1):
+            _require(count <= MAX_GUARD_SCAN_ENTRIES, "replacement guard recovery scan exceeds bound")
+            if not _guard_backup_name(entry.name):
+                continue
+            before = os.stat(entry.name, dir_fd=cap.fd, follow_symlinks=False)
+            _require(issuers is not None and before.st_uid not in issuers,
+                     "replacement guard update requires explicit recovery")
+            after = os.stat(entry.name, dir_fd=cap.fd, follow_symlinks=False)
+            _require(_guard_observation(before) == _guard_observation(after),
+                     "foreign replacement guard recovery evidence changed")
+            observed[entry.name] = _guard_observation(before)
+    cap.validate()
+    return observed
+
+
 def _guard_path(path, *, mutation=True, issuer_policy=None):
     """Read ancestor registrations through pinned directories, including absent targets."""
     path = Path(os.path.abspath(path))
@@ -488,42 +524,52 @@ def _guard_path(path, *, mutation=True, issuer_policy=None):
                 None if cap is None else (cap.identity.device, cap.identity.inode), selected_parent=parent)
             if cap is None:
                 continue
+            recovery = _guard_recovery_entries(cap, issuers)
             before = _guard_entry(cap)
-            if before is None:
-                continue
-            if issuers is not None and before.st_uid not in issuers:
-                _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),
-                         "foreign replacement guard changed")
+            try:
+                if before is None:
+                    continue
+                if issuers is not None and before.st_uid not in issuers:
+                    _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),
+                             "foreign replacement guard changed")
+                    cap.validate()
+                    continue
+                _require(stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
+                _require(before.st_nlink == 1 and before.st_size <= MAX_BYTES,
+                         "unsafe or oversized replacement file")
+                record = _load(GUARD, parent=cap)
+                after = _guard_entry(cap)
+                _require(_guard_observation(after) == _guard_observation(before), "replacement guard changed")
                 cap.validate()
-                continue
-            _require(stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
-            _require(before.st_nlink == 1 and before.st_size <= MAX_BYTES,
-                     "unsafe or oversized replacement file")
-            record = _load(GUARD, parent=cap)
-            after = _guard_entry(cap)
-            _require(_guard_observation(after) == _guard_observation(before), "replacement guard changed")
-            cap.validate()
-            _require(isinstance(record, dict) and record.get("schema") == 1
-                     and isinstance(record.get("entries"), dict), "malformed replacement guard")
-            name = path.relative_to(parent).parts[0]
-            if name not in record["entries"]:
-                continue
-            entry = record["entries"][name]
-            _require(isinstance(entry, dict) and set(entry) == {"journal", "digest", "role"}
-                     and isinstance(entry["role"], str) and entry["role"] in {"target", "archive"}
-                     and isinstance(entry["journal"], str) and Path(entry["journal"]).is_absolute()
-                     and isinstance(entry["digest"], str) and bool(entry["digest"]),
-                     "malformed replacement guard entry")
-            journal = _load(entry["journal"])
-            _require(isinstance(journal, dict) and journal.get("request_digest") == entry["digest"],
-                     "replacement guard changed")
-            if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
-                continue
-            if entry.get("role") == "archive":
-                _require(not mutation, "preserved graph archive is read-only")
-            else:
-                _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
-                         "canonical replacement is incomplete")
+                _require(isinstance(record, dict) and record.get("schema") == 1
+                         and isinstance(record.get("entries"), dict), "malformed replacement guard")
+                name = path.relative_to(parent).parts[0]
+                if name not in record["entries"]:
+                    continue
+                entry = record["entries"][name]
+                _require(isinstance(entry, dict) and set(entry) == {"journal", "digest", "role"}
+                         and isinstance(entry["role"], str) and entry["role"] in {"target", "archive"}
+                         and isinstance(entry["journal"], str) and Path(entry["journal"]).is_absolute()
+                         and isinstance(entry["digest"], str) and bool(entry["digest"]),
+                         "malformed replacement guard entry")
+                journal = _load(entry["journal"])
+                _require(isinstance(journal, dict) and journal.get("request_digest") == entry["digest"],
+                         "replacement guard changed")
+                if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
+                    continue
+                if entry.get("role") == "archive":
+                    _require(not mutation, "preserved graph archive is read-only")
+                else:
+                    _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
+                             "canonical replacement is incomplete")
+            finally:
+                _require(_guard_recovery_entries(cap, issuers) == recovery,
+                         "replacement guard recovery evidence changed")
+                _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),
+                         "foreign replacement guard changed" if before is not None
+                         and issuers is not None and before.st_uid not in issuers
+                         else "replacement guard changed")
+                cap.validate()
 
 
 def guard_output(path, *, mutation=True):
@@ -533,7 +579,8 @@ def guard_output(path, *, mutation=True):
     absent targets. Markers are read relative to pinned ancestors and revalidated;
     A protected, namespace-scoped issuer snapshot classifies POSIX marker owners
     before payload admission. Only proved-foreign entries are ignored; trusted
-    malformed markers and uncertain/changed policy raise PendingTransactionError.
+    malformed markers, trusted displaced-guard backups and uncertain/changed
+    policy raise PendingTransactionError. POSIX ancestor scans are bounded.
     Windows retains its existing admission without Unix issuer filtering.
     Return None if admission succeeds; mutation=False permits archive reads.
     This preflight does not grant maintenance authority or fence arbitrary writers.
@@ -565,7 +612,11 @@ def _operation(journal_path, digest):
 
 @contextlib.contextmanager
 def _coordinator_lock(request):
-    """Bind the locked inode and frozen parents before admitting operation work."""
+    """Bind the inode and parents, then fully write/read the lock before work.
+
+    Short writes are completed; zero progress or a changed binding refuses
+    before yielding. Incomplete lock evidence is retained for explicit recovery.
+    """
     import fcntl
     deadline = time.monotonic() + 30
     journal_slot = Path(request["journal"]).name
@@ -615,13 +666,17 @@ def _coordinator_lock(request):
                      "replacement operation lock changed")
             payload = ("replacement-lock-v1:" + _sha(os.fsencode(journal_slot))).encode()
             if info.st_size == 0:
-                os.write(fd, payload)
+                view = memoryview(payload)
+                while view:
+                    count = os.write(fd, view)
+                    _require(0 < count <= len(view), "replacement operation lock write made no progress")
+                    view = view[count:]
                 os.fsync(fd)
                 with tx.pin_output(path.parent, mutation=False) as cap:
                     os.fsync(cap.fd)
-            else:
-                _require(_read(path.name, parent_fd=parent.fd, limit=1024, expected=info) == payload,
-                         "replacement operation lock binding changed")
+            written = os.fstat(fd)
+            _require(_read(path.name, parent_fd=parent.fd, limit=1024, expected=written) == payload,
+                     "replacement operation lock binding changed")
             _validate_parents(request)
             parent.validate()
             named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
@@ -973,6 +1028,9 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
                               if projected.get("rollback_new_tree") is None else None)
         _require(retained_container is None or _identity_at(retained_container) == journal["new_identity"],
                  "retained replacement allocation changed")
+        if journal["state"] == "COMMITTED":
+            _require(expected_new_tree == _sha(_bytes(projected["rollback_new_tree"])),
+                     "explicit current new-graph selector required")
         if projected.get("rollback_new_tree") is not None:
             _register(quarantine, journal_path, digest, "archive")
         lock_paths = [output.parent, archive.parent, quarantine.parent, old_path]

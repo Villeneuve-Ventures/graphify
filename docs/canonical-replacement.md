@@ -26,7 +26,8 @@ explicit exclusion in this first profile rather than a fabricated concept.
 IDs cannot collide across source files, including AST nodes; source coverage is
 checked again after graph canonicalization. Edge confidence, finite scores and
 relations follow the host extraction rubric and are validated before merging.
-Edge and hyperedge records must be JSON objects; non-object records return a
+Edge and hyperedge records must be JSON objects. Hyperedge members must be
+nonempty strings before set or topology checks. Malformed records return a
 structured blocked result before any seal or graph is published.
 
 Fragment `backend=codex_host_agent` and `network_egress=false` fields describe
@@ -52,7 +53,8 @@ globs, extra policy/Git roots, direction, extraction profile and artifact
 profile. Output retains the `graphify-out` basename. Archive, stage and journal
 are external to every source/policy root and cannot contain one another. Archive
 and evidence slots, including rollback quarantine, cannot use the reserved
-`.graphify_replacement_guard` basename; admission refuses before operation effects.
+`.graphify_replacement_guard` basename or its exact recovery-backup names;
+admission refuses before operation effects.
 Archive and output, including the preallocation/control parent, must share a filesystem.
 Rollback quarantine is checked against all source/policy roots and rename devices
 before any journal or guard change. Bounds include 100,000 preserved entries,
@@ -112,8 +114,22 @@ a changed physical target refuses admission. These checks perform no mutation
 and do not enable the maintenance backend.
 Guard registration requires mutating admission on its locked parent, so a prior
 retained archive cannot become another registration parent.
+On POSIX, displaced guard predecessors remain recovery evidence when publication
+loses to another entry or fails before restoration. Ordinary admission recognizes
+the exact `..graphify_replacement_guard.graphify-merge-backup.<32 lowercase hex>`
+names independently of a missing or foreign public marker. A trusted backup,
+including a nonregular one, blocks reads and writes until explicit reconciliation;
+it is never automatically adopted or cleared. Only proved-foreign backups are
+ignored. Successful updates remove their predecessor through the existing writer.
+Each existing ancestor is enumerated twice with a 100,000-name limit per pass;
+overflow, unavailable enumeration or changed evidence blocks. This adds directory
+read access and enumeration cost to POSIX preflight. Public-marker metadata is
+rechecked after the final backup scan, including initially missing or foreign
+markers. This is a bounded preflight, not continuous namespace exclusion; Windows
+retains its marker-only route.
 Archive registration is outside the preserved tree; new clients reject explicit
-archive mutations and aliases. Older strict readers reject the new binding.
+archive mutations and aliases, including `save-result` directory and selected-file
+writes. Older strict readers reject the new binding.
 Maintenance exclusion, including legacy restart inhibition, remains essential:
 advisory inode locks cannot fence arbitrary same-UID or root writers.
 

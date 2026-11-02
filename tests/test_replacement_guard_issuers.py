@@ -356,6 +356,8 @@ def test_registration_restore_never_overwrites_a_late_foreign_winner(
     assert marker.read_bytes() == b"restore-winner"
     backups = list(parent.glob("*graphify-merge-backup*"))
     assert len(backups) == 1 and backups[0].read_bytes() == before
+    with pytest.raises(tx.PendingTransactionError, match="guard update.*recovery"):
+        replacement.guard_output(parent / "archive" / "new")
 
 
 def test_foreign_owner_change_is_not_ignored(protected_policy, guarded_parent, monkeypatch):

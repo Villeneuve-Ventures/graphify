@@ -1481,7 +1481,9 @@ def _replace_bytes(
     checks the selected entry and its quarantined predecessor before publication;
     callback failures refuse. Restoration uses no-replace rename on this path,
     so a concurrent destination is preserved and a displaced predecessor may
-    remain as recovery evidence. Existing queue digest validation is unchanged.
+    remain as recovery evidence. Publication failures retain that predecessor
+    when a concurrent destination exists on this callback path. Existing queue
+    digest validation is unchanged.
     """
     if expected_digest is not None and expected_identity is None:
         raise PendingTransactionError("managed entry digest requires exact identity")
@@ -1593,8 +1595,9 @@ def _replace_bytes(
                     raise PendingTransactionError(
                         f"managed entry replacement disappeared: {name}"
                     ) from exc
-                with contextlib.suppress(OSError):
-                    os.unlink(quarantine, dir_fd=capability.fd)
+                if validate_existing is None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(quarantine, dir_fd=capability.fd)
                 os.fsync(capability.fd)
                 capability.validate()
                 raise PendingTransactionError(
@@ -1608,7 +1611,8 @@ def _replace_bytes(
                         raise PendingTransactionError(
                             f"managed entry quarantine identity changed: {name}"
                         )
-                    os.unlink(quarantine, dir_fd=capability.fd)
+                    if validate_existing is None:
+                        os.unlink(quarantine, dir_fd=capability.fd)
                 os.fsync(capability.fd)
                 capability.validate()
                 raise

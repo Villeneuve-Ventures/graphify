@@ -275,3 +275,60 @@ def test_audio_final_path_is_readmitted_after_copy(
     assert not selected.exists()
     assert sorted(path.name for path in target.iterdir()) == [replacement.GUARD]
     assert list(downloader.private_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("boundary", ["download", "copy", "publication"])
+@pytest.mark.parametrize("winner_kind", ["regular", "symlink"])
+def test_late_audio_cache_winner_is_never_replaced(
+    tmp_path, monkeypatch, downloader, boundary, winner_kind,
+):
+    target = tmp_path / "raw"
+    selected = target / f"{STEM}.m4a"
+    external = tmp_path / "user-audio.m4a"
+    external.write_bytes(b"user-owned complete audio")
+    winner_identity = []
+
+    def publish_winner():
+        if winner_kind == "regular":
+            selected.write_bytes(b"existing complete audio")
+        else:
+            selected.symlink_to(external)
+        info = selected.lstat()
+        winner_identity.append((info.st_dev, info.st_ino))
+
+    if boundary == "download":
+        downloader.before_write = publish_winner
+    elif boundary == "copy":
+        original_copy = shutil.copyfileobj
+
+        def copy_then_publish(source, destination, *args, **kwargs):
+            original_copy(source, destination, *args, **kwargs)
+            publish_winner()
+
+        monkeypatch.setattr(shutil, "copyfileobj", copy_then_publish)
+    else:
+        original_link = transcribe.os.link
+        original_replace = transcribe.os.replace
+
+        def publication(original):
+            def publish(source, destination, *args, **kwargs):
+                if Path(destination) == selected:
+                    publish_winner()
+                return original(source, destination, *args, **kwargs)
+            return publish
+
+        monkeypatch.setattr(transcribe.os, "link", publication(original_link))
+        monkeypatch.setattr(transcribe.os, "replace", publication(original_replace))
+
+    with pytest.raises(FileExistsError):
+        transcribe.download_audio(URL, target)
+
+    info = selected.lstat()
+    assert (info.st_dev, info.st_ino) == winner_identity[0]
+    assert selected.is_symlink() == (winner_kind == "symlink")
+    assert selected.read_bytes() == (
+        b"existing complete audio" if winner_kind == "regular" else b"user-owned complete audio"
+    )
+    assert external.read_bytes() == b"user-owned complete audio"
+    assert list(target.iterdir()) == [selected]
+    assert list(downloader.private_root.iterdir()) == []
