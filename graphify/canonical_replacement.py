@@ -244,15 +244,18 @@ def _confidence(edge, *, hyperedge=False):
     relations = {"participate_in", "implement", "form"} if hyperedge else {"calls", "implements", "references", "cites",
              "conceptually_related_to", "shares_data_with", "semantically_similar_to",
              "rationale_for"}
-    _require(edge.get("relation") in relations, "invalid semantic relation")
+    _require(isinstance(edge.get("relation"), str) and edge["relation"] in relations,
+             "invalid semantic relation")
 
 
 def build_data(raw, fragments, *, _source_output=None):
     """Read fresh AST and host-Codex fragments without providers or caches.
 
-    Semantic edge and hyperedge records must be objects and use their respective
-    host-rubric relations and confidence kinds; hyperedges cannot be AMBIGUOUS.
-    Invalid records raise PendingTransactionError before graph composition. This
+    Fragment containers must be lists; node records, IDs and source ownership
+    are checked before iteration, hashing or membership operations. Edge and
+    hyperedge records use their respective host-rubric relations and confidence
+    kinds; hyperedges cannot be AMBIGUOUS. Invalid records raise
+    PendingTransactionError before graph composition. This
     builds a sealed in-memory payload and does not publish filesystem authority.
     """
     import copy
@@ -303,30 +306,40 @@ def build_data(raw, fragments, *, _source_output=None):
             for path, digest in hashes.items():
                 _require(_sha(inputs.read_bytes(path)) == digest, "semantic source changed")
             part_nodes = fragment.get("nodes", [])
-            ids = {n.get("id") for n in part_nodes if isinstance(n, dict)}
-            _require(len(ids) == len(part_nodes) and all(isinstance(n, str) and n for n in ids),
+            part_edges, part_groups = fragment.get("edges", []), fragment.get("hyperedges", [])
+            _require(all(isinstance(part, list) for part in (part_nodes, part_edges, part_groups)),
+                     "semantic fragment records must be lists")
+            _require(all(isinstance(node, dict) and isinstance(node.get("id"), str)
+                         and node["id"] for node in part_nodes), "invalid semantic node identity")
+            ids = {node["id"] for node in part_nodes}
+            _require(len(ids) == len(part_nodes),
                      "invalid semantic node identity")
+            _require(all(isinstance(node.get("source_file"), str) for node in part_nodes),
+                     "invalid semantic node source")
             _require({n.get("source_file") for n in part_nodes} == set(hashes),
                      "semantic coverage is incomplete")
             for node in part_nodes:
                 admit_identity(node)
-                _require(node.get("file_type") in {"document", "paper", "image", "concept", "rationale"},
+                _require(isinstance(node.get("file_type"), str)
+                         and node["file_type"] in {"document", "paper", "image", "concept", "rationale"},
                          "invalid semantic file type")
-            for edge in fragment.get("edges", []):
+            for edge in part_edges:
                 _confidence(edge)
-                _require(edge.get("source") in ids and edge.get("target") in ids
+                _require(all(isinstance(edge.get(field), str) for field in ("source", "target", "source_file"))
+                         and edge["source"] in ids and edge["target"] in ids
                          and edge["source"] != edge["target"]
                          and edge.get("source_file") in hashes, "invalid semantic edge")
-            for group in fragment.get("hyperedges", []):
+            for group in part_groups:
                 _confidence(group, hyperedge=True)
                 members = group.get("nodes")
                 _require(isinstance(members, list)
                          and all(isinstance(member, str) and member for member in members)
                          and set(members) <= ids
-                         and group.get("source_file") in hashes, "invalid semantic group")
+                         and isinstance(group.get("source_file"), str)
+                         and group["source_file"] in hashes, "invalid semantic group")
             nodes.extend(part_nodes)
-            edges.extend(fragment.get("edges", []))
-            hyperedges.extend(fragment.get("hyperedges", []))
+            edges.extend(part_edges)
+            hyperedges.extend(part_groups)
             covered.update(hashes)
         _require(covered == set(semantic), "selected semantic inputs are incomplete")
         graph = build_from_json(copy.deepcopy({"nodes": ast["nodes"] + nodes, "edges": ast["edges"] + edges,

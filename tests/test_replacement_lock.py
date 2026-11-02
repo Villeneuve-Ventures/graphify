@@ -1,6 +1,5 @@
 """Coordinator initialization recovery keeps the original native safety boundary."""
 import errno
-import fcntl
 import os
 from pathlib import Path
 
@@ -9,6 +8,8 @@ import pytest
 from graphify import canonical_replacement as replacement
 from graphify import transaction as tx
 from tests.test_canonical_replacement import case  # noqa: F401
+
+fcntl = pytest.importorskip("fcntl")
 
 
 def _lock_path(request):

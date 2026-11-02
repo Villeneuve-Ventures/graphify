@@ -13,12 +13,18 @@ from graphify import transaction as tx
 
 @pytest.fixture
 def protected_policy(tmp_path, monkeypatch):
-    """Model root ownership/ACL evidence on ordinary disposable files only."""
+    """Model root ownership, safe ancestor modes and ACLs on disposable files.
+
+    Host ancestors can be shared writable directories. Their synthetic policy
+    modes are independent of that host layout; mode() injects explicit directory
+    faults. Policy-file permissions remain real and are not masked.
+    """
     directory = tmp_path / "controller-policy"
     directory.mkdir()
     records = directory / issuers._RECORDS
     records.mkdir()
     owners = {}
+    modes = {}
     real_stat, real_fstat = os.stat, os.fstat
 
     def owner(path, uid=0):
@@ -27,10 +33,17 @@ def protected_policy(tmp_path, monkeypatch):
 
     for path in (directory, *directory.parents, records):
         owner(path)
+        info = real_stat(path, follow_symlinks=False)
+        modes[(info.st_dev, info.st_ino)] = info.st_mode & ~0o7022
+
+    def mode(path, permissions):
+        info = real_stat(path, follow_symlinks=False)
+        modes[(info.st_dev, info.st_ino)] = (info.st_mode & ~0o7777) | permissions
 
     def metadata(info):
-        uid = owners.get((info.st_dev, info.st_ino), info.st_uid)
-        return SimpleNamespace(**{name: (uid if name == "st_uid" else getattr(info, name))
+        key = info.st_dev, info.st_ino
+        override = {"st_uid": owners.get(key, info.st_uid), "st_mode": modes.get(key, info.st_mode)}
+        return SimpleNamespace(**{name: override.get(name, getattr(info, name))
                                   for name in dir(info) if name.startswith("st_")})
 
     monkeypatch.setattr(issuers, "_DIRECTORY", directory)
@@ -53,7 +66,7 @@ def protected_policy(tmp_path, monkeypatch):
         owner(index)
         return policy, index, record
 
-    return SimpleNamespace(directory=directory, records=records, owner=owner, install=install)
+    return SimpleNamespace(directory=directory, records=records, owner=owner, mode=mode, install=install)
 
 
 @pytest.fixture

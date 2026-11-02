@@ -29,6 +29,9 @@ relations follow the host extraction rubric and are validated before merging.
 Edge and hyperedge records must be JSON objects. Hyperedge members must be
 nonempty strings before set or topology checks. Malformed records return a
 structured blocked result before any seal or graph is published.
+Fragment node, edge and hyperedge containers must be lists. Node objects and
+their nonempty string IDs are admitted before hashing; source ownership and
+relationship identifiers are checked before membership or path operations.
 
 Fragment `backend=codex_host_agent` and `network_egress=false` fields describe
 the approved caller's provenance claim. They do not cryptographically attest
@@ -130,6 +133,9 @@ retains its marker-only route.
 Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases, including `save-result` directory and selected-file
 writes. Older strict readers reject the new binding.
+Global graph and manifest saves apply the same mutation admission before
+directory creation and final writing. Corrupt global-manifest backup checks
+both rename paths; replacement refusal cannot become a backup-error fallback.
 Maintenance exclusion, including legacy restart inhibition, remains essential:
 advisory inode locks cannot fence arbitrary same-UID or root writers.
 
@@ -216,6 +222,10 @@ Rollback is explicit and retains the replacement graph at a fresh external
 quarantine path before restoring the original archive name. The terminal result
 is `rolled-back-unrecovered`: the old identity failure still exists. It is not
 permission to resume forward publication or a claim of restored service.
+The original request-bound target/archive registrations remain after rollback,
+including an empty archive slot. Path absence supplies no release authority;
+this candidate provides no automatic slot-deregistration operation. This differs
+from an unused quarantine that was never registered.
 If installation has not occurred, the allocation stays at its recorded external
 container instead, with its recorded physical identity checked before restoration.
 Only quarantine selected to retain an installed tree receives an archive guard;
