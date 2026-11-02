@@ -1473,9 +1473,20 @@ def _replace_bytes(
     *,
     expected_identity: ManagedEntryIdentity | tuple[int, int] | None = None,
     expected_digest: str | None = None,
+    validate_existing: Callable[[str], None] | None = None,
 ) -> None:
+    """Stage bytes and optionally bind replacement to an observed existing entry.
+
+    With validate_existing, an exact expected_identity is mandatory. The callback
+    checks the selected entry and its quarantined predecessor before publication;
+    callback failures refuse. Restoration uses no-replace rename on this path,
+    so a concurrent destination is preserved and a displaced predecessor may
+    remain as recovery evidence. Existing queue digest validation is unchanged.
+    """
     if expected_digest is not None and expected_identity is None:
         raise PendingTransactionError("managed entry digest requires exact identity")
+    if validate_existing is not None and expected_identity is None:
+        raise PendingTransactionError("managed entry validation requires exact identity")
     capability.validate()
     prior = _entry_stat(capability, name)
     temporary = f".{name}.{secrets.token_hex(16)}.tmp"
@@ -1507,10 +1518,18 @@ def _replace_bytes(
         info = _entry_stat(capability, entry_name)
         return None if info is None else (info.st_dev, info.st_ino)
 
+    def restore_quarantine(quarantine: str) -> None:
+        if validate_existing is not None:
+            _atomic_rename_no_replace(capability, quarantine, name)
+        else:
+            os.rename(quarantine, name, src_dir_fd=capability.fd, dst_dir_fd=capability.fd)
+
     try:
         if expected_identity is not None:
             if current_identity(name) != expected_identity:
                 raise PendingTransactionError(f"managed entry identity changed: {name}")
+            if validate_existing is not None:
+                validate_existing(name)
             if expected_digest is not None:
                 current_record = _read_queue_record(capability, name)
                 if (
@@ -1530,15 +1549,19 @@ def _replace_bytes(
             os.fsync(capability.fd)
             if current_identity(quarantine) != expected_identity:
                 if _entry_stat(capability, name) is None:
-                    os.rename(
-                        quarantine,
-                        name,
-                        src_dir_fd=capability.fd,
-                        dst_dir_fd=capability.fd,
-                    )
+                    restore_quarantine(quarantine)
                     os.fsync(capability.fd)
                     capability.validate()
                 raise PendingTransactionError(f"managed entry changed during quarantine: {name}")
+            if validate_existing is not None:
+                try:
+                    validate_existing(quarantine)
+                except BaseException:
+                    if _entry_stat(capability, name) is None:
+                        restore_quarantine(quarantine)
+                        os.fsync(capability.fd)
+                        capability.validate()
+                    raise
             if expected_digest is not None:
                 quarantined_record = _read_queue_record(capability, quarantine)
                 if (
@@ -1546,12 +1569,7 @@ def _replace_bytes(
                     or quarantined_record.digest != expected_digest
                 ):
                     if _entry_stat(capability, name) is None:
-                        os.rename(
-                            quarantine,
-                            name,
-                            src_dir_fd=capability.fd,
-                            dst_dir_fd=capability.fd,
-                        )
+                        restore_quarantine(quarantine)
                         os.fsync(capability.fd)
                         capability.validate()
                     raise PendingTransactionError(
@@ -1569,12 +1587,7 @@ def _replace_bytes(
                 winner = _entry_stat(capability, name)
                 if winner is None:
                     if _entry_stat(capability, quarantine) is not None:
-                        os.rename(
-                            quarantine,
-                            name,
-                            src_dir_fd=capability.fd,
-                            dst_dir_fd=capability.fd,
-                        )
+                        restore_quarantine(quarantine)
                         os.fsync(capability.fd)
                         capability.validate()
                     raise PendingTransactionError(
@@ -1589,12 +1602,7 @@ def _replace_bytes(
                 ) from exc
             except Exception:
                 if _entry_stat(capability, name) is None:
-                    os.rename(
-                        quarantine,
-                        name,
-                        src_dir_fd=capability.fd,
-                        dst_dir_fd=capability.fd,
-                    )
+                    restore_quarantine(quarantine)
                 else:
                     if current_identity(quarantine) != expected_identity:
                         raise PendingTransactionError(

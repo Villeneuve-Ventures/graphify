@@ -170,6 +170,7 @@ def _external_path(request, path, *, allow_equal=None):
     _require(path.is_absolute() and str(path) == os.path.abspath(path)
              and path.parent.resolve(strict=True) == path.parent
              and path.name not in {"", ".", ".."}, "noncanonical external replacement path")
+    _require(path.name != GUARD, "reserved replacement guard name")
     _directory(path.parent)
     roots = [Path(request[k]) for k in ("root", "output")]
     roots += [Path(entry["path"]) for entry in request["extra_roots"]]
@@ -229,26 +230,29 @@ def _request(raw):
     return dict(raw), structural
 
 
-def _confidence(edge):
+def _confidence(edge, *, hyperedge=False):
+    """Refuse records outside the selected edge or hyperedge host rubric."""
     import math
     _require(isinstance(edge, dict), "semantic relationship must be an object")
     kind, score = edge.get("confidence"), edge.get("confidence_score")
     _require(type(score) in {int, float} and math.isfinite(score)
              and ((kind == "EXTRACTED" and score == 1.0)
                   or (kind == "INFERRED" and score in {0.95, 0.85, 0.75, 0.65, 0.55})
-                  or (kind == "AMBIGUOUS" and 0.1 <= score <= 0.3)),
+                  or (not hyperedge and kind == "AMBIGUOUS" and 0.1 <= score <= 0.3)),
              "invalid semantic confidence or score")
-    _require(edge.get("relation") in {"calls", "implements", "references", "cites",
+    relations = {"participate_in", "implement", "form"} if hyperedge else {"calls", "implements", "references", "cites",
              "conceptually_related_to", "shares_data_with", "semantically_similar_to",
-             "rationale_for", "participate_in", "implement", "form"}, "invalid semantic relation")
+             "rationale_for"}
+    _require(edge.get("relation") in relations, "invalid semantic relation")
 
 
 def build_data(raw, fragments, *, _source_output=None):
     """Read fresh AST and host-Codex fragments without providers or caches.
 
-    Semantic edge and hyperedge records must be objects; non-object records raise
-    PendingTransactionError before confidence or topology admission. This builds
-    a sealed in-memory payload and does not publish filesystem graph authority.
+    Semantic edge and hyperedge records must be objects and use their respective
+    host-rubric relations and confidence kinds; hyperedges cannot be AMBIGUOUS.
+    Invalid records raise PendingTransactionError before graph composition. This
+    builds a sealed in-memory payload and does not publish filesystem authority.
     """
     import copy
     from .build import build_from_json
@@ -313,7 +317,7 @@ def build_data(raw, fragments, *, _source_output=None):
                          and edge["source"] != edge["target"]
                          and edge.get("source_file") in hashes, "invalid semantic edge")
             for group in fragment.get("hyperedges", []):
-                _confidence(group)
+                _confidence(group, hyperedge=True)
                 _require(isinstance(group.get("nodes"), list) and set(group["nodes"]) <= ids
                          and group.get("source_file") in hashes, "invalid semantic group")
             nodes.extend(part_nodes)
@@ -467,25 +471,37 @@ def _guard_entry(cap):
         info = os.stat(GUARD, dir_fd=cap.fd, follow_symlinks=False)
     except FileNotFoundError:
         return None
-    _require(stat.S_ISREG(info.st_mode), "unsafe non-regular replacement guard")
     return info
 
 
-def _guard_path(path, *, mutation=True):
+def _guard_observation(info):
+    return None if info is None else (_stable(info), info.st_uid, info.st_gid, info.st_nlink)
+
+
+def _guard_path(path, *, mutation=True, issuer_policy=None):
     """Read ancestor registrations through pinned directories, including absent targets."""
     path = Path(os.path.abspath(path))
     for parent in path.parents:
         with _guard_parent(parent) as cap:
+            issuers = None if issuer_policy is None else issuer_policy.trusted_issuers(
+                parent if cap is None else cap.path,
+                None if cap is None else (cap.identity.device, cap.identity.inode), selected_parent=parent)
             if cap is None:
                 continue
             before = _guard_entry(cap)
             if before is None:
                 continue
+            if issuers is not None and before.st_uid not in issuers:
+                _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),
+                         "foreign replacement guard changed")
+                cap.validate()
+                continue
+            _require(stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
             _require(before.st_nlink == 1 and before.st_size <= MAX_BYTES,
                      "unsafe or oversized replacement file")
             record = _load(GUARD, parent=cap)
             after = _guard_entry(cap)
-            _require(after is not None and _stable(after) == _stable(before), "replacement guard changed")
+            _require(_guard_observation(after) == _guard_observation(before), "replacement guard changed")
             cap.validate()
             _require(isinstance(record, dict) and record.get("schema") == 1
                      and isinstance(record.get("entries"), dict), "malformed replacement guard")
@@ -515,15 +531,21 @@ def guard_output(path, *, mutation=True):
 
     Both lexical and resolved aliases are checked, including descendants and
     absent targets. Markers are read relative to pinned ancestors and revalidated;
-    malformed, replaced or unavailable registrations raise PendingTransactionError.
+    A protected, namespace-scoped issuer snapshot classifies POSIX marker owners
+    before payload admission. Only proved-foreign entries are ignored; trusted
+    malformed markers and uncertain/changed policy raise PendingTransactionError.
+    Windows retains its existing admission without Unix issuer filtering.
     Return None if admission succeeds; mutation=False permits archive reads.
     This preflight does not grant maintenance authority or fence arbitrary writers.
     """
     try:
         absolute = os.path.abspath(path)
         resolved = os.path.realpath(absolute)
-        for candidate in dict.fromkeys((absolute, resolved)):
-            _guard_path(candidate, mutation=mutation)
+        from .replacement_guard_issuers import issuer_snapshot
+        policy_context = issuer_snapshot() if os.name == "posix" else contextlib.nullcontext(None)
+        with policy_context as policy:
+            for candidate in dict.fromkeys((absolute, resolved)):
+                _guard_path(candidate, mutation=mutation, issuer_policy=policy)
         _require(os.path.realpath(absolute) == resolved, "replacement guard path changed")
     except (KeyError, TypeError, ValueError, OSError) as exc:
         raise tx.PendingTransactionError("malformed or unavailable replacement guard") from exc
@@ -543,7 +565,7 @@ def _operation(journal_path, digest):
 
 @contextlib.contextmanager
 def _coordinator_lock(request):
-    """Serialize journal creation/replay before any mutable operation observation."""
+    """Bind the locked inode and frozen parents before admitting operation work."""
     import fcntl
     deadline = time.monotonic() + 30
     journal_slot = Path(request["journal"]).name
@@ -598,7 +620,14 @@ def _coordinator_lock(request):
                 with tx.pin_output(path.parent, mutation=False) as cap:
                     os.fsync(cap.fd)
             else:
-                _require(_read(path, limit=1024) == payload, "replacement operation lock binding changed")
+                _require(_read(path.name, parent_fd=parent.fd, limit=1024, expected=info) == payload,
+                         "replacement operation lock binding changed")
+            _validate_parents(request)
+            parent.validate()
+            named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
+            _require((info.st_dev, info.st_ino) == (named.st_dev, named.st_ino)
+                     and named.st_nlink == 1 and named.st_uid == os.getuid(),
+                     "replacement operation lock changed")
             yield
             parent.validate()
             named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
@@ -616,18 +645,40 @@ def _persist(path, value):
 
 
 def _register(path, journal, digest, role):
+    from .replacement_guard_issuers import issuer_snapshot
+
     path = Path(path)
     with _fd_locks([path.parent], time.monotonic() + 30) as caps, \
-            tx.pin_output(path.parent, mutation=True) as cap:
+            tx.pin_output(path.parent, mutation=True) as cap, issuer_snapshot() as policy:
         _require(cap.identity == caps[0].identity, "replacement registration parent changed")
-        marker = path.parent / GUARD
-        value = _load(marker) if os.path.lexists(marker) else {"schema": 1, "entries": {}}
+        issuers = policy.trusted_issuers(cap.path, (cap.identity.device, cap.identity.inode))
+        before = _guard_entry(cap)
+        _require(before is None or before.st_uid in issuers, "foreign replacement guard registration collision")
+        _require(before is None or stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
+        previous = _read(GUARD, parent_fd=cap.fd, expected=before) if before is not None else None
+        value = _load(GUARD, parent=cap) if before is not None else {"schema": 1, "entries": {}}
+        _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),
+                 "replacement registration marker changed")
         entry = {"journal": str(journal), "digest": digest, "role": role}
-        _require(value.get("schema") == 1 and isinstance(value.get("entries"), dict),
+        _require(isinstance(value, dict) and value.get("schema") == 1 and isinstance(value.get("entries"), dict),
                  "malformed replacement guard")
         _require(value["entries"].get(path.name, entry) == entry, "replacement slot already registered")
         value["entries"][path.name] = entry
-        tx._replace_bytes(cap, GUARD, _bounded_bytes(value))
+        policy.validate()
+        cap.validate()
+        if before is None:
+            tx._create_bytes(cap, GUARD, _bounded_bytes(value))
+        else:
+            def validate_existing(name):
+                info = os.stat(name, dir_fd=cap.fd, follow_symlinks=False)
+                _require((info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode, info.st_nlink)
+                         == (before.st_dev, before.st_ino, before.st_uid, before.st_gid, before.st_mode, 1),
+                         "replacement registration entry changed")
+                _require(_read(name, parent_fd=cap.fd, expected=info) == previous,
+                         "replacement registration content changed")
+
+            tx._replace_bytes(cap, GUARD, _bounded_bytes(value),
+                              expected_identity=(before.st_dev, before.st_ino), validate_existing=validate_existing)
 
 
 @contextlib.contextmanager
@@ -863,8 +914,14 @@ def validate_allocation(capability, binding):
 
 
 def status(raw):
+    """Read the selected operation state without changing its journal or graphs.
+
+    A non-object journal or changed request raises PendingTransactionError;
+    filesystem and JSON admission errors propagate to the CLI's blocked result.
+    """
     request, _ = _request(raw)
     journal = _load(request["journal"])
+    _require(isinstance(journal, dict), "replacement status journal must be an object")
     _require(journal.get("request") == request, "replacement status request changed")
     return {"state": journal["state"], "output": request["output"], "archive": request["archive"],
             "new_tree_sha256": _sha(_bytes(_tree(request["output"]))) if journal["state"] == "COMMITTED" else None}

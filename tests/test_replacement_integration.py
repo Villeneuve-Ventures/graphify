@@ -188,13 +188,13 @@ def test_guard_alias_mapping_cannot_change_before_ancestor_admission(registratio
     real_guard = replacement._guard_path
     changed = False
 
-    def retarget(path, *, mutation=True):
+    def retarget(path, *, mutation=True, issuer_policy=None):
         nonlocal changed
         if not changed:
             alias.unlink()
             alias.symlink_to(alternate, target_is_directory=True)
             changed = True
-        return real_guard(path, mutation=mutation)
+        return real_guard(path, mutation=mutation, issuer_policy=issuer_policy)
 
     monkeypatch.setattr(replacement, '_guard_path', retarget)
     with pytest.raises(tx.PendingTransactionError, match='replacement guard path changed'):

@@ -191,7 +191,9 @@ def test_coordinator_reopen_preserves_unsafe_peer_checks(case, monkeypatch, dama
         with pytest.raises(tx.PendingTransactionError, match=reason):
             with replacement._coordinator_lock(request):
                 pytest.fail("unsafe peer must refuse")
-    assert [bool(flags & os.O_CREAT) for flags in calls] == [True, False]
+    # Descriptor-relative binding reads can also open the same name read-only.
+    admissions = [flags for flags in calls if flags & os.O_RDWR]
+    assert [bool(flags & os.O_CREAT) for flags in admissions] == [True, False]
     for fd in opened:
         _assert_closed(fd)
     assert peer.read_bytes() == (b"foreign-lock" if damage == "payload" else b"")

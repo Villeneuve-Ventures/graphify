@@ -154,11 +154,21 @@ def transcribe(
     If video_path is a URL, audio is downloaded first via yt-dlp.
     Returns the path to the saved transcript file.
     Uses cached transcript if it exists unless force=True.
+    Output directories and selected transcripts require mutating replacement
+    admission, including cached transcripts. Directory admission precedes creation;
+    selected transcript admission precedes cache use or model loading. Refusals
+    raise PendingTransactionError. Admission is checked again after transcription
+    and before writing; a late refusal preserves the transcript.
+    Ordinary output directories are created as needed and force=True overwrites
+    an admitted existing transcript. Download and transcription errors propagate.
 
     initial_prompt: domain hint for Whisper (built from corpus god nodes).
     force: re-transcribe even if transcript already exists.
     """
+    from graphify.canonical_replacement import guard_output
+
     out_dir = Path(output_dir) if output_dir else Path(_TRANSCRIPTS_DIR)
+    guard_output(out_dir, mutation=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if is_url(str(video_path)):
@@ -167,6 +177,7 @@ def transcribe(
         audio_path = Path(video_path)
 
     transcript_path = out_dir / (audio_path.stem + ".txt")
+    guard_output(transcript_path, mutation=True)
     if transcript_path.exists() and not force:
         return transcript_path
 
@@ -185,6 +196,7 @@ def transcribe(
     lines = [segment.text.strip() for segment in segments if segment.text.strip()]
     transcript = "\n".join(lines)
 
+    guard_output(transcript_path, mutation=True)
     transcript_path.write_text(transcript, encoding="utf-8")
     lang = info.language if hasattr(info, "language") else "unknown"
     print(f"  transcript saved -> {transcript_path} (lang={lang}, {len(lines)} segments)")
@@ -200,6 +212,8 @@ def transcribe_all(
 
     Already-transcribed files are returned from cache instantly.
     initial_prompt is shared across all files — built once from corpus god nodes.
+    Replacement refusals and other transcription errors print a warning and skip
+    that input; only successful transcript paths are returned.
     """
     if not video_files:
         return []

@@ -51,7 +51,9 @@ Requests name schema, root, output, archive, stage, journal, include/exclude
 globs, extra policy/Git roots, direction, extraction profile and artifact
 profile. Output retains the `graphify-out` basename. Archive, stage and journal
 are external to every source/policy root and cannot contain one another. Archive
-and output, including the preallocation/control parent, must share a filesystem.
+and evidence slots, including rollback quarantine, cannot use the reserved
+`.graphify_replacement_guard` basename; admission refuses before operation effects.
+Archive and output, including the preallocation/control parent, must share a filesystem.
 Rollback quarantine is checked against all source/policy roots and rename devices
 before any journal or guard change. Bounds include 100,000 preserved entries,
 128 nested directory levels (`MAX_PRESERVATION_DEPTH`), 128 MiB per preserved
@@ -114,6 +116,77 @@ Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases. Older strict readers reject the new binding.
 Maintenance exclusion, including legacy restart inhibition, remains essential:
 advisory inode locks cannot fence arbitrary same-UID or root writers.
+
+### Guard issuer policy
+
+On supported POSIX hosts, guard preflight reads a fixed administrator-owned
+issuer index before classifying markers. The directory is
+`/private/etc/graphify` on macOS and `/etc/graphify` on other POSIX hosts; the
+index is `replacement-guard-issuers.json`. Requests, environment variables and
+marker contents cannot choose this source or enroll an issuer. This slice ships
+no enrollment writer, installer, account changes or authority service.
+
+The index and its ancestors are pinned without following links. Every ancestor
+must be root-owned and disallow group/other writes; the existing deny-only ACL
+admission also applies. Files must be root-owned, regular, single-link and safe
+under that same permissions/ACL policy. Reads are bounded to 64 KiB per file and
+64 indexed namespaces, use canonical ASCII-escaped JSON without a trailing
+newline, reject duplicate fields and revalidate identity, metadata and bytes.
+These checks do not establish native custody, filesystem qualification or rollback
+resistance. Compatible clients must have read access to the index, referenced
+policy records, applicable markers and journals.
+
+The exact index schema is `graphify.guard-issuer-index.v1` with a `namespaces`
+list. Each entry contains `enrollment_id`, `namespace_path`,
+`namespace_identity` (`device` and `inode`), `policy_generation` and
+`policy_sha256`. Duplicate paths or physical identities refuse. A namespace is
+one exact canonical guard-parent path and its pinned identity. Nested namespaces
+name independent marker locations; issuer trust never inherits between them.
+Changed or missing enrolled parent identities block even when no marker exists.
+An enrolled lexical path cannot become a symlink to another canonical path, even
+if it points to the old physical directory. An indexed physical identity found
+under a different canonical namespace name also blocks. Legitimate aliases to
+an unchanged enrolled namespace retain its issuer policy and archive fencing.
+
+The digest selects `replacement-guard-issuers.d/<policy_sha256>.json` under the
+same protected directory. Its exact schema is `graphify.guard-issuer-policy.v1`,
+with the same enrollment/path/identity/generation fields, plus `mutator_uid` and
+sorted unique `legacy_issuer_uids`. A missing record, wrong digest or mismatched
+binding blocks the enrolled namespace. Policy construction and digests are inert
+data; only the independently admitted source supplies issuer trust.
+
+Without enrollment, UID 0 and the caller's real UID are recognized legacy issuers.
+Enrollment adds the selected mutator and retained legacy issuers for that exact
+namespace. Real/effective UID mismatch refuses instead of expanding trust.
+POSIX creation assigns the effective UID; the coordinator's real-UID lock rule
+remains unchanged. See the official [open specification](https://pubs.opengroup.org/onlinepubs/9799919799.2024edition/functions/open.html).
+Windows retains the existing guard path without POSIX owner filtering; this
+does not qualify cross-identity Windows enrollment.
+
+No-follow owner metadata is classified before marker type or payload admission.
+Only a proved-foreign marker may be ignored without opening its payload. Trusted
+malformed/nonregular/unavailable markers and unknown policy states still block.
+Parent, owner and entry bindings are rechecked. Registration refuses a foreign
+collision; ordinary preflight's ignore rule grants no overwrite/adoption right.
+An absent marker is published exclusively. Updating an existing marker binds its
+identity, owner, mode and exact previous bytes before and after quarantine, then
+publishes without replacing a concurrent winner. Restoration also uses no-replace
+publication. A refused restoration can retain the predecessor as recovery
+evidence; it is not authority to remove the winner or resume ordinary writers.
+Existing target/archive checks, aliases and exact-operation bypass requirements
+remain in force.
+
+Bootstrap absence is admitted only at a proved-missing entry beneath pinned safe
+ancestors. Every other unavailable/unsafe/changed index state refuses. A trusted
+administrator must install the permanent index before any cross-UID enrollment
+or marker publication and never remove enrollment evidence while its namespaces
+or guards survive. Missing referenced records then remain distinguishable from
+never-enrolled namespaces. Deletion or rollback of the entire protected index
+cannot be distinguished from bootstrap absence by this reader; the deployment
+contract must preserve that custody invariant or provide another independent
+anchor. No live deployment is qualified by this slice. Legacy issuer migration,
+policy changes and removal require controlled reconciliation; mutator retirement
+alone never removes issuer recognition for retained guards.
 
 Resume needs an existing journal under the coordinator lock, plus the exact
 request, preview, seal and state-specific physical objects. It never initializes
