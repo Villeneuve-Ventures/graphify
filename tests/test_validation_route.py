@@ -313,7 +313,40 @@ def test_contract_tests_are_path_bound_not_pytest_cache(repository, monkeypatch)
     assert result.lane == route.CONTRACT_DOCS
     argv = [value for command in commands for value in command.argv]
     assert "tests/test_validation_route.py" in argv
+    assert "tests/test_validation_contracts.py" in argv
     assert "tests/test_unrelated.py" not in argv
+
+
+def test_readme_contract_selects_existing_command_safety_tests(repository):
+    root, base = repository
+    (root / "README.md").write_text("python3.14 -m pip install graphifyy\n")
+    selected = route.classify_repository(base)
+    assert selected.lane == route.CONTRACT_DOCS
+    commands = route.build_plan(selected, base, False, None, 1)
+    assert any("tests/test_python314_policy.py" in command.argv for command in commands)
+
+
+@pytest.mark.parametrize("drift", ["content", "mode", "head", "base"])
+def test_direct_full_checks_invalidate_changed_snapshot(repository, monkeypatch, capsys, drift):
+    root, base = repository
+    git(root, "branch", "validation-base", base)
+
+    def execute(commands, admission):
+        path = root / "docs/notes.md"
+        if drift == "content":
+            path.write_text("Changed while tests ran.\n")
+        elif drift == "mode":
+            path.chmod(0o755)
+        else:
+            git(root, "commit", "--allow-empty", "-qm", "concurrent identity change")
+            if drift == "base":
+                git(root, "branch", "-f", "validation-base", "HEAD")
+                git(root, "checkout", "--detach", base)
+        return 0
+
+    monkeypatch.setattr(route, "run_commands", execute)
+    assert route.main(["--full-checks", "--base", "validation-base"]) == 3
+    assert "change-set-changed-during-validation" in capsys.readouterr().err
 
 
 def test_full_dispatch_and_ci_delegation(repository, monkeypatch, tmp_path, capsys):

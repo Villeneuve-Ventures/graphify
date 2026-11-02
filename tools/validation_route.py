@@ -142,8 +142,10 @@ MAX_DOCUMENT_BYTES = 1_000_000
 # corpora, test fixtures, and arbitrary Markdown paths retain full validation.
 CONTRACT_TESTS_BY_PATH = {
     "AGENTS.md": ("tests/test_readme_policy.py",),
-    "README.md": ("tests/test_readme_policy.py",),
-    ".github/pull_request_template.md": ("tests/test_validation_route.py",),
+    "README.md": ("tests/test_readme_policy.py", "tests/test_python314_policy.py"),
+    ".github/pull_request_template.md": (
+        "tests/test_validation_route.py", "tests/test_validation_contracts.py",
+    ),
 }
 CONTRACT_TESTS_BY_PREFIX = ()
 
@@ -1204,6 +1206,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run admitted checks and return 3 if their repository snapshot changes."""
     args = parse_args(argv)
     if args.check_change_set_whitespace:
         return check_change_set_whitespace(args.base or None)
@@ -1219,6 +1222,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
     if args.full_checks:
+        before = classify_repository(args.base or None)
         result = check_change_set_whitespace(args.base or None)
         if result:
             return result
@@ -1231,7 +1235,18 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print(f"validation_check_status=failed; reason=validation-environment; {exc}", file=sys.stderr)
             return 2
-        return result or check_change_set_whitespace(args.base or None)
+        if result:
+            return result
+        result = check_change_set_whitespace(args.base or None)
+        if result:
+            return result
+        if not same_route_snapshot(classify_repository(args.base or None), before):
+            print(
+                "validation_check_status=invalidated; check=full; "
+                "reason=change-set-changed-during-validation", file=sys.stderr,
+            )
+            return 3
+        return 0
 
     base = args.base or None
     status_kind = "validation_check_status" if args.docs_check else "validation_route_status"

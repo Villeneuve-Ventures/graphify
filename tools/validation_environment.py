@@ -76,8 +76,10 @@ class ValidationEnvironment:
         self.record("prewrite")
 
     def child_environment(self) -> dict[str, str]:
+        """Pin checkout/environment routing while retaining offline and cache settings."""
         env = git_environment()
-        operational = {key: env[key] for key in ("UV_OFFLINE", "UV_PYTHON_DOWNLOADS") if key in env}
+        operational = {key: env[key] for key in ("UV_OFFLINE", "UV_PYTHON_DOWNLOADS", "UV_CACHE_DIR")
+                       if key in env}
         for key in list(env):
             if key.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_")) or key in {
                 "VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_ENVIRONMENT",

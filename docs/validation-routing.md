@@ -23,7 +23,9 @@ repository-wide inventory check; it does not check prose accuracy or links.
 Changes to the protected-change policy select full validation. Its verifier's
 real-Git oracle requires exactly Git 2.55.0, which the full CI jobs install before
 tests; the routing job does not supply that prerequisite. Local full validation
-also requires that Git version. Template changes run the routing contract tests.
+also requires that Git version. README changes also run the existing Python
+installation/runtime policy tests. PR template changes run the routing tests and
+a content check of the maintained template's validation-route receipt field.
 Instruction filenames qualify only at the root or in maintained docs and template
 directories; they do not bypass excluded or unknown path ownership.
 An explicitly designated protected change still
@@ -56,8 +58,11 @@ Ambient `UV_PROJECT_ENVIRONMENT` grants no admission. Child processes pin the
 checkout and admitted environment, discard competing uv routing/configuration
 and Python import controls, and disable dotenv loading. Ambient pytest plugin
 selection and autoload overrides are removed; installed plugins and tracked
-pytest configuration remain active. Documentation setup uses frozen inexact sync
-to retain optional packages, then verifies the environment before running tests.
+pytest configuration remain active. Operational `UV_OFFLINE`,
+`UV_PYTHON_DOWNLOADS` and `UV_CACHE_DIR` settings are retained; a custom cache
+does not select the checkout or environment. Documentation setup uses frozen
+inexact sync to retain optional packages, then verifies the environment before
+running tests.
 The full setup still uses the existing frozen all-extras sync and complete suite.
 Make and CI bootstrap the router with isolated Python startup; recursive Make
 uses the same admitted selection through explicit arguments. Inherited Make
@@ -79,6 +84,9 @@ Only `validation_route_status=complete` proves selected commands passed with the
 same final snapshot. Changes during execution invalidate the receipt. A dry run
 prints `validation_route_status=printed`; low-level `make docs-check` cannot
 replace the final routing receipt.
+Direct `make review-ready` also compares its initial and final repository snapshot
+and exits with status 3 if content, modes, HEAD or base identity changes while
+the checks run. Passing whitespace checks alone cannot admit changed inputs.
 
 PR CI runs the same classifier against the event's base SHA, with complete Git
 history. Eligible docs run their selected checks in the routing job. Full changes

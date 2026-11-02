@@ -92,6 +92,19 @@ def prepare(root, env):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_admitted_child_uv_uses_configured_offline_cache(tmp_path, monkeypatch):
+    cache = tmp_path / "custom-cache"
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+    monkeypatch.setenv("UV_OFFLINE", "1")
+    admitted = ValidationEnvironment(tmp_path)
+    child = admitted.child_environment()
+    result = execute(["uv", "cache", "dir"], tmp_path, child)
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == cache
+    assert child["UV_OFFLINE"] == "1"
+    assert child["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
+
+
 @pytest.mark.parametrize("control", ["UV_WORKING_DIR", "UV_PROJECT", "UV_PROJECT_ENVIRONMENT",
                                       "UV_ENV_FILE", "plugins", "imports"])
 def test_actual_uv_ignores_foreign_routing_and_preserves_required_check(projects, control, tmp_path):
