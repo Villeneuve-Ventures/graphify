@@ -182,10 +182,25 @@ class _Reader:
 
 
 def _command(argv: list[str], commands: list[dict[str, Any]], env: dict[str, str]) -> bytes:
-    result = subprocess.run(argv, capture_output=True, timeout=30, env=env)
-    commands.append({"argv": argv, "returncode": result.returncode,
-                     "stdout": result.stdout[:MAX_OUTPUT].decode(errors="replace"),
-                     "stderr": result.stderr[:MAX_OUTPUT].decode(errors="replace")})
+    """Record command intent and bounded diagnostics; timeout and launch errors propagate."""
+    record: dict[str, Any] = {"argv": list(argv), "returncode": None,
+                              "outcome": "started", "stdout": "", "stderr": ""}
+    commands.append(record)
+
+    def captured(value: bytes | str | None) -> str:
+        data = value.encode() if isinstance(value, str) else value or b""
+        return data[:MAX_OUTPUT].decode(errors="replace")
+
+    try:
+        result = subprocess.run(argv, capture_output=True, timeout=30, env=env)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        record.update(outcome="timed-out" if isinstance(exc, subprocess.TimeoutExpired) else "launch-failed",
+                      error=repr(exc))
+        if isinstance(exc, subprocess.TimeoutExpired):
+            record.update(timeout=exc.timeout, stdout=captured(exc.stdout), stderr=captured(exc.stderr))
+        raise
+    record.update(returncode=result.returncode, outcome="completed",
+                  stdout=captured(result.stdout), stderr=captured(result.stderr))
     _require(result.returncode == 0, "prerequisite command failed: " + argv[0])
     _require(len(result.stdout) <= MAX_OUTPUT and len(result.stderr) <= MAX_OUTPUT,
              "prerequisite command output exceeds bound")

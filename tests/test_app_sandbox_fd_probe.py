@@ -4,10 +4,39 @@ import errno
 import os
 from pathlib import Path
 import signal
+import subprocess
 
 import pytest
 
-from tools import app_sandbox_fd_probe as probe
+pytest.importorskip("fcntl", reason="pure descriptor checks require Unix fcntl")
+from tools import app_sandbox_fd_probe as probe  # noqa: E402
+
+
+@pytest.mark.parametrize("failure,outcome,stdout,stderr", [
+    (subprocess.TimeoutExpired(["fake-command"], 30, output=b"partial output", stderr=b"partial error"),
+     "timed-out", "partial ", "partial "),
+    (subprocess.TimeoutExpired(["fake-command"], 30, output="partial output", stderr="partial error"),
+     "timed-out", "partial ", "partial "),
+    (FileNotFoundError("fake command missing"), "launch-failed", "", ""),
+])
+def test_command_failure_keeps_bounded_diagnostics(monkeypatch, failure, outcome, stdout, stderr):
+    commands = []
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(probe.subprocess, "run", fail)
+    monkeypatch.setattr(probe, "MAX_OUTPUT", 8)
+    with pytest.raises(type(failure)) as raised:
+        probe._command(["fake-command"], commands, {})
+    assert raised.value is failure
+    assert len(commands) == 1
+    assert commands[0]["argv"] == ["fake-command"]
+    assert commands[0]["returncode"] is None
+    assert commands[0]["outcome"] == outcome
+    assert commands[0]["stdout"] == stdout
+    assert commands[0]["stderr"] == stderr
+    assert commands[0]["error"] == repr(failure)
 
 
 @pytest.fixture

@@ -113,6 +113,8 @@ Normal imports and ordinary pytest must not compile, sign or launch the native
 probe. Native execution requires an explicit opt-in. Pure tests check evidence
 classification and admission/order rules; they are not native proof. Local
 focused checks do not establish full PR readiness or authorize delivery.
+The pure test module requires Unix `fcntl` for descriptor-mode checks; collection
+explicitly skips that module when the dependency is unavailable.
 
 From the source checkout, explicitly authorized native execution uses:
 
