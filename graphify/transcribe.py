@@ -50,45 +50,61 @@ def is_url(path: str) -> bool:
 def download_audio(url: str, output_dir: Path) -> Path:
     """Download audio-only stream from a URL using yt-dlp.
 
-    Returns the path to the downloaded audio file (.m4a or .opus).
-    Uses cached file if already downloaded.
+    Return an admitted cached file when available. Otherwise download into a
+    private temporary directory, then copy the actual audio file to output_dir
+    after mutating admission of its final path. This permits different filesystems
+    without exposing selected output aliases to the downloader. Replacement
+    refusals raise PendingTransactionError; download and copy errors propagate.
     """
+    import shutil
+    import tempfile
+
+    from graphify.canonical_replacement import guard_output
     from graphify.security import validate_url
+
+    guard_output(output_dir, mutation=True)
     validate_url(url)  # blocks private IPs, bad schemes before yt-dlp runs
+    guard_output(output_dir, mutation=True)
     yt_dlp = _get_yt_dlp()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # yt-dlp uses %(title)s which can be long/weird — use a stable name based on URL hash
     import hashlib
     url_hash = hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:12]
-    out_template = str(output_dir / f"yt_{url_hash}.%(ext)s")
 
     # Check for already-downloaded file
     for ext in ('.m4a', '.opus', '.mp3', '.ogg', '.wav', '.webm'):
         candidate = output_dir / f"yt_{url_hash}{ext}"
         if candidate.exists():
+            guard_output(candidate, mutation=True)
             print(f"  cached audio: {candidate.name}")
             return candidate
 
 
     print(f"  downloading audio: {url[:80]} ...", flush=True)
-    with yt_dlp.YoutubeDL({
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'outtmpl': out_template,
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'postprocessors': [],  # no ffmpeg needed — use native audio
-    }) as ydl:
-        info = ydl.extract_info(url, download=True)
-        ext = info.get('ext', 'm4a')
-        downloaded = output_dir / f"yt_{url_hash}.{ext}"
-        if not downloaded.exists():
-            # yt-dlp may have picked a different extension
-            for p in output_dir.glob(f"yt_{url_hash}.*"):
-                downloaded = p
-                break
-        return downloaded
+    with tempfile.TemporaryDirectory(prefix="graphify-audio-") as temporary:
+        download_dir = Path(temporary)
+        out_template = str(download_dir / f"yt_{url_hash}.%(ext)s")
+        with yt_dlp.YoutubeDL({
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'outtmpl': out_template,
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'postprocessors': [],  # no ffmpeg needed — use native audio
+        }) as ydl:
+            info = ydl.extract_info(url, download=True)
+            ext = info.get('ext', 'm4a')
+            downloaded = download_dir / f"yt_{url_hash}.{ext}"
+            if not downloaded.exists():
+                # yt-dlp may have picked a different extension
+                for p in download_dir.glob(f"yt_{url_hash}.*"):
+                    downloaded = p
+                    break
+        out = output_dir / downloaded.name
+        guard_output(out, mutation=True)
+        shutil.copyfile(downloaded, out)
+        return out
 
 
 def build_whisper_prompt(god_nodes: list[dict]) -> str:

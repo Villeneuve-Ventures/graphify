@@ -209,9 +209,13 @@ Source: {url}
 
 def _download_binary(url: str, suffix: str, target_dir: Path) -> Path:
     """Download a binary file (PDF, image) directly."""
+    from graphify.canonical_replacement import guard_output
+
     filename = _safe_filename(url, suffix)
     out_path = target_dir / filename
-    out_path.write_bytes(safe_fetch(url))
+    content = safe_fetch(url)
+    guard_output(out_path, mutation=True)
+    out_path.write_bytes(content)
     return out_path
 
 
@@ -220,7 +224,13 @@ def ingest(url: str, target_dir: Path, author: str | None = None, contributor: s
     Fetch a URL and save it into target_dir as a graphify-ready file.
 
     Returns the path of the saved file.
+    Replacement admission failures raise PendingTransactionError before directory
+    creation or delegated downloads, and before each direct file write. Retained
+    archives, registered absent slots and their aliases cannot be used as outputs.
     """
+    from graphify.canonical_replacement import guard_output
+
+    guard_output(target_dir, mutation=True)
     target_dir.mkdir(parents=True, exist_ok=True)
     url_type = _detect_url_type(url)
 
@@ -243,6 +253,7 @@ def ingest(url: str, target_dir: Path, author: str | None = None, contributor: s
 
         if url_type == "youtube":
             from graphify.transcribe import download_audio
+            guard_output(target_dir, mutation=True)
             out = download_audio(url, target_dir)
             print(f"Downloaded audio: {out.name}")
             return out
@@ -264,6 +275,7 @@ def ingest(url: str, target_dir: Path, author: str | None = None, contributor: s
         out_path = target_dir / f"{stem}_{counter}.md"
         counter += 1
 
+    guard_output(out_path, mutation=True)
     out_path.write_text(content, encoding="utf-8")
     print(f"Saved {url_type}: {out_path.name}")
     return out_path
