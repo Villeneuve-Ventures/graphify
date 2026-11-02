@@ -452,6 +452,8 @@ def _clone_repo(
 
     Clones into ~/.graphify/repos/<owner>/<repo> by default so repeated
     runs on the same URL reuse the existing clone (git pull instead of clone).
+    Replacement admission must allow mutation of the destination before either
+    operation; a held or read-only archive raises PendingTransactionError.
     """
     import subprocess as _sp
     import re as _re
@@ -480,6 +482,7 @@ def _clone_repo(
         print(f"error: invalid branch name: {branch!r}", file=sys.stderr)
         sys.exit(1)
 
+    _replacement_write_guard(dest)
     if dest.exists():
         print(f"Repo already cloned at {dest} - pulling latest...", flush=True)
         cmd = ["git", "-C", str(dest), "pull"]

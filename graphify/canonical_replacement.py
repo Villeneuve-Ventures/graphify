@@ -23,6 +23,10 @@ GUARD = ".graphify_replacement_guard"
 PROVENANCE = ".graphify_replacement_origin.json"
 PROFILE = "fresh-corpus-codex-v1"
 MAX_BYTES = 128 * 1024 * 1024
+# Forward growth: one request copy, one container-path allowance, one bounded
+# native owner, plus allocation/identity/binding/receipt fields and state names.
+_FORWARD_JOURNAL_RESERVE = 3 * tx._MAX_STATE_BYTES + 64 * 1024
+_JOURNAL_TAIL_RESERVE = 4096
 _AUTHORITY: ContextVar[tuple[str, str] | None] = ContextVar("replacement_operation", default=None)
 
 
@@ -34,6 +38,19 @@ def _require(value, reason):
 def _bytes(value):
     return (json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False,
                        separators=(",", ":")) + "\n").encode()
+
+
+def _bounded_bytes(value, *, reserve=0):
+    """Serialize once and admit bytes plus pending growth to the reader limit."""
+    data = _bytes(value)
+    _require(len(data) + reserve <= MAX_BYTES, "replacement metadata exceeds bound")
+    return data
+
+
+def _forward_reserve(journal):
+    if journal["state"] == "PREPARED":
+        return _FORWARD_JOURNAL_RESERVE
+    return _JOURNAL_TAIL_RESERVE + (tx._MAX_STATE_BYTES if journal["owner"] is None else 0)
 
 
 def _sha(value):
@@ -80,7 +97,7 @@ def _load(path):
             _require(key not in result, "duplicate replacement JSON field")
             result[key] = value
         return result
-    return json.loads(_read(path), object_pairs_hook=pairs,
+    return json.loads(_read(path, limit=MAX_BYTES), object_pairs_hook=pairs,
                       parse_constant=lambda _: _require(False, "nonfinite replacement JSON"))
 
 
@@ -350,7 +367,13 @@ def _tree(path):
 
 
 def preview(raw, sealed):
+    """Validate fresh sealed data and return a read-only replacement plan.
+
+    A non-object seal raises PendingTransactionError before field access. Preview
+    does not admit old graph authority or change selected output membership.
+    """
     request, _ = _request(raw)
+    _require(isinstance(sealed, dict), "replacement data seal must be a JSON object")
     _require(sealed.get("schema") == 1 and sealed.get("producer") == PROFILE
              and sealed.get("request_sha256") == _sha(_bytes(request)), "data seal/request mismatch")
     root, output = Path(request["root"]), Path(request["output"])
@@ -365,7 +388,11 @@ def preview(raw, sealed):
             "parent_identity": _directory(output.parent), "archive_parent_identity": _directory(Path(request["archive"]).parent),
             "old_tree": _tree(output), "seal_sha256": _sha(_bytes(sealed)),
             "inventory": {n: {"size": len(v), "sha256": _sha(v)} for n, v in payloads.items()}}
-    return {**plan, "preview_sha256": _sha(_bytes(plan))}
+    result = {**plan, "preview_sha256": _sha(_bytes(plan))}
+    initial = {**result, "request_digest": _sha(_bytes(request)), "state": "PREPARED",
+               "new_identity": None, "container": None, "owner": None}
+    _bounded_bytes(initial, reserve=_FORWARD_JOURNAL_RESERVE)
+    return result
 
 
 @contextlib.contextmanager
@@ -434,7 +461,7 @@ def _coordinator_lock(request):
     journal_slot = Path(request["journal"]).name
     _validate_parents(request)
     path = Path(request["journal"]).parent / (".replacement-lock-" + _sha(os.fsencode(journal_slot)))
-    with tx.pin_output(path.parent, mutation=False) as parent:
+    with tx.pin_output(path.parent, mutation=True) as parent:
         _require(parent.identity.json() == request["parent_identities"]["control"],
                  "replacement control parent changed")
         parent.validate()
@@ -495,8 +522,9 @@ def _coordinator_lock(request):
 
 
 def _persist(path, value):
+    data = _bounded_bytes(value)
     with tx.pin_output(Path(path).parent) as cap:
-        tx._replace_bytes(cap, Path(path).name, _bytes(value))
+        tx._replace_bytes(cap, Path(path).name, data)
 
 
 def _register(path, journal, digest, role):
@@ -510,7 +538,7 @@ def _register(path, journal, digest, role):
                  "malformed replacement guard")
         _require(value["entries"].get(path.name, entry) == entry, "replacement slot already registered")
         value["entries"][path.name] = entry
-        tx._replace_bytes(cap, GUARD, _bytes(value))
+        tx._replace_bytes(cap, GUARD, _bounded_bytes(value))
 
 
 @contextlib.contextmanager
@@ -570,6 +598,7 @@ def _state(path, journal, state, failpoint=None):
 
 
 def _source_current(request, sealed):
+    _require(isinstance(sealed, dict), "replacement data seal must be a JSON object")
     output = Path(request["output"])
     archive = Path(request["archive"])
     source_output = output if output.exists() else archive
@@ -595,8 +624,9 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
             _require(plan["preview_sha256"] == preview_sha256, "replacement preview changed")
             journal = {**plan, "request_digest": digest, "state": "PREPARED", "new_identity": None,
                        "container": None, "owner": None}
+            data = _bounded_bytes(journal, reserve=_FORWARD_JOURNAL_RESERVE)
             with tx.pin_output(journal_path.parent) as journal_parent:
-                tx._create_bytes(journal_parent, journal_path.name, _bytes(journal))
+                tx._create_bytes(journal_parent, journal_path.name, data)
         _require(journal["state"] != "ROLLED_BACK_UNRECOVERED", "rollback is terminal")
         if journal["state"] == "COMMITTED":
             _require(_identity_at(output) == journal["new_identity"] and _tree(archive) == journal["old_tree"],
@@ -605,6 +635,7 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
                 _, current, _ = tx._validate_receipt_locked(cap, require_closed=True)
                 _require(current == journal["receipt_sha256"], "completed replacement generation changed")
             return {"status": "complete", "receipt_sha256": journal["receipt_sha256"]}
+        _bounded_bytes(journal, reserve=_forward_reserve(journal))
         _register(output, journal_path, digest, "target")
         _register(archive, journal_path, digest, "archive")
         _source_current(request, sealed)
@@ -631,6 +662,8 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
                     "old_inventory_sha256": _sha(_bytes(journal["old_tree"]))}
                 journal["provenance"] = provenance
                 journal["binding"] = "canonical-replacement-v1:" + _sha(_bytes(provenance))
+                _bounded_bytes({**journal, "state": "ALLOCATED"},
+                               reserve=tx._MAX_STATE_BYTES + _JOURNAL_TAIL_RESERVE)
                 _state(journal_path, journal, "ALLOCATED", failpoint)
             if journal["state"] == "ALLOCATED":
                 _state(journal_path, journal, "ARCHIVE_INTENT", failpoint)
@@ -656,8 +689,12 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
             binding = journal["binding"]
             tx._REPLACEMENT_AUTHORITY.set(binding)
             if journal["state"] == "NEW_INSTALLED":
+                _bounded_bytes(journal, reserve=tx._MAX_STATE_BYTES + _JOURNAL_TAIL_RESERVE)
                 owner = tx.begin_transaction("full", request["root"], output=output, replacement_binding=binding)
-                journal["owner"] = tx._transaction_json(owner, phase=owner.phase)
+                owner_record = tx._transaction_json(owner, phase=owner.phase)
+                _require(len(_bytes(owner_record)) <= tx._MAX_STATE_BYTES,
+                         "replacement owner exceeds reserved bound")
+                journal["owner"] = owner_record
                 _state(journal_path, journal, "PUBLISHING", failpoint)
             _require(journal["state"] == "PUBLISHING", "unknown replacement state")
             with tx.pin_output(output) as cap, tx._locked(cap):
@@ -731,7 +768,13 @@ def status(raw):
 
 
 def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None, failpoint=None):
-    """Explicit exact rollback; retain new data and make rollback terminal."""
+    """Restore the exact old tree and persist the retained replacement location.
+
+    Installed data stays at the selected quarantine; a pre-install allocation
+    stays at its recorded container. Interrupted retries use the persisted tree
+    selector rather than the restored output name. Rollback is terminal and does
+    not repair the old authority's identity failure.
+    """
     request, _ = _request(raw)
     journal_path = Path(request["journal"])
     digest = _sha(_bytes(request))
@@ -754,22 +797,47 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
         if journal["state"] == "ROLLBACK_INTENT":
             _require(journal.get("rollback_parent_identity") == quarantine_parent,
                      "rollback retention parent changed")
+            projected = dict(journal)
+            projected["rollback_retained"] = (journal.get("container") if journal["rollback_new_tree"] is None
+                                               else journal["rollback_quarantine"])
+        elif old_path == output:
+            projected = {**journal, "rollback_retained": journal.get("container")}
+        else:
+            new_tree = _tree(output) if output.exists() else None
+            projected = {**journal, "rollback_quarantine": str(quarantine), "rollback_new_tree": new_tree,
+                         "rollback_preview": expected_journal_sha256, "rollback_parent_identity": quarantine_parent,
+                         "rollback_retained": journal.get("container") if new_tree is None else str(quarantine)}
+        _bounded_bytes({**projected, "state": "ROLLED_BACK_UNRECOVERED"})
+        retained_container = (projected["rollback_retained"]
+                              if projected.get("rollback_new_tree") is None else None)
+        _require(retained_container is None or _identity_at(retained_container) == journal["new_identity"],
+                 "retained replacement allocation changed")
         _register(quarantine, journal_path, digest, "archive")
-        with _fd_locks([output.parent, archive.parent, quarantine.parent, old_path], time.monotonic() + 30):
+        lock_paths = [output.parent, archive.parent, quarantine.parent, old_path]
+        if retained_container is not None:
+            lock_paths.append(Path(retained_container))
+        with _fd_locks(lock_paths, time.monotonic() + 30):
             _require(_directory(quarantine.parent) == quarantine_parent, "rollback retention parent changed")
             _require(_identity_at(old_path) == journal["old_identity"]
                      and _tree(old_path) == journal["old_tree"], "rollback archive changed")
+            _require(retained_container is None or _identity_at(retained_container) == journal["new_identity"],
+                     "retained replacement allocation changed")
             if journal["state"] != "ROLLBACK_INTENT":
                 if old_path == output:
+                    journal["rollback_retained"] = journal.get("container")
                     _state(journal_path, journal, "ROLLED_BACK_UNRECOVERED")
-                    return {"status": "rolled-back-unrecovered", "new_graph_retained": journal.get("container")}
+                    return {"status": "rolled-back-unrecovered", "new_graph_retained": journal["rollback_retained"]}
                 _require(_identity_at(output) in (None, journal["new_identity"]), "unknown canonical occupant")
                 new_tree = _tree(output) if output.exists() else None
+                _require(new_tree == projected["rollback_new_tree"], "rollback new graph changed")
                 if journal["state"] == "COMMITTED":
                     _require(expected_new_tree == _sha(_bytes(new_tree)), "explicit current new-graph selector required")
                 journal.update(rollback_quarantine=str(quarantine), rollback_new_tree=new_tree,
-                               rollback_preview=expected_journal_sha256, rollback_parent_identity=quarantine_parent)
+                               rollback_preview=expected_journal_sha256, rollback_parent_identity=quarantine_parent,
+                               rollback_retained=journal.get("container") if new_tree is None else str(quarantine))
                 _state(journal_path, journal, "ROLLBACK_INTENT", failpoint)
+            journal["rollback_retained"] = (journal.get("container") if journal["rollback_new_tree"] is None
+                                            else journal["rollback_quarantine"])
             if _identity_at(output) == journal["new_identity"]:
                 _require(_tree(output) == journal["rollback_new_tree"], "rollback new graph changed")
                 _rename(output, quarantine)
@@ -785,11 +853,12 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
             _require(_identity_at(output) == journal["old_identity"] and _tree(output) == journal["old_tree"],
                      "rollback preservation changed")
             _state(journal_path, journal, "ROLLED_BACK_UNRECOVERED", failpoint)
-            return {"status": "rolled-back-unrecovered", "new_graph_retained": str(quarantine)}
+            return {"status": "rolled-back-unrecovered", "new_graph_retained": journal["rollback_retained"]}
 
 
 def _seal_data(request, sealed):
     """Create the stage under its frozen parent; retain incomplete files on refusal."""
+    data = _bounded_bytes(sealed)
     path = Path(request["stage"])
     with tx.pin_output(path.parent, mutation=True) as parent:
         _require(parent.identity.json() == request["parent_identities"]["stage"],
@@ -799,7 +868,7 @@ def _seal_data(request, sealed):
                      0o600, dir_fd=parent.fd)
         try:
             parent.validate()
-            view = memoryview(_bytes(sealed))
+            view = memoryview(data)
             while view:
                 count = os.write(fd, view)
                 _require(count > 0, "exclusive seal write made no progress")

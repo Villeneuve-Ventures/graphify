@@ -52,9 +52,17 @@ are external to every source/policy root and cannot contain one another. Archive
 and output, including the preallocation/control parent, must share a filesystem.
 Rollback quarantine is checked against all source/policy roots and rename devices
 before any journal or guard change. Bounds include 100,000 preserved entries,
-128 MiB per preserved file, 2 GiB aggregate preserved bytes, 128 MiB sealed data,
-existing SourceIO read bounds and a 30-second lock deadline. A tree can be below
-the aggregate bound and still refuse because one file exceeds its own bound.
+128 MiB per preserved file, 2 GiB aggregate preserved bytes, 128 MiB sealed data
+and serialized control objects, existing SourceIO read bounds and a 30-second
+lock deadline. Preview measures the complete serialized initial journal,
+including escaped inventory names, and reserves another 3 MiB + 64 KiB for
+forward metadata. That allowance covers the duplicated request, container path,
+a native owner bounded to 1 MiB, and fixed allocation and completion fields.
+Replay checks the remaining allowance before forward effects. Every control
+write checks its complete serialized size against the reader limit before
+creation or replacement; oversized or unreadable existing state stays held.
+A tree can be below the aggregate bound and still refuse because one file exceeds
+its own bound.
 The profile's exact guard namespace is excluded from
 source selection; it is never graph input.
 
@@ -69,6 +77,8 @@ The historical mismatched identity is not approval.
 A stable no-follow operation lock is keyed by the journal slot, not the request.
 Initial journal creation is exclusive under that lock. A different request cannot
 replace an existing winner, including a completed operation.
+The control parent requires mutating admission before lock creation, so a
+registered retained archive cannot be used to create another operation's lock.
 
 The coordinator persists its request and preview before creating a private,
 empty external container. Its allocation nonce and physical identity are
@@ -101,6 +111,14 @@ Rollback is explicit and retains the replacement graph at a fresh external
 quarantine path before restoring the original archive name. The terminal result
 is `rolled-back-unrecovered`: the old identity failure still exists. It is not
 permission to resume forward publication or a claim of restored service.
+If installation has not occurred, the allocation stays at its recorded external
+container instead, with its recorded physical identity checked before restoration.
+The journal and response name that retained location, including
+when rollback resumes after restoring the original tree. Rollback admits the
+complete intent and terminal journal, including the current new-tree inventory,
+before registering quarantine or moving either tree. Its metadata can exceed
+the bound even when forward preview passed; refusal preserves the prior journal
+and namespace.
 
 ## Proof and remaining qualification
 
