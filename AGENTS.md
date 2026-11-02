@@ -68,6 +68,20 @@ Run the path checks locally with
 This rule does not restrict multilingual input corpora or language extraction
 support. Any change to this policy requires an explicit operator request.
 
+## Python Docstrings
+
+Apply these categories only to interfaces covered by the global docstring rule,
+and only where relevant.
+
+- For extraction, transformation, query, and export interfaces, document
+  applicable direction, parallel-edge and hyperedge handling, identity and
+  deduplication rules, confidence or score defaults, filtering, budget
+  truncation, and information loss.
+- For incremental replacement, explain source-key contribution ownership and
+  the caller's duty to declare only successfully completed sources, including
+  successful empty extraction. Distinguish in-memory composition or
+  serialization from filesystem admission and publication.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
