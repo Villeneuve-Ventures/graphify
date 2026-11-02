@@ -23,6 +23,8 @@ GUARD = ".graphify_replacement_guard"
 PROVENANCE = ".graphify_replacement_origin.json"
 PROFILE = "fresh-corpus-codex-v1"
 MAX_BYTES = 128 * 1024 * 1024
+# Root depth is zero; refuse deeper directories before opening them.
+MAX_PRESERVATION_DEPTH = 128
 # Forward growth: one request copy, one container-path allowance, one bounded
 # native owner, plus allocation/identity/binding/receipt fields and state names.
 _FORWARD_JOURNAL_RESERVE = 3 * tx._MAX_STATE_BYTES + 64 * 1024
@@ -229,6 +231,7 @@ def _request(raw):
 
 def _confidence(edge):
     import math
+    _require(isinstance(edge, dict), "semantic relationship must be an object")
     kind, score = edge.get("confidence"), edge.get("confidence_score")
     _require(type(score) in {int, float} and math.isfinite(score)
              and ((kind == "EXTRACTED" and score == 1.0)
@@ -241,7 +244,12 @@ def _confidence(edge):
 
 
 def build_data(raw, fragments, *, _source_output=None):
-    """Read-only fresh AST + host-Codex fragment admission; no provider or cache."""
+    """Read fresh AST and host-Codex fragments without providers or caches.
+
+    Semantic edge and hyperedge records must be objects; non-object records raise
+    PendingTransactionError before confidence or topology admission. This builds
+    a sealed in-memory payload and does not publish filesystem graph authority.
+    """
     import copy
     from .build import build_from_json
     from .detect import detect
@@ -340,10 +348,15 @@ def build_data(raw, fragments, *, _source_output=None):
 
 
 def _tree(path):
-    """Bounded no-follow opaque preservation inventory; no old authority admission."""
+    """Inventory opaque bytes without admitting old graph authority.
+
+    The root is depth zero. Child directories through MAX_PRESERVATION_DEPTH are
+    admitted; deeper directories raise PendingTransactionError before opening.
+    Opened descriptors close on both success and refusal.
+    """
     result, total = {}, 0
     with tx.pin_output(path, mutation=False) as cap:
-        def walk(fd, prefix):
+        def walk(fd, prefix, depth):
             nonlocal total
             names = sorted(os.listdir(fd))
             for name in names:
@@ -355,10 +368,12 @@ def _tree(path):
                 record: dict[str, int | str] = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode}
                 result[relative] = record
                 if stat.S_ISDIR(info.st_mode):
+                    _require(depth < MAX_PRESERVATION_DEPTH,
+                             "preservation directory depth bound exceeded")
                     child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY, dir_fd=fd)
                     try:
                         _require(_stable(os.fstat(child)) == _stable(info), "preservation directory replaced")
-                        walk(child, relative)
+                        walk(child, relative, depth + 1)
                     finally:
                         os.close(child)
                 else:
@@ -368,7 +383,7 @@ def _tree(path):
                 _require(_stable(os.stat(name, dir_fd=fd, follow_symlinks=False)) == _stable(info),
                          "preservation source changed")
             _require(sorted(os.listdir(fd)) == names, "preservation membership changed")
-        walk(cap.fd, "")
+        walk(cap.fd, "", 0)
         cap.validate()
     return result
 
@@ -596,8 +611,9 @@ def _persist(path, value):
 
 def _register(path, journal, digest, role):
     path = Path(path)
-    with _fd_locks([path.parent], time.monotonic() + 30) as caps:
-        cap = caps[0]
+    with _fd_locks([path.parent], time.monotonic() + 30) as caps, \
+            tx.pin_output(path.parent, mutation=True) as cap:
+        _require(cap.identity == caps[0].identity, "replacement registration parent changed")
         marker = path.parent / GUARD
         value = _load(marker) if os.path.lexists(marker) else {"schema": 1, "entries": {}}
         entry = {"journal": str(journal), "digest": digest, "role": role}
@@ -674,13 +690,27 @@ def _source_current(request, sealed):
 
 
 def execute(raw, sealed, preview_sha256, *, failpoint=None):
-    """Execute/resume only with a qualified maintenance capability (none shipped)."""
+    """Start or exactly retry an operation with qualified maintenance (none shipped)."""
+    return _execute("execute", raw, sealed, preview_sha256, failpoint=failpoint)
+
+
+def resume(raw, sealed, preview_sha256, *, failpoint=None):
+    """Retry an existing exact operation with qualified maintenance (none shipped).
+
+    Journal presence is required under the coordinator lock. An absent journal
+    raises PendingTransactionError without initializing an operation.
+    """
+    return _execute("resume", raw, sealed, preview_sha256, failpoint=failpoint)
+
+
+def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
     import secrets
     request, _ = _request(raw)
     journal_path, output, archive = map(Path, (request["journal"], request["output"], request["archive"]))
     digest = _sha(_bytes(request))
     _same_filesystem(request)
     with _maintenance(request), _operation(journal_path, digest) as binding, _coordinator_lock(request):
+        _require(action != "resume" or journal_path.exists(), "existing replacement journal required")
         if journal_path.exists():
             journal = _load(journal_path)
             _require(journal.get("request") == request and journal.get("request_digest") == digest
@@ -839,8 +869,9 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
 
     Installed data stays at the selected quarantine; a pre-install allocation
     stays at its recorded container. Interrupted retries use the persisted tree
-    selector rather than the restored output name. Rollback is terminal and does
-    not repair the old authority's identity failure.
+    selector rather than the restored output name. Only a quarantine selected
+    to retain an installed tree receives an archive guard. Rollback is terminal
+    and does not repair the old authority's identity failure.
     """
     request, _ = _request(raw)
     journal_path = Path(request["journal"])
@@ -879,7 +910,8 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
                               if projected.get("rollback_new_tree") is None else None)
         _require(retained_container is None or _identity_at(retained_container) == journal["new_identity"],
                  "retained replacement allocation changed")
-        _register(quarantine, journal_path, digest, "archive")
+        if projected.get("rollback_new_tree") is not None:
+            _register(quarantine, journal_path, digest, "archive")
         lock_paths = [output.parent, archive.parent, quarantine.parent, old_path]
         if retained_container is not None:
             lock_paths.append(Path(retained_container))
@@ -987,7 +1019,12 @@ def main(argv=None):
             result = rollback(request, args.journal_sha256, args.quarantine, expected_new_tree=args.new_tree_sha256)
         else:
             sealed = _load(request["stage"])
-            result = preview(request, sealed) if args.command == "preview" else execute(request, sealed, args.preview_sha256)
+            if args.command == "preview":
+                result = preview(request, sealed)
+            elif args.command == "resume":
+                result = resume(request, sealed, args.preview_sha256)
+            else:
+                result = execute(request, sealed, args.preview_sha256)
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, ValueError, KeyError, tx.PendingTransactionError) as exc:

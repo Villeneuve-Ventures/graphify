@@ -26,6 +26,8 @@ explicit exclusion in this first profile rather than a fabricated concept.
 IDs cannot collide across source files, including AST nodes; source coverage is
 checked again after graph canonicalization. Edge confidence, finite scores and
 relations follow the host extraction rubric and are validated before merging.
+Edge and hyperedge records must be JSON objects; non-object records return a
+structured blocked result before any seal or graph is published.
 
 Fragment `backend=codex_host_agent` and `network_egress=false` fields describe
 the approved caller's provenance claim. They do not cryptographically attest
@@ -52,7 +54,8 @@ are external to every source/policy root and cannot contain one another. Archive
 and output, including the preallocation/control parent, must share a filesystem.
 Rollback quarantine is checked against all source/policy roots and rename devices
 before any journal or guard change. Bounds include 100,000 preserved entries,
-128 MiB per preserved file, 2 GiB aggregate preserved bytes, 128 MiB sealed data
+128 nested directory levels (`MAX_PRESERVATION_DEPTH`), 128 MiB per preserved
+file, 2 GiB aggregate preserved bytes, 128 MiB sealed data
 and serialized control objects, existing SourceIO read bounds and a 30-second
 lock deadline. Preview measures the complete serialized initial journal,
 including escaped inventory names, and reserves another 3 MiB + 64 KiB for
@@ -62,7 +65,12 @@ Replay checks the remaining allowance before forward effects. Every control
 write checks its complete serialized size against the reader limit before
 creation or replacement; oversized or unreadable existing state stays held.
 A tree can be below the aggregate bound and still refuse because one file exceeds
-its own bound.
+its own bound. The inventory root has depth 0; directories at depth 128 and
+files in them are admitted. A directory at depth 129 refuses with a structured
+`PendingTransactionError` before it is opened. This conservative traversal cap
+bounds recursive stack and descriptor use independently of the entry/byte caps;
+opened descriptors still close on refusal, and identity and membership checks
+still apply within the admitted tree.
 The profile's exact guard namespace is excluded from
 source selection; it is never graph input.
 
@@ -100,12 +108,16 @@ Guard markers are read relative to pinned ancestor directories and checked for
 entry and parent substitution. Both lexical and resolved aliases are checked;
 a changed physical target refuses admission. These checks perform no mutation
 and do not enable the maintenance backend.
+Guard registration requires mutating admission on its locked parent, so a prior
+retained archive cannot become another registration parent.
 Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases. Older strict readers reject the new binding.
 Maintenance exclusion, including legacy restart inhibition, remains essential:
 advisory inode locks cannot fence arbitrary same-UID or root writers.
 
-Resume needs the exact request, preview, seal and physical objects. It never
+Resume needs an existing journal under the coordinator lock, plus the exact
+request, preview, seal and state-specific physical objects. It never initializes
+a missing operation. Execute can create an operation or exactly retry one. It never
 searches for matching hashes or repairs substituted directories. Native
 publication interruption resumes under its exact recorded owner. Unknown or
 unrecorded ownership is blocked rather than reconstructed from a token found
@@ -117,6 +129,9 @@ is `rolled-back-unrecovered`: the old identity failure still exists. It is not
 permission to resume forward publication or a claim of restored service.
 If installation has not occurred, the allocation stays at its recorded external
 container instead, with its recorded physical identity checked before restoration.
+Only quarantine selected to retain an installed tree receives an archive guard;
+a pre-install rollback leaves its unused quarantine name unregistered. Interrupted
+rollback uses the persisted tree selector to keep an actual quarantine protected.
 The journal and response name that retained location, including
 when rollback resumes after restoring the original tree. Rollback admits the
 complete intent and terminal journal, including the current new-tree inventory,
