@@ -4,6 +4,10 @@
 base-to-HEAD, index, working-tree and non-ignored untracked changes together.
 Use the actual PR base. Full history and a resolvable base are required to prove
 docs-only eligibility. Empty or failed inspections select full validation.
+Make selects its base from `BASE` (default `origin/v8`), including an explicit
+empty value. Recursive checks receive the same selection as a Make argument.
+`GRAPHIFY_VALIDATION_BASE` remains available as policy context but does not
+override Make's base selection.
 
 | Lane | Checks |
 | --- | --- |
@@ -38,6 +42,9 @@ cross-category renames, symlinks, executable modes, binary or non-UTF-8 content,
 inspection errors and missing base evidence cannot take a docs lane. Both sides
 of renames and all change surfaces are inspected, including deleted content.
 Pytest cache history does not select focused tests.
+Full-content scans of changed tracked files require a complete conflict-marker
+set, so an unrelated edit does not reject pre-existing standalone marker-like
+text. Added lines and wholly new files retain strict standalone-marker checks.
 Final routing execution rejects nonempty `PYTEST_ADDOPTS` before dispatching
 checks. Unset it so inherited collection or cache options cannot suppress required
 tests. Dry runs and low-level whitespace helpers do not establish final readiness.

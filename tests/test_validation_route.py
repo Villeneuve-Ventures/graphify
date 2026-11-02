@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import os
+import shlex
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -398,6 +401,86 @@ def test_whitespace_conflicts_and_deleted_docs(repository):
     assert route.check_change_set_whitespace(base) == 0
     (root / "docs/new.md").write_text("<<<<<<< ours\ntext\n=======\nother\n>>>>>>> theirs\n")
     assert route.check_change_set_whitespace(base) == 1
+
+
+@pytest.mark.parametrize("target", ["fast-feedback", "docs-check", "review-ready"])
+@pytest.mark.parametrize("base", [None, "requested-base", ""])
+def test_make_base_selection_ignores_ambient_policy_context(tmp_path, target, base):
+    spy = tmp_path / "argv.py"
+    spy.write_text("import json,sys; print(json.dumps(sys.argv[1:]))\n")
+    env = {key: value for key, value in os.environ.items() if key not in {
+        "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKEFILES", "GNUMAKEFLAGS",
+        "BASE", "VALIDATION_ENVIRONMENT",
+    }}
+    env["GRAPHIFY_VALIDATION_BASE"] = "stale-base"
+    command = ["make", "-s", "-f", str(ROOT / "Makefile"), target,
+               "PYTHON=" + shlex.join([sys.executable, "-I", "-S", "-B", str(spy)])]
+    if base is not None:
+        command.append("BASE=" + base)
+    result = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(result.stdout)
+    assert argv[argv.index("--base") + 1] == ("origin/v8" if base is None else base)
+
+
+@pytest.mark.parametrize("base", [route.BASE_UNSET, None, "requested-base"])
+def test_recursive_make_passes_base_without_losing_policy_context(base):
+    command = route.make_command("docs-check", base=base)
+    assignments = [arg for arg in command.argv if arg.startswith("BASE=")]
+    if base == route.BASE_UNSET:
+        assert assignments == []
+        assert command.env == ()
+    else:
+        assert assignments == ["BASE=" + (base or "")]
+        assert dict(command.env)["GRAPHIFY_VALIDATION_BASE"] == (base or "")
+
+
+@pytest.mark.parametrize("surface", ["committed", "staged", "unstaged"])
+@pytest.mark.parametrize("marker", ["<<<<<<< literal", "||||||| literal", ">>>>>>> literal"])
+def test_full_content_scan_allows_unchanged_marker_literals(repository, surface, marker):
+    root, _ = repository
+    path = root / "docs/markers.md"
+    path.write_text(f"Protocol example:\n{marker}\nOriginal explanation.\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "existing marker-like text")
+    base = git(root, "rev-parse", "HEAD")
+    path.write_text(path.read_text().replace("Original", "Revised"))
+    if surface in {"committed", "staged"}:
+        git(root, "add", ".")
+    if surface == "committed":
+        git(root, "commit", "-qm", "unrelated explanation edit")
+    assert route.check_change_set_whitespace(base) == 0
+
+
+@pytest.mark.parametrize("marker", ["<<<<<<< ours", "||||||| base", ">>>>>>> theirs"])
+def test_added_line_patch_scan_rejects_standalone_markers(marker):
+    patch = ("diff --git a/example.md b/example.md\n"
+             "--- a/example.md\n+++ b/example.md\n@@ -0,0 +1 @@\n+" + marker + "\n")
+    assert route._patch_conflict_failures("unstaged", patch.encode())
+
+
+@pytest.mark.parametrize("marker", ["<<<<<<< ours", "||||||| base", ">>>>>>> theirs"])
+def test_new_file_scan_rejects_standalone_markers(repository, marker):
+    root, base = repository
+    (root / "docs/new.md").write_text(marker + "\n")
+    assert route.check_change_set_whitespace(base) == 1
+    assert route.check_untracked_whitespace(["docs/new.md"]) == 1
+
+
+@pytest.mark.parametrize("diff3", [False, True])
+def test_full_content_scan_rejects_complete_conflict_sets(repository, diff3):
+    root, _ = repository
+    path = root / "docs/conflict.md"
+    base_lines = "||||||| base\nbase text\n" if diff3 else ""
+    path.write_text("<<<<<<< ours\nours\n" + base_lines + "=======\ntheirs\n>>>>>>> theirs\n")
+    git(root, "add", ".")
+    git(root, "commit", "-qm", "existing complete conflict fixture")
+    path.write_text(path.read_text() + "Unrelated edit.\n")
+    failures, errors = route._surface_text_conflict_failures([
+        route.Change("M", Path("docs/conflict.md"), Path("docs/conflict.md"), "unstaged"),
+    ])
+    assert errors == []
+    assert len(failures) == (4 if diff3 else 3)
 
 
 def test_ci_keeps_all_full_jobs_and_stable_quality_gate():

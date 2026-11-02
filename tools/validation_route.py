@@ -679,7 +679,14 @@ def escalate_to_full(route: Classification, reason: str) -> Classification:
 
 def make_command(target: str, reason: str | None = None, base: str | None = BASE_UNSET,
                  validation_environment: Path | None = None) -> Command:
+    """Select recursive Make's base explicitly while retaining policy context.
+
+    BASE_UNSET leaves Make's default intact; None selects an empty base.
+    The context environment remains available without overriding Make's BASE.
+    """
     argv = ["make", f"PYTHON={shlex.join(PYTHON_ARGV)}"]
+    if base != BASE_UNSET:
+        argv.append(f"BASE={base or ''}")
     env = (("GRAPHIFY_VALIDATION_BASE", base or ""),) if base != BASE_UNSET else ()
     if validation_environment is not None:
         argv.append(f"VALIDATION_ENVIRONMENT={validation_environment}")
@@ -900,12 +907,21 @@ def _diagnostic_label(label: str) -> str:
     return json.dumps(label, ensure_ascii=True)[1:-1]
 
 
-def _text_conflict_failures(label: str, lines: list[str]) -> list[str]:
+def _text_conflict_failures(
+    label: str, lines: list[str], *, require_complete_set: bool = False,
+) -> list[str]:
+    """Report marker locations, optionally requiring a complete conflict set.
+
+    Existing file content needs an opener, separator and closer to distinguish
+    conflicts from unchanged literals. Added lines and new files remain strict.
+    """
     failures: list[str] = []
     opener = any(_is_git_conflict_marker(line, "<<<<<<<") for line in lines)
     separator = any(line == "=======" for line in lines)
     closer = any(_is_git_conflict_marker(line, ">>>>>>>") for line in lines)
     conflict_set = opener and separator and closer
+    if require_complete_set and not conflict_set:
+        return failures
     for line_number, line in enumerate(lines, start=1):
         if (
             _is_git_conflict_marker(line, "<<<<<<<")
@@ -1015,6 +1031,7 @@ def _surface_text_conflict_failures(
             _text_conflict_failures(
                 f"{source}:{_diagnostic_label(raw_path)}",
                 lines,
+                require_complete_set=True,
             )
         )
     return failures, errors

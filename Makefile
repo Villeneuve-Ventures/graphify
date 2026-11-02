@@ -7,10 +7,10 @@ VALIDATION_PYTHON = $(PYTHON) -I -S -B -c 'import os,runpy,sys; sys.path.insert(
 
 .PHONY: fast-feedback docs-check review-ready
 fast-feedback:
-	$(VALIDATION_PYTHON) --base "$${GRAPHIFY_VALIDATION_BASE-$(BASE)}" $(VALIDATION_ENVIRONMENT_ARG)
+	$(VALIDATION_PYTHON) --base "$(BASE)" $(VALIDATION_ENVIRONMENT_ARG)
 
 docs-check:
-	$(VALIDATION_PYTHON) --docs-check --base "$${GRAPHIFY_VALIDATION_BASE-$(BASE)}"
+	$(VALIDATION_PYTHON) --docs-check --base "$(BASE)"
 
 review-ready:
-	$(VALIDATION_PYTHON) --full-checks --base "$${GRAPHIFY_VALIDATION_BASE-$(BASE)}" $(VALIDATION_ENVIRONMENT_ARG)
+	$(VALIDATION_PYTHON) --full-checks --base "$(BASE)" $(VALIDATION_ENVIRONMENT_ARG)
