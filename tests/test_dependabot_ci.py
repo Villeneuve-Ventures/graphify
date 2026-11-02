@@ -127,6 +127,19 @@ def test_validation_job_bodies_remain_equal_to_original_ci():
     for name in VALIDATORS:
         old = copy.deepcopy(original["jobs"][name])
         new = copy.deepcopy(workflow()["jobs"][name])
+        if name == "quality":
+            route_gate = old["steps"].pop(0)
+            assert route_gate["name"] == "Require a complete docs route or full validation selection"
+            assert route_gate["env"] == {
+                "ROUTE_RESULT": "${{ needs.validation-route.result }}",
+                "ROUTE_LANE": "${{ needs.validation-route.outputs.lane }}",
+                "ROUTE_STATUS": "${{ needs.validation-route.outputs.status }}",
+            }
+            for step in old["steps"]:
+                if step.get("name") == "Reject whole-run cancellation":
+                    continue
+                step_if = step.pop("if")
+                assert step_if == "${{ needs.validation-route.outputs.lane == 'full' }}"
         for job in (old, new):
             job.pop("if", None)
             job.pop("needs", None)

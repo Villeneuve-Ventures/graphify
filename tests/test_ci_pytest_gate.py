@@ -33,7 +33,7 @@ def workflow():
 
 def test_matrix_and_gate_preserve_execution_and_environment():
     ci = workflow()
-    assert set(ci["jobs"]) == {"skillgen-check", "test", "quality", "security-scan", "leiden-binary-smoke"}
+    assert set(ci["jobs"]) == {"validation-route", "skillgen-check", "test", "quality", "security-scan", "leiden-binary-smoke"}
     matrix = ci["jobs"]["test"]
     assert matrix["strategy"] == {"fail-fast": "false", "matrix": {
         "python-version": ["3.14.10"], "shard": ["1", "2", "3", "4"]}}
@@ -60,10 +60,11 @@ def test_matrix_and_gate_preserve_execution_and_environment():
         "pytest-timings-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}"
     )
     gate = ci["jobs"]["quality"]
-    assert gate["name"] == "Python quality gate" and gate["needs"] == ["test"]
+    assert gate["name"] == "Python quality gate" and gate["needs"] == ["validation-route", "test"]
     assert gate["if"] == (
         "${{ always() && (github.event_name != 'pull_request' || "
-        "github.event.pull_request.draft == false) }}"
+        "(github.event.pull_request.user.login != 'dependabot[bot]' && "
+        "github.event.pull_request.draft == false)) }}"
     )
     assert "continue-on-error" not in gate
     gate_steps = {step.get("name"): step for step in gate["steps"]}
@@ -235,7 +236,7 @@ def test_workflow_gate_command_executes_fail_closed(receipts, success):
     assert ("All four pytest shard executions succeeded" in result.stdout) == success
 
 
-def test_non_shard_job_policies_preserve_baseline_except_action_and_python_updates():
+def test_non_shard_job_policies_preserve_baseline_except_author_guard_action_and_python_updates():
     baseline = subprocess.check_output([
         "git", "show", "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984:.github/workflows/ci.yml"
     ], cwd=ROOT, text=True)
@@ -248,6 +249,15 @@ def test_non_shard_job_policies_preserve_baseline_except_action_and_python_updat
         "actions/upload-artifact@v4": "actions/upload-artifact@v7.0.2",
     }
     for name in ("skillgen-check", "security-scan", "leiden-binary-smoke"):
+        assert old["jobs"][name]["if"] == (
+            "${{ github.event_name != 'pull_request' || "
+            "github.event.pull_request.draft == false }}"
+        )
+        old["jobs"][name]["if"] = (
+            "${{ github.event_name != 'pull_request' || "
+            "(github.event.pull_request.user.login != 'dependabot[bot]' && "
+            "github.event.pull_request.draft == false) }}"
+        )
         for step in old["jobs"][name]["steps"]:
             previous_action = step.get("uses")
             if previous_action in action_updates:
@@ -261,6 +271,13 @@ def test_non_shard_job_policies_preserve_baseline_except_action_and_python_updat
             if step.get("name") == "Install Graphify with the native Leiden wheel only":
                 step["run"] = step["run"].replace(
                     "uv venv --python 3.14\n", "uv venv --python 3.14.10\n")
+        old["jobs"][name]["needs"] = ["validation-route"]
+        old["jobs"][name]["if"] = (
+            "${{ needs.validation-route.outputs.lane == 'full' && "
+            "(github.event_name != 'pull_request' || "
+            "(github.event.pull_request.user.login != 'dependabot[bot]' && "
+            "github.event.pull_request.draft == false)) }}"
+        )
         assert current["jobs"][name] == old["jobs"][name]
     for field in ("name", "on", "concurrency"):
         assert current[field] == old[field]
@@ -278,7 +295,8 @@ def test_quality_installs_the_acceptance_git_before_conformance():
                           if step.get("name") ==
                           "Run protected verifier conformance with optimized Python")
     assert git_index < verifier_index
-    assert gate_steps[git_index] == matrix_step
+    assert {key: value for key, value in gate_steps[git_index].items() if key != "if"} == matrix_step
+    assert gate_steps[git_index]["if"] == "${{ needs.validation-route.outputs.lane == 'full' }}"
     assert "if" not in matrix_step and "continue-on-error" not in matrix_step
     assert "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357" in matrix_step["run"]
     assert '"$git_build/install/bin" >> "$GITHUB_PATH"' in matrix_step["run"]

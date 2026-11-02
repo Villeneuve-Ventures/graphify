@@ -1,13 +1,14 @@
 """PR feedback: admission, receipt capacity, retained leases and Git includes."""
 import os
 import subprocess
-import time
+from types import SimpleNamespace
 
 import pytest
 
 from graphify.workspace import sync
 from graphify.workspace.generations import CapacityExceeded
 from graphify.workspace.identity import SourceDiscoveryError, discover_source
+from graphify.workspace.leases import LeaseExpired
 from tests.test_workspace_structural_s4 import runtime_fixture, request_for
 from tests.workspace_s3_helpers import REPO_UUID, create_repo, tree_snapshot
 
@@ -129,20 +130,59 @@ def test_insufficient_receipt_allowance_rejected_before_staging(tmp_path, monkey
     assert (tree_snapshot(runtime.inputs.state_root), tree_snapshot(repo)) == before
 
 
-def test_retained_lease_is_renewed_on_heartbeat_entry(tmp_path, monkeypatch):
+@pytest.fixture
+def retained_heartbeat(tmp_path, monkeypatch):
     runtime, _repo = runtime_fixture(tmp_path, monkeypatch)
     request = request_for(runtime)
     _, observations = sync._observe(runtime, REPO_UUID)
     runtime.stores.generations.request_staged_build(REPO_UUID, request.generation_id, request.build, source_observations=observations)
+    clock = SimpleNamespace(now_ns=1_000_000_000, thread_actions=[])
+    monkeypatch.setattr(sync, 'time', SimpleNamespace(monotonic_ns=lambda: clock.now_ns))
+
+    class UnscheduledThread:
+        # Never run the target: a background renewal must not hide a missing
+        # synchronous entry renewal, regardless of host scheduling or load.
+        def __init__(self, *, target, name):
+            pass
+
+        def start(self):
+            clock.thread_actions.append('start')
+
+        def join(self):
+            clock.thread_actions.append('join')
+
+    monkeypatch.setattr(sync, 'Thread', UnscheduledThread)
     monkeypatch.setattr(sync, '_LEASE_TTL_NS', 30_000_000_000)
     attempt = runtime.stores.generations.acquire_staged_operation(REPO_UUID, request.generation_id, request.build,
         attempt_sha256='a' * 64, operation='BUILD', acquired_at=sync._now(),
-        monotonic_ns=time.monotonic_ns(), ttl_ns=1_000_000_000)
+        monotonic_ns=clock.now_ns, ttl_ns=1_000_000_000)
     retained = sync._acquire(runtime, request, 'a' * 64, recovering=True)
     assert retained.grant.lease.to_dict() == attempt.grant.lease.to_dict()
-    with sync._released(runtime, retained.grant), sync._heartbeat(runtime, retained.grant):
-        time.sleep(1.2)
-        runtime.stores.leases.assert_current(retained.grant, monotonic_ns=time.monotonic_ns())
+    return runtime, retained.grant, clock
+
+
+def test_retained_lease_is_renewed_on_heartbeat_entry(retained_heartbeat):
+    runtime, grant, clock = retained_heartbeat
+    original_deadline = grant.lease.to_dict()['liveness_deadline_monotonic_ns']
+    clock.now_ns = original_deadline - 1
+    with sync._released(runtime, grant), sync._heartbeat(runtime, grant):
+        assert clock.thread_actions == ['start']
+        clock.now_ns = original_deadline + 1
+        runtime.stores.leases.assert_current(grant, monotonic_ns=clock.now_ns)
+    assert clock.thread_actions == ['start', 'join']
+    assert not runtime.stores.leases.inspect(REPO_UUID).leases
+
+
+def test_expired_retained_lease_is_rejected_on_heartbeat_entry(retained_heartbeat):
+    runtime, grant, clock = retained_heartbeat
+    clock.now_ns = grant.lease.to_dict()['liveness_deadline_monotonic_ns']
+    with sync._released(runtime, grant):
+        before = runtime.stores.leases.inspect(REPO_UUID).to_dict()
+        with pytest.raises(LeaseExpired, match='liveness deadline'):
+            with sync._heartbeat(runtime, grant):
+                pytest.fail('expired grant entered the heartbeat body')
+        assert runtime.stores.leases.inspect(REPO_UUID).to_dict() == before
+        assert not clock.thread_actions
     assert not runtime.stores.leases.inspect(REPO_UUID).leases
 
 
