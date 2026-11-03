@@ -142,6 +142,8 @@ retains its marker-only route.
 Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases, including `save-result` directory and selected-file
 writes. Older strict readers reject the new binding.
+Lessons reflection (`reflect`) applies mutation admission before parent creation
+and again before opening the selected output, including file and directory aliases.
 Global graph and manifest saves apply the same mutation admission before
 directory creation and final writing. Corrupt global-manifest backup checks
 both rename paths; replacement refusal cannot become a backup-error fallback.
