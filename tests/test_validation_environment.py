@@ -116,12 +116,12 @@ def offline_wheels(tmp_path_factory):
 
 @pytest.fixture
 def projects(tmp_path, offline_wheels):
-    """Create offline projects using the caller's cache, without foreign routing."""
+    """Create offline projects with caller-anchored cache paths and no foreign routing."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
     if "UV_CACHE_DIR" in os.environ:
-        env["UV_CACHE_DIR"] = os.environ["UV_CACHE_DIR"]
+        env["UV_CACHE_DIR"] = os.path.join(os.getcwd(), os.environ["UV_CACHE_DIR"])
     env.update(UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
 
     def create(name, *, passing=False):
@@ -201,19 +201,25 @@ def test_fixture_sync_works_with_an_empty_offline_cache(projects, tmp_path):
     assert "1 passed" in output
 
 
-def test_projects_use_configured_cache_without_foreign_project_routing(tmp_path, monkeypatch, request):
+@pytest.mark.parametrize("relative_cache", [False, True])
+def test_projects_use_configured_cache_without_foreign_project_routing(
+        tmp_path, monkeypatch, request, relative_cache):
     cache = tmp_path / "custom-cache"
-    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UV_CACHE_DIR", cache.name if relative_cache else str(cache))
     monkeypatch.setenv("UV_PROJECT", str(tmp_path / "foreign"))
     monkeypatch.setenv("UV_OFFLINE", "0")
     _, env = request.getfixturevalue("projects")
-    assert env["UV_CACHE_DIR"] == str(cache)
     assert env["UV_OFFLINE"] == "1"
     assert env["UV_PYTHON_DOWNLOADS"] == "never"
     assert "UV_PROJECT" not in env
-    result = execute(["uv", "cache", "dir"], tmp_path, env)
+    child = tmp_path / "child"
+    child.mkdir()
+    result = execute(["uv", "cache", "dir"], child, env)
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()) == cache
+    reported = Path(result.stdout.strip())
+    assert (reported if reported.is_absolute() else child / reported) == cache
+    assert env["UV_CACHE_DIR"] == str(cache)
 
 
 def test_admitted_child_uv_uses_configured_offline_cache(tmp_path, monkeypatch):
