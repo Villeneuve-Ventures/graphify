@@ -29,6 +29,8 @@ jobs:
         with:
           python-version: "3.14.10"
           prune-cache: true
+          # Full-route classification does not install dependencies or populate the cache.
+          ignore-nothing-to-cache: true
       - name: Classify and validate docs; retain full jobs for everything else
         id: route
         env:

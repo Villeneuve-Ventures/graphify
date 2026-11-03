@@ -489,6 +489,10 @@ def test_ci_keeps_all_full_jobs_and_stable_quality_gate():
     classifier = jobs["validation-route"]
     checkout = classifier["steps"][0]
     assert checkout["with"]["fetch-depth"] == "0"
+    setup = next(step for step in classifier["steps"]
+                 if step.get("uses", "").startswith("astral-sh/setup-uv@"))
+    assert setup["with"]["prune-cache"] == "true"
+    assert setup["with"]["ignore-nothing-to-cache"] == "true"
     classify = classifier["steps"][-1]
     assert "--ci-plan --github-output" in classify["run"]
     assert 'if [ "$EVENT_NAME" != pull_request ]; then args+=(--full); fi' in classify["run"]
