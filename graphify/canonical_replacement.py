@@ -254,9 +254,12 @@ def build_data(raw, fragments, *, _source_output=None):
     Fragment containers must be lists; node records, IDs and source ownership
     are checked before iteration, hashing or membership operations. Edge and
     hyperedge records use their respective host-rubric relations and confidence
-    kinds; hyperedges cannot be AMBIGUOUS. Invalid records raise
-    PendingTransactionError before graph composition. This
-    builds a sealed in-memory payload and does not publish filesystem authority.
+    kinds; hyperedges cannot be AMBIGUOUS and require at least three distinct
+    members before and after graph canonicalization. Composition uses the
+    builder's simple Graph/DiGraph projection, which can collapse parallel
+    relationships. Invalid records or final topology raise PendingTransactionError
+    before a data seal is returned. This builds a sealed in-memory payload and
+    does not publish filesystem authority.
     """
     import copy
     from .build import build_from_json
@@ -334,6 +337,7 @@ def build_data(raw, fragments, *, _source_output=None):
                 members = group.get("nodes")
                 _require(isinstance(members, list)
                          and all(isinstance(member, str) and member for member in members)
+                         and len(set(members)) >= 3
                          and set(members) <= ids
                          and isinstance(group.get("source_file"), str)
                          and group["source_file"] in hashes, "invalid semantic group")
@@ -345,6 +349,8 @@ def build_data(raw, fragments, *, _source_output=None):
         graph = build_from_json(copy.deepcopy({"nodes": ast["nodes"] + nodes, "edges": ast["edges"] + edges,
                                  "hyperedges": hyperedges}), directed=request["directed"], root=root)
         _require(graph.number_of_nodes() > 0, "empty replacement graph")
+        _require(all(len(set(group["nodes"])) >= 3 for group in graph.graph.get("hyperedges", [])),
+                 "semantic group lost minimum membership during graph canonicalization")
         surviving = {node.get("source_file") for _, node in graph.nodes(data=True)}
         _require({str(Path(p).relative_to(root)) for p in covered} <= surviving,
                  "semantic source coverage lost during graph canonicalization")
@@ -548,6 +554,8 @@ def _guard_path(path, *, mutation=True, issuer_policy=None):
                     cap.validate()
                     continue
                 _require(stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
+                _require(os.name == "nt" or not before.st_mode & 0o022,
+                         "unsafe writable replacement guard")
                 _require(before.st_nlink == 1 and before.st_size <= MAX_BYTES,
                          "unsafe or oversized replacement file")
                 record = _load(GUARD, parent=cap)
@@ -713,6 +721,7 @@ def _persist(path, value):
 
 
 def _register(path, journal, digest, role):
+    """Register a slot without adopting foreign or group/other writable markers."""
     from .replacement_guard_issuers import issuer_snapshot
 
     path = Path(path)
@@ -723,6 +732,7 @@ def _register(path, journal, digest, role):
         before = _guard_entry(cap)
         _require(before is None or before.st_uid in issuers, "foreign replacement guard registration collision")
         _require(before is None or stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
+        _require(before is None or not before.st_mode & 0o022, "unsafe writable replacement guard")
         previous = _read(GUARD, parent_fd=cap.fd, expected=before) if before is not None else None
         value = _load(GUARD, parent=cap) if before is not None else {"schema": 1, "entries": {}}
         _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),

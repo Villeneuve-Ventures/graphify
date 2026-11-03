@@ -36,6 +36,7 @@ def isolated_storage(tmp_path, monkeypatch):
 
 @pytest.fixture
 def registration(tmp_path):
+    pytest.importorskip("fcntl")
     journal = tmp_path / "journal.json"
     journal.write_bytes(replacement._bytes({
         "request_digest": "prior-operation", "state": "COMMITTED",

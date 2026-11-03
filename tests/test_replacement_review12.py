@@ -1,9 +1,9 @@
 """Malformed fragments and synthetic portability evidence use disposable inputs."""
-import builtins
 import json
 import os
 from pathlib import Path
 import runpy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -44,10 +44,10 @@ def test_fragment_identifier_fields_refuse_before_membership(case, tmp_path, cap
     fragment = fragments[0]
     node = fragment["nodes"][0]
     owner = node["source_file"]
-    fragment["nodes"].append({**node, "id": "second"})
+    fragment["nodes"].extend({**node, "id": identity} for identity in ("second", "third"))
     edge = {"source": node["id"], "target": "second", "source_file": owner,
             "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0}
-    group = {"nodes": [node["id"], "second"], "source_file": owner,
+    group = {"nodes": [node["id"], "second", "third"], "source_file": owner,
              "relation": "participate_in", "confidence": "EXTRACTED", "confidence_score": 1.0}
     fragment["edges"], fragment["hyperedges"] = [edge], [group]
     if field in {"source_file", "file_type"}:
@@ -73,14 +73,9 @@ def _assert_cli_refusal(request, fragments, tmp_path, capsys):
 
 
 def test_lock_module_skips_if_fcntl_is_unavailable(monkeypatch):
-    original = builtins.__import__
-
-    def unavailable(name, *args, **kwargs):
-        if name == "fcntl":
-            raise ModuleNotFoundError("synthetic missing fcntl", name="fcntl")
-        return original(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", unavailable)
+    # Both __import__ and importlib.import_module refuse this sentinel, even if
+    # an earlier test loaded fcntl. Monkeypatch restores the prior module entry.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
     with pytest.raises(pytest.skip.Exception) as error:
         runpy.run_path(str(Path(__file__).with_name("test_replacement_lock.py")))
     assert "fcntl" in str(error.value)

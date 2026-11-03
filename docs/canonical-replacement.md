@@ -27,11 +27,17 @@ IDs cannot collide across source files, including AST nodes; source coverage is
 checked again after graph canonicalization. Edge confidence, finite scores and
 relations follow the host extraction rubric and are validated before merging.
 Edge and hyperedge records must be JSON objects. Hyperedge members must be
-nonempty strings before set or topology checks. Malformed records return a
-structured blocked result before any seal or graph is published.
+nonempty strings before set or topology checks. Each hyperedge requires at least
+three distinct members, both in the fragment and after graph canonicalization.
+Malformed records return a structured blocked result before any seal or graph
+is published.
 Fragment node, edge and hyperedge containers must be lists. Node objects and
 their nonempty string IDs are admitted before hashing; source ownership and
 relationship identifiers are checked before membership or path operations.
+Composition retains the builder's simple `Graph` or `DiGraph` representation.
+Parallel relationships on one endpoint slot can collapse; undirected slots can
+also collapse reciprocal relationships. The seal does not add multigraph or
+lossless relationship preservation to that existing projection.
 
 Fragment `backend=codex_host_agent` and `network_egress=false` fields describe
 the approved caller's provenance claim. They do not cryptographically attest
@@ -186,8 +192,11 @@ Windows retains the existing guard path without POSIX owner filtering; this
 does not qualify cross-identity Windows enrollment.
 
 No-follow owner metadata is classified before marker type or payload admission.
-Only a proved-foreign marker may be ignored without opening its payload. Trusted
-malformed/nonregular/unavailable markers and unknown policy states still block.
+Only a proved-foreign marker may be ignored without opening its payload. On POSIX,
+trusted markers must also disallow group/other writes before payload admission;
+registration applies the same mode check. Trusted malformed/nonregular/unavailable
+markers and unknown policy states still block. This mode check does not qualify
+native ACL custody or prevent same-UID/root writers.
 Parent, owner and entry bindings are rechecked. Registration refuses a foreign
 collision; ordinary preflight's ignore rule grants no overwrite/adoption right.
 An absent marker is published exclusively. Updating an existing marker binds its
