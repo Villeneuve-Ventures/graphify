@@ -255,14 +255,16 @@ def build_data(raw, fragments, *, _source_output=None):
     are checked before iteration, hashing or membership operations. Edge and
     hyperedge records use their respective host-rubric relations and confidence
     kinds; hyperedges cannot be AMBIGUOUS and require at least three distinct
-    members before and after graph canonicalization. Composition uses the
+    members before and after graph canonicalization. Group IDs must be hashable,
+    and every admitted group must survive composition, including anonymous and
+    repeated groups. Composition uses the
     builder's simple Graph/DiGraph projection, which can collapse parallel
     relationships. Invalid records or final topology raise PendingTransactionError
     before a data seal is returned. This builds a sealed in-memory payload and
     does not publish filesystem authority.
     """
     import copy
-    from .build import build_from_json
+    from .build import _hashable, build_from_json
     from .detect import detect
     from .extract import extract
     request, structural = _request(raw)
@@ -334,6 +336,7 @@ def build_data(raw, fragments, *, _source_output=None):
                          and edge.get("source_file") in hashes, "invalid semantic edge")
             for group in part_groups:
                 _confidence(group, hyperedge=True)
+                _require(_hashable(group.get("id")), "invalid semantic group identity")
                 members = group.get("nodes")
                 _require(isinstance(members, list)
                          and all(isinstance(member, str) and member for member in members)
@@ -349,6 +352,8 @@ def build_data(raw, fragments, *, _source_output=None):
         graph = build_from_json(copy.deepcopy({"nodes": ast["nodes"] + nodes, "edges": ast["edges"] + edges,
                                  "hyperedges": hyperedges}), directed=request["directed"], root=root)
         _require(graph.number_of_nodes() > 0, "empty replacement graph")
+        _require(len(graph.graph.get("hyperedges", [])) == len(hyperedges),
+                 "semantic groups lost during graph canonicalization")
         _require(all(len(set(group["nodes"])) >= 3 for group in graph.graph.get("hyperedges", [])),
                  "semantic group lost minimum membership during graph canonicalization")
         surviving = {node.get("source_file") for _, node in graph.nodes(data=True)}

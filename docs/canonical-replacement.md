@@ -29,6 +29,9 @@ relations follow the host extraction rubric and are validated before merging.
 Edge and hyperedge records must be JSON objects. Hyperedge members must be
 nonempty strings before set or topology checks. Each hyperedge requires at least
 three distinct members, both in the fragment and after graph canonicalization.
+Group IDs must be hashable before composition; anonymous groups and hashable JSON
+scalar IDs retain their existing behavior. Construction must retain every admitted
+group, including repeated and anonymous records, before the data can be sealed.
 Malformed records return a structured blocked result before any seal or graph
 is published.
 Fragment node, edge and hyperedge containers must be lists. Node objects and
