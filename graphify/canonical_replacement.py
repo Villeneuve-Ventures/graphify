@@ -25,6 +25,7 @@ PROFILE = "fresh-corpus-codex-v1"
 MAX_BYTES = 128 * 1024 * 1024
 # Root depth is zero; refuse deeper directories before opening them.
 MAX_PRESERVATION_DEPTH = 128
+MAX_PRESERVATION_ENTRIES = 100_000
 MAX_GUARD_SCAN_ENTRIES = 100_000
 # Forward growth: one request copy, one container-path allowance, one bounded
 # native owner, plus allocation/identity/binding/receipt fields and state names.
@@ -189,6 +190,17 @@ def _same_filesystem(request, quarantine=None):
     if quarantine is not None:
         _require(_directory(Path(quarantine).parent)["device"] == device,
                  "rollback quarantine must be on same filesystem")
+    objects = [Path(request["output"]), Path(request["archive"])]
+    if quarantine is not None:
+        objects.append(Path(quarantine))
+    for path in objects:
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        _require(stat.S_ISDIR(info.st_mode) and info.st_dev == device,
+                 "replacement object must be a directory on the same filesystem as its rename parents")
+        _require(not os.path.ismount(path), "mounted replacement directory refused")
 
 
 def _request(raw):
@@ -379,21 +391,38 @@ def build_data(raw, fragments, *, _source_output=None):
     return result
 
 
+def _preservation_names(fd, limit):
+    """Sort only an admitted directory listing, stopping at limit plus one names."""
+    names = []
+    with os.scandir(fd) as entries:
+        for entry in entries:
+            _require(len(names) < limit, "preservation entry bound exceeded")
+            names.append(entry.name)
+    return sorted(names)
+
+
 def _tree(path):
     """Inventory opaque bytes without admitting old graph authority.
 
-    The root is depth zero. Child directories through MAX_PRESERVATION_DEPTH are
+    The '.' record binds root identity, mode and ownership without timestamps
+    changed by a rename. The root is depth zero and does not consume the child
+    entry budget. Both membership passes stop at the remaining budget plus one
+    names before sorting. Child directories through MAX_PRESERVATION_DEPTH are
     admitted; deeper directories raise PendingTransactionError before opening.
     Opened descriptors close on both success and refusal.
     """
     result, total = {}, 0
     with tx.pin_output(path, mutation=False) as cap:
+        root = os.fstat(cap.fd)
+        result["."] = {"device": root.st_dev, "inode": root.st_ino, "mode": root.st_mode,
+                       "uid": root.st_uid, "gid": root.st_gid}
         def walk(fd, prefix, depth):
             nonlocal total
-            names = sorted(os.listdir(fd))
+            budget = MAX_PRESERVATION_ENTRIES - (len(result) - 1)
+            names = _preservation_names(fd, budget)
             for name in names:
                 relative = f"{prefix}/{name}" if prefix else name
-                _require(len(result) < 100_000, "preservation entry bound exceeded")
+                _require(len(result) - 1 < MAX_PRESERVATION_ENTRIES, "preservation entry bound exceeded")
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 _require(stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode)
                          and info.st_nlink == 1), "unsafe preservation entry")
@@ -414,8 +443,9 @@ def _tree(path):
                     record["sha256"] = _sha(_read(name, parent_fd=fd, expected=info))
                 _require(_stable(os.stat(name, dir_fd=fd, follow_symlinks=False)) == _stable(info),
                          "preservation source changed")
-            _require(sorted(os.listdir(fd)) == names, "preservation membership changed")
+            _require(_preservation_names(fd, budget) == names, "preservation membership changed")
         walk(cap.fd, "", 0)
+        _require(_stable(os.fstat(cap.fd)) == _stable(root), "preservation root changed")
         cap.validate()
     return result
 
@@ -538,6 +568,110 @@ def _guard_recovery_entries(cap, issuers):
     return observed
 
 
+def _guard_journal_payload(fd):
+    """Read bounded bytes from the held journal without changing its identity."""
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks, remaining = [], MAX_BYTES + 1
+    while remaining:
+        chunk = os.read(fd, min(remaining, 1024 * 1024))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    _require(len(data) <= MAX_BYTES, "replacement guard journal exceeds bound")
+    return data
+
+
+@contextlib.contextmanager
+def _guard_journal(path, issuers):
+    """Hold an authenticated journal observation through the guard decision.
+
+    Admit only a canonical POSIX path whose direct parent and regular, single-
+    link bounded file have owners in the marker namespace's exact issuer set,
+    no group/other write bits, and safe ACLs. Recheck descriptors, named identity,
+    full stat metadata, path mapping, ACLs and bytes before releasing them; all
+    opened descriptors close on refusal. Higher ancestors need not be trusted.
+    This does not detect pre-existing trusted stale content or whole-host
+    rollback, qualify same-UID/root adversaries, or establish native custody.
+    Unsupported identity or ACL inspection refuses the selected guarded entry.
+    """
+    import sys
+    _require(os.name == "posix" and sys.platform in {"linux", "darwin"}
+             and issuers is not None
+             and all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")),
+             "safe replacement guard journal inspection unavailable")
+    issuers = cast(frozenset[int], issuers)
+    try:
+        from .hook_installation import _acl_safe
+    except ImportError as exc:
+        raise tx.PendingTransactionError("replacement guard journal ACL inspection unavailable") from exc
+
+    selected = Path(path)
+    _require(selected.is_absolute() and str(selected) == path
+             and selected.resolve(strict=True) == selected,
+             "noncanonical replacement guard journal")
+
+    def admit(fd, *, directory=False):
+        info = os.fstat(fd)
+        _require(all(hasattr(info, field) for field in ("st_uid", "st_gid", "st_nlink")),
+                 "replacement guard journal identity inspection unavailable")
+        _require((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+                 and info.st_uid in issuers and not info.st_mode & 0o022
+                 and (directory or (info.st_nlink == 1 and info.st_size <= MAX_BYTES)),
+                 "unsafe replacement guard journal parent" if directory else "unsafe replacement guard journal")
+        try:
+            _require(_acl_safe(fd), "unsafe replacement guard journal ACL")
+        except (AttributeError, NotImplementedError) as exc:
+            raise tx.PendingTransactionError("replacement guard journal ACL inspection unavailable") from exc
+        return _guard_observation(info)
+
+    with _guard_parent(selected.parent) as parent:
+        _require(parent is not None, "replacement guard journal parent unavailable")
+        parent = cast(tx.OutputCapability, parent)
+        parent_observation = admit(parent.fd, directory=True)
+        named = os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
+        fd = os.open(selected.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent.fd)
+        try:
+            observation = admit(fd)
+            _require(observation == _guard_observation(named), "replacement guard journal replaced")
+            data = _guard_journal_payload(fd)
+
+            def metadata():
+                parent.validate()
+                _require(selected.parent.resolve(strict=True) == parent.path
+                         and selected.resolve(strict=True) == selected
+                         and admit(parent.fd, directory=True) == parent_observation
+                         and _guard_observation(os.stat(selected.parent, follow_symlinks=False)) == parent_observation,
+                         "replacement guard journal parent changed")
+                _require(admit(fd) == observation
+                         and _guard_observation(os.stat(selected.name, dir_fd=parent.fd,
+                                                       follow_symlinks=False)) == observation,
+                         "replacement guard journal changed")
+
+            def validate():
+                metadata()
+                _require(_guard_journal_payload(fd) == data, "replacement guard journal changed")
+                metadata()
+
+            def pairs(items):
+                result = {}
+                for key, value in items:
+                    _require(key not in result, "duplicate replacement JSON field")
+                    result[key] = value
+                return result
+
+            validate()
+            journal = json.loads(data, object_pairs_hook=pairs,
+                                 parse_constant=lambda _: _require(False, "nonfinite replacement JSON"))
+            try:
+                yield journal
+            finally:
+                validate()
+        finally:
+            os.close(fd)
+
+
 def _guard_path(path, *, mutation=True, issuer_policy=None):
     """Read ancestor registrations through pinned directories, including absent targets."""
     path = Path(os.path.abspath(path))
@@ -578,16 +712,16 @@ def _guard_path(path, *, mutation=True, issuer_policy=None):
                          and isinstance(entry["journal"], str) and Path(entry["journal"]).is_absolute()
                          and isinstance(entry["digest"], str) and bool(entry["digest"]),
                          "malformed replacement guard entry")
-                journal = _load(entry["journal"])
-                _require(isinstance(journal, dict) and journal.get("request_digest") == entry["digest"],
-                         "replacement guard changed")
-                if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
-                    continue
-                if entry.get("role") == "archive":
-                    _require(not mutation, "preserved graph archive is read-only")
-                else:
-                    _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
-                             "canonical replacement is incomplete")
+                with _guard_journal(entry["journal"], issuers) as journal:
+                    _require(isinstance(journal, dict) and journal.get("request_digest") == entry["digest"],
+                             "replacement guard changed")
+                    if _AUTHORITY.get() == (entry["journal"], entry["digest"]):
+                        continue
+                    if entry.get("role") == "archive":
+                        _require(not mutation, "preserved graph archive is read-only")
+                    else:
+                        _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
+                                 "canonical replacement is incomplete")
             finally:
                 _require(_guard_recovery_entries(cap, issuers) == recovery,
                          "replacement guard recovery evidence changed")
@@ -607,7 +741,8 @@ def guard_output(path, *, mutation=True):
     before payload admission. Only proved-foreign entries are ignored; trusted
     malformed markers, trusted displaced-guard backups and uncertain/changed
     policy raise PendingTransactionError. POSIX ancestor scans are bounded.
-    Windows retains its existing admission without Unix issuer filtering.
+    Windows retains marker discovery without Unix issuer filtering; a selected
+    guard journal without supported authentication refuses admission.
     Return None if admission succeeds; mutation=False permits archive reads.
     This preflight does not grant maintenance authority or fence arbitrary writers.
     """
@@ -830,7 +965,11 @@ def _source_current(request, sealed):
 
 
 def execute(raw, sealed, preview_sha256, *, failpoint=None):
-    """Start or exactly retry an operation with qualified maintenance (none shipped)."""
+    """Start or exactly retry an operation with qualified maintenance (none shipped).
+
+    A non-object existing journal raises PendingTransactionError before field
+    access or forward operation effects.
+    """
     return _execute("execute", raw, sealed, preview_sha256, failpoint=failpoint)
 
 
@@ -853,6 +992,7 @@ def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
         _require(action != "resume" or journal_path.exists(), "existing replacement journal required")
         if journal_path.exists():
             journal = _load(journal_path)
+            _require(isinstance(journal, dict), "replacement execution journal must be an object")
             _require(journal.get("request") == request and journal.get("request_digest") == digest
                      and journal.get("preview_sha256") == preview_sha256
                      and journal.get("seal_sha256") == _sha(_bytes(sealed)), "replacement resume request changed")
@@ -1027,6 +1167,7 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
     _same_filesystem(request, quarantine)
     with _maintenance(request), _operation(journal_path, digest), _coordinator_lock(request):
         journal = _load(journal_path)
+        _require(isinstance(journal, dict), "replacement rollback journal must be an object")
         _require(journal.get("request") == request, "rollback request changed")
         if journal["state"] == "ROLLBACK_INTENT":
             _require(journal.get("rollback_preview") == expected_journal_sha256

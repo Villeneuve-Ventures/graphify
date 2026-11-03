@@ -1,6 +1,7 @@
 """Audio delegation downloads privately and admits its actual publication path."""
 import errno
 import hashlib
+import os
 from pathlib import Path
 import socket
 import shutil
@@ -17,6 +18,46 @@ from graphify import transaction as tx
 
 URL = "https://youtube.com/watch?v=fixture"
 STEM = "yt_" + hashlib.sha1(URL.encode(), usedforsecurity=False).hexdigest()[:12]
+
+
+@pytest.mark.parametrize("boundary", ["directory-after-copy", "stage-after-copy", "stage-before-copy"])
+def test_audio_retains_stage_when_its_mutation_admission_changes(
+    tmp_path, monkeypatch, downloader, archive_registration, boundary,
+):
+    _, register = archive_registration
+    target = tmp_path / "raw"
+    selected = target / f"{STEM}.m4a"
+    real_copy, real_mkstemp = shutil.copyfileobj, tempfile.mkstemp
+    staged, descriptors = [], []
+
+    def after_copy(source, destination, *args, **kwargs):
+        real_copy(source, destination, *args, **kwargs)
+        stage = next(target.glob(".graphify-audio-*.tmp"))
+        staged.append(stage)
+        register(target if boundary == "directory-after-copy" else stage)
+
+    def before_copy(*args, **kwargs):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        if kwargs.get("prefix") == ".graphify-audio-":
+            descriptors.append(descriptor)
+            staged.append(Path(name))
+            register(Path(name))
+        return descriptor, name
+
+    if boundary == "stage-before-copy":
+        monkeypatch.setattr(tempfile, "mkstemp", before_copy)
+    else:
+        monkeypatch.setattr(shutil, "copyfileobj", after_copy)
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        transcribe.download_audio(URL, target)
+
+    assert len(staged) == 1 and staged[0].exists()
+    assert staged[0].read_bytes() == (b"" if boundary == "stage-before-copy" else b"local audio bytes")
+    assert not selected.exists()
+    for descriptor in descriptors:
+        with pytest.raises(OSError) as caught:
+            os.fstat(descriptor)
+        assert caught.value.errno == errno.EBADF
 
 
 @pytest.fixture

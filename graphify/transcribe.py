@@ -55,8 +55,10 @@ def download_audio(url: str, output_dir: Path) -> Path:
     staging file in output_dir. Publish with a no-replace hard link only after
     the copy closes successfully and the final path passes mutating admission
     again. A destination created meanwhile is preserved and raises FileExistsError.
-    Failed or interrupted copies leave no cache file; owned staging files are
-    removed after either successful publication or failure.
+    Failed or interrupted copies leave no cache file. Staging writes, hard-link
+    publication and cleanup require mutating admission. Owned staging files are
+    removed after publication or failure only while still admitted; a late
+    registration retains the stage and raises PendingTransactionError.
     This permits different filesystems without exposing selected output aliases
     to the downloader. Replacement refusals raise PendingTransactionError;
     download, copy and publication errors propagate.
@@ -114,10 +116,13 @@ def download_audio(url: str, output_dir: Path) -> Path:
         staging = Path(staging_name)
         try:
             with os.fdopen(descriptor, "wb") as destination, downloaded.open("rb") as source:
+                guard_output(staging, mutation=True)
                 shutil.copyfileobj(source, destination)
             guard_output(out, mutation=True)
+            guard_output(staging, mutation=True)
             os.link(staging, out)
         finally:
+            guard_output(staging, mutation=True)
             staging.unlink(missing_ok=True)
         return out
 

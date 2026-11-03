@@ -164,7 +164,7 @@ def test_preservation_depth_boundary_closes_opened_directories(tmp_path, monkeyp
     monkeypatch.setattr(replacement.os, "close", tracked_close)
     if depth == 128:
         inventory = replacement._tree(root)
-        assert len(inventory) == depth + 1
+        assert len(inventory) == depth + 2  # Root metadata plus child directories and file.
         assert inventory["/".join(["d"] * depth + ["held"])]["sha256"] == replacement._sha(b"retained")
     else:
         with pytest.raises(tx.PendingTransactionError, match="preservation directory depth bound exceeded"):

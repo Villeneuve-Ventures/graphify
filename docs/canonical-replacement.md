@@ -68,6 +68,11 @@ and evidence slots, including rollback quarantine, cannot use the reserved
 `.graphify_replacement_guard` basename or its exact recovery-backup names;
 admission refuses before operation effects.
 Archive and output, including the preallocation/control parent, must share a filesystem.
+Preflight checks existing output, archive and rollback-quarantine objects as well
+as their rename parents, and refuses detected mount points before operation
+effects. Detection uses Python's [`os.path.ismount`](https://docs.python.org/3.14/library/os.path.html#os.path.ismount);
+it does not reliably detect same-filesystem bind mounts. Native mount/namespace
+exclusion remains a qualification prerequisite.
 Rollback quarantine is checked against all source/policy roots and rename devices
 before any journal or guard change. Bounds include 100,000 preserved entries,
 128 nested directory levels (`MAX_PRESERVATION_DEPTH`), 128 MiB per preserved
@@ -87,6 +92,12 @@ files in them are admitted. A directory at depth 129 refuses with a structured
 bounds recursive stack and descriptor use independently of the entry/byte caps;
 opened descriptors still close on refusal, and identity and membership checks
 still apply within the admitted tree.
+Both directory-membership passes stop after the remaining child-entry budget
+plus one name, before sorting. The separate `.` inventory record binds the
+preserved root's device, inode, mode, UID and GID; it does not consume that child
+budget. Rename-sensitive root timestamps are not persisted. Root metadata drift
+changes the preview selector and refuses replay. Older previews or journals
+without this record are not automatically upgraded or admitted.
 The profile's exact guard namespace is excluded from
 source selection; it is never graph input.
 
@@ -124,6 +135,19 @@ Guard markers are read relative to pinned ancestor directories and checked for
 entry and parent substitution. Both lexical and resolved aliases are checked;
 a changed physical target refuses admission. These checks perform no mutation
 and do not enable the maintenance backend.
+Before interpreting a selected guard's journal, POSIX admission authenticates its
+owner against that marker namespace's issuer snapshot. The directly pinned
+journal parent and the bounded regular, single-link journal must have trusted
+owners, no group/other writes and safe ACLs under the existing installer policy.
+The canonical path, parent mapping, file identity, metadata and ACL observations
+are revalidated through the admission decision, including operation-authority
+shortcuts. Mixed retained legacy/mutator issuers are allowed within their enrolled
+namespace; journal contents cannot add trusted issuers. Unsupported journal
+authentication refuses selected guard admission.
+These checks reject foreign forged contents. They do not authenticate a trusted
+stale journal or parent mapping substituted before observation, provide an
+independent rollback anchor, or enforce custody of every higher ancestor. Native
+enrollment/control custody and same-UID/root exclusion remain prerequisites.
 Guard registration requires mutating admission on its locked parent, so a prior
 retained archive cannot become another registration parent.
 On POSIX, displaced guard predecessors remain recovery evidence when publication
@@ -144,6 +168,14 @@ archive mutations and aliases, including `save-result` directory and selected-fi
 writes. Older strict readers reject the new binding.
 Lessons reflection (`reflect`) applies mutation admission before parent creation
 and again before opening the selected output, including file and directory aliases.
+Office and Google Workspace conversion applies mutation admission before output
+directory creation, temporary export allocation and delegation, final sidecar
+writes, and temporary cleanup. A late registration refuses cleanup and retains
+the temporary file. Detection propagates these admission refusals; ordinary
+Google export failures remain skipped-input notes.
+Audio publication admits staging writes, the staging hard-link source and final
+destination, and staging cleanup. Refused cleanup retains the staged audio;
+it cannot unlink a path that became a retained archive during copying.
 Global graph and manifest saves apply the same mutation admission before
 directory creation and final writing. Corrupt global-manifest backup checks
 both rename paths; replacement refusal cannot become a backup-error fallback.
