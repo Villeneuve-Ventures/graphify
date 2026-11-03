@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import zipfile
 
 import pytest
 
@@ -47,8 +48,30 @@ def _write_fixture_lock(root):
     (root / "uv.lock").write_text(fixture)
 
 
+@pytest.fixture(scope="session")
+def offline_wheels(tmp_path_factory):
+    """Package the installed pure-Python fixture inputs for offline isolated builds."""
+    root = tmp_path_factory.mktemp("offline-wheels")
+    wheels = {}
+    for name in ("setuptools", "attrs"):
+        distribution = importlib.metadata.distribution(name)
+        metadata = distribution.read_text("WHEEL")
+        assert metadata is not None
+        assert "Root-Is-Purelib: true" in metadata
+        assert "Tag: py3-none-any" in metadata
+        files = distribution.files
+        assert files is not None
+        wheel = root / f"{name}-{distribution.version}-py3-none-any.whl"
+        with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+            for item in files:
+                assert not item.is_absolute() and ".." not in item.parts
+                archive.write(str(distribution.locate_file(item)), str(item))
+        wheels[name] = wheel
+    return wheels
+
+
 @pytest.fixture
-def projects(tmp_path):
+def projects(tmp_path, offline_wheels):
     """Create offline projects using the caller's cache, without foreign routing."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
@@ -83,12 +106,12 @@ def projects(tmp_path):
         (root / "docs/notes.md").write_text("Initial explanation.\n")
         (root / "README.md").write_text("Project overview.\n")
         (root / ".gitignore").write_text(".venv/\n__pycache__/\n.pytest_cache/\n*.egg-info/\n")
-        setuptools = importlib.metadata.version("setuptools")
         (root / "pyproject.toml").write_text(
             '[project]\nname="graphifyy"\nversion="0.0.0"\nrequires-python=">=3.14,<3.15"\n'
             'dependencies=["pytest==9.0.3"]\n'
             '[project.entry-points.pytest11]\nvalidation_fixture="graphify.validation_plugin"\n'
-            '[build-system]\nrequires=["setuptools==' + setuptools + '"]\n'
+            '[build-system]\nrequires=['
+            + json.dumps("setuptools @ " + offline_wheels["setuptools"].as_uri()) + ']\n'
             'build-backend="setuptools.build_meta"\n'
             '[tool.setuptools]\npackages=["graphify"]\n'
             '[tool.pytest.ini_options]\naddopts="--strict-markers"\n'
@@ -109,6 +132,16 @@ def projects(tmp_path):
 def prepare(root, env):
     result = execute(["uv", "sync", "--all-extras", "--frozen"], root, env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_fixture_build_backend_works_with_an_empty_offline_cache(projects, tmp_path):
+    create, env = projects
+    primary, _ = create("primary")
+    output = tmp_path / "built-wheels"
+    result = execute(["uv", "build", "--wheel", "--offline", "--out-dir", str(output)],
+                     primary, {**env, "UV_CACHE_DIR": str(tmp_path / "empty-build-cache")})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (output / "graphifyy-0.0.0-py3-none-any.whl").is_file()
 
 
 def test_projects_use_configured_cache_without_foreign_project_routing(tmp_path, monkeypatch, request):
@@ -200,14 +233,14 @@ def test_real_owned_local_with_foreign_editable_binding_is_refused(projects):
     assert inventory(primary / ".venv") == before
 
 
-def test_explicit_owned_external_environment_retains_optional_packages(projects, tmp_path):
+def test_explicit_owned_external_environment_retains_optional_packages(projects, tmp_path, offline_wheels):
     create, env = projects
     primary, base = create("primary", passing=True)
     prepare(primary, env)
     external = tmp_path / "external"
     (primary / ".venv").rename(external)
     optional = execute(["uv", "pip", "install", "--offline", "--python", str(external / "bin/python"),
-                        "attrs==26.1.0"], primary, env)
+                        str(offline_wheels["attrs"])], primary, env)
     assert optional.returncode == 0, optional.stderr
     result = execute(["make", "fast-feedback", f"BASE={base}",
                       f"PYTHON={external / 'bin/python'}", f"VALIDATION_ENVIRONMENT={external}"], primary, env)
