@@ -223,9 +223,16 @@ def to_wiki(
       - <CommunityName>.md  — one article per community
       - <GodNodeLabel>.md   — one article per god node
 
-    Returns the number of articles written (excluding index.md).
+    Rechecks replacement admission before directory creation, stale-article
+    deletion and each final write, including aliases. A retained archive or an
+    incomplete replacement raises PendingTransactionError. This preflight does
+    not exclude arbitrary concurrent writers. Returns the number of articles
+    written (excluding index.md).
     """
+    from .canonical_replacement import guard_output
+
     out = Path(output_dir)
+    guard_output(out, mutation=True)
     out.mkdir(parents=True, exist_ok=True)
 
     if not communities:
@@ -264,6 +271,7 @@ def to_wiki(
     # as an orphan. Since to_wiki() owns wiki/ entirely (always writes the full set),
     # it can safely clear .md files at the start of each call.
     for old_article in out.glob("*.md"):
+        guard_output(old_article, mutation=True)
         old_article.unlink()
 
     labels = community_labels or {cid: f"Community {cid}" for cid in communities}
@@ -320,18 +328,22 @@ def to_wiki(
     for cid, nodes in communities.items():
         label = labels.get(cid, f"Community {cid}")
         article = _community_article(G, cid, nodes, label, labels, cohesion.get(cid), node_community, resolver)
-        (out / f"{community_slugs[cid]}.md").write_text(article, encoding="utf-8")
+        destination = out / f"{community_slugs[cid]}.md"
+        guard_output(destination, mutation=True)
+        destination.write_text(article, encoding="utf-8")
         count += 1
 
     for nid, slug in god_articles:
         article = _god_node_article(G, nid, labels, node_community, resolver)
-        (out / f"{slug}.md").write_text(article, encoding="utf-8")
+        destination = out / f"{slug}.md"
+        guard_output(destination, mutation=True)
+        destination.write_text(article, encoding="utf-8")
         count += 1
 
     # Index
-    (out / "index.md").write_text(
-        _index_md(communities, labels, god_nodes_data, G.number_of_nodes(), G.number_of_edges(), resolver),
-        encoding="utf-8",
-    )
+    article = _index_md(communities, labels, god_nodes_data, G.number_of_nodes(), G.number_of_edges(), resolver)
+    destination = out / "index.md"
+    guard_output(destination, mutation=True)
+    destination.write_text(article, encoding="utf-8")
 
     return count

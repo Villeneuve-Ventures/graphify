@@ -239,8 +239,8 @@ def test_journal_refusal_closes_parent_and_file(protected_policy, target, monkey
     monkeypatch.setattr(os, "open", tracked_open)
     with pytest.raises((tx.PendingTransactionError, ValueError)):
         with replacement._guard_journal(str(journal), {0, os.getuid()}):
-            assert failure == "decision"
-            raise tx.PendingTransactionError("decision refusal")
+            if failure == "decision":
+                raise tx.PendingTransactionError("decision refusal")
     assert opened
     for fd in opened:
         with pytest.raises(OSError):

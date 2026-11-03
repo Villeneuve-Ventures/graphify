@@ -95,9 +95,10 @@ still apply within the admitted tree.
 Both directory-membership passes stop after the remaining child-entry budget
 plus one name, before sorting. The separate `.` inventory record binds the
 preserved root's device, inode, mode, UID and GID; it does not consume that child
-budget. Rename-sensitive root timestamps are not persisted. Root metadata drift
+budget. Child records also bind UID and GID, including directory ownership.
+Rename-sensitive root timestamps are not persisted. Root or child metadata drift
 changes the preview selector and refuses replay. Older previews or journals
-without this record are not automatically upgraded or admitted.
+without these fields are not automatically upgraded or admitted.
 The profile's exact guard namespace is excluded from
 source selection; it is never graph input.
 
@@ -110,6 +111,9 @@ current observed old-directory identity, both parents, source and payload seal.
 The historical mismatched identity is not approval.
 
 A stable no-follow operation lock is keyed by the journal slot, not the request.
+It must belong to the caller's real UID, forbid group/other writes and pass the
+existing safe-ACL policy. Admission is repeated after the binding read and after
+work; unsafe existing lock permissions or ACLs are refused, never repaired.
 Initial journal creation is exclusive under that lock. A different request cannot
 replace an existing winner, including a completed operation.
 The control parent requires mutating admission before lock creation, so a
@@ -166,6 +170,10 @@ retains its marker-only route.
 Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases, including `save-result` directory and selected-file
 writes. Older strict readers reject the new binding.
+Direct `to_wiki` exports apply mutation admission before directory creation,
+each stale-article deletion and each article or index write after rendering.
+These checks include aliases and late registrations; refused mutations preserve
+the selected retained bytes.
 Lessons reflection (`reflect`) applies mutation admission before parent creation
 and again before opening the selected output, including file and directory aliases.
 Office and Google Workspace conversion applies mutation admission before output
@@ -263,6 +271,11 @@ searches for matching hashes or repairs substituted directories. Native
 publication interruption resumes under its exact recorded owner. Unknown or
 unrecorded ownership is blocked rather than reconstructed from a token found
 on disk. Completed retries validate the native receipt and retained archive.
+After exact selector checks, forward dispatch admits the supported state and
+required field shapes before guard registration. Rollback intent cannot enter
+forward replay. This admission does not authenticate journal history or replace
+the existing physical-object and native-owner checks. The coordinator lock is
+already held, so a refusal can retain its lock file.
 
 Rollback is explicit and retains the replacement graph at a fresh external
 quarantine path before restoring the original archive name. The terminal result

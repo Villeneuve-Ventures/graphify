@@ -404,7 +404,7 @@ def _preservation_names(fd, limit):
 def _tree(path):
     """Inventory opaque bytes without admitting old graph authority.
 
-    The '.' record binds root identity, mode and ownership without timestamps
+    Every record binds identity, mode and ownership without timestamps
     changed by a rename. The root is depth zero and does not consume the child
     entry budget. Both membership passes stop at the remaining budget plus one
     names before sorting. Child directories through MAX_PRESERVATION_DEPTH are
@@ -426,7 +426,8 @@ def _tree(path):
                 info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 _require(stat.S_ISDIR(info.st_mode) or (stat.S_ISREG(info.st_mode)
                          and info.st_nlink == 1), "unsafe preservation entry")
-                record: dict[str, int | str] = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode}
+                record: dict[str, int | str] = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+                                                "uid": info.st_uid, "gid": info.st_gid}
                 result[relative] = record
                 if stat.S_ISDIR(info.st_mode):
                     _require(depth < MAX_PRESERVATION_DEPTH,
@@ -775,10 +776,14 @@ def _operation(journal_path, digest):
 def _coordinator_lock(request):
     """Bind the inode and parents, then fully write/read the lock before work.
 
+    The lock must belong to the real UID, disallow group/other writes, and pass
+    the existing safe-ACL policy. Recheck that admission after the binding read
+    and after work; do not repair unsafe pre-existing permissions or ACLs.
     Short writes are completed; zero progress or a changed binding refuses
     before yielding. Incomplete lock evidence is retained for explicit recovery.
     """
     import fcntl
+    from .hook_installation import _acl_safe
     deadline = time.monotonic() + 30
     journal_slot = Path(request["journal"]).name
     _validate_parents(request)
@@ -806,6 +811,15 @@ def _coordinator_lock(request):
                     _require(remaining > 0, "replacement operation lock deadline")
                     time.sleep(min(0.01, remaining))
         try:
+            def admit():
+                info = os.fstat(fd)
+                named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
+                _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                         and info.st_uid == os.getuid() and not info.st_mode & 0o022
+                         and _guard_observation(info) == _guard_observation(named) and _acl_safe(fd),
+                         "replacement operation lock changed")
+                return info
+
             _validate_parents(request)
             parent.validate()
             while True:
@@ -819,12 +833,8 @@ def _coordinator_lock(request):
                     time.sleep(min(0.01, remaining))
             _require(time.monotonic() < deadline, "replacement operation lock deadline")
             _validate_parents(request)
-            info = os.fstat(fd)
             parent.validate()
-            named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
-            _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
-                     and info.st_uid == os.getuid() and (info.st_dev, info.st_ino) == (named.st_dev, named.st_ino),
-                     "replacement operation lock changed")
+            info = admit()
             payload = ("replacement-lock-v1:" + _sha(os.fsencode(journal_slot))).encode()
             if info.st_size == 0:
                 view = memoryview(payload)
@@ -840,7 +850,7 @@ def _coordinator_lock(request):
                      "replacement operation lock binding changed")
             _validate_parents(request)
             parent.validate()
-            named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
+            named = admit()
             _require((info.st_dev, info.st_ino) == (named.st_dev, named.st_ino)
                      and named.st_nlink == 1 and named.st_uid == os.getuid(),
                      "replacement operation lock changed")
@@ -848,6 +858,7 @@ def _coordinator_lock(request):
             parent.validate()
             named = os.stat(path.name, dir_fd=parent.fd, follow_symlinks=False)
             _require((info.st_dev, info.st_ino) == (named.st_dev, named.st_ino), "replacement lock retargeted")
+            admit()
         finally:
             with contextlib.suppress(OSError):
                 fcntl.flock(fd, fcntl.LOCK_UN)
@@ -967,8 +978,9 @@ def _source_current(request, sealed):
 def execute(raw, sealed, preview_sha256, *, failpoint=None):
     """Start or exactly retry an operation with qualified maintenance (none shipped).
 
-    A non-object existing journal raises PendingTransactionError before field
-    access or forward operation effects.
+    An unsupported state or malformed state-specific journal raises
+    PendingTransactionError before guard registration or forward transitions.
+    This admission follows the coordinator lock and does not authenticate history.
     """
     return _execute("execute", raw, sealed, preview_sha256, failpoint=failpoint)
 
@@ -980,6 +992,57 @@ def resume(raw, sealed, preview_sha256, *, failpoint=None):
     raises PendingTransactionError without initializing an operation.
     """
     return _execute("resume", raw, sealed, preview_sha256, failpoint=failpoint)
+
+
+def _admit_forward_journal(journal):
+    """Admit forward state and consumed field shapes without filesystem effects.
+
+    Exact selectors are checked by the caller first. Physical identities,
+    inventories and native owner authority remain checked at their held locks.
+    Rollback intent is exclusive to rollback; terminal rollback stays refused.
+    """
+    state = journal.get("state")
+    _require(state != "ROLLED_BACK_UNRECOVERED", "rollback is terminal")
+    _require(isinstance(state, str) and state in {
+        "PREPARED", "ALLOCATED", "ARCHIVE_INTENT", "OLD_ARCHIVED", "INSTALL_INTENT",
+        "NEW_INSTALLED", "PUBLISHING", "COMMITTED"}, "unknown replacement state")
+
+    def hex_token(value, length=64):
+        return (isinstance(value, str) and len(value) == length
+                and all(char in "0123456789abcdef" for char in value))
+
+    _require(isinstance(journal.get("old_tree"), dict), "malformed replacement inventory")
+    if state == "COMMITTED":
+        tx._identity_from_json(journal.get("new_identity"))
+        _require(hex_token(journal.get("receipt_sha256")), "malformed replacement receipt digest")
+        return
+    _require(type(journal.get("schema")) is int and journal["schema"] == 1
+             and {"container", "new_identity", "owner"} <= journal.keys(),
+             "malformed replacement replay fields")
+    for field in ("old_identity", "parent_identity", "archive_parent_identity"):
+        tx._identity_from_json(journal.get(field))
+    if state == "PREPARED":
+        _require(all(journal[field] is None for field in ("container", "new_identity", "owner")),
+                 "malformed prepared replacement fields")
+        return
+    tx._identity_from_json(journal["new_identity"])
+    container = journal["container"]
+    _require(isinstance(container, str) and container and "\x00" not in container,
+             "malformed replacement container")
+    selected = Path(container)
+    prefix = ".replacement-container-"
+    _require(selected.is_absolute() and str(selected) == container
+             and selected.parent == Path(journal["request"]["journal"]).parent
+             and selected.name.startswith(prefix) and hex_token(selected.name[len(prefix):], 32),
+             "malformed replacement container")
+    binding = journal.get("binding")
+    prefix = "canonical-replacement-v1:"
+    _require(isinstance(journal.get("allocation"), dict) and isinstance(journal.get("provenance"), dict)
+             and isinstance(binding, str) and binding.startswith(prefix) and hex_token(binding[len(prefix):]),
+             "malformed replacement allocation fields")
+    owner = journal["owner"]
+    _require((isinstance(owner, dict) and hex_token(owner.get("id"))) if state == "PUBLISHING"
+             else owner is None, "malformed replacement owner")
 
 
 def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
@@ -1004,7 +1067,7 @@ def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
             data = _bounded_bytes(journal, reserve=_FORWARD_JOURNAL_RESERVE)
             with tx.pin_output(journal_path.parent) as journal_parent:
                 tx._create_bytes(journal_parent, journal_path.name, data)
-        _require(journal["state"] != "ROLLED_BACK_UNRECOVERED", "rollback is terminal")
+        _admit_forward_journal(journal)
         if journal["state"] == "COMMITTED":
             _require(_identity_at(output) == journal["new_identity"] and _tree(archive) == journal["old_tree"],
                      "completed replacement objects changed")
