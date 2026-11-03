@@ -9,9 +9,11 @@ import shutil
 import subprocess
 import sys
 import tomllib
-import zipfile
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from wheel.wheelfile import WheelFile
 
 from tools import validation_route as route
 from tools.validation_environment import (
@@ -32,8 +34,8 @@ def inventory(root):
             for p in root.rglob("*") if not p.is_symlink()}
 
 
-def _write_fixture_lock(root):
-    """Reuse repository dependency locks so offline setup needs no index metadata."""
+def _write_fixture_lock(root, offline_wheels):
+    """Keep locked versions/edges, using local wheels for the fixture's offline inputs."""
     header, *packages = (ROOT / "uv.lock").read_text().split("[[package]]\n")
     format_version = tomllib.loads(header)
     fixture = (
@@ -43,30 +45,72 @@ def _write_fixture_lock(root):
         'source = { editable = "." }\ndependencies = [{ name = "pytest" }]\n\n'
         '[package.metadata]\nrequires-dist = [{ name = "pytest", specifier = "==9.0.3" }]\n\n'
     )
-    fixture += "".join("[[package]]\n" + package for package in packages
-                       if tomllib.loads("[[package]]\n" + package)["package"][0]["name"] != "graphifyy")
+    for package in packages:
+        locked = tomllib.loads("[[package]]\n" + package)["package"][0]
+        name = locked["name"]
+        if name == "graphifyy":
+            continue
+        if name in offline_wheels:
+            wheel = offline_wheels[name]
+            package = (
+                f'name = {json.dumps(name)}\nversion = {json.dumps(locked["version"])}\n'
+                f'source = {{ path = {json.dumps(str(wheel))} }}\n'
+            )
+            if locked.get("dependencies"):
+                package += "dependencies = [\n"
+                for dependency in locked["dependencies"]:
+                    fields = ", ".join(f"{key} = {json.dumps(value)}"
+                                       for key, value in dependency.items())
+                    package += "    { " + fields + " },\n"
+                package += "]\n"
+            digest = "sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest()
+            package += (f'wheels = [{{ filename = {json.dumps(wheel.name)}, '
+                        f'hash = {json.dumps(digest)} }}]\n\n')
+        fixture += "[[package]]\n" + package
     (root / "uv.lock").write_text(fixture)
 
 
 @pytest.fixture(scope="session")
 def offline_wheels(tmp_path_factory):
-    """Package the installed pure-Python fixture inputs for offline isolated builds."""
+    """Repack locked pure-Python inputs and their active dependencies for offline setup.
+
+    The installed environment must match the repository lock. Installed console
+    wrappers and bytecode are omitted; WheelFile regenerates the wheel RECORD.
+    """
     root = tmp_path_factory.mktemp("offline-wheels")
+    locked = {(package["name"], package["version"])
+              for package in tomllib.loads((ROOT / "uv.lock").read_text())["package"]}
     wheels = {}
-    for name in ("setuptools", "attrs"):
+    pending = ["setuptools", "attrs", "pytest"]
+    while pending:
+        name = pending.pop()
+        if name in wheels:
+            continue
         distribution = importlib.metadata.distribution(name)
+        assert (name, distribution.version) in locked
         metadata = distribution.read_text("WHEEL")
         assert metadata is not None
         assert "Root-Is-Purelib: true" in metadata
         assert "Tag: py3-none-any" in metadata
         files = distribution.files
         assert files is not None
-        wheel = root / f"{name}-{distribution.version}-py3-none-any.whl"
-        with zipfile.ZipFile(wheel, "w", zipfile.ZIP_DEFLATED) as archive:
+        wheel = root / f"{name.replace('-', '_')}-{distribution.version}-py3-none-any.whl"
+        scripts = {entry.name for entry in distribution.entry_points
+                   if entry.group == "console_scripts"}
+        with WheelFile(wheel, "w") as archive:
             for item in files:
-                assert not item.is_absolute() and ".." not in item.parts
+                if item.is_absolute() or ".." in item.parts:
+                    assert item.name in scripts
+                    continue
+                if item.suffix == ".pyc" or (item.name == "RECORD"
+                                            and item.parent.name.endswith(".dist-info")):
+                    continue
                 archive.write(str(distribution.locate_file(item)), str(item))
         wheels[name] = wheel
+        for requirement in distribution.requires or ():
+            dependency = Requirement(requirement)
+            if dependency.marker is None or dependency.marker.evaluate({"extra": ""}):
+                pending.append(canonicalize_name(dependency.name))
     return wheels
 
 
@@ -116,7 +160,7 @@ def projects(tmp_path, offline_wheels):
             '[tool.setuptools]\npackages=["graphify"]\n'
             '[tool.pytest.ini_options]\naddopts="--strict-markers"\n'
         )
-        _write_fixture_lock(root)
+        _write_fixture_lock(root, offline_wheels)
         for argv in (["git", "init", "-q"], ["git", "config", "user.email", "fixture@example.invalid"],
                      ["git", "config", "user.name", "Fixture"], ["git", "add", "."],
                      ["git", "commit", "-qm", "fixture"]):
@@ -142,6 +186,19 @@ def test_fixture_build_backend_works_with_an_empty_offline_cache(projects, tmp_p
                      primary, {**env, "UV_CACHE_DIR": str(tmp_path / "empty-build-cache")})
     assert result.returncode == 0, result.stdout + result.stderr
     assert (output / "graphifyy-0.0.0-py3-none-any.whl").is_file()
+
+
+def test_fixture_sync_works_with_an_empty_offline_cache(projects, tmp_path):
+    """Exercise frozen setup and the installed pytest plugin without cached packages."""
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    settings = {**env, "UV_CACHE_DIR": str(tmp_path / "empty-sync-cache")}
+    prepare(primary, settings)
+    result = execute(["make", "fast-feedback", f"BASE={base}"], primary, settings)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "validation_route_status=complete; selected_lane=editorial-docs" in output
+    assert "1 passed" in output
 
 
 def test_projects_use_configured_cache_without_foreign_project_routing(tmp_path, monkeypatch, request):
