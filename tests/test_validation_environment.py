@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -30,11 +31,30 @@ def inventory(root):
             for p in root.rglob("*") if not p.is_symlink()}
 
 
+def _write_fixture_lock(root):
+    """Reuse repository dependency locks so offline setup needs no index metadata."""
+    header, *packages = (ROOT / "uv.lock").read_text().split("[[package]]\n")
+    format_version = tomllib.loads(header)
+    fixture = (
+        f'version = {format_version["version"]}\nrevision = {format_version["revision"]}\n'
+        'requires-python = ">=3.14,<3.15"\n\n'
+        '[[package]]\nname = "graphifyy"\nversion = "0.0.0"\n'
+        'source = { editable = "." }\ndependencies = [{ name = "pytest" }]\n\n'
+        '[package.metadata]\nrequires-dist = [{ name = "pytest", specifier = "==9.0.3" }]\n\n'
+    )
+    fixture += "".join("[[package]]\n" + package for package in packages
+                       if tomllib.loads("[[package]]\n" + package)["package"][0]["name"] != "graphifyy")
+    (root / "uv.lock").write_text(fixture)
+
+
 @pytest.fixture
 def projects(tmp_path):
+    """Create offline projects using the caller's cache, without foreign routing."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
+    if "UV_CACHE_DIR" in os.environ:
+        env["UV_CACHE_DIR"] = os.environ["UV_CACHE_DIR"]
     env.update(UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
 
     def create(name, *, passing=False):
@@ -73,8 +93,7 @@ def projects(tmp_path):
             '[tool.setuptools]\npackages=["graphify"]\n'
             '[tool.pytest.ini_options]\naddopts="--strict-markers"\n'
         )
-        result = execute(["uv", "lock", "--offline"], root, env)
-        assert result.returncode == 0, result.stdout + result.stderr
+        _write_fixture_lock(root)
         for argv in (["git", "init", "-q"], ["git", "config", "user.email", "fixture@example.invalid"],
                      ["git", "config", "user.name", "Fixture"], ["git", "add", "."],
                      ["git", "commit", "-qm", "fixture"]):
@@ -90,6 +109,21 @@ def projects(tmp_path):
 def prepare(root, env):
     result = execute(["uv", "sync", "--all-extras", "--frozen"], root, env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_projects_use_configured_cache_without_foreign_project_routing(tmp_path, monkeypatch, request):
+    cache = tmp_path / "custom-cache"
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+    monkeypatch.setenv("UV_PROJECT", str(tmp_path / "foreign"))
+    monkeypatch.setenv("UV_OFFLINE", "0")
+    _, env = request.getfixturevalue("projects")
+    assert env["UV_CACHE_DIR"] == str(cache)
+    assert env["UV_OFFLINE"] == "1"
+    assert env["UV_PYTHON_DOWNLOADS"] == "never"
+    assert "UV_PROJECT" not in env
+    result = execute(["uv", "cache", "dir"], tmp_path, env)
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()) == cache
 
 
 def test_admitted_child_uv_uses_configured_offline_cache(tmp_path, monkeypatch):
