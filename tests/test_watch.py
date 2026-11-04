@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import cast
 import pytest
 
 
@@ -1244,11 +1245,12 @@ def running_watch(monkeypatch):
 
     def start(path, **kwargs):
         from watchdog.observers import Observer
+        from watchdog.observers.api import BaseObserver
         from watchdog.observers.polling import PollingObserver
 
         stop = threading.Event()
         ready = threading.Event()
-        observer_type = PollingObserver if sys.platform == "darwin" else Observer
+        observer_type = cast(type[BaseObserver], PollingObserver if sys.platform == "darwin" else Observer)
         real_start = observer_type.start
 
         def start_and_signal(observer):
@@ -2432,12 +2434,13 @@ def test_watcher_dispatch_recovers_merge_pending_union(tmp_path, monkeypatch):
     from graphify import transaction as transaction_module
     from graphify import watch as watch_module
     from watchdog.observers import Observer
+    from watchdog.observers.api import BaseObserver
     from watchdog.observers.polling import PollingObserver
 
     root, output, source = _merge_pending_watch_fixture(tmp_path)
     started = threading.Event()
     stop = threading.Event()
-    observer_type = PollingObserver if sys.platform == "darwin" else Observer
+    observer_type = cast(type[BaseObserver], PollingObserver if sys.platform == "darwin" else Observer)
     real_observer_start = observer_type.start
     real_sleep = time.sleep
 

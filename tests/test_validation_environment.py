@@ -8,8 +8,12 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 
 import pytest
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from wheel.wheelfile import WheelFile
 
 from tools import validation_route as route
 from tools.validation_environment import (
@@ -30,11 +34,94 @@ def inventory(root):
             for p in root.rglob("*") if not p.is_symlink()}
 
 
+def _write_fixture_lock(root, offline_wheels):
+    """Keep locked versions/edges, using local wheels for the fixture's offline inputs."""
+    header, *packages = (ROOT / "uv.lock").read_text().split("[[package]]\n")
+    format_version = tomllib.loads(header)
+    fixture = (
+        f'version = {format_version["version"]}\nrevision = {format_version["revision"]}\n'
+        'requires-python = ">=3.14,<3.15"\n\n'
+        '[[package]]\nname = "graphifyy"\nversion = "0.0.0"\n'
+        'source = { editable = "." }\ndependencies = [{ name = "pytest" }]\n\n'
+        '[package.metadata]\nrequires-dist = [{ name = "pytest", specifier = "==9.0.3" }]\n\n'
+    )
+    for package in packages:
+        locked = tomllib.loads("[[package]]\n" + package)["package"][0]
+        name = locked["name"]
+        if name == "graphifyy":
+            continue
+        if name in offline_wheels:
+            wheel = offline_wheels[name]
+            package = (
+                f'name = {json.dumps(name)}\nversion = {json.dumps(locked["version"])}\n'
+                f'source = {{ path = {json.dumps(str(wheel))} }}\n'
+            )
+            if locked.get("dependencies"):
+                package += "dependencies = [\n"
+                for dependency in locked["dependencies"]:
+                    fields = ", ".join(f"{key} = {json.dumps(value)}"
+                                       for key, value in dependency.items())
+                    package += "    { " + fields + " },\n"
+                package += "]\n"
+            digest = "sha256:" + hashlib.sha256(wheel.read_bytes()).hexdigest()
+            package += (f'wheels = [{{ filename = {json.dumps(wheel.name)}, '
+                        f'hash = {json.dumps(digest)} }}]\n\n')
+        fixture += "[[package]]\n" + package
+    (root / "uv.lock").write_text(fixture)
+
+
+@pytest.fixture(scope="session")
+def offline_wheels(tmp_path_factory):
+    """Repack locked pure-Python inputs and their active dependencies for offline setup.
+
+    The installed environment must match the repository lock. Installed console
+    wrappers and bytecode are omitted; WheelFile regenerates the wheel RECORD.
+    """
+    root = tmp_path_factory.mktemp("offline-wheels")
+    locked = {(package["name"], package["version"])
+              for package in tomllib.loads((ROOT / "uv.lock").read_text())["package"]}
+    wheels = {}
+    pending = ["setuptools", "attrs", "pytest"]
+    while pending:
+        name = pending.pop()
+        if name in wheels:
+            continue
+        distribution = importlib.metadata.distribution(name)
+        assert (name, distribution.version) in locked
+        metadata = distribution.read_text("WHEEL")
+        assert metadata is not None
+        assert "Root-Is-Purelib: true" in metadata
+        assert "Tag: py3-none-any" in metadata
+        files = distribution.files
+        assert files is not None
+        wheel = root / f"{name.replace('-', '_')}-{distribution.version}-py3-none-any.whl"
+        scripts = {entry.name for entry in distribution.entry_points
+                   if entry.group == "console_scripts"}
+        with WheelFile(wheel, "w") as archive:
+            for item in files:
+                if item.is_absolute() or ".." in item.parts:
+                    assert item.name in scripts
+                    continue
+                if item.suffix == ".pyc" or (item.name == "RECORD"
+                                            and item.parent.name.endswith(".dist-info")):
+                    continue
+                archive.write(str(distribution.locate_file(item)), str(item))
+        wheels[name] = wheel
+        for requirement in distribution.requires or ():
+            dependency = Requirement(requirement)
+            if dependency.marker is None or dependency.marker.evaluate({"extra": ""}):
+                pending.append(canonicalize_name(dependency.name))
+    return wheels
+
+
 @pytest.fixture
-def projects(tmp_path):
+def projects(tmp_path, offline_wheels):
+    """Create offline projects with caller-anchored cache paths and no foreign routing."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
+    if "UV_CACHE_DIR" in os.environ:
+        env["UV_CACHE_DIR"] = os.path.join(os.getcwd(), os.environ["UV_CACHE_DIR"])
     env.update(UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
 
     def create(name, *, passing=False):
@@ -63,18 +150,17 @@ def projects(tmp_path):
         (root / "docs/notes.md").write_text("Initial explanation.\n")
         (root / "README.md").write_text("Project overview.\n")
         (root / ".gitignore").write_text(".venv/\n__pycache__/\n.pytest_cache/\n*.egg-info/\n")
-        setuptools = importlib.metadata.version("setuptools")
         (root / "pyproject.toml").write_text(
             '[project]\nname="graphifyy"\nversion="0.0.0"\nrequires-python=">=3.14,<3.15"\n'
             'dependencies=["pytest==9.0.3"]\n'
             '[project.entry-points.pytest11]\nvalidation_fixture="graphify.validation_plugin"\n'
-            '[build-system]\nrequires=["setuptools==' + setuptools + '"]\n'
+            '[build-system]\nrequires=['
+            + json.dumps("setuptools @ " + offline_wheels["setuptools"].as_uri()) + ']\n'
             'build-backend="setuptools.build_meta"\n'
             '[tool.setuptools]\npackages=["graphify"]\n'
             '[tool.pytest.ini_options]\naddopts="--strict-markers"\n'
         )
-        result = execute(["uv", "lock", "--offline"], root, env)
-        assert result.returncode == 0, result.stdout + result.stderr
+        _write_fixture_lock(root, offline_wheels)
         for argv in (["git", "init", "-q"], ["git", "config", "user.email", "fixture@example.invalid"],
                      ["git", "config", "user.name", "Fixture"], ["git", "add", "."],
                      ["git", "commit", "-qm", "fixture"]):
@@ -90,6 +176,50 @@ def projects(tmp_path):
 def prepare(root, env):
     result = execute(["uv", "sync", "--all-extras", "--frozen"], root, env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_fixture_build_backend_works_with_an_empty_offline_cache(projects, tmp_path):
+    create, env = projects
+    primary, _ = create("primary")
+    output = tmp_path / "built-wheels"
+    result = execute(["uv", "build", "--wheel", "--offline", "--out-dir", str(output)],
+                     primary, {**env, "UV_CACHE_DIR": str(tmp_path / "empty-build-cache")})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (output / "graphifyy-0.0.0-py3-none-any.whl").is_file()
+
+
+def test_fixture_sync_works_with_an_empty_offline_cache(projects, tmp_path):
+    """Exercise frozen setup and the installed pytest plugin without cached packages."""
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    settings = {**env, "UV_CACHE_DIR": str(tmp_path / "empty-sync-cache")}
+    prepare(primary, settings)
+    result = execute(["make", "fast-feedback", f"BASE={base}"], primary, settings)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "validation_route_status=complete; selected_lane=editorial-docs" in output
+    assert "1 passed" in output
+
+
+@pytest.mark.parametrize("relative_cache", [False, True])
+def test_projects_use_configured_cache_without_foreign_project_routing(
+        tmp_path, monkeypatch, request, relative_cache):
+    cache = tmp_path / "custom-cache"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("UV_CACHE_DIR", cache.name if relative_cache else str(cache))
+    monkeypatch.setenv("UV_PROJECT", str(tmp_path / "foreign"))
+    monkeypatch.setenv("UV_OFFLINE", "0")
+    _, env = request.getfixturevalue("projects")
+    assert env["UV_OFFLINE"] == "1"
+    assert env["UV_PYTHON_DOWNLOADS"] == "never"
+    assert "UV_PROJECT" not in env
+    child = tmp_path / "child"
+    child.mkdir()
+    result = execute(["uv", "cache", "dir"], child, env)
+    assert result.returncode == 0, result.stderr
+    reported = Path(result.stdout.strip())
+    assert (reported if reported.is_absolute() else child / reported) == cache
+    assert env["UV_CACHE_DIR"] == str(cache)
 
 
 def test_admitted_child_uv_uses_configured_offline_cache(tmp_path, monkeypatch):
@@ -166,14 +296,14 @@ def test_real_owned_local_with_foreign_editable_binding_is_refused(projects):
     assert inventory(primary / ".venv") == before
 
 
-def test_explicit_owned_external_environment_retains_optional_packages(projects, tmp_path):
+def test_explicit_owned_external_environment_retains_optional_packages(projects, tmp_path, offline_wheels):
     create, env = projects
     primary, base = create("primary", passing=True)
     prepare(primary, env)
     external = tmp_path / "external"
     (primary / ".venv").rename(external)
     optional = execute(["uv", "pip", "install", "--offline", "--python", str(external / "bin/python"),
-                        "attrs==26.1.0"], primary, env)
+                        str(offline_wheels["attrs"])], primary, env)
     assert optional.returncode == 0, optional.stderr
     result = execute(["make", "fast-feedback", f"BASE={base}",
                       f"PYTHON={external / 'bin/python'}", f"VALIDATION_ENVIRONMENT={external}"], primary, env)
