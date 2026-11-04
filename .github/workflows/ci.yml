@@ -128,6 +128,7 @@ jobs:
 
       # Hook authority checks include every ancestor. Hosted images can make
       # /opt world-writable, so allocate below / and admit the path before pytest.
+      # Keep pytest repositories on that same filesystem instead of ambient /tmp.
       - name: Prepare trusted hook test parent
         run: |
           set -euo pipefail
@@ -135,13 +136,22 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "$fixture_parent"
           stat -c '%a %u:%g %n' / /opt "$HOME" "$fixture_parent"
           .venv/bin/python - "$fixture_parent" <<'PY'
+          import os
           import sys
           from pathlib import Path
           from graphify.hook_installation import _authority
 
-          with _authority(Path(sys.argv[1]), False):
-              pass
-          print(f"Admitted hook test authority parent: {sys.argv[1]}")
+          parent = Path(sys.argv[1])
+          with _authority(parent, False) as (authority_fd, _):
+              repositories = parent / "pytest"
+              repositories.mkdir(mode=0o700)
+              with _authority(repositories, False) as (repositories_fd, _):
+                  authority = os.fstat(authority_fd)
+                  repository = os.fstat(repositories_fd)
+                  print(f"Hook test authority parent {parent}: device={authority.st_dev} inode={authority.st_ino}", flush=True)
+                  print(f"Hook test repository parent {repositories}: device={repository.st_dev} inode={repository.st_ino}", flush=True)
+                  if authority.st_dev != repository.st_dev:
+                      raise RuntimeError("Hook test authority and repositories require the same filesystem")
           PY
           echo "GRAPHIFY_TEST_AUTHORITY_PARENT=$fixture_parent" >> "$GITHUB_ENV"
 
@@ -152,6 +162,7 @@ jobs:
           uv run --frozen python -m pytest -p tools.pytest_partition -p tools.pytest_timings
           --ci-shard=${{ matrix.shard }}
           --ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json"
+          --basetemp "$GRAPHIFY_TEST_AUTHORITY_PARENT/pytest/run"
           tests/ -q --tb=short
 
       - name: Upload pytest timing diagnostics

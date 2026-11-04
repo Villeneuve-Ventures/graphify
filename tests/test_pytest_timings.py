@@ -462,7 +462,8 @@ def test_workflow_keeps_full_suite_and_uploads_failed_run_diagnostics():
     assert steps["Run tests"]["run"] == (
         "uv run --frozen python -m pytest -p tools.pytest_partition -p tools.pytest_timings "
         "--ci-shard=${{ matrix.shard }} "
-        '--ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json" tests/ -q --tb=short'
+        '--ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json" '
+        '--basetemp "$GRAPHIFY_TEST_AUTHORITY_PARENT/pytest/run" tests/ -q --tb=short'
     )
     assert "continue-on-error" not in steps["Run tests"]
     upload = steps["Upload pytest timing diagnostics"]
