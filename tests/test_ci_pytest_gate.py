@@ -86,15 +86,17 @@ def test_matrix_and_gate_preserve_execution_and_environment():
 
 
 @pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX hook authority")
-@pytest.mark.parametrize("unsafe_ancestor", [False, True])
-def test_workflow_checks_hook_parent_before_exporting_it(tmp_path, unsafe_ancestor):
-    step = next(s for s in workflow()["jobs"]["test"]["steps"]
+@pytest.mark.parametrize("workflow_name", ["ci.yml", "dependabot-ci.yml"])
+@pytest.mark.parametrize("failure", ["none", "unsafe-ancestor", "cross-device"])
+def test_workflow_checks_hook_parent_before_exporting_it(tmp_path, failure, workflow_name):
+    ci = yaml.load((ROOT / ".github/workflows" / workflow_name).read_text(), Loader=yaml.BaseLoader)
+    step = next(s for s in ci["jobs"]["test"]["steps"]
                 if s.get("name") == "Prepare trusted hook test parent")
     parent = os.environ.get("GRAPHIFY_TEST_AUTHORITY_PARENT") or Path.home()
     with tempfile.TemporaryDirectory(prefix=".graphify-ci-preflight-", dir=parent) as directory:
         ancestor = Path(directory) / "ancestor"
         ancestor.mkdir()
-        mode = 0o777 if unsafe_ancestor else 0o700
+        mode = 0o777 if failure == "unsafe-ancestor" else 0o700
         ancestor.chmod(mode)
         authority = ancestor / "private"
         authority.mkdir(mode=0o700)
@@ -112,21 +114,95 @@ def test_workflow_checks_hook_parent_before_exporting_it(tmp_path, unsafe_ancest
         stat() { :; }
         """
         command = harness + step["run"].replace(".venv/bin/python", shlex.quote(sys.executable))
+        if failure == "cross-device":
+            # Replace only the workflow's local os binding. Authority admission
+            # keeps real metadata; no host mount or production module changes.
+            injected = "\n".join((
+                "from types import SimpleNamespace", "_real_fstat = os.fstat",
+                "def _device_view(fd):", "    info = _real_fstat(fd)",
+                "    target = (Path(sys.argv[1]) / 'pytest').stat()",
+                "    if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):",
+                "        return SimpleNamespace(st_dev=info.st_dev + 1, st_ino=info.st_ino)",
+                "    return info", "os = SimpleNamespace(fstat=_device_view)", "",
+            ))
+            assert command.count("import os\n") == 1
+            command = command.replace("import os\n", "import os\n" + injected, 1)
         env = {**os.environ, "GITHUB_ENV": str(output), "ALLOCATION_TEMPLATE": str(template),
                "TEST_AUTHORITY": str(authority), "PYTHONPATH": str(ROOT),
                "PYTHONDONTWRITEBYTECODE": "1"}
         result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], cwd=ROOT,
                                 env=env, capture_output=True, text=True, timeout=10)
         assert Path(template.read_text().strip()).parent == Path("/")
-        assert (result.returncode != 0) == unsafe_ancestor, result.stdout + result.stderr
-        if unsafe_ancestor:
+        assert (result.returncode != 0) == (failure != "none"), result.stdout + result.stderr
+        if failure == "unsafe-ancestor":
             assert "Unsafe installer authority" in result.stderr
             assert not output.exists()
+            assert not list(authority.iterdir())
+        elif failure == "cross-device":
+            assert "require the same filesystem" in result.stderr
+            assert not output.exists()
+            assert list(authority.iterdir()) == [authority / "pytest"]
+            assert not list((authority / "pytest").iterdir())
         else:
             assert output.read_text() == f"GRAPHIFY_TEST_AUTHORITY_PARENT={authority}\n"
+            repositories = authority / "pytest"
+            assert repositories.is_dir() and not repositories.is_symlink()
+            assert repositories.stat().st_mode & 0o777 == 0o700
+            assert repositories.stat().st_dev == authority.stat().st_dev
+            assert not list(repositories.iterdir())
+            assert list(authority.iterdir()) == [repositories]
+            for path in (authority, repositories):
+                info = path.stat()
+                assert f"{path}: device={info.st_dev} inode={info.st_ino}" in result.stdout
         assert ancestor.stat().st_mode & 0o777 == mode
         assert authority.stat().st_mode & 0o777 == 0o700
-        assert not list(authority.iterdir())
+
+
+@pytest.mark.parametrize("workflow_name", ["ci.yml", "dependabot-ci.yml"])
+def test_workflow_routes_pytest_beneath_admitted_hook_parent(tmp_path, workflow_name):
+    ci = yaml.load((ROOT / ".github/workflows" / workflow_name).read_text(), Loader=yaml.BaseLoader)
+    steps = ci["jobs"]["test"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Run tests")
+    prepare = next(s for s in steps if s.get("name") == "Prepare trusted hook test parent")
+    assert steps.index(prepare) < steps.index(step)
+    capture = tmp_path / "arguments"
+    parent = tmp_path / "trusted parent with spaces"
+    command = step["run"].replace("${{ matrix.shard }}", "2")
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c",
+                             'uv() { printf "%s\\0" "$@" > "$CAPTURE"; };\n' + command],
+                            cwd=ROOT, env={**os.environ, "CAPTURE": str(capture),
+                                           "GRAPHIFY_TEST_AUTHORITY_PARENT": str(parent),
+                                           "RUNNER_TEMP": str(tmp_path / "unrelated-runner-temp")},
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    args = capture.read_bytes().decode().rstrip("\0").split("\0")
+    assert args[:5] == ["run", "--frozen", "python", "-m", "pytest"]
+    assert args.count("--basetemp") == 1
+    assert args[args.index("--basetemp") + 1] == str(parent / "pytest/run")
+    assert "--ci-shard=2" in args and "tools.pytest_partition" in args
+    assert "tools.pytest_timings" in args and args[-3:] == ["tests/", "-q", "--tb=short"]
+    assert not parent.exists()
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX hook authority")
+def test_hook_slot_still_refuses_cross_device_without_creating_evidence(tmp_path):
+    from graphify.hook_installation import _open_store
+
+    authority, hooks = tmp_path / "authority", tmp_path / "hooks"
+    authority.mkdir(mode=0o700)
+    hooks.mkdir()
+    authority_fd = os.open(authority, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        hooks_fd = os.open(hooks, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            info = os.fstat(hooks_fd)
+            with pytest.raises(RuntimeError, match="requires the hooks filesystem"):
+                _open_store(authority_fd, (info.st_dev + 1, info.st_ino), hooks_fd)
+        finally:
+            os.close(hooks_fd)
+    finally:
+        os.close(authority_fd)
+    assert not list(authority.iterdir()) and not list(hooks.iterdir())
 
 
 @pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX hook authority")
