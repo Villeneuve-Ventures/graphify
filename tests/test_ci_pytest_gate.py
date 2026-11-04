@@ -313,6 +313,7 @@ def test_workflow_gate_command_executes_fail_closed(receipts, success):
 
 
 def test_non_shard_job_policies_preserve_baseline_except_author_guard_action_and_python_updates():
+    """Allow explicit display labels while retaining execution and cancellation policy."""
     baseline = subprocess.check_output([
         "git", "show", "6dcd6941ec47a5e5d83044a2ac702dc2d3a6c984:.github/workflows/ci.yml"
     ], cwd=ROOT, text=True)
@@ -323,6 +324,11 @@ def test_non_shard_job_policies_preserve_baseline_except_author_guard_action_and
         "actions/checkout@v6": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "astral-sh/setup-uv@v8.1.0": "astral-sh/setup-uv@v10.3.2",
         "actions/upload-artifact@v4": "actions/upload-artifact@v7.0.2",
+    }
+    job_names = {
+        "skillgen-check": "Validate generated skills",
+        "security-scan": "Security scan — advisory",
+        "leiden-binary-smoke": "Check native graph clustering on macOS",
     }
     for name in ("skillgen-check", "security-scan", "leiden-binary-smoke"):
         assert old["jobs"][name]["if"] == (
@@ -354,9 +360,16 @@ def test_non_shard_job_policies_preserve_baseline_except_author_guard_action_and
             "(github.event.pull_request.user.login != 'dependabot[bot]' && "
             "github.event.pull_request.draft == false)) }}"
         )
+        old["jobs"][name]["name"] = job_names[name]
         assert current["jobs"][name] == old["jobs"][name]
-    for field in ("name", "on", "concurrency"):
-        assert current[field] == old[field]
+    assert old["name"] == "CI"
+    assert current["name"] == "Graphify — Validation"
+    assert current["on"] == old["on"]
+    expected_concurrency = dict(old["concurrency"])
+    expected_concurrency["group"] = expected_concurrency["group"].replace(
+        "${{ github.workflow }}", old["name"]
+    )
+    assert current["concurrency"] == expected_concurrency
 
 
 def test_quality_installs_the_acceptance_git_before_conformance():

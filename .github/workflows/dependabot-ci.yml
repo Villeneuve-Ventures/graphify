@@ -1,4 +1,4 @@
-name: Dependabot CI
+name: Graphify — Dependabot validation
 
 on:
   pull_request:
@@ -9,12 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: dependabot-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && format('-ignored-label-{0}', github.run_id) || '' }}
+  # Preserve cancellation keys independently of the display name.
+  group: dependabot-ci-Dependabot CI-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && format('-ignored-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Approved Dependabot label events rerun CI so a skipped run cannot satisfy the gate.
 jobs:
   admission:
+    name: Check Dependabot approval
     # Reruns retain event data; query live approval for each full attempt.
     # Partial reruns cannot reuse admission from a previous attempt.
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' }}
@@ -55,6 +57,7 @@ jobs:
           echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   skillgen-check:
+    name: Dependabot — Validate generated skills
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
@@ -96,7 +99,7 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
-    name: Pytest shard ${{ matrix.shard }}/4
+    name: Graphify — Dependabot Python tests
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     runs-on: ubuntu-latest
@@ -267,6 +270,7 @@ jobs:
         run: exit 1
 
   security-scan:
+    name: Dependabot — Security scan — advisory
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
@@ -337,7 +341,7 @@ jobs:
   leiden-binary-smoke:
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
-    name: Leiden binary smoke (macOS)
+    name: Dependabot — Check native graph clustering on macOS
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -140,7 +140,18 @@ def test_validation_job_bodies_remain_equal_to_original_ci():
                     continue
                 step_if = step.pop("if")
                 assert step_if == "${{ needs.validation-route.outputs.lane == 'full' }}"
+        expected_names = {
+            "skillgen-check": ("Validate generated skills", "Dependabot — Validate generated skills"),
+            "test": ("Graphify — Python tests", "Graphify — Dependabot Python tests"),
+            "quality": ("Python quality gate", "Python quality gate"),
+            "security-scan": ("Security scan — advisory", "Dependabot — Security scan — advisory"),
+            "leiden-binary-smoke": (
+                "Check native graph clustering on macOS", "Dependabot — Check native graph clustering on macOS",
+            ),
+        }
+        assert (old["name"], new["name"]) == expected_names[name]
         for job in (old, new):
+            job.pop("name")
             job.pop("if", None)
             job.pop("needs", None)
         assert old == new
