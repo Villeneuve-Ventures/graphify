@@ -104,7 +104,7 @@ def test_workflows_run_executable_python_on_314_only():
     assert set(ci_versions) == {"3.14.10"}
     assert re.findall(r'python-version: "([0-9.]+)"', release) == ["3.14.10"]
     assert 'uv pip install --only-binary=graspologic-native ".[leiden]"' in leiden_job
-    assert "name: Leiden binary smoke (macOS)" in leiden_job
+    assert "name: Check native graph clustering on macOS" in leiden_job
     assert "communities == {frozenset({'0', '1'}), frozenset({'2', '3'})}" in leiden_job
 
 

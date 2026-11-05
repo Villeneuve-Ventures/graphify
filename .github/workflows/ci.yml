@@ -1,4 +1,4 @@
-name: CI
+name: Graphify — Validation
 
 on:
   push:
@@ -9,12 +9,13 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  # Preserve cancellation keys independently of the display name.
+  group: ci-CI-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validation-route:
-    name: Classify complete validation change set
+    name: Choose checks and validate documentation
     if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     outputs:
@@ -43,6 +44,7 @@ jobs:
           python3 -I -S -B -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tools.validation_route",run_name="__main__")' "${args[@]}"
 
   skillgen-check:
+    name: Validate generated skills
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
@@ -84,7 +86,7 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
-    name: Pytest shard ${{ matrix.shard }}/4
+    name: Graphify — Python tests
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-latest
@@ -276,6 +278,7 @@ jobs:
         run: exit 1
 
   security-scan:
+    name: Security scan — advisory
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
@@ -346,7 +349,7 @@ jobs:
   leiden-binary-smoke:
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
-    name: Leiden binary smoke (macOS)
+    name: Check native graph clustering on macOS
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
