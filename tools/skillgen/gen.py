@@ -45,6 +45,7 @@ REPO_ROOT = SKILLGEN_DIR.parent.parent
 FRAGMENTS_DIR = SKILLGEN_DIR / "fragments"
 EXPECTED_DIR = SKILLGEN_DIR / "expected"
 PLATFORMS_TOML = SKILLGEN_DIR / "platforms.toml"
+_INLINE_DISPATCHES = frozenset({"codex-agenttask", "opencode-mention"})
 
 # Immutable coverage baseline for --audit-coverage. The working-tree skill bodies
 # are being replaced by the lean core, so the audit reads each host's v8 body
@@ -1043,7 +1044,9 @@ def _render_saved_interpreter_commands(
     )
     body = _render_static_mcp_config(body, platform)
     body = _render_step1_bootstrap(body, platform, artifact_role=artifact_role)
-    body = _route_full_build_transaction(body, cache_writes=platform.dispatch in _DISK_DISPATCHES)
+    body = _route_full_build_transaction(
+        body, cache_writes=platform.dispatch in (_DISK_DISPATCHES | _INLINE_DISPATCHES)
+    )
     body = _route_incremental_transaction(body)
     if artifact_role == "reference":
         body = _route_reference_transaction(body, platform)
@@ -1431,6 +1434,22 @@ def _render_core(platform: Platform) -> str:
         .replace("@@HOOKS_TARGET@@", platform.hooks_target)
         .replace("@@EXTRA@@", extra)
     )
+    if platform.dispatch in _INLINE_DISPATCHES:
+        body = body.replace(
+            "If all files are cached, skip to Part C directly.",
+            "If all files are cached, skip B1/B2 and run B3 to merge the cached results before Part C.",
+            1,
+        ).replace(
+            "Register each validated chunk's absolute file path in that same manifest through the exact prepared-token runner used by B3.",
+            "Stage the validated inline aggregate through the exact prepared-token runner used by B3. Only OpenCode's serial fallback registers chunk paths in the prepared manifest.",
+            1,
+        )
+        start = body.index("**Step B3 - Collect, cache, and merge**")
+        end = body.index("Save new results to cache:", start)
+        collection = _read_fragment("collection/inline.md").replace(
+            "@@INLINE_SERIAL_FALLBACK@@", str(platform.dispatch == "opencode-mention")
+        )
+        body = body[:start] + collection + "\n" + body[end:]
     if platform.dispatch in _DISK_DISPATCHES:
         prefix, collection = body.split("**Step B3 - Collect, cache, and merge**", 1)
         _, commands = collection.split("Save new results to cache:", 1)
