@@ -23,6 +23,7 @@ GUARD = ".graphify_replacement_guard"
 PROVENANCE = ".graphify_replacement_origin.json"
 PROFILE = "fresh-corpus-codex-v1"
 MAX_BYTES = 128 * 1024 * 1024
+MAX_FRAGMENT_NESTING = 128
 # Root depth is zero; refuse deeper directories before opening them.
 MAX_PRESERVATION_DEPTH = 128
 MAX_PRESERVATION_ENTRIES = 100_000
@@ -260,11 +261,35 @@ def _confidence(edge, *, hyperedge=False):
              "invalid semantic relation")
 
 
+def _admit_fragment_nesting(fragments):
+    """Refuse over 128 nested containers, counting the outer fragment list as one.
+
+    Walk dictionary values and list/tuple members without recursion or mutation.
+    Iterator storage is bounded by depth; cycles also reach the depth refusal.
+    Extra metadata is included because the complete fragments enter the seal.
+    Return None on admission, or raise PendingTransactionError before copying.
+    """
+    pending = [iter((fragments,))]
+    while pending:
+        try:
+            value = next(pending[-1])
+        except StopIteration:
+            pending.pop()
+            continue
+        if isinstance(value, (dict, list, tuple)):
+            _require(len(pending) <= MAX_FRAGMENT_NESTING,
+                     "semantic fragment nesting exceeds bound")
+            pending.append(iter(value.values() if isinstance(value, dict) else value))
+
+
 def build_data(raw, fragments, *, _source_output=None):
     """Read fresh AST and host-Codex fragments without providers or caches.
 
     Fragment containers must be lists; node records, IDs and source ownership
-    are checked before iteration, hashing or membership operations. Edge and
+    are checked before iteration, hashing or membership operations. Complete
+    fragment values admit at most 128 nested containers, counting the outer list
+    as one. This iterative check precedes recursive composition and serialization,
+    including for extra metadata retained in the seal. Edge and
     hyperedge records use their respective host-rubric relations and confidence
     kinds; hyperedges cannot be AMBIGUOUS and require at least three distinct
     members before and after graph canonicalization. Group IDs must be hashable,
@@ -299,6 +324,7 @@ def build_data(raw, fragments, *, _source_output=None):
                       parallel=False, quiet=True, ambient_output=False)
         semantic = sorted(p for kind in ("document", "paper", "image") for p in files.get(kind, []))
         _require(isinstance(fragments, list), "explicit Codex fragments required")
+        _admit_fragment_nesting(fragments)
         nodes, edges, hyperedges, covered = [], [], [], set()
         owners = {}
         def admit_identity(node):

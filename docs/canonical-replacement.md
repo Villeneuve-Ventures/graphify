@@ -37,6 +37,11 @@ is published.
 Fragment node, edge and hyperedge containers must be lists. Node objects and
 their nonempty string IDs are admitted before hashing; source ownership and
 relationship identifiers are checked before membership or path operations.
+Complete fragment values are limited to 128 nested containers, counting the
+outer fragment list as one. Dictionary values and array members, including extra
+metadata retained in the seal, are checked iteratively before recursive graph
+composition or serialization. Exceeding this bound returns a structured blocked
+result before sealing; the bound does not limit the number of sibling values.
 Composition retains the builder's simple `Graph` or `DiGraph` representation.
 Parallel relationships on one endpoint slot can collapse; undirected slots can
 also collapse reciprocal relationships. The seal does not add multigraph or
