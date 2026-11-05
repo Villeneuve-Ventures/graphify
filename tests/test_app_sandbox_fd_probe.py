@@ -1,6 +1,7 @@
 """Pure evidence-contract checks; pytest never builds, signs, or runs the probe."""
 from copy import deepcopy
 import errno
+import json
 import os
 from pathlib import Path
 import signal
@@ -231,3 +232,48 @@ def test_raw_evidence_remains_unchanged_by_classification(evidence):
     before = deepcopy(evidence)
     probe.classify_case(evidence, sandboxed=True)
     assert before == evidence
+
+
+@pytest.mark.parametrize("failing_case", ["control", "sandbox"])
+def test_classification_failure_retains_raw_case_in_receipt(tmp_path, monkeypatch, evidence, failing_case):
+    root = tmp_path / "probe-output"
+    monkeypatch.setattr(probe.sys, "platform", "darwin")
+    monkeypatch.setattr(probe.os, "getuid", lambda: 1000)
+    monkeypatch.setattr(probe.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(probe.platform, "platform", lambda: "mocked macOS")
+    monkeypatch.setattr(probe, "_child_env", lambda root: {})
+    monkeypatch.setattr(probe, "_command", lambda *args: b"mocked OS version")
+    monkeypatch.setattr(probe, "_build", lambda *args: {
+        "control": {"executable": "mock-control"}, "sandbox": {"executable": "mock-sandbox"}})
+    monkeypatch.setattr(probe.subprocess, "run", lambda *a, **kw: pytest.fail("native command"))
+    monkeypatch.setattr(probe.subprocess, "Popen", lambda *a, **kw: pytest.fail("native actor"))
+    observed = {}
+
+    def raw_case(root, executable, *, sandboxed, env):
+        name = "sandbox" if sandboxed else "control"
+        case = deepcopy(evidence)
+        if not sandboxed:
+            case["sender_ready"]["outside_errno"] = 0
+        if name == failing_case:
+            del case["order"]
+        observed[name] = deepcopy(case)
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "case.json").write_text(json.dumps(case))
+        return case
+
+    monkeypatch.setattr(probe, "_run_case", raw_case)
+    with pytest.raises(probe.ProbeError, match="incomplete"):
+        probe.run_probe(root)
+
+    receipt = json.loads((root / "receipt.json").read_text())
+    assert receipt["status"] == "blocked-or-harness-invalid"
+    assert receipt["exit_code"] == 2
+    assert receipt["qualified"] is False
+    assert receipt["live_replacement_enabled"] is False
+    assert receipt["cases"][failing_case] == observed[failing_case]
+    assert "classification" not in receipt["cases"][failing_case]
+    assert json.loads((root / failing_case / "case.json").read_text()) == observed[failing_case]
+    assert set(receipt["cases"]) == set(observed)
+    if failing_case == "sandbox":
+        assert receipt["cases"]["control"]["classification"] == "fd-write-after-death"
