@@ -508,7 +508,8 @@ def run_probe(output_root: Path) -> dict[str, Any]:
 
     All mutations are task-local except a possible OS-created unique sandbox
     container, which is recorded and never deleted here. Failures retain their
-    receipts and fixtures. This creates no graph/backend authority.
+    receipts and fixtures, including raw cases that fail classification. This
+    creates no graph/backend authority.
     """
     _require(sys.platform == "darwin" and 0 < os.getuid() == os.geteuid(),
              "non-root macOS execution without UID elevation required")
@@ -531,14 +532,14 @@ def run_probe(output_root: Path) -> dict[str, Any]:
         (root / "sandbox/allowed").rmdir()
         (root / "sandbox").rmdir()
         control = _run_case(root, build["control"]["executable"], sandboxed=False, env=env)
+        receipt["cases"]["control"] = control
         control["classification"] = classify_case(control, sandboxed=False)
         (root / "control/case.json").write_text(json.dumps(control, indent=2) + "\n")
-        receipt["cases"]["control"] = control
         _require(control["classification"] == "fd-write-after-death", "positive transfer control failed")
         sandbox = _run_case(root, build["sandbox"]["executable"], sandboxed=True, env=env)
+        receipt["cases"]["sandbox"] = sandbox
         sandbox["classification"] = classify_case(sandbox, sandboxed=True)
         (root / "sandbox/case.json").write_text(json.dumps(sandbox, indent=2) + "\n")
-        receipt["cases"]["sandbox"] = sandbox
         receipt["status"] = ("containment-failed" if sandbox["classification"] == "fd-write-after-death"
                              else "bounded-blocked-observation")
         receipt["exit_code"] = 3 if receipt["status"] == "containment-failed" else 0
