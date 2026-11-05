@@ -4706,8 +4706,8 @@ def begin_transaction(
             raise TypeError("transaction root requires an OutputCapability")
         _validate_root_capability(root_capability, root_path)
     output_path = Path(output).expanduser().absolute()
-    _replacement_guard_output(output_path)
     _reject_portable_path(output_path)
+    _replacement_guard_output(output_path)
     try:
         require_ordinary_output(output_path)
     except ManagedWorkspaceOutputError as exc:

@@ -1657,7 +1657,12 @@ def _strip_graphify_hook(settings_path: Path) -> None:
     settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     print(f"  .claude/{settings_path.name}  ->  PreToolUse hook removed")
 def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
-    """Remove graphify from every platform detected in the current project."""
+    """Remove graphify from every platform detected in the current project.
+
+    With purge, delete the project's configured output after ordinary mutation
+    admission. Protected workspace or retained replacement archives refuse the
+    deletion, including through aliases; earlier integration removal can remain.
+    """
     pd = project_dir or Path(".")
     print("Uninstalling graphify from all detected platforms...\n")
 
@@ -1694,6 +1699,8 @@ def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
         import shutil as _shutil
         out = pd / _GRAPHIFY_OUT
         if out.exists():
+            from graphify.storage_guard import require_ordinary_output
+            require_ordinary_output(out)
             _shutil.rmtree(out)
             print(f"\n  {_GRAPHIFY_OUT}/  ->  deleted (--purge)")
         else:

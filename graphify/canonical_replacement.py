@@ -1309,7 +1309,7 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
 
 
 def _seal_data(request, sealed):
-    """Create the stage under its frozen parent; retain incomplete files on refusal."""
+    """Create an owner-readable private stage; retain incomplete files on refusal."""
     data = _bounded_bytes(sealed)
     path = Path(request["stage"])
     with tx.pin_output(path.parent, mutation=True) as parent:
@@ -1320,6 +1320,7 @@ def _seal_data(request, sealed):
                      0o600, dir_fd=parent.fd)
         try:
             parent.validate()
+            os.fchmod(fd, 0o600)
             view = memoryview(data)
             while view:
                 count = os.write(fd, view)
