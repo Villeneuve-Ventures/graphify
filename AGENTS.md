@@ -125,6 +125,19 @@ and only where relevant.
   successful empty extraction. Distinguish in-memory composition or
   serialization from filesystem admission and publication.
 
+## Skill examples
+
+Apply the shared global skill rules to these examples; they do not activate a
+workflow or designate a protected change.
+
+- For an explicitly requested `code-review`, check direction and parallel-edge
+  preservation, source contribution ownership, and generated-instruction
+  boundaries through the owners in [the agent contract map](docs/agent-contracts.md).
+- After focused checks and explicit opt-in, use `ultraqa` in scratch repositories
+  for successful-empty versus failed extraction, interrupted updates, and installer
+  preservation. Use [the agent contract map](docs/agent-contracts.md) to select the
+  owning contracts and tests.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
