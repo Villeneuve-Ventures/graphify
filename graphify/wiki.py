@@ -225,11 +225,12 @@ def to_wiki(
 
     Rechecks replacement admission before directory creation, stale-article
     deletion and each final write, including aliases. A retained archive or an
-    incomplete replacement raises PendingTransactionError. This preflight does
+    incomplete replacement raises PendingTransactionError. POSIX article changes
+    hold the registration lock for the wiki directory only. This preflight does
     not exclude arbitrary concurrent writers. Returns the number of articles
     written (excluding index.md).
     """
-    from .canonical_replacement import guard_output
+    from .canonical_replacement import _wiki_recovery_admission, guard_output
 
     out = Path(output_dir)
     guard_output(out, mutation=True)
@@ -270,80 +271,81 @@ def to_wiki(
     # (e.g. "AutoAgent Skills" → "AutoAgent Methodology"), leaving the previous file
     # as an orphan. Since to_wiki() owns wiki/ entirely (always writes the full set),
     # it can safely clear .md files at the start of each call.
-    for old_article in out.glob("*.md"):
-        guard_output(old_article, mutation=True)
-        old_article.unlink()
+    with _wiki_recovery_admission(out) as mutate:
+        for old_article in out.glob("*.md"):
+            with mutate(old_article):
+                old_article.unlink()
 
-    labels = community_labels or {cid: f"Community {cid}" for cid in communities}
-    cohesion = cohesion or {}
-    god_nodes_data = god_nodes_data or []
+        labels = community_labels or {cid: f"Community {cid}" for cid in communities}
+        cohesion = cohesion or {}
+        god_nodes_data = god_nodes_data or []
 
-    # Build node->community lookup once; node attrs never carry community (it lives in
-    # the communities dict), so _cross_community_links and _god_node_article need this.
-    node_community: dict[str, int] = {n: cid for cid, nodes in communities.items() for n in nodes}
+        # Build node->community lookup once; node attrs never carry community (it lives in
+        # the communities dict), so _cross_community_links and _god_node_article need this.
+        node_community: dict[str, int] = {n: cid for cid, nodes in communities.items() for n in nodes}
 
-    count = 0
-    used_slugs: set[str] = set()
+        count = 0
+        used_slugs: set[str] = set()
 
-    def _unique_slug(base: str) -> str:
-        # Fold case in the collision check: two labels differing only by case
-        # (e.g. "Parser" vs "parser") resolve to one path on case-insensitive
-        # filesystems (macOS/APFS, Windows/NTFS), so they must dedup against each
-        # other while still emitting the original-case filename.
-        slug = base
-        n = 2
-        while slug.lower() in used_slugs:
-            slug = f"{base}_{n}"
-            n += 1
-        used_slugs.add(slug.lower())
-        return slug
+        def _unique_slug(base: str) -> str:
+            # Fold case in the collision check: two labels differing only by case
+            # (e.g. "Parser" vs "parser") resolve to one path on case-insensitive
+            # filesystems (macOS/APFS, Windows/NTFS), so they must dedup against each
+            # other while still emitting the original-case filename.
+            slug = base
+            n = 2
+            while slug.lower() in used_slugs:
+                slug = f"{base}_{n}"
+                n += 1
+            used_slugs.add(slug.lower())
+            return slug
 
-    # First pass: assign every article its slug before rendering any body, so the
-    # bodies can link to one another. A link's target is the on-disk filename (the
-    # slug), which differs from the label — _safe_filename turns spaces into
-    # underscores and substitutes reserved chars, and a slug may pick up a numeric
-    # suffix from collision dedup — so the final slug must be known up front.
-    # resolver maps display label -> slug; labels with no article are absent, so
-    # _md_link renders them as plain text. Communities are slugged before god nodes
-    # (and setdefault keeps the first), preserving the filename-assignment order
-    # the case-collision dedup relies on.
-    resolver: dict[str, str] = {"index": "index"}
+        # First pass: assign every article its slug before rendering any body, so the
+        # bodies can link to one another. A link's target is the on-disk filename (the
+        # slug), which differs from the label — _safe_filename turns spaces into
+        # underscores and substitutes reserved chars, and a slug may pick up a numeric
+        # suffix from collision dedup — so the final slug must be known up front.
+        # resolver maps display label -> slug; labels with no article are absent, so
+        # _md_link renders them as plain text. Communities are slugged before god nodes
+        # (and setdefault keeps the first), preserving the filename-assignment order
+        # the case-collision dedup relies on.
+        resolver: dict[str, str] = {"index": "index"}
 
-    community_slugs: dict[int, str] = {}
-    for cid in communities:
-        label = labels.get(cid, f"Community {cid}")
-        slug = _unique_slug(_safe_filename(label))
-        community_slugs[cid] = slug
-        resolver.setdefault(label, slug)
+        community_slugs: dict[int, str] = {}
+        for cid in communities:
+            label = labels.get(cid, f"Community {cid}")
+            slug = _unique_slug(_safe_filename(label))
+            community_slugs[cid] = slug
+            resolver.setdefault(label, slug)
 
-    god_articles: list[tuple[str, str]] = []  # (node_id, slug)
-    for node_data in god_nodes_data:
-        nid = node_data.get("id")
-        if nid and nid in G:
-            slug = _unique_slug(_safe_filename(node_data['label']))
-            god_articles.append((nid, slug))
-            resolver.setdefault(node_data['label'], slug)
+        god_articles: list[tuple[str, str]] = []  # (node_id, slug)
+        for node_data in god_nodes_data:
+            nid = node_data.get("id")
+            if nid and nid in G:
+                slug = _unique_slug(_safe_filename(node_data['label']))
+                god_articles.append((nid, slug))
+                resolver.setdefault(node_data['label'], slug)
 
-    # Second pass: render and write each article with the full resolver in hand.
-    for cid, nodes in communities.items():
-        label = labels.get(cid, f"Community {cid}")
-        article = _community_article(G, cid, nodes, label, labels, cohesion.get(cid), node_community, resolver)
-        destination = out / f"{community_slugs[cid]}.md"
-        guard_output(destination, mutation=True)
-        destination.write_text(article, encoding="utf-8")
-        count += 1
+        # Second pass: render and write each article with the full resolver in hand.
+        for cid, nodes in communities.items():
+            label = labels.get(cid, f"Community {cid}")
+            article = _community_article(G, cid, nodes, label, labels, cohesion.get(cid), node_community, resolver)
+            destination = out / f"{community_slugs[cid]}.md"
+            with mutate(destination):
+                destination.write_text(article, encoding="utf-8")
+            count += 1
 
-    for nid, slug in god_articles:
-        article = _god_node_article(G, nid, labels, node_community, resolver)
-        destination = out / f"{slug}.md"
-        guard_output(destination, mutation=True)
-        destination.write_text(article, encoding="utf-8")
-        count += 1
+        for nid, slug in god_articles:
+            article = _god_node_article(G, nid, labels, node_community, resolver)
+            destination = out / f"{slug}.md"
+            with mutate(destination):
+                destination.write_text(article, encoding="utf-8")
+            count += 1
 
-    # Index
-    article = _index_md(communities, labels, god_nodes_data, G.number_of_nodes(), G.number_of_edges(), resolver)
-    destination = out / "index.md"
-    guard_output(destination, mutation=True)
-    destination.write_text(article, encoding="utf-8")
+        # Index
+        article = _index_md(communities, labels, god_nodes_data, G.number_of_nodes(), G.number_of_edges(), resolver)
+        destination = out / "index.md"
+        with mutate(destination):
+            destination.write_text(article, encoding="utf-8")
 
     return count

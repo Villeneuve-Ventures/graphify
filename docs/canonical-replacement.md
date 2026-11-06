@@ -70,8 +70,9 @@ globs, extra policy/Git roots, direction, extraction profile and artifact
 profile. Output retains the `graphify-out` basename. Archive, stage and journal
 are external to every source/policy root and cannot contain one another. Archive
 and evidence slots, including rollback quarantine, cannot use the reserved
-`.graphify_replacement_guard` basename or its exact recovery-backup names;
-admission refuses before operation effects.
+`.graphify_replacement_guard` basename or its exact recovery-backup names.
+An evidence slot in the journal directory also cannot use the journal's
+case-insensitive coordinator lock name. Admission refuses before operation effects.
 Archive and output, including the preallocation/control parent, must share a filesystem.
 Preflight checks existing output, archive and rollback-quarantine objects as well
 as their rename parents, and refuses detected mount points before operation
@@ -158,7 +159,9 @@ stale journal or parent mapping substituted before observation, provide an
 independent rollback anchor, or enforce custody of every higher ancestor. Native
 enrollment/control custody and same-UID/root exclusion remain prerequisites.
 Guard registration requires mutating admission on its locked parent, so a prior
-retained archive cannot become another registration parent.
+retained archive cannot become another registration parent. Before publishing a
+marker, registration checks recovery backups inside that parent and refuses
+changed or trusted recovery evidence.
 On POSIX, displaced guard predecessors remain recovery evidence when publication
 loses to another entry or fails before restoration. Ordinary admission recognizes
 the exact `..graphify_replacement_guard.graphify-merge-backup.<32 lowercase hex>`
@@ -166,19 +169,25 @@ names independently of a missing or foreign public marker. A trusted backup,
 including a nonregular one, blocks reads and writes until explicit reconciliation;
 it is never automatically adopted or cleared. Only proved-foreign backups are
 ignored. Successful updates remove their predecessor through the existing writer.
-Each existing ancestor is enumerated twice with a 100,000-name limit per pass;
-overflow, unavailable enumeration or changed evidence blocks. This adds directory
-read access and enumeration cost to POSIX preflight. Public-marker metadata is
-rechecked after the final backup scan, including initially missing or foreign
-markers. This is a bounded preflight, not continuous namespace exclusion; Windows
-retains its marker-only route.
+POSIX admission normally enumerates each existing ancestor twice with a
+100,000-name limit per pass. Overflow, unavailable enumeration or changed
+evidence blocks. Public-marker metadata is rechecked after the final recovery
+check, including initially missing or foreign markers. The wiki export exception
+below still applies the entry limit. These checks do not exclude arbitrary
+namespace writers. Windows retains its marker-only route.
 Archive registration is outside the preserved tree; new clients reject explicit
 archive mutations and aliases, including `save-result` directory and selected-file
-writes. Older strict readers reject the new binding.
+writes. Integration install and removal check selected skill, configuration and
+hook directory paths before mutating them. Recursive installer cleanup preserves
+subtrees that contain replacement markers or recovery evidence. Older strict
+readers reject the new binding.
 Direct `to_wiki` exports apply mutation admission before directory creation,
 each stale-article deletion and each article or index write after rendering.
-These checks include aliases and late registrations; refused mutations preserve
-the selected retained bytes.
+On POSIX, direct article changes can reuse an empty recovery scan of the wiki
+directory under its guard registration lock. Other ancestors and aliases are
+checked as usual. Directory metadata changes between operations trigger a new
+scan, and the entry limit still applies. Refused mutations preserve the
+selected retained bytes.
 Lessons reflection (`reflect`) applies mutation admission before parent creation
 and again before opening the selected output, including file and directory aliases.
 Office and Google Workspace conversion applies mutation admission before output

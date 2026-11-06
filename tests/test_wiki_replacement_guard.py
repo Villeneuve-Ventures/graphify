@@ -1,4 +1,6 @@
 """Direct wiki export observes retained-archive admission at each mutation."""
+from contextlib import contextmanager
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -111,3 +113,75 @@ def test_ordinary_direct_wiki_still_exports(tmp_path, sample):
     (out / "stale.md").write_text("old")
     assert wiki.to_wiki(sample[0], sample[1], out, god_nodes_data=[{"id": "alpha", "label": "Alpha", "degree": 0}]) == 2
     assert sorted(path.name for path in out.iterdir()) == ["Alpha.md", "Community_0.md", "index.md"]
+
+
+def test_wiki_reuses_empty_recovery_scan_across_ordinary_article_changes(tmp_path, monkeypatch):
+    out = tmp_path / "wiki"
+    out.mkdir()
+    graph = nx.Graph()
+    count = 30
+    for index in range(count):
+        name = str(index)
+        graph.add_node(name, label=name, source_file="fixture.py")
+        (out / f"stale-{name}.md").write_text("stale")
+    original = os.scandir
+    inode = out.stat().st_ino
+    visited = []
+
+    def scandir(path=None):
+        if not isinstance(path, int) or os.fstat(path).st_ino != inode:
+            return original(path)
+
+        @contextmanager
+        def count_entries():
+            with original(path) as entries:
+                def recorded():
+                    for entry in entries:
+                        visited.append(entry.name)
+                        yield entry
+                yield recorded()
+        return count_entries()
+
+    monkeypatch.setattr(replacement.os, "scandir", scandir)
+    assert wiki.to_wiki(graph, {n: [str(n)] for n in range(count)}, out) == count
+    assert len(visited) <= count * 2
+    assert sorted(out.glob("stale-*.md")) == []
+    assert len(list(out.glob("*.md"))) == count + 1
+
+
+def test_recovery_backup_published_between_writes_blocks_next_article(tmp_path, monkeypatch, sample):
+    out = tmp_path / "wiki"
+    backup = out / ("." + replacement.GUARD + ".graphify-merge-backup." + "a" * 32)
+
+    def render(*args, **kwargs):
+        assert (out / "Community_0.md").is_file()
+        backup.write_text("recovery evidence")
+        return "new article"
+
+    monkeypatch.setattr(wiki, "_god_node_article", render)
+    with pytest.raises(tx.PendingTransactionError, match="requires explicit recovery"):
+        wiki.to_wiki(sample[0], sample[1], out, god_nodes_data=[{"id": "alpha", "label": "Alpha", "degree": 0}])
+    assert backup.read_text() == "recovery evidence"
+    assert not (out / "Alpha.md").exists()
+    assert not (out / "index.md").exists()
+
+
+def test_wiki_recovery_scan_still_refuses_above_entry_bound(tmp_path, monkeypatch, sample):
+    out = (tmp_path / "wiki").resolve()
+    out.mkdir()
+    (out / "keep.txt").touch()
+    scan = replacement._scan_guard_recovery_entries
+    original_limit = replacement.MAX_GUARD_SCAN_ENTRIES
+
+    def bound_only_wiki(cap, issuers):
+        if cap.path == out:
+            return scan(cap, issuers)
+        with monkeypatch.context() as local:
+            local.setattr(replacement, "MAX_GUARD_SCAN_ENTRIES", original_limit)
+            return scan(cap, issuers)
+
+    monkeypatch.setattr(replacement, "_scan_guard_recovery_entries", bound_only_wiki)
+    monkeypatch.setattr(replacement, "MAX_GUARD_SCAN_ENTRIES", 1)
+    with pytest.raises(tx.PendingTransactionError, match="scan exceeds bound"):
+        wiki.to_wiki(sample[0], sample[1], out)
+    assert sorted(path.name for path in out.iterdir()) == ["Community_0.md", "keep.txt"]

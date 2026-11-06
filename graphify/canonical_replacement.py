@@ -95,22 +95,31 @@ def _read(path, limit=MAX_BYTES, *, parent_fd=None, expected=None):
         os.close(fd)
 
 
-def _load(path, *, parent=None):
-    """Decode bounded JSON, optionally relative to an already pinned directory."""
+def _decode_replacement_json(data):
+    """Reject duplicate fields, nonfinite numbers and decoder stack exhaustion."""
     def pairs(items):
         result = {}
         for key, value in items:
             _require(key not in result, "duplicate replacement JSON field")
             result[key] = value
         return result
+
+    try:
+        return json.loads(data, object_pairs_hook=pairs,
+                          parse_constant=lambda _: _require(False, "nonfinite replacement JSON"))
+    except RecursionError as exc:
+        raise tx.PendingTransactionError("replacement JSON nesting exceeds decoder bound") from exc
+
+
+def _load(path, *, parent=None):
+    """Decode bounded JSON, optionally relative to an already pinned directory."""
     if parent is None:
         data = _read(path, limit=MAX_BYTES)
     elif os.name == "nt":
         data = tx._read_bytes(parent, path, MAX_BYTES)
     else:
         data = _read(path, limit=MAX_BYTES, parent_fd=parent.fd)
-    return json.loads(data, object_pairs_hook=pairs,
-                      parse_constant=lambda _: _require(False, "nonfinite replacement JSON"))
+    return _decode_replacement_json(data)
 
 
 def _directory(value):
@@ -169,11 +178,19 @@ def _validate_parents(request):
                  "replacement parent identity changed")
 
 
+def _coordinator_lock_path(journal):
+    """Derive the persistent lock slot from the journal's parent and basename."""
+    return journal.with_name(".replacement-lock-" + _sha(os.fsencode(journal.name)))
+
+
 def _external_path(request, path, *, allow_equal=None):
     _require(path.is_absolute() and str(path) == os.path.abspath(path)
              and path.parent.resolve(strict=True) == path.parent
              and path.name not in {"", ".", ".."}, "noncanonical external replacement path")
     _require(path.name != GUARD and not _guard_backup_name(path.name), "reserved replacement guard name")
+    lock = _coordinator_lock_path(Path(request["journal"]))
+    if path.name.casefold() == lock.name:
+        _require(not os.path.samefile(path.parent, lock.parent), "replacement evidence collides with coordinator lock")
     _directory(path.parent)
     roots = [Path(request[k]) for k in ("root", "output")]
     roots += [Path(entry["path"]) for entry in request["extra_roots"]]
@@ -578,7 +595,13 @@ def _guard_recovery_entries(cap, issuers):
     """
     if os.name == "nt":
         return {}
+    return _scan_guard_recovery_entries(cap, issuers)[0]
+
+
+def _scan_guard_recovery_entries(cap, issuers):
+    """Return recovery observations and the admitted directory entry count."""
     observed = {}
+    count = 0
     with os.scandir(cap.fd) as entries:
         for count, entry in enumerate(entries, 1):
             _require(count <= MAX_GUARD_SCAN_ENTRIES, "replacement guard recovery scan exceeds bound")
@@ -592,7 +615,7 @@ def _guard_recovery_entries(cap, issuers):
                      "foreign replacement guard recovery evidence changed")
             observed[entry.name] = _guard_observation(before)
     cap.validate()
-    return observed
+    return observed, count
 
 
 def _guard_journal_payload(fd):
@@ -681,16 +704,8 @@ def _guard_journal(path, issuers):
                 _require(_guard_journal_payload(fd) == data, "replacement guard journal changed")
                 metadata()
 
-            def pairs(items):
-                result = {}
-                for key, value in items:
-                    _require(key not in result, "duplicate replacement JSON field")
-                    result[key] = value
-                return result
-
             validate()
-            journal = json.loads(data, object_pairs_hook=pairs,
-                                 parse_constant=lambda _: _require(False, "nonfinite replacement JSON"))
+            journal = _decode_replacement_json(data)
             try:
                 yield journal
             finally:
@@ -699,8 +714,9 @@ def _guard_journal(path, issuers):
             os.close(fd)
 
 
-def _guard_path(path, *, mutation=True, issuer_policy=None):
+def _guard_path(path, *, mutation=True, issuer_policy=None, recovery_scan=None):
     """Read ancestor registrations through pinned directories, including absent targets."""
+    scan = _guard_recovery_entries if recovery_scan is None else recovery_scan
     path = Path(os.path.abspath(path))
     for parent in path.parents:
         with _guard_parent(parent) as cap:
@@ -709,7 +725,7 @@ def _guard_path(path, *, mutation=True, issuer_policy=None):
                 None if cap is None else (cap.identity.device, cap.identity.inode), selected_parent=parent)
             if cap is None:
                 continue
-            recovery = _guard_recovery_entries(cap, issuers)
+            recovery = scan(cap, issuers)
             before = _guard_entry(cap)
             try:
                 if before is None:
@@ -750,7 +766,7 @@ def _guard_path(path, *, mutation=True, issuer_policy=None):
                         _require(journal.get("state") in {"COMMITTED", "ROLLED_BACK_UNRECOVERED"},
                                  "canonical replacement is incomplete")
             finally:
-                _require(_guard_recovery_entries(cap, issuers) == recovery,
+                _require(scan(cap, issuers) == recovery,
                          "replacement guard recovery evidence changed")
                 _require(_guard_observation(_guard_entry(cap)) == _guard_observation(before),
                          "foreign replacement guard changed" if before is not None
@@ -773,17 +789,87 @@ def guard_output(path, *, mutation=True):
     Return None if admission succeeds; mutation=False permits archive reads.
     This preflight does not grant maintenance authority or fence arbitrary writers.
     """
+    _admit_guard_output(path, mutation=mutation)
+
+
+def _admit_guard_output(path, *, mutation, recovery_scan=None):
+    """Share ordinary admission with the lock-held wiki recovery scan."""
     try:
         absolute = os.path.abspath(path)
         resolved = os.path.realpath(absolute)
-        from .replacement_guard_issuers import issuer_snapshot
-        policy_context = issuer_snapshot() if os.name == "posix" else contextlib.nullcontext(None)
+        policy_context = contextlib.nullcontext(None)
+        if os.name == "posix":
+            from .replacement_guard_issuers import issuer_snapshot
+            policy_context = issuer_snapshot()
         with policy_context as policy:
             for candidate in dict.fromkeys((absolute, resolved)):
-                _guard_path(candidate, mutation=mutation, issuer_policy=policy)
+                _guard_path(candidate, mutation=mutation, issuer_policy=policy, recovery_scan=recovery_scan)
         _require(os.path.realpath(absolute) == resolved, "replacement guard path changed")
     except (KeyError, TypeError, ValueError, OSError) as exc:
         raise tx.PendingTransactionError("malformed or unavailable replacement guard") from exc
+
+
+@contextlib.contextmanager
+def _wiki_recovery_admission(directory):
+    """Hold the wiki directory's registration lock while admitting article changes.
+
+    Reuse only an empty, bounded inventory of that directory. Other ancestors,
+    aliases and the named marker still receive fresh checks at each mutation.
+    The lock serializes Graphify guard writers for this directory only and does
+    not fence arbitrary filesystem writers.
+    """
+    @contextlib.contextmanager
+    def ordinary_mutation(path):
+        guard_output(path, mutation=True)
+        yield
+
+    if os.name != "posix":
+        yield ordinary_mutation
+        return
+
+    with _fd_locks([directory.resolve(strict=True)], time.monotonic() + 30) as (locked,):
+        stamp = None
+        entry_count = 0
+
+        def scan(cap, issuers):
+            nonlocal stamp, entry_count
+            if cap.path != locked.path or cap.identity != locked.identity:
+                return _guard_recovery_entries(cap, issuers)
+            before = _guard_observation(os.fstat(cap.fd))
+            if stamp == before:
+                cap.validate()
+                return {}
+            observed, entry_count = _scan_guard_recovery_entries(cap, issuers)
+            stamp = before if not observed and before == _guard_observation(os.fstat(cap.fd)) else None
+            return observed
+
+        @contextlib.contextmanager
+        def mutation(path):
+            nonlocal stamp, entry_count
+            locked.validate()
+            _require(path.parent.resolve(strict=True) == locked.path, "wiki output directory changed")
+            if path.is_symlink():
+                stamp = None
+                with ordinary_mutation(path):
+                    yield
+                return
+            _admit_guard_output(path, mutation=True, recovery_scan=scan)
+            direct = locked.path / path.name
+            advance = (path.resolve() == direct and not path.is_symlink()
+                       and stamp == _guard_observation(os.fstat(locked.fd)))
+            if advance:
+                existed = os.path.lexists(direct)
+                marker = _guard_observation(_guard_entry(locked))
+            stamp = None
+            yield
+            locked.validate()
+            if (advance and path.resolve() == direct and not path.is_symlink()
+                    and marker == _guard_observation(_guard_entry(locked))):
+                entry_count += int(os.path.lexists(direct)) - int(existed)
+                if entry_count <= MAX_GUARD_SCAN_ENTRIES:
+                    stamp = _guard_observation(os.fstat(locked.fd))
+
+        yield mutation
 
 
 @contextlib.contextmanager
@@ -811,9 +897,9 @@ def _coordinator_lock(request):
     import fcntl
     from .hook_installation import _acl_safe
     deadline = time.monotonic() + 30
-    journal_slot = Path(request["journal"]).name
+    journal = Path(request["journal"])
     _validate_parents(request)
-    path = Path(request["journal"]).parent / (".replacement-lock-" + _sha(os.fsencode(journal_slot)))
+    path = _coordinator_lock_path(journal)
     with tx.pin_output(path.parent, mutation=True) as parent:
         _require(parent.identity.json() == request["parent_identities"]["control"],
                  "replacement control parent changed")
@@ -861,7 +947,7 @@ def _coordinator_lock(request):
             _validate_parents(request)
             parent.validate()
             info = admit()
-            payload = ("replacement-lock-v1:" + _sha(os.fsencode(journal_slot))).encode()
+            payload = ("replacement-lock-v1:" + _sha(os.fsencode(journal.name))).encode()
             if info.st_size == 0:
                 view = memoryview(payload)
                 while view:
@@ -898,7 +984,7 @@ def _persist(path, value):
 
 
 def _register(path, journal, digest, role):
-    """Register a slot without adopting foreign or group/other writable markers."""
+    """Register under a held parent after checking marker and recovery evidence."""
     from .replacement_guard_issuers import issuer_snapshot
 
     path = Path(path)
@@ -906,6 +992,7 @@ def _register(path, journal, digest, role):
             tx.pin_output(path.parent, mutation=True) as cap, issuer_snapshot() as policy:
         _require(cap.identity == caps[0].identity, "replacement registration parent changed")
         issuers = policy.trusted_issuers(cap.path, (cap.identity.device, cap.identity.inode))
+        recovery = _guard_recovery_entries(cap, issuers)
         before = _guard_entry(cap)
         _require(before is None or before.st_uid in issuers, "foreign replacement guard registration collision")
         _require(before is None or stat.S_ISREG(before.st_mode), "unsafe non-regular replacement guard")
@@ -920,6 +1007,8 @@ def _register(path, journal, digest, role):
         _require(value["entries"].get(path.name, entry) == entry, "replacement slot already registered")
         value["entries"][path.name] = entry
         policy.validate()
+        _require(_guard_recovery_entries(cap, issuers) == recovery,
+                 "replacement guard recovery evidence changed")
         cap.validate()
         if before is None:
             tx._create_bytes(cap, GUARD, _bounded_bytes(value))
