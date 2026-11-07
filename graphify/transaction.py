@@ -25,8 +25,6 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence, cast
 
-import networkx as nx
-
 from graphify.paths import GRAPHIFY_OUT
 from graphify.storage_guard import ManagedWorkspaceOutputError, require_ordinary_output
 
@@ -16678,6 +16676,15 @@ def merge_detached_snapshots(
     *,
     managed_current: Path | str | None = None,
 ) -> None:
+    """Compose current and other graphs and replace current with a pending snapshot.
+
+    Bind the ancestor bytes into the merge record. If managed_current is given,
+    require a matching active snapshot and receipt before replacing current.
+    Invalid snapshots or changed identities raise PendingTransactionError.
+    """
+    # Filesystem-only callers such as the installer do not need NetworkX.
+    import networkx as nx
+
     _ancestor_snapshot, ancestor_payload, _ancestor_identity = (
         _load_detached_merge_snapshot_with_identity(ancestor, role="ancestor")
     )
