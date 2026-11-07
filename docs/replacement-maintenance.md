@@ -8,29 +8,163 @@ authority. The shipping maintenance entry point continues to refuse execute,
 resume and rollback before replacement mutation. No request field, environment
 variable, model instance or confirmation flag enables it.
 
-## First deployment profile
+## Broker-only candidate and first deployment profile
 
-The first proposed native profile is a cold-start, enrolled, single-purpose
-macOS/APFS environment. An administrator controls the enclosure, canonical
-parent, external archive/control parents, installed runtime and authority store.
-The authority store is outside every source and output root. Only the broker
-may launch graph processes under the dedicated non-login writer identity.
-Administrator and kernel integrity are assumptions, not properties supplied by
-the model.
+The selected design candidate is broker-only filesystem mutation in a cold-start,
+enrolled, single-purpose macOS/APFS environment. It is not a qualified backend.
+The administrator, kernel, authority controller and complete mutator runtime are
+trusted. If the mutator itself must be treated as hostile, this candidate does
+not resolve containment. A closed enclosure for untrusted writers remains an
+alternative with an unmet complete-holder/export enforcement prerequisite.
+
+The authority controller owns the protected registry and exclusive launch policy;
+it admits one trusted, one-shot mutator under a dedicated identity. That mutator
+performs all selected target, stage, archive, quarantine and journal mutation.
+It runs no child processes, plugins or caller-selected code. Workers prepare or
+submit bounded data and receive no protected filesystem capability. A separate
+verifier must have no authority to mutate the objects it validates. Permanent
+registry and launch authority remains with the controller after mutator exit.
+
+An administrator controls the canonical parent, external archive/control/stage
+parents, runtime and authority store. The authority store is outside every source
+and output root. Account, launch, namespace and IPC enforcement must prevent
+unrelated code from obtaining the mutator identity or protected access. A non-login
+shell alone does not prove this. Native deployment and enforcement are absent.
 
 No ordinary graph writer may have been admitted during the current boot before
 maintenance starts. Admission of the first ordinary writer must be recorded
-before it starts; restarting a broker cannot clear that history. Unknown launch
-routes, retained writable descriptors, unaccounted descendants, descriptor
-export or uncertain enrollment refuse maintenance admission. This profile does
-not support online draining of an ordinary desktop's unknown process population.
+before it starts; controller restart cannot clear that history. Unknown launch
+routes, retained mutation capabilities, unaccounted processes, capability export
+or uncertain enrollment refuse maintenance admission. This profile does not
+support online draining of an ordinary desktop's unknown process population.
 
 Changing permissions and renaming files do not revoke existing writable file
 descriptors. A process census, non-login shell, advisory lock, stopped launchd
-job or disabled service is not proof of complete exclusion. A native mechanism
-establishing the complete process family and absence of descriptor export is
-still an unmet feasibility prerequisite. If it cannot be established, every
-shipping replacement path must remain disabled.
+job or disabled service is not proof of complete exclusion. Exclusive mutator
+custody and absence of protected capabilities in workers remain unmet native
+prerequisites. A closed enclosure instead needs a supported mechanism accounting
+for every recipient and preventing export beyond its retirement domain. Every
+shipping replacement path remains disabled.
+
+The retained [#266 counterexample](qualification/issue147-app-sandbox-fd-export-20261102.md)
+records a 52-byte write through an exported descriptor after sender and broker
+death. Its exact profile/channel failed containment; the result is not rewritten
+or rerun to obtain a pass. It does not rule out every App Sandbox construction.
+The same harness calls `fchmod` through its `O_RDONLY` verifier descriptor before
+transfer. Capability accounting must cover metadata and namespace effects as well
+as byte writes; an open-mode label alone is insufficient.
+
+## Worker boundary and deployment prerequisites
+
+`MaintenanceBroker.submit` describes a future whole-operation, data-only
+submission boundary, not an implemented transport. It must not yield a capability
+that lets the caller run the current coordinator with temporary filesystem access.
+The existing `_maintenance()` hook remains an unconditional refusal. Replacing
+that refusal with a context-manager grant is not this broker design.
+
+A native adapter must authenticate requests and bind them to independent approval,
+the exact operation, broker policy and process incarnations. A signing identity or
+transport connection alone grants no operation authority. The trusted mutator
+must independently validate frozen selectors, source/payload bindings and all
+existing guards under its actual UID; the real-UID lock check is not relaxed.
+Forward payloads are bounded copied bytes bound to the seal. Rollback supplies no
+forward payload. There is no arbitrary open, rename, command or handle-returning
+RPC. Acknowledgment and successful publication cannot release service.
+
+Workers receive no protected descriptor, directory handle, shared writable mapping,
+access-granting bookmark or equivalent resource. Reject resource attachments and
+unknown protocol fields rather than treating an attachment as data. UNIX rights
+transfer, inherited handles, Mach/XPC resources, shared mappings, helper services
+and persistent grants must be closed or independently shown unavailable at the
+protected boundary. A transport name or sandbox entitlement is not that proof.
+Apple documents [XPC descriptor duplication](https://developer.apple.com/documentation/xpc/xpc_fd_create(_:))
+and [bookmark-based access sharing](https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox).
+
+Before native implementation is usable, deployment needs all of the following:
+
+- Exclusive administrator-controlled mutator identity and launch routes, including
+  restart and on-demand routes; no unrelated code may run as that identity.
+- An administrator-controlled interpreter, dependencies, imports and configuration,
+  bound as the complete trusted runtime, with no writable code-loading surface.
+- Protected ancestor and alias admission that denies worker mutation while leaving
+  compatible clients the guard/journal read access they need after release.
+- Independent cold-start enrollment and prior-holder accounting. Existing graphs,
+  retained fixtures, unchanged paths or a process census cannot establish it.
+- Authenticated, resource-free transport, protected persistent history and native
+  evidence for failure, restart, retirement and release ordering.
+
+These are deployment prerequisites, not account/service setup instructions or
+authority to change this host. Namespace durability, rollback, power-loss limits
+and the parent's other native acceptance requirements remain independently open.
+
+## Permanent namespace issuer enrollment
+
+The broker's issuer identity must be trusted through an independent namespace
+policy before it creates a guard or journal. A dedicated UID or non-login shell
+is insufficient. The shared `NamespaceIssuerPolicy` record is immutable data;
+constructing, copying or hashing it establishes no filesystem authority.
+
+Ordinary readers use the fixed administrator-owned issuer index at
+`/private/etc/graphify/replacement-guard-issuers.json` on macOS
+(`/etc/graphify/replacement-guard-issuers.json` on other supported hosts).
+Separate records live in the adjacent `replacement-guard-issuers.d` directory.
+The protected index pins each record's digest and policy generation, exact parent
+path and device/inode identity. Neither requests, environment variables, marker
+contents nor source/payload bytes can select this trust source. Root ownership,
+protected ancestors, restrictive write permissions, ACL checks and pinned reads
+are independent of a record's integrity digest. Native provisioning and permanent
+custody of this store remain deployment prerequisites.
+
+The administrator must publish the policy record and its index entry durably
+before the first broker-owned guard or journal can be visible. The controller
+retains permanent enrollment after the operation and mutator have retired; the
+one-shot mutator must not own policy publication or removal. A missing referenced
+record, wrong digest or generation, changed parent identity, unsafe store, or
+uncertain read denies access. Bootstrap absence permits the historical UID-0 /
+caller-real-UID issuer baseline only under the explicit trusted-administrator
+invariant that the permanent index is never removed while enrolled namespaces or
+their guards survive. Absence is not evidence of completed retirement. These
+checks cannot detect loss or rollback of the entire index; they make no index
+rollback-resistance claim.
+
+Enrollment applies to an exact parent namespace, not an ancestor subtree. A
+nested parent needs its own independently enrolled record. Issuers do not inherit
+across parent scopes; matching a dedicated UID in another namespace grants no
+trust. Each record retains the legacy issuer UIDs needed by surviving guards and
+journals. Migration must keep those issuers recognized alongside the selected
+mutator UID, including after release, retirement and controller restart. It must
+not rewrite guard ownership, weaken the coordinator's caller-real-UID lock rule,
+or make old records unreadable to compatible clients. Removing old issuer UIDs,
+rotating policies, refreshing device identities and reusing retired UIDs are not
+implemented migration paths.
+
+The model registry pins the complete immutable policy tuple, its digest and one
+dedicated mutator UID in every persisted `ModelState`. All policies must belong
+to that registry enrollment and UID. `issuer_policy_set_sha256` hashes the entire
+record set in path order, including generations, parent identities and legacy
+issuer sets. Its value is independent of the operation epoch. `GrantIdentity`
+binds both this digest and the simulated actual mutator UID. Grant admission
+matches every frozen canonical, archive, control and stage parent in the operation
+to an exact enrolled path and device/inode; rollback also binds its quarantine
+parent. Omitted enrollment permits model construction only and cannot grant
+maintenance.
+
+`BrokerAdmission.current_issuer_policy_sha256`, release and ordinary client
+startup must each supply the exact current complete fingerprint as simulation
+evidence. Missing, stale or unknown release/startup policy persists
+`RECOVERY_HELD` before refusal and cannot set the first-writer admission latch.
+Matching publication or payload bytes cannot replace policy evidence. Restart
+retains the original records, legacy issuers, fingerprint and mutator UID, keeps
+service held and never refreshes them or automatically reconciles a prior release.
+An administrator-controlled reader handoff must leave normal clients read access
+to the permanent index, applicable policy records, guards and journals while
+preserving archive mutation denial and independent verifier custody.
+
+The synthetic tests show these model bindings and refusal transitions only.
+Protected-index publication ordering, durable custody and recovery, whole-index
+rollback, UID reuse and stale OS identities, live ordinary-reader handoff, and
+native account/launch enforcement still need separate qualification. The model
+cannot enable the shipping `_maintenance()` entry point.
 
 ## Exact operation and authority boundary
 
@@ -46,11 +180,12 @@ the journal-slot lock before replacement mutation. Execute retains its existing
 exact-retry behavior. Rollback rechecks its selected quarantine parent after
 maintenance admission and before registering or moving data there.
 
-A future broker grant must bind the descriptor to enrollment, boot and operation
-epochs, the pinned runtime and coordinator incarnation, root/parent/output
-identities, old-tree inventory and its supervised process family. It must travel
-through authenticated broker-created IPC. Serialized data or possession of a
-model object is insufficient. None of that native transport is implemented here.
+A future internal admission must bind the descriptor to enrollment, boot and
+operation epochs, the complete pinned runtime, launch/namespace/transport policy,
+controller and one-shot mutator incarnations, root/parent/output identities and
+old-tree inventory. Worker requests must cross authenticated data-only transport;
+the internal model handle is never an exported filesystem grant. Serialized data
+or possession of a model object is insufficient. No native transport ships here.
 
 There is one maintenance slot for the whole enrolled target. Two different
 journals or requests cannot independently acquire overlapping graphs. Existing
@@ -62,16 +197,18 @@ their ownership and identity checks are not relaxed.
 | State | Contract |
 | --- | --- |
 | `HELD` | Deny ordinary launches. Missing or uncertain native authority starts here. |
-| `GRANTING` | Validate enrollment and exact selection; persist the new epoch before starting a coordinator. |
-| `ACTIVE` | Admit one supervised coordinator and reject competing grants. |
+| `GRANTING` | Validate enrollment and exact selection; persist the new epoch before starting a mutator. |
+| `ACTIVE` | Admit one trusted mutator with explicit broker-only boundary evidence; reject competing admissions. |
 | `RECOVERY_HELD` | Keep exclusion after failure, timeout, channel loss or uncertain termination. |
-| `RELEASE_READY` | All admitted processes have exited, temporary access is withdrawn and independent terminal validation passed. |
+| `RELEASE_READY` | The mutator has exited, requests/effects are quiesced, protected capabilities are retired, temporary access is withdrawn and independent terminal validation passed. |
 | `RELEASED` | A separate durable release record permits approved compatible clients. |
 
 Handle closure and context-manager exit never release service. Revocation or
 expiry does not revoke an already-open descriptor or an in-flight system call.
-A new epoch cannot replace proof that the old coordinator and all permitted
-descendants have terminated. If that proof is unavailable, retain the hold.
+A new epoch cannot replace exact mutator retirement and quiescence evidence. An
+in-flight request may have had an effect; stop new steps and reconcile that effect
+under the selected operation. If proof is unavailable, retain the hold. Do not
+infer that a timeout cancels a system call.
 Across reboot, invalidate grants and retain denial; stale frozen identities are
 not refreshed or translated. This slice supplies no cross-boot recovery.
 
@@ -82,8 +219,9 @@ admission still requires the prior cohort's exact retirement evidence.
 
 Successful publication is only a completion notification. Release requires:
 
-1. Confirm that the coordinator and every permitted descendant have exited and
-   no writable descriptor remains exported.
+1. Confirm exact mutator exit, request/queue quiescence and reconciled in-flight
+   effects. Confirm all temporary protected handles/mappings are closed and no
+   worker holds protected content, metadata or namespace mutation authority.
 2. Withdraw temporary maintenance access to archive/control ancestors.
 3. Independently validate the closed native receipt, canonical identity,
    provenance, completed journal and exact preserved old-tree inventory.
@@ -93,6 +231,20 @@ The release record is separate from replacement's exact generation-one retry.
 A later ordinary generation can legitimately change that receipt. A release
 retry must reconcile its own record and supported current native lineage; it
 cannot re-run generation-one publication or mint a new grant.
+
+`BrokerAdmission` and `BrokerRetirement` are caller-supplied simulation witnesses
+bound to the exact operation and identity. Missing boundary facts deny modeled
+admission; a reap without complete retirement evidence retains a hold. They do
+not inspect accounts, processes, IPC or OS permissions.
+
+The model's `restart` transition retains the attempted epoch, mutator history,
+first-writer latch and exact prior operation/release records while recording a
+fresh controller incarnation and retaining denial. It does not deserialize native
+state or prove old controller exit. Failed persistence acknowledgments retain the
+attempted state conservatively because the write may already have happened. No
+failed acknowledgment returns admission authority. Post-restart release
+reconciliation remains a native prerequisite; an old controller cannot reuse a
+release to restart service. No boot identities are translated or refreshed.
 
 A retired forward operation retains its preview and seal on resume. An
 interrupted rollback retains its complete action and retention selection; it
@@ -107,12 +259,13 @@ that terminal journal state.
 
 ## Permission handoff and preservation
 
-The protected authority registry is separate from coordinator-owned journals and
+The protected authority registry is separate from mutator-owned journals and
 locks. The existing coordinator lock requires the real UID of its caller.
-Temporary access on administrator-controlled ancestors must permit the
-coordinator's inventory and cross-parent rename operations without changing the
-preserved old tree's ownership, modes or bytes. Close and reap that process
-family before withdrawing access and admitting normal clients.
+Temporary access on administrator-controlled ancestors belongs only to the trusted
+mutator. It must permit inventory and cross-parent rename without changing the
+preserved old tree's ownership, modes or bytes. Do not grant that access to an
+unprivileged planner or worker. Retire the mutator and all operation effects before
+withdrawing temporary access and admitting normal clients.
 
 Normal clients need read access to applicable target guards and journals; the
 preserved archive stays inaccessible for ordinary mutation. Do not weaken the
@@ -123,21 +276,24 @@ substitute for a defined handoff. The final output remains `graphify-out`.
 
 The contract/model checks cover selector drift, immutable capture, competing
 requests, stale epochs, failure holds, persistence failure, uncertain process
-termination, explicit release ordering, later-generation release retries and
-unrecovered rollback. Their witnesses and persistence are modeled. They prove
+termination, broker policy/identity drift, capability-free worker boundaries,
+incomplete retirement, exact-parent issuer enrollment, stale-policy release/startup
+holds, retained legacy issuers, controller restart holds, explicit release ordering,
+later-generation release retries and unrecovered rollback. Their witnesses and
+persistence are modeled. They prove
 neither OS custody nor real restart inhibition.
 
 Before a usable native backend, qualify the following on newly created,
-disposable macOS/APFS fixtures, bound to the exact coordinator, broker, runtime,
+disposable macOS/APFS fixtures, bound to the exact controller, mutator, runtime,
 OS, identities and launch policy. Existing user graphs and retained #147 VMs
 are not fixtures.
 
 | Group | Required outcome |
 | --- | --- |
-| Enrollment and containment | Establish exclusive launch routes, complete process-family accounting and no writable-descriptor export; otherwise refuse admission. |
+| Enrollment and containment | Establish exclusive trusted-mutator launch custody, no mutator children, data-only authenticated transport and no protected worker capabilities; otherwise refuse admission. |
 | Grant admission | Reject altered/stale/copied selectors and epochs; different journals targeting one graph have at most one winner. |
 | Legacy launch attempts | Deny every sanctioned legacy restart route during maintenance and after release. |
-| Coordinator/broker failure | Death, lost communication, timeout or a suspended predecessor cannot admit another writer or release service. |
+| Mutator/controller failure | Death, lost communication, timeout, uncertain persistence or a suspended predecessor cannot admit another writer or release service. |
 | Namespace interruption | Exercise every finite archive/install/publication boundary and relevant rename/sync failure; preserve exact objects and selectors. |
 | Rollback interruption | Retain both trees and quarantine; finish unrecovered with service held. |
 | Successful release | New closed graph is usable at canonical `graphify-out`; complete old-tree identity/content preservation and archive mutation denial pass. |
@@ -148,6 +304,33 @@ failure and retain the smallest complete reproducer. Store source hashes,
 commands, environment, identities, state transitions and before/after inventories
 with each receipt. Reuse earlier evidence only while its relevant inputs remain
 unchanged. Existing checkpoint A14 does not qualify these new boundaries.
+
+## One bounded future boundary probe (not run)
+
+After separate native authorization and prerequisite provisioning, use one fresh
+external APFS fixture with synthetic target/sibling canaries, a trusted one-shot
+mutator, an unprivileged worker, an outside receiver and an independent verifier.
+Do not select an existing graph, retained VM or the #266 counterexample as a fixture.
+
+1. Once, establish functional controls: an exact approved broker request changes
+   the selected canary; worker path/metadata mutation is denied. Demonstrate the
+   worker-to-receiver transport with an unrelated scratch descriptor.
+2. Run one candidate operation. Attempt protected-handle requests and unauthorized
+   selectors through the actual protocol. Inspect responses for resource
+   attachments. Kill and reap the exact mutator; then let the surviving worker
+   and receiver attempt content and metadata changes.
+3. Restart the authority controller once. It must recover the hold and reject
+   stale authority before more mutation. This is not a claim about all launchd
+   routes, reboot recovery or native service-release qualification.
+4. Retain source/runtime/policy hashes, exact identities, messages, waits,
+   persistence ordering, errors and before/after byte and metadata inventories.
+   Stop on the first unexplained result. Any protected post-retirement mutation
+   is a counterexample; a blocked observation supports only this route/profile.
+
+Run each selected exchange once, with bounded waits and cleanup limited to proven
+fixture-owned actors. Failed controls are inconclusive. Preserve failures without
+policy relaxation or retries for a passing result. Finish held; this probe grants
+no release and does not qualify live replacement.
 
 Process-exit checks make no power-loss claim. These bounded checks do not remove
 the canonical candidate's existing native enablement requirements. Local focused
