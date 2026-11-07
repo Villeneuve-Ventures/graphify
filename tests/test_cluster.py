@@ -339,6 +339,7 @@ def test_partition_rejects_canonical_key_collisions_before_backend(monkeypatch, 
         called = True
         return 0.0, {}
 
+    monkeypatch.setattr("graphify.cluster._canonical_node_key", lambda node: "same:key")
     if backend == "native":
         _install_native_stub(monkeypatch, fail_if_called)
     else:
@@ -348,7 +349,6 @@ def test_partition_rejects_canonical_key_collisions_before_backend(monkeypatch, 
         monkeypatch.delitem(sys.modules, "graspologic_native", raising=False)
         monkeypatch.setattr("graphify.cluster.importlib.import_module", missing_native)
         monkeypatch.setattr(nx.community, "louvain_communities", fail_if_called)
-    monkeypatch.setattr("graphify.cluster._canonical_node_key", lambda node: "same:key")
     with pytest.raises(ValueError, match="canonical node-key collision"):
         _partition(nx.Graph([("a", "b")]))
     assert not called
