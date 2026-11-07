@@ -17,6 +17,7 @@ import time
 from typing import cast
 
 from . import legacy_source as source
+from .replacement_maintenance import OperationDescriptor
 from . import transaction as tx
 
 GUARD = ".graphify_replacement_guard"
@@ -524,7 +525,8 @@ def preview(raw, sealed):
 
 
 @contextlib.contextmanager
-def _maintenance(request):
+def _maintenance(operation: OperationDescriptor):
+    """Refuse every live operation; model records never establish native authority."""
     raise tx.PendingTransactionError("native replacement maintenance backend is not qualified")
     yield  # pragma: no cover -- default never grants a capability
 
@@ -1100,13 +1102,15 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
     return _execute("execute", raw, sealed, preview_sha256, failpoint=failpoint)
 
 
-def resume(raw, sealed, preview_sha256, *, failpoint=None):
-    """Retry an existing exact operation with qualified maintenance (none shipped).
+def resume(raw, sealed, preview_sha256, *, expected_journal_sha256, failpoint=None):
+    """Bind an explicitly selected journal digest and recheck it under the operation lock.
 
-    Journal presence is required under the coordinator lock. An absent journal
-    raises PendingTransactionError without initializing an operation.
+    The journal must already exist under the coordinator lock. The caller supplies
+    its read-only journal observation. No identity refresh or
+    owner adoption occurs; default live maintenance still refuses before mutation.
     """
-    return _execute("resume", raw, sealed, preview_sha256, failpoint=failpoint)
+    return _execute("resume", raw, sealed, preview_sha256,
+                    expected_journal_sha256=expected_journal_sha256, failpoint=failpoint)
 
 
 def _admit_forward_journal(journal):
@@ -1160,17 +1164,22 @@ def _admit_forward_journal(journal):
              else owner is None, "malformed replacement owner")
 
 
-def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
+def _execute(action, raw, sealed, preview_sha256, *, expected_journal_sha256=None, failpoint=None):
     import secrets
     request, _ = _request(raw)
     journal_path, output, archive = map(Path, (request["journal"], request["output"], request["archive"]))
     digest = _sha(_bytes(request))
     _same_filesystem(request)
-    with _maintenance(request), _operation(journal_path, digest) as binding, _coordinator_lock(request):
+    descriptor = OperationDescriptor.from_request(action, request, preview_sha256=preview_sha256,
+                                                  seal_sha256=_sha(_bytes(sealed)),
+                                                  journal_sha256=expected_journal_sha256)
+    with _maintenance(descriptor), _operation(journal_path, digest) as binding, _coordinator_lock(request):
         _require(action != "resume" or journal_path.exists(), "existing replacement journal required")
         if journal_path.exists():
             journal = _load(journal_path)
             _require(isinstance(journal, dict), "replacement execution journal must be an object")
+            _require(action != "resume" or _sha(_bytes(journal)) == expected_journal_sha256,
+                     "selected resume journal changed")
             _require(journal.get("request") == request and journal.get("request_digest") == digest
                      and journal.get("preview_sha256") == preview_sha256
                      and journal.get("seal_sha256") == _sha(_bytes(sealed)), "replacement resume request changed")
@@ -1343,7 +1352,12 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
     quarantine = Path(quarantine)
     _external_path(request, quarantine)
     _same_filesystem(request, quarantine)
-    with _maintenance(request), _operation(journal_path, digest), _coordinator_lock(request):
+    parent = _directory(quarantine.parent)
+    descriptor = OperationDescriptor.from_request(
+        "rollback", request, journal_sha256=expected_journal_sha256,
+        quarantine=str(quarantine), quarantine_parent=(parent["device"], parent["inode"]),
+        new_tree_sha256=expected_new_tree)
+    with _maintenance(descriptor), _operation(journal_path, digest), _coordinator_lock(request):
         journal = _load(journal_path)
         _require(isinstance(journal, dict), "replacement rollback journal must be an object")
         _require(journal.get("request") == request, "rollback request changed")
@@ -1357,6 +1371,8 @@ def rollback(raw, expected_journal_sha256, quarantine, *, expected_new_tree=None
         output, archive = Path(request["output"]), Path(request["archive"])
         old_path = archive if archive.exists() else output
         quarantine_parent = _directory(quarantine.parent)
+        _require((quarantine_parent["device"], quarantine_parent["inode"])
+                 == descriptor.quarantine_parent, "rollback retention parent changed")
         if journal["state"] == "ROLLBACK_INTENT":
             _require(journal.get("rollback_parent_identity") == quarantine_parent,
                      "rollback retention parent changed")
@@ -1467,6 +1483,8 @@ def main(argv=None):
             command.add_argument("--fragments", required=True)
         if name in {"execute", "resume"}:
             command.add_argument("--preview-sha256", required=True)
+        if name == "resume":
+            command.add_argument("--journal-sha256", required=True)
         if name == "rollback":
             command.add_argument("--journal-sha256", required=True)
             command.add_argument("--quarantine", required=True)
@@ -1490,10 +1508,10 @@ def main(argv=None):
             sealed = _load(request["stage"])
             if args.command == "preview":
                 result = preview(request, sealed)
-            elif args.command == "resume":
-                result = resume(request, sealed, args.preview_sha256)
             else:
-                result = execute(request, sealed, args.preview_sha256)
+                result = (resume(request, sealed, args.preview_sha256,
+                                 expected_journal_sha256=args.journal_sha256)
+                          if args.command == "resume" else execute(request, sealed, args.preview_sha256))
         print(json.dumps(result, sort_keys=True))
         return 0
     except (OSError, ValueError, KeyError, tx.PendingTransactionError) as exc:
