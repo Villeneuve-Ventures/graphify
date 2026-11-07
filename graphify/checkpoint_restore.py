@@ -217,7 +217,8 @@ def capture(source_id, root, output, expected_head, *, failpoint=None):
         root, _root_id = _canonical_directory(str(root))
         protocol = tx._read_protocol(cap)
         _require(protocol is not None and protocol["root"] == str(root)
-                 and "restore_binding" not in protocol and "bootstrap_binding" not in protocol,
+                 and "restore_binding" not in protocol and "bootstrap_binding" not in protocol
+                 and "replacement_binding" not in protocol,
                  "capture requires a closed ordinary output at the selected root")
         entries = set(tx._list_entries(cap))
         _require(not entries.intersection(tx._COORDINATION_FILES - {
@@ -530,12 +531,17 @@ def _publish(cap, claim, payloads, deadline, failpoint, root_capability):
 
 
 def execute(request, preview_sha256, *, failpoint=None):
+    """Restore an approved checkpoint into an absent, admitted destination.
+
+    The destination parent requires mutating admission before directory creation;
+    a registered archive refuses before any child is created.
+    """
     _require(_hex(preview_sha256), "invalid restore preview digest")
     deadline = time.monotonic() + 120
     with authority.open_store() as store:
         request, _, _ = _request(request)
         output = Path(request["output"])
-        with tx.pin_output(output.parent, mutation=False) as parent, _locked(parent, deadline):
+        with tx.pin_output(output.parent) as parent, _locked(parent, deadline):
             plan, fingerprint, checkpoint, payloads = _plan(store, request, deadline, require_absent=True)
             _require(fingerprint == preview_sha256, "restore preview changed")
             with _pinned_root(plan) as root_capability:
