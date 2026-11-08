@@ -54,3 +54,21 @@ def test_register_honors_recovery_backup_inside_held_parent(tmp_path, monkeypatc
     assert backup.read_bytes() == b"displaced predecessor"
     assert not (parent / replacement.GUARD).exists()
     assert not slot.exists()
+
+
+@pytest.mark.parametrize("field", ["archive", "archive-upper", "stage", "quarantine"])
+def test_refuse_evidence_path_equal_to_coordinator_lock(case, field):
+    request, _ = case
+    journal = Path(request["journal"])
+    lock = journal.with_name(".replacement-lock-" + hashlib.sha256(os.fsencode(journal.name)).hexdigest())
+
+    with pytest.raises(tx.PendingTransactionError, match="coordinator lock"):
+        if field == "quarantine":
+            replacement.rollback(request, "0" * 64, lock)
+        elif field == "archive-upper":
+            replacement.bind_request({**request, "archive": str(lock.with_name(lock.name.upper()))})
+        else:
+            replacement.bind_request({**request, field: str(lock)})
+
+    assert not lock.exists()
+    assert not journal.exists()

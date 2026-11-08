@@ -52,6 +52,70 @@ def test_registration_rechecks_mutation_after_waiting_for_parent_lock(tmp_path, 
     assert not (archive / replacement.GUARD).exists()
 
 
+@pytest.mark.parametrize("boundary", ["ALLOCATED", "OLD_ARCHIVED", "INSTALL_INTENT"])
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_preinstall_rollback_leaves_unused_quarantine_unregistered(case, modeled, boundary, interrupted):
+    request, fragments = case
+    sealed = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, sealed)
+
+    def stop_execution(point):
+        if point == boundary:
+            raise RuntimeError("execution interruption")
+
+    with pytest.raises(RuntimeError, match="execution interruption"):
+        replacement.execute(request, sealed, plan["preview_sha256"], failpoint=stop_execution)
+    journal = replacement._load(request["journal"])
+    expected = replacement._sha(replacement._bytes(journal))
+    quarantine = Path(request["journal"]).parent / "unused-quarantine"
+
+    def stop_rollback(point):
+        if point == "after_rollback_restore":
+            raise RuntimeError("rollback interruption")
+
+    if interrupted and boundary != "ALLOCATED":
+        with pytest.raises(RuntimeError, match="rollback interruption"):
+            replacement.rollback(request, expected, quarantine, failpoint=stop_rollback)
+    result = replacement.rollback(request, expected, quarantine)
+
+    assert result["new_graph_retained"] == journal["container"]
+    assert not quarantine.exists()
+    guard = replacement._load(quarantine.parent / replacement.GUARD)
+    assert quarantine.name not in guard["entries"]
+    replacement.guard_output(quarantine / "new.json", mutation=True)
+    with tx.pin_output(quarantine, create=True):
+        pass
+    assert quarantine.is_dir()
+
+
+@pytest.mark.parametrize("boundary", [None, "after_rollback_quarantine", "after_rollback_restore"])
+def test_installed_rollback_keeps_actual_quarantine_readonly(case, modeled, boundary):
+    request, fragments = case
+    sealed = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, sealed)
+    replacement.execute(request, sealed, plan["preview_sha256"])
+    journal = replacement._load(request["journal"])
+    expected = replacement._sha(replacement._bytes(journal))
+    tree = replacement._tree(request["output"])
+    quarantine = Path(request["journal"]).parent / "retained-new"
+
+    def stop(point):
+        if point == boundary:
+            raise RuntimeError("rollback interruption")
+
+    if boundary is not None:
+        with pytest.raises(RuntimeError, match="rollback interruption"):
+            replacement.rollback(request, expected, quarantine,
+                                 expected_new_tree=replacement._sha(replacement._bytes(tree)), failpoint=stop)
+    result = replacement.rollback(request, expected, quarantine,
+                                  expected_new_tree=replacement._sha(replacement._bytes(tree)))
+
+    assert result["new_graph_retained"] == str(quarantine)
+    assert replacement._tree(quarantine) == tree
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        replacement.guard_output(quarantine / "new.json", mutation=True)
+
+
 @pytest.mark.parametrize("depth", [128, 129])
 def test_preservation_depth_boundary_closes_opened_directories(tmp_path, monkeypatch, depth):
     root = tmp_path / "inventory"

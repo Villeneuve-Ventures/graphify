@@ -57,3 +57,57 @@ def test_external_slot_cannot_equal_registration_marker(case, field):
         replacement.bind_request(raw)
     assert replacement._tree(request["output"]) == before
     assert sorted(p.name for p in external.iterdir()) == before_entries
+
+
+def test_quarantine_marker_name_refuses_before_maintenance(case, monkeypatch):
+    request, _ = case
+    before = replacement._tree(request["output"])
+
+    def unexpected_maintenance(_request):
+        pytest.fail("reserved quarantine reached maintenance")
+
+    monkeypatch.setattr(replacement, "_maintenance", unexpected_maintenance)
+    with pytest.raises(tx.PendingTransactionError, match="reserved replacement guard name"):
+        replacement.rollback(request, "unused", Path(request["archive"]).parent / replacement.GUARD)
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["journal"]).exists()
+
+
+def test_copied_control_parent_during_lock_read_cannot_start_rollback(case, modeled, tmp_path, monkeypatch):
+    request, fragments = case
+    control = tmp_path / "control"
+    control.mkdir()
+    raw = {key: copy.deepcopy(value) for key, value in request.items() if key != "parent_identities"}
+    raw["journal"] = str(control / "journal.json")
+    request = replacement.bind_request(raw)
+    seal = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, seal)
+    replacement.execute(request, seal, plan["preview_sha256"])
+    journal = replacement._load(request["journal"])
+    original_journal = Path(request["journal"]).read_bytes()
+    before_output = replacement._tree(request["output"])
+    before_archive = replacement._tree(request["archive"])
+    quarantine_parent = tmp_path / "quarantines"
+    quarantine_parent.mkdir()
+    quarantine = quarantine_parent / "new-tree"
+    real_read = replacement._read
+    moved = tmp_path / "original-control"
+    swaps = []
+
+    def swap_on_binding_read(path, *args, **kwargs):
+        if Path(path).name.startswith(".replacement-lock-") and not swaps:
+            control.rename(moved)
+            shutil.copytree(moved, control)
+            swaps.append(True)
+        return real_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(replacement, "_read", swap_on_binding_read)
+    with pytest.raises(tx.PendingTransactionError, match="changed"):
+        replacement.rollback(request, replacement._sha(replacement._bytes(journal)), quarantine,
+                             expected_new_tree=replacement._sha(replacement._bytes(before_output)))
+    assert swaps == [True]
+    assert replacement._tree(request["output"]) == before_output
+    assert replacement._tree(request["archive"]) == before_archive
+    assert (moved / "journal.json").read_bytes() == original_journal
+    assert Path(request["journal"]).read_bytes() == original_journal
+    assert list(quarantine_parent.iterdir()) == []

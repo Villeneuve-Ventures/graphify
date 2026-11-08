@@ -110,6 +110,28 @@ def test_create_cannot_downgrade_archive_admission(archive):
     assert not (archive / "new-output").exists()
 
 
+def test_checkpoint_execute_cannot_create_inside_archive(archive, monkeypatch):
+    # Model approved checkpoint data and root custody only. Keep execute's
+    # actual destination admission, locks and mkdir path to detect any write
+    # before the downstream child capability refuses archive mutation.
+    root = archive.parent / "corpus"
+    root.mkdir()
+    request = {"schema": 1, "source_id": "1" * 64,
+               "root": str(root), "output": str(archive / "restored")}
+    fingerprint = "f" * 64
+    monkeypatch.setattr(recovery.authority, "open_store", lambda: contextlib.nullcontext(object()))
+    monkeypatch.setattr(recovery, "_plan", lambda *args, **kwargs: ({}, fingerprint, {}, {}))
+    monkeypatch.setattr(recovery, "_pinned_root", lambda plan: contextlib.nullcontext(None))
+    _register_archive(archive)
+    before = {path: path.read_bytes() for path in archive.parent.rglob("*") if path.is_file()}
+
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        recovery.execute(request, fingerprint)
+
+    assert not Path(request["output"]).exists()
+    assert {path: path.read_bytes() for path in archive.parent.rglob("*") if path.is_file()} == before
+
+
 @pytest.mark.parametrize("options", [{}, {"create": True, "mutation": False}])
 def test_windows_mutation_remains_blocked(archive, monkeypatch, options):
     monkeypatch.setattr(tx, "_PLATFORM", "windows")
