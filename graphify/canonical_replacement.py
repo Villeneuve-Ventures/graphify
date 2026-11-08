@@ -1569,3 +1569,58 @@ def _seal_data(request, sealed):
             parent.validate()
         finally:
             os.close(fd)
+
+
+def main(argv=None):
+    """Return JSON success or blocked status for supported replacement commands.
+
+    Safe filesystem features are required before reading any request. Build-data
+    creates a seal exclusively under the frozen stage parent; interrupted writes
+    stay in place and cannot be adopted or overwritten by a retry.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("bind-request", "build-data", "preview", "execute", "resume", "status", "rollback"):
+        command = sub.add_parser(name)
+        command.add_argument("--request", required=True)
+        if name == "build-data":
+            command.add_argument("--fragments", required=True)
+        if name in {"execute", "resume"}:
+            command.add_argument("--preview-sha256", required=True)
+        if name == "rollback":
+            command.add_argument("--journal-sha256", required=True)
+            command.add_argument("--quarantine", required=True)
+            command.add_argument("--new-tree-sha256")
+    args = parser.parse_args(argv)
+    try:
+        _safe_platform()
+        request = _load(args.request)
+        _request_paths(request)
+        if args.command == "bind-request":
+            result = bind_request(request)
+        elif args.command == "build-data":
+            sealed = build_data(request, _load(args.fragments))
+            _seal_data(request, sealed)
+            result = {"status": "data-sealed", "seal_sha256": _sha(_bytes(sealed))}
+        elif args.command == "status":
+            result = status(request)
+        elif args.command == "rollback":
+            result = rollback(request, args.journal_sha256, args.quarantine, expected_new_tree=args.new_tree_sha256)
+        else:
+            sealed = _load(request["stage"])
+            if args.command == "preview":
+                result = preview(request, sealed)
+            elif args.command == "resume":
+                result = resume(request, sealed, args.preview_sha256)
+            else:
+                result = execute(request, sealed, args.preview_sha256)
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    except (OSError, ValueError, KeyError, tx.PendingTransactionError) as exc:
+        print(json.dumps({"status": "blocked", "error": str(exc)}, sort_keys=True))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -9,6 +9,25 @@ from graphify import transaction as tx
 from tests.test_canonical_replacement import case as case, modeled as modeled
 
 
+@pytest.mark.parametrize("sealed", [[], None, 17, "seal", True])
+def test_nonobject_seal_is_structured_preview_refusal(case, tmp_path, capsys, sealed):
+    request, _ = case
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+    Path(request["stage"]).write_text(json.dumps(sealed))
+    before = replacement._tree(request["output"])
+
+    assert replacement.main(["preview", "--request", str(request_path)]) == 1
+
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "seal" in response["error"]
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["journal"]).exists()
+    assert not Path(request["archive"]).exists()
+    assert Path(request["stage"]).read_text() == json.dumps(sealed)
+
+
 def test_coordinator_lock_refuses_registered_archive_parent(case, tmp_path):
     request, _ = case
     archive = tmp_path / "prior-archive"

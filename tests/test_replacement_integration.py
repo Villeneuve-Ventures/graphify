@@ -250,6 +250,41 @@ def test_ordinary_writer_obeys_replacement_guard(tmp_path, monkeypatch):
         require_ordinary_output(tmp_path / 'graphify-out' / 'cache')
 
 
+@pytest.mark.parametrize('entrypoint', ['helper', 'dispatch'])
+def test_extract_dispatch_preserves_replacement_guard(tmp_path, monkeypatch, entrypoint):
+    import sys
+    from graphify import cli
+
+    corpus = tmp_path / 'corpus'
+    corpus.mkdir()
+    (corpus / 'source.py').write_text('def source(): pass\n')
+    output_root = tmp_path / 'absent-output'
+    checked = []
+
+    def refuse(path, *, mutation=True):
+        checked.append((Path(path), mutation))
+        raise tx.PendingTransactionError('replacement is pending')
+
+    monkeypatch.setattr(replacement, 'guard_output', refuse)
+    monkeypatch.setattr(sys, 'argv', [
+        'graphify', 'extract', str(corpus), '--out', str(output_root), '--code-only',
+    ])
+    with pytest.raises(tx.PendingTransactionError, match='replacement is pending'):
+        if entrypoint == 'helper':
+            cli._dispatch_extract()
+        else:
+            cli._dispatch_command('extract')
+    assert checked == [(output_root / 'graphify-out', True)]
+    assert not output_root.exists()
+    assert (corpus / 'source.py').read_text() == 'def source(): pass\n'
+
+
+def test_exact_guard_namespace_excluded():
+    from graphify.detect import _SKIP_FILES
+    assert '.graphify_replacement_guard' in _SKIP_FILES
+    assert '.graphify_replacement_guard_notes.md' not in _SKIP_FILES
+
+
 def test_absent_snapshot_guard(tmp_path, monkeypatch):
     def refuse(path, *, mutation=True):
         if Path(path).name == 'graphify-out':
@@ -258,6 +293,16 @@ def test_absent_snapshot_guard(tmp_path, monkeypatch):
     with pytest.raises(tx.PendingTransactionError, match='replacement is pending'):
         tx.open_graph_snapshot(tmp_path / 'graphify-out' / 'graph.json', purpose='test', allow_absent=True)
     assert not (tmp_path / 'graphify-out').exists()
+
+
+def test_direct_manifest_guard(tmp_path, monkeypatch):
+    from graphify.detect import save_manifest
+    def refuse(path, *, mutation=True):
+        raise tx.PendingTransactionError('replacement is pending')
+    monkeypatch.setattr(replacement, 'guard_output', refuse)
+    with pytest.raises(tx.PendingTransactionError, match='replacement is pending'):
+        save_manifest({}, manifest_path=str(tmp_path / 'out' / 'manifest.json'))
+    assert not (tmp_path / 'out').exists()
 
 
 from tests.test_canonical_replacement import case, modeled  # noqa: E402,F401

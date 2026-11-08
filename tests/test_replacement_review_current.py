@@ -15,6 +15,25 @@ from tests.test_canonical_replacement import case as case
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="descriptor-relative replacement requires POSIX")
 
 
+def test_cli_reports_json_decoder_recursion(tmp_path, monkeypatch, capsys):
+    request = tmp_path / "request.json"
+    request.write_text("{}", encoding="utf-8")
+
+    def overflow(*args, **kwargs):
+        raise RecursionError("simulated JSON decoder stack exhaustion")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(replacement.json, "loads", overflow)
+        result = replacement.main(["bind-request", "--request", str(request)])
+
+    assert result == 1
+    captured = capsys.readouterr()
+    assert not captured.err
+    assert json.loads(captured.out) == {
+        "status": "blocked", "error": "replacement JSON nesting exceeds decoder bound",
+    }
+
+
 def test_guard_journal_reports_json_decoder_recursion(tmp_path, monkeypatch):
     journal = tmp_path.resolve() / "journal.json"
     journal.write_text("{}", encoding="utf-8")

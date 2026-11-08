@@ -39,6 +39,30 @@ def _fragment_text(fragments, location, depth):
 
 
 @pytest.mark.parametrize("location", ["node", "edge", "group", "fragment"])
+def test_deep_fragment_cli_returns_blocked_without_publication(case, tmp_path, location):
+    request, fragments = case
+    request_path, fragment_path = tmp_path / "request.json", tmp_path / "fragments.json"
+    request_path.write_text(json.dumps(request))
+    fragment_path.write_text(_fragment_text(fragments, location, 20_000))
+    before = replacement._tree(request["output"])
+    external = Path(request["stage"]).parent
+    entries = sorted(path.name for path in external.iterdir())
+
+    result = subprocess.run([sys.executable, "-B", "-m", "graphify.canonical_replacement", "build-data",
+                             "--request", str(request_path), "--fragments", str(fragment_path)],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+
+    assert replacement._tree(request["output"]) == before
+    assert sorted(path.name for path in external.iterdir()) == entries
+    assert not Path(request["stage"]).exists() and not Path(request["journal"]).exists()
+    assert result.returncode == 1
+    assert not result.stderr, result.stderr[-1500:]
+    response = json.loads(result.stdout)
+    assert response["status"] == "blocked"
+    assert "fragment nesting" in response["error"]
+
+
+@pytest.mark.parametrize("location", ["node", "edge", "group", "fragment"])
 @pytest.mark.parametrize("overflow", [False, True])
 def test_fragment_container_depth_boundary(case, location, overflow):
     request, fragments = case

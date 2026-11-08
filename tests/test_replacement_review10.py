@@ -11,6 +11,28 @@ from tests.test_canonical_replacement import case as case, modeled as modeled
 from tests.test_replacement_guard_issuers import guarded_parent as guarded_parent, protected_policy as protected_policy
 
 
+@pytest.mark.parametrize("member", [[], {}, None, 3, ""])
+def test_invalid_hyperedge_member_returns_structured_refusal(case, tmp_path, capsys, member):
+    request, fragments = case
+    fragments[0]["hyperedges"] = [{
+        "nodes": [member], "source_file": next(iter(fragments[0]["source_sha256"])),
+        "relation": "participate_in", "confidence": "EXTRACTED", "confidence_score": 1.0,
+    }]
+    request_path, fragments_path = tmp_path / "request.json", tmp_path / "fragments.json"
+    request_path.write_text(json.dumps(request))
+    fragments_path.write_text(json.dumps(fragments))
+    before = replacement._tree(request["output"])
+
+    result = replacement.main(["build-data", "--request", str(request_path),
+                               "--fragments", str(fragments_path)])
+
+    assert result == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["stage"]).exists()
+    assert not Path(request["journal"]).exists()
+
+
 @pytest.mark.parametrize("failure", ["collision", "io-error"])
 @pytest.mark.parametrize("remove_winner", [False, True])
 def test_failed_guard_update_retains_predecessor_and_blocks_archive(

@@ -10,6 +10,7 @@ from graphify import transaction as tx
 from tests.test_canonical_replacement import case as case
 from tests.test_replacement_guard_issuers import guarded_parent as guarded_parent
 from tests.test_replacement_guard_issuers import protected_policy as protected_policy
+from tests.test_replacement_review12 import _assert_cli_refusal
 
 
 def _group(fragment, members):
@@ -19,6 +20,24 @@ def _group(fragment, members):
     fragment["hyperedges"] = [{"id": "guide_flow", "nodes": members,
         "source_file": node["source_file"], "relation": "participate_in",
         "confidence": "EXTRACTED", "confidence_score": 1.0}]
+
+
+@pytest.mark.parametrize("members", [[], ["guide_one"], ["guide_one", "guide_two"],
+    ["guide_one"] * 3, ["guide_one", "guide_two", "guide_two"]])
+def test_profile_refuses_fewer_than_three_distinct_group_members(case, tmp_path, capsys, members):
+    request, fragments = case
+    _group(fragments[0], members)
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+
+
+def test_profile_refuses_group_collapsed_by_document_canonicalization(case, tmp_path, capsys):
+    request, fragments = case
+    _group(fragments[0], ["guide_one", "guide_two", "guide_three"])
+    fragment = fragments[0]
+    for node, identity in zip(fragment["nodes"], ("guide", "guide_doc", "guide_third")):
+        node.update(id=identity, file_type="document")
+    fragment["hyperedges"][0]["nodes"] = [node["id"] for node in fragment["nodes"]]
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
 
 
 def test_profile_keeps_three_distinct_group_members(case):

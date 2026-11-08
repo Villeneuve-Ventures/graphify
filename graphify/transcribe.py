@@ -50,45 +50,81 @@ def is_url(path: str) -> bool:
 def download_audio(url: str, output_dir: Path) -> Path:
     """Download audio-only stream from a URL using yt-dlp.
 
-    Returns the path to the downloaded audio file (.m4a or .opus).
-    Uses cached file if already downloaded.
+    Return an admitted cached file when available. Otherwise download into a
+    private temporary directory, then copy the actual audio file to an owned
+    staging file in output_dir. Publish with a no-replace hard link only after
+    the copy closes successfully and the final path passes mutating admission
+    again. A destination created meanwhile is preserved and raises FileExistsError.
+    Failed or interrupted copies leave no cache file. Staging writes, hard-link
+    publication and cleanup require mutating admission. Owned staging files are
+    removed after publication or failure only while still admitted; a late
+    registration retains the stage and raises PendingTransactionError.
+    This permits different filesystems without exposing selected output aliases
+    to the downloader. Replacement refusals raise PendingTransactionError;
+    download, copy and publication errors propagate.
     """
+    import shutil
+    import tempfile
+
+    from graphify.canonical_replacement import guard_output
     from graphify.security import validate_url
+
+    guard_output(output_dir, mutation=True)
     validate_url(url)  # blocks private IPs, bad schemes before yt-dlp runs
+    guard_output(output_dir, mutation=True)
     yt_dlp = _get_yt_dlp()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # yt-dlp uses %(title)s which can be long/weird — use a stable name based on URL hash
     import hashlib
     url_hash = hashlib.sha1(url.encode(), usedforsecurity=False).hexdigest()[:12]
-    out_template = str(output_dir / f"yt_{url_hash}.%(ext)s")
 
     # Check for already-downloaded file
     for ext in ('.m4a', '.opus', '.mp3', '.ogg', '.wav', '.webm'):
         candidate = output_dir / f"yt_{url_hash}{ext}"
         if candidate.exists():
+            guard_output(candidate, mutation=True)
             print(f"  cached audio: {candidate.name}")
             return candidate
 
 
     print(f"  downloading audio: {url[:80]} ...", flush=True)
-    with yt_dlp.YoutubeDL({
-        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-        'outtmpl': out_template,
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'postprocessors': [],  # no ffmpeg needed — use native audio
-    }) as ydl:
-        info = ydl.extract_info(url, download=True)
-        ext = info.get('ext', 'm4a')
-        downloaded = output_dir / f"yt_{url_hash}.{ext}"
-        if not downloaded.exists():
-            # yt-dlp may have picked a different extension
-            for p in output_dir.glob(f"yt_{url_hash}.*"):
-                downloaded = p
-                break
-        return downloaded
+    with tempfile.TemporaryDirectory(prefix="graphify-audio-") as temporary:
+        download_dir = Path(temporary)
+        out_template = str(download_dir / f"yt_{url_hash}.%(ext)s")
+        with yt_dlp.YoutubeDL({
+            'format': 'bestaudio[ext=m4a]/bestaudio/best',
+            'outtmpl': out_template,
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'postprocessors': [],  # no ffmpeg needed — use native audio
+        }) as ydl:
+            info = ydl.extract_info(url, download=True)
+            ext = info.get('ext', 'm4a')
+            downloaded = download_dir / f"yt_{url_hash}.{ext}"
+            if not downloaded.exists():
+                # yt-dlp may have picked a different extension
+                for p in download_dir.glob(f"yt_{url_hash}.*"):
+                    downloaded = p
+                    break
+        out = output_dir / downloaded.name
+        guard_output(out, mutation=True)
+        descriptor, staging_name = tempfile.mkstemp(
+            prefix=".graphify-audio-", suffix=".tmp", dir=output_dir,
+        )
+        staging = Path(staging_name)
+        try:
+            with os.fdopen(descriptor, "wb") as destination, downloaded.open("rb") as source:
+                guard_output(staging, mutation=True)
+                shutil.copyfileobj(source, destination)
+            guard_output(out, mutation=True)
+            guard_output(staging, mutation=True)
+            os.link(staging, out)
+        finally:
+            guard_output(staging, mutation=True)
+            staging.unlink(missing_ok=True)
+        return out
 
 
 def build_whisper_prompt(god_nodes: list[dict]) -> str:
@@ -125,11 +161,21 @@ def transcribe(
     If video_path is a URL, audio is downloaded first via yt-dlp.
     Returns the path to the saved transcript file.
     Uses cached transcript if it exists unless force=True.
+    Output directories and selected transcripts require mutating replacement
+    admission, including cached transcripts. Directory admission precedes creation;
+    selected transcript admission precedes cache use or model loading. Refusals
+    raise PendingTransactionError. Admission is checked again after transcription
+    and before writing; a late refusal preserves the transcript.
+    Ordinary output directories are created as needed and force=True overwrites
+    an admitted existing transcript. Download and transcription errors propagate.
 
     initial_prompt: domain hint for Whisper (built from corpus god nodes).
     force: re-transcribe even if transcript already exists.
     """
+    from graphify.canonical_replacement import guard_output
+
     out_dir = Path(output_dir) if output_dir else Path(_TRANSCRIPTS_DIR)
+    guard_output(out_dir, mutation=True)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if is_url(str(video_path)):
@@ -138,6 +184,7 @@ def transcribe(
         audio_path = Path(video_path)
 
     transcript_path = out_dir / (audio_path.stem + ".txt")
+    guard_output(transcript_path, mutation=True)
     if transcript_path.exists() and not force:
         return transcript_path
 
@@ -156,6 +203,7 @@ def transcribe(
     lines = [segment.text.strip() for segment in segments if segment.text.strip()]
     transcript = "\n".join(lines)
 
+    guard_output(transcript_path, mutation=True)
     transcript_path.write_text(transcript, encoding="utf-8")
     lang = info.language if hasattr(info, "language") else "unknown"
     print(f"  transcript saved -> {transcript_path} (lang={lang}, {len(lines)} segments)")
@@ -171,6 +219,8 @@ def transcribe_all(
 
     Already-transcribed files are returned from cache instantly.
     initial_prompt is shared across all files — built once from corpus god nodes.
+    Replacement refusals and other transcription errors print a warning and skip
+    that input; only successful transcript paths are returned.
     """
     if not video_files:
         return []

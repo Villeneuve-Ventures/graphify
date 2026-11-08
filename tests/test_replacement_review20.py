@@ -69,6 +69,46 @@ def test_preservation_enumeration_refuses_at_remaining_budget(tmp_path, monkeypa
     assert consumed[-1] == 3
 
 
+@pytest.mark.parametrize("journal", [[], None, "edited"])
+def test_nonobject_rollback_journal_returns_blocked_json(case, modeled, tmp_path, capsys, journal):
+    request, _ = case
+    Path(request["journal"]).write_text(json.dumps(journal))
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+    quarantine = Path(request["journal"]).parent / "quarantine"
+    before = Path(request["journal"]).read_bytes()
+    result = replacement.main(["rollback", "--request", str(request_path),
+                               "--journal-sha256", replacement._sha(before), "--quarantine", str(quarantine)])
+    assert result == 1
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "object" in response["error"]
+    assert Path(request["journal"]).read_bytes() == before
+    assert not quarantine.exists()
+    assert not (quarantine.parent / replacement.GUARD).exists()
+
+
+@pytest.mark.parametrize("journal", [[], None, "edited"])
+def test_nonobject_execute_journal_returns_blocked_json(case, modeled, tmp_path, capsys, journal):
+    request, fragments = case
+    seal = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, seal)
+    Path(request["stage"]).write_bytes(replacement._bytes(seal))
+    Path(request["journal"]).write_text(json.dumps(journal))
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(replacement._bytes(request))
+    before = Path(request["journal"]).read_bytes()
+    result = replacement.main(["execute", "--request", str(request_path),
+                               "--preview-sha256", plan["preview_sha256"]])
+    assert result == 1
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "object" in response["error"]
+    assert Path(request["journal"]).read_bytes() == before
+    assert not Path(request["archive"]).exists()
+    assert not list(Path(request["journal"]).parent.glob(".replacement-container-*"))
+
+
 @pytest.mark.parametrize("failure", ["device", "mount"])
 def test_preview_refuses_mounted_output_without_effects(case, monkeypatch, failure):
     request, fragments = case
