@@ -530,12 +530,17 @@ def _publish(cap, claim, payloads, deadline, failpoint, root_capability):
 
 
 def execute(request, preview_sha256, *, failpoint=None):
+    """Restore an approved checkpoint into an absent, admitted destination.
+
+    The destination parent requires mutating admission before directory creation;
+    a registered archive refuses before any child is created.
+    """
     _require(_hex(preview_sha256), "invalid restore preview digest")
     deadline = time.monotonic() + 120
     with authority.open_store() as store:
         request, _, _ = _request(request)
         output = Path(request["output"])
-        with tx.pin_output(output.parent, mutation=False) as parent, _locked(parent, deadline):
+        with tx.pin_output(output.parent) as parent, _locked(parent, deadline):
             plan, fingerprint, checkpoint, payloads = _plan(store, request, deadline, require_absent=True)
             _require(fingerprint == preview_sha256, "restore preview changed")
             with _pinned_root(plan) as root_capability:

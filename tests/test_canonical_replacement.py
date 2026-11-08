@@ -63,6 +63,12 @@ def modeled(monkeypatch):
     monkeypatch.setattr(replacement, "_maintenance", fixture_maintenance)
 
 
+def test_malformed_guard_is_fail_closed(tmp_path):
+    (tmp_path / replacement.GUARD).write_text('{"schema":1,"entries":{"graphify-out":{}}}')
+    with pytest.raises(tx.PendingTransactionError, match="malformed"):
+        replacement.guard_output(tmp_path / "graphify-out")
+
+
 def test_external_evidence_cannot_overlap_policy_root(case):
     request, fragments = case
     request["extra_roots"] = [{"label": "policy", "path": str(Path(request["archive"]).parent)}]

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import plistlib
 from subprocess import CompletedProcess
+import sys
 from uuid import uuid4
 
 import networkx as nx
@@ -321,13 +322,17 @@ def test_directory_admission_opens_scale_linearly(tmp_path, monkeypatch):
 
     def counted_open(*args, **kwargs):
         nonlocal calls
-        calls += 1
+        # Measure the workspace traversal, not the replacement guard's separate
+        # bounded ancestor walk through the same shared os module.
+        if sys._getframe(1).f_code.co_filename == guard.__file__:
+            calls += 1
         return real_open(*args, **kwargs)
 
     monkeypatch.setattr(guard.os, "open", counted_open)
     with guard.ordinary_directory(shallow):
         pass
     shallow_calls = calls
+    assert shallow_calls > 0
     calls = 0
     with guard.ordinary_directory(deep):
         pass
@@ -646,6 +651,7 @@ def test_historical_workspace_probe_stops_at_first_matching_entry(tmp_path, monk
     for index in range(20):
         (workspaces / f"unrelated-{index}").mkdir()
     real_scandir = guard.os.scandir
+    workspace_identity = (workspaces.stat().st_dev, workspaces.stat().st_ino)
     entries_seen = 0
 
     class CountedScan:
@@ -669,7 +675,15 @@ def test_historical_workspace_probe_stops_at_first_matching_entry(tmp_path, monk
             entries_seen += 1
             return next(self.entries)
 
-    monkeypatch.setattr(guard.os, "scandir", lambda path: CountedScan(real_scandir(path)))
+    def count_workspace_scan(path):
+        scan = real_scandir(path)
+        if isinstance(path, int):
+            info = os.fstat(path)
+            if (info.st_dev, info.st_ino) == workspace_identity:
+                return CountedScan(scan)
+        return scan
+
+    monkeypatch.setattr(guard.os, "scandir", count_workspace_scan)
     with pytest.raises(ManagedWorkspaceOutputError):
         guard.require_ordinary_output(root / "output")
     assert entries_seen == 1
