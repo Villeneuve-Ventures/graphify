@@ -1,4 +1,5 @@
 """Bounded replay admission and retained-object reporting on fixture roots."""
+import json
 from pathlib import Path
 
 import pytest

@@ -1,5 +1,8 @@
 """Malformed fragments and synthetic portability evidence use disposable inputs."""
 import os
+from pathlib import Path
+import runpy
+import sys
 from types import SimpleNamespace
 
 import pytest
