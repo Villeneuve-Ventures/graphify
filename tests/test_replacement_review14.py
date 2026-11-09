@@ -1,12 +1,9 @@
 """Profile cardinality and guard modes use disposable, synthetic custody fixtures."""
 import base64
 import json
-import os
 
-import pytest
 
 from graphify import canonical_replacement as replacement
-from graphify import transaction as tx
 from tests.test_canonical_replacement import case as case
 from tests.test_replacement_guard_issuers import protected_policy as protected_policy
 

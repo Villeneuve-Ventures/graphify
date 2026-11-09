@@ -1,6 +1,5 @@
 """Bounded coordinator regressions use disposable files and modeled metadata."""
 import contextlib
-import json
 import os
 import stat
 from pathlib import Path
