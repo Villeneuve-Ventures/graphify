@@ -1,8 +1,6 @@
 """Fragment nesting admission uses disposable inputs and never live maintenance."""
 import json
 from pathlib import Path
-import subprocess
-import sys
 
 import pytest
 

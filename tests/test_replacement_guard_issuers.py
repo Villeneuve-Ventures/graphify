@@ -1,14 +1,11 @@
 """Synthetic issuer metadata and disposable files; no foreign accounts or native probes."""
 import os
-import json
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from graphify import canonical_replacement as replacement
 from graphify import replacement_guard_issuers as issuers
-from graphify import transaction as tx
 
 
 @pytest.fixture

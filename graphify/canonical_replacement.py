@@ -13,8 +13,6 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import stat
-import time
-import unicodedata
 from typing import cast
 
 from . import legacy_source as source
@@ -291,8 +289,11 @@ def build_data(raw, fragments, *, _source_output=None):
     """Read fresh AST and host-Codex fragments without providers or caches.
 
     Fragment containers must be lists; node records, IDs and source ownership
-    are checked before iteration, hashing or membership operations. Complete
-    fragment values admit at most 128 nested containers, counting the outer list
+    are checked before iteration, hashing or membership operations. Semantic
+    nodes require text labels. Cross-source ownership is checked again using
+    the builder's canonical IDs before graph insertion; same-source merges
+    remain allowed. Complete fragment values admit at most 128 nested containers,
+    counting the outer list
     as one. This iterative check precedes recursive composition and serialization,
     including for extra metadata retained in the seal. Edge and
     hyperedge records use their respective host-rubric relations and confidence
@@ -306,7 +307,7 @@ def build_data(raw, fragments, *, _source_output=None):
     does not publish filesystem authority.
     """
     import copy
-    from .build import _hashable, build_from_json
+    from .build import _hashable, _semantic_id_remap, build_from_json
     from .detect import detect
     from .extract import extract
     request, structural = _request(raw)
@@ -332,8 +333,8 @@ def build_data(raw, fragments, *, _source_output=None):
         _admit_fragment_nesting(fragments)
         nodes, edges, hyperedges, covered = [], [], [], set()
         owners = {}
-        def admit_identity(node):
-            identity = node.get("id")
+        def admit_identity(node, identity=None):
+            identity = node.get("id") if identity is None else identity
             location = node.get("source_file", "")
             if location:
                 location = str(Path(location).relative_to(root)) if Path(location).is_absolute() else location
@@ -368,6 +369,7 @@ def build_data(raw, fragments, *, _source_output=None):
                      "semantic coverage is incomplete")
             for node in part_nodes:
                 admit_identity(node)
+                _require(isinstance(node.get("label"), str), "invalid semantic node label")
                 _require(isinstance(node.get("file_type"), str)
                          and node["file_type"] in {"document", "paper", "image", "concept", "rationale"},
                          "invalid semantic file type")
@@ -392,7 +394,14 @@ def build_data(raw, fragments, *, _source_output=None):
             hyperedges.extend(part_groups)
             covered.update(hashes)
         _require(covered == set(semantic), "selected semantic inputs are incomplete")
-        graph = build_from_json(copy.deepcopy({"nodes": ast["nodes"] + nodes, "edges": ast["edges"] + edges,
+        all_nodes = ast["nodes"] + nodes
+        # The compatibility builder rekeys semantic IDs before inserting nodes.
+        # Check that exact namespace before insertion can overwrite an owner.
+        rekey = _semantic_id_remap(all_nodes, str(root))
+        owners.clear()
+        for node in all_nodes:
+            admit_identity(node, rekey.get(node["id"], node["id"]))
+        graph = build_from_json(copy.deepcopy({"nodes": all_nodes, "edges": ast["edges"] + edges,
                                  "hyperedges": hyperedges}), directed=request["directed"], root=root)
         _require(graph.number_of_nodes() > 0, "empty replacement graph")
         _require(len(graph.graph.get("hyperedges", [])) == len(hyperedges),

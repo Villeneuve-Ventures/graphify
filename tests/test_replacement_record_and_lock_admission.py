@@ -1,5 +1,4 @@
 """Bounded regressions for replacement review findings, using modeled fixtures."""
-import copy
 import json
 from pathlib import Path
 import shutil

@@ -1,6 +1,4 @@
 """Focused replacement repairs on disposable fixtures and modeled maintenance."""
-from contextlib import contextmanager
-import json
 from pathlib import Path
 
 import pytest
