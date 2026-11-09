@@ -10,7 +10,7 @@ from graphify import canonical_replacement as replacement
 from graphify import checkpoint_restore as recovery
 from graphify import storage_guard as storage
 from graphify import transaction as tx
-from tests.test_checkpoint_restore import fixture as restore_case, modeled as modeled
+from tests.test_checkpoint_restore import fixture as fixture, modeled as modeled
 from tests.test_replacement_guard_issuers import protected_policy as protected_policy
 
 
@@ -102,8 +102,8 @@ def test_ordinary_write_rechecks_registration_after_open(
 @pytest.mark.parametrize("role", ["archive", "target"])
 @pytest.mark.parametrize("registration_time", ["before-execute", "after-lock"])
 def test_checkpoint_restore_refuses_registered_slot_before_directory_creation(
-        restore_case, protected_policy, monkeypatch, role, registration_time):
-    store, _root, original, request, _approved = restore_case
+        fixture, protected_policy, monkeypatch, role, registration_time):
+    store, _root, original, request, _approved = fixture
     output = Path(request["output"])
     fingerprint = recovery.preview(request)["preview_sha256"]
     real_locked = recovery._locked
