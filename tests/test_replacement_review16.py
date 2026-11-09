@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from graphify import build
 from graphify import canonical_replacement as replacement
 from tests.test_canonical_replacement import case as case
 from tests.test_replacement_review12 import _assert_cli_refusal

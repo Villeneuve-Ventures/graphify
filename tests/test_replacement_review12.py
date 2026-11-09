@@ -1,4 +1,5 @@
 """Malformed fragments and synthetic portability evidence use disposable inputs."""
+import json
 import os
 from pathlib import Path
 import runpy
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from graphify import canonical_replacement as replacement
 from graphify import replacement_guard_issuers as issuers
 from tests.test_canonical_replacement import case as case
 from tests.test_replacement_guard_issuers import protected_policy as protected_policy
