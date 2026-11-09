@@ -1,4 +1,5 @@
 """Bounded regressions for replacement review findings, using modeled fixtures."""
+import copy
 from pathlib import Path
 
 import pytest
