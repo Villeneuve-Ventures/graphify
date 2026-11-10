@@ -214,6 +214,101 @@ def test_entitlements_have_only_the_explicit_task_directory(tmp_path):
                           [str(tmp_path.resolve()) + "/"]}
 
 
+def test_case_equivalent_graph_ancestry_refuses_without_mutation(tmp_path):
+    graph = tmp_path / "GRAPHIFY-OUT"
+    graph.mkdir()
+    candidate = graph / "new-probe"
+    with pytest.raises(probe.ProbeError, match="graph output"):
+        probe.validate_output_root(candidate)
+    assert list(graph.iterdir()) == []
+
+
+@pytest.mark.parametrize("identity", ["same", "distinct", "unreadable"])
+def test_checkout_alias_admission_uses_physical_identity(tmp_path, monkeypatch, identity):
+    source = tmp_path / "source"
+    source.mkdir()
+    alias = tmp_path / "SOURCE"
+    if not alias.exists():
+        alias.mkdir()
+    monkeypatch.setattr(probe, "REPOSITORY", source)
+    original_samefile = Path.samefile
+
+    def samefile(path, other):
+        # Model both APFS variants without depending on the host's case mode.
+        if path == alias and other == source:
+            if identity == "unreadable":
+                raise OSError(errno.EACCES, "identity unavailable")
+            return identity == "same"
+        return original_samefile(path, other)
+
+    monkeypatch.setattr(Path, "samefile", samefile)
+    candidate = alias / "new-probe"
+    if identity == "distinct":
+        assert probe.validate_output_root(candidate) == candidate
+    else:
+        with pytest.raises(probe.ProbeError, match="checkout|identity"):
+            probe.validate_output_root(candidate)
+    assert not candidate.exists()
+    assert list(source.iterdir()) == []
+
+
+@pytest.mark.parametrize("field,value", [
+    ("wrote", None), ("wrote", 0), ("count", 32), ("count", -1),
+    ("count", True), ("marker_observed", True),
+])
+def test_contradictory_write_denial_is_not_a_valid_observation(evidence, field, value):
+    evidence["receiver_write"] = {"wrote": False, "count": 0, "errno": errno.EPERM}
+    evidence["after_sha256"] = evidence["before_gate_sha256"]
+    evidence["marker_observed"] = False
+    if field == "marker_observed":
+        evidence[field] = value
+    else:
+        evidence["receiver_write"][field] = value
+    before = deepcopy(evidence)
+    with pytest.raises(probe.ProbeError):
+        probe.classify_case(evidence, sandboxed=True)
+    assert evidence == before
+
+
+def test_denied_export_cannot_report_a_receiver_write_count(evidence):
+    evidence["sender_sent"] = {"sent": False, "errno": errno.EPERM}
+    evidence["receiver_received"]["received"] = False
+    evidence["receiver_write"] = {"wrote": False, "count": 32, "errno": 0}
+    evidence["after_sha256"] = evidence["before_gate_sha256"]
+    evidence["marker_observed"] = False
+    with pytest.raises(probe.ProbeError, match="valid denial"):
+        probe.classify_case(evidence, sandboxed=True)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("coordinator_reaped", {}), ("coordinator_reaped", None),
+    ("sender_ready", []), ("receiver_received", {"received": True}),
+    ("receiver_write", None), ("order", None),
+])
+def test_nested_malformed_evidence_uses_documented_exception(evidence, field, value):
+    evidence[field] = value
+    before = deepcopy(evidence)
+    with pytest.raises(probe.ProbeError):
+        probe.classify_case(evidence, sandboxed=True)
+    assert evidence == before
+
+
+def test_unhashable_cleanup_role_uses_documented_exception(evidence):
+    evidence["cleanup"][0]["role"] = []
+    with pytest.raises(probe.ProbeError):
+        probe.classify_case(evidence, sandboxed=True)
+
+
+@pytest.mark.parametrize("field", ["count", "marker_length"])
+def test_malformed_write_measurements_use_documented_exception(evidence, field):
+    if field == "count":
+        evidence["receiver_write"][field] = "32"
+    else:
+        evidence[field] = None
+    with pytest.raises(probe.ProbeError):
+        probe.classify_case(evidence, sandboxed=True)
+
+
 def test_read_only_verifier_rejects_a_writable_descriptor(tmp_path):
     path = tmp_path / "canary"
     path.write_bytes(b"test")

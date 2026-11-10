@@ -65,15 +65,23 @@ def _read_verifier(fd: int) -> bytes:
 def validate_output_root(value: Path) -> Path:
     """Resolve a fresh external fixture location without creating or changing it.
 
-    Existing destinations, graphify-out ancestry and source-checkout overlap
-    refuse with ProbeError. Parent resolution handles macOS /var aliases.
+    Existing destinations, case-equivalent graphify-out components and physical
+    source-checkout overlap refuse with ProbeError. Parent resolution handles
+    symlinks and macOS /var aliases; uncertain ancestry also refuses. No paths
+    are created and no volume-wide case-sensitivity assumption is made.
     """
     _require(value.is_absolute(), "absolute output root required")
-    parent = value.parent.resolve(strict=True)
+    try:
+        parent = value.parent.resolve(strict=True)
+        overlaps_checkout = any(ancestor.samefile(REPOSITORY)
+                                for ancestor in (parent, *parent.parents))
+    except OSError as exc:
+        raise ProbeError("fixture ancestry identity unavailable") from exc
     target = parent / value.name
     _require(not os.path.lexists(value) and not os.path.lexists(target), "output root must be absent")
-    _require("graphify-out" not in target.parts, "graph output cannot be a probe fixture")
-    _require(not target.is_relative_to(REPOSITORY) and not REPOSITORY.is_relative_to(target),
+    _require(not any(part.casefold() == "graphify-out" for part in target.parts),
+             "graph output cannot be a probe fixture")
+    _require(not overlaps_checkout,
              "probe output must be external to the source checkout")
     return target
 
@@ -88,9 +96,11 @@ def entitlements_for(allowed: Path) -> dict[str, Any]:
 def classify_case(case: dict[str, Any], *, sandboxed: bool) -> str:
     """Validate recorded ordering and effects, then classify this one diagnostic.
 
-    The records are evidence inputs, not authority. Missing actor retirement,
-    wrong file identity, invalid controls or contradictory effects raise
-    ProbeError. A blocked observation is limited to this exact route/profile.
+    The records are evidence inputs, not authority, and are not changed here.
+    Missing or malformed records, missing actor retirement, wrong file identity,
+    invalid controls or contradictory effects raise ProbeError. Blocked writes
+    require an explicit false write flag, zero bytes and no observed marker.
+    A blocked observation is limited to this exact route/profile.
     """
     required_fields = {"sender_ready", "receiver_received", "receiver_write", "spawned", "receiver_ready",
                        "controller_pid", "coordinator_reaped", "broker_returncode", "receiver_returncode",
@@ -98,8 +108,27 @@ def classify_case(case: dict[str, Any], *, sandboxed: bool) -> str:
                        "after_sha256", "before_gate_sha256", "canary_mode_at_transfer", "verifier_read_only",
                        "verifier_access_mode", "cleanup"}
     _require(isinstance(case, dict) and required_fields <= case.keys(), "incomplete case evidence")
+    record_fields = {
+        "sender_ready": {"pid", "ppid", "pgid", "allowed_write", "allowed_errno", "outside_errno",
+                         "device", "inode"},
+        "spawned": {"broker_pid", "coordinator_pid"},
+        "receiver_ready": {"pid", "ppid", "outside_errno"},
+        "receiver_received": {"received", "device", "inode", "access_mode", "pathname_errno"},
+        "sender_sent": {"sent", "errno"},
+        "receiver_write": {"wrote", "count", "errno"},
+        "coordinator_reaped": {"coordinator_pid", "returncode"},
+    }
+    for name, fields in record_fields.items():
+        _require(isinstance(case[name], dict) and fields <= case[name].keys(),
+                 "incomplete or malformed case record: " + name)
     ready, received, write = case["sender_ready"], case["receiver_received"], case["receiver_write"]
     spawned, receiver = case["spawned"], case["receiver_ready"]
+    for record, field in ((ready, "outside_errno"), (received, "pathname_errno"),
+                          (case["sender_sent"], "errno"), (write, "errno")):
+        _require(type(record[field]) is int, "malformed errno evidence")
+    _require(type(write["count"]) is int and write["count"] >= 0
+             and type(case["marker_length"]) is int and case["marker_length"] > 0,
+             "malformed write measurements")
     _require(ready["pid"] == spawned["coordinator_pid"] and ready["ppid"] == spawned["broker_pid"]
              and ready["pgid"] == spawned["broker_pid"], "sender ancestry differs")
     _require(receiver["pid"] != spawned["broker_pid"] and receiver["ppid"] == case["controller_pid"]
@@ -117,7 +146,8 @@ def classify_case(case: dict[str, Any], *, sandboxed: bool) -> str:
              and case["receiver_returncode"] == 0, "exact actor retirement missing")
     cleanup = case["cleanup"]
     _require(isinstance(cleanup, list) and len(cleanup) == 3
-             and all(isinstance(item, dict) and "error" not in item for item in cleanup),
+             and all(isinstance(item, dict) and isinstance(item.get("role"), str)
+                     and "error" not in item for item in cleanup),
              "actor cleanup incomplete or uncertain")
     retired = {item.get("role"): item for item in cleanup}
     _require(set(retired) == {"broker", "receiver", "coordinator"}, "actor cleanup roles differ")
@@ -129,6 +159,8 @@ def classify_case(case: dict[str, Any], *, sandboxed: bool) -> str:
              and retired["coordinator"].get("returncode") == -signal.SIGKILL,
              "actor cleanup identity or wait result differs")
     order = case["order"]
+    _require(isinstance(order, list) and all(isinstance(item, str) for item in order),
+             "malformed event order")
     required = ["canary_pathname_revoked", "coordinator_reaped", "broker_reaped",
                 "receiver_gate_released", "receiver_write", "observation_recorded", "canary_mode_restored"]
     _require(all(order.count(name) == 1 for name in required)
@@ -148,11 +180,14 @@ def classify_case(case: dict[str, Any], *, sandboxed: bool) -> str:
                      and case["after_sha256"] != case["before_gate_sha256"],
                      "receiver write effect is unproved")
             return "fd-write-after-death"
-        _require(write["errno"] in DENIALS and case["after_sha256"] == case["before_gate_sha256"],
+        _require(write["wrote"] is False and write["count"] == 0
+                 and case["marker_observed"] is False
+                 and write["errno"] in DENIALS and case["after_sha256"] == case["before_gate_sha256"],
                  "post-death write failed for an unrelated reason")
         return "write-blocked-observation"
     _require(sent["sent"] is False and sent["errno"] in DENIALS
              and received["received"] is False and write["wrote"] is False
+             and write["count"] == 0 and write["errno"] == 0
              and case["marker_observed"] is False
              and case["after_sha256"] == case["before_gate_sha256"],
              "FD export failed without valid denial evidence")

@@ -63,8 +63,10 @@ container was selected or removed.
 
 These hashes identify the original measured inputs. Subsequent runner changes
 retain diagnostics on command timeout or launch failure and were checked with
-mocked commands only. The native experiment was not rerun; the retained failed
-counterexample remains bound to the original source hashes above.
+mocked commands only. Later fixture-admission and evidence-validation repairs
+are covered by pure regression tests. The native experiment was not rerun;
+the retained failed counterexample remains bound to the original source hashes
+above. These repairs supply no new native qualification.
 
 The machine-local retention packet is
 `graphify-app-sandbox-fd-probe-20261102-01a18acd`, with `native-01/receipt.json`,
