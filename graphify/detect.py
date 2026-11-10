@@ -1583,6 +1583,10 @@ def save_manifest(
     supplied ``files``. Existing entries are still consulted for complementary
     hash fields on supplied rows, but no untouched row is seeded into the new
     manifest. The default preserves the historical subset/full-scan behavior.
+
+    Replacement mutation admission precedes parent creation and the final write.
+    Refusal raises PendingTransactionError and leaves the selected manifest
+    unchanged. This is a preflight check, not concurrent-writer exclusion.
     """
     existing = load_manifest(manifest_path, root=root)
 
