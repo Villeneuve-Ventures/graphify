@@ -1742,8 +1742,9 @@ def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
     """Remove graphify from every platform detected in the current project.
 
     With purge, delete the project's configured output after ordinary mutation
-    admission. Protected workspace or retained replacement archives refuse the
-    deletion, including through aliases; earlier integration removal can remain.
+    admission and refuse replacement registrations or recovery evidence anywhere
+    in its subtree. Protected workspace or retained replacement archive paths
+    refuse deletion, including aliases; earlier integration removal can remain.
     """
     pd = project_dir or Path(".")
     print("Uninstalling graphify from all detected platforms...\n")
@@ -1778,12 +1779,11 @@ def uninstall_all(project_dir: Path | None = None, purge: bool = False) -> None:
             print(result)
 
     if purge:
-        import shutil as _shutil
         out = pd / _GRAPHIFY_OUT
         if out.exists():
             from graphify.storage_guard import require_ordinary_output
             require_ordinary_output(out)
-            _shutil.rmtree(out)
+            _remove_install_tree(out)
             print(f"\n  {_GRAPHIFY_OUT}/  ->  deleted (--purge)")
         else:
             print(f"\n  {_GRAPHIFY_OUT}/  ->  not found (nothing to purge)")
