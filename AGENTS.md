@@ -72,6 +72,21 @@ external environment requires its Python plus explicit `VALIDATION_ENVIRONMENT`
 selection; ambient uv overrides cannot select it. See
 [validation routing](docs/validation-routing.md) for admission and setup rules.
 
+## Pull request bodies
+
+Use [.github/pull_request_template.md](.github/pull_request_template.md) as the
+canonical starting text when creating a PR or replacing its body, including
+CLI and connector writes. Follow the [body preparation procedure](README.md#pull-request-bodies)
+and run `python3 -I -S -B tools/pr_body.py --body-file <file>` on the completed
+text. Use `--draft` only to record explicitly pending local evidence.
+Preserve historical receipts when updating an existing description.
+
+The body check verifies structure, not truth, test passage or permission to skip
+a required gate. Keep validation evidence and justified omissions explicit.
+Dependabot's generated-body exception does not waive its separate CI admission
+or review. PR-Agent description commands publish suggestions in comments; do
+not override comment mode to replace the author-maintained body.
+
 ## Local resource retention
 
 Follow [the local resource retention rule](docs/local-resource-retention.md) when

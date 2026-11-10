@@ -45,6 +45,7 @@ jobs:
             import json
             import os
             import re
+            import shlex
             import sys
             from pathlib import Path
 
@@ -53,6 +54,23 @@ jobs:
             body = event.get('comment', {}).get('body', '')
             if re.match(r'^/review(?=\s|$)', body, re.IGNORECASE):
                 sys.exit(0)
+            # Match the pinned upstream lexer and action normalization. Parse
+            # remaining arguments only for description commands.
+            lexer = shlex.shlex(body, posix=True)
+            lexer.whitespace_split = True
+            lexer.quotes = chr(34)  # Upstream recognizes only double quotes.
+            lexer.commenters = ''
+            try:
+                action = next(lexer, '').lstrip('/').lower()
+                if action in ('describe', 'describe_pr'):
+                    if list(lexer):
+                        sys.exit('Description commands accept no arguments; edit the PR body manually.')
+                    event['comment']['body'] = (
+                        '/describe --pr_description.publish_description_as_comment=true'
+                    )
+                    event_path.write_text(json.dumps(event), encoding='utf-8')
+            except ValueError:
+                sys.exit('Invalid command quoting; no PR-Agent command was run.')
             match = re.match(r'^/prreview(?=\s|$)', body, re.IGNORECASE)
             if match:
                 event['comment']['body'] = '/review' + body[match.end():]

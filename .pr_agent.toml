@@ -10,3 +10,7 @@ temperature = 1.0
 # Space large reviews across repositories sharing the Google project.
 max_model_tokens = 265536
 max_output_tokens = 65536
+
+# Keep generated suggestions outside the author-maintained PR body.
+[pr_description]
+publish_description_as_comment = true
