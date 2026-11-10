@@ -378,3 +378,91 @@ def test_ordinary_full_dispatch_is_unchanged():
     classification = route.Classification(route.FULL, (), ())
     commands = route.build_plan(classification, "HEAD", False, None, 1)
     assert len(commands) == 1 and commands[0].argv[-1] == "review-ready"
+
+
+@pytest.mark.parametrize("source", ["checkout", "environment"])
+def test_git_reads_do_not_execute_fsmonitor(case, monkeypatch, source):
+    repo = Path(json.loads(Path(case[3]["focused_result"]["path"]).read_text())["checkout"])
+    marker = case[1].with_name("fsmonitor-ran")
+    hook = case[1].with_name("fsmonitor-hook")
+    hook.write_text(f"#!/bin/sh\ntouch '{marker}'\nprintf 'token\\0'\n")
+    hook.chmod(0o700)
+    if source == "checkout":
+        git(repo, "config", "core.fsmonitor", str(hook))
+    else:
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.fsmonitor")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(hook))
+    assert verify(case)["status"] == "complete"
+    assert not marker.exists()
+
+
+@pytest.fixture
+def stacked_case(case, tmp_path):
+    """Add a second feature prefix with real retained proof and parent cleanup."""
+    root, _, data, first = case
+    second = copy.deepcopy(first)
+    second.update(pr=278, old_base=first["old_head"], base=first["head"])
+    for label, parent in [("original", second["old_base"]), ("candidate", second["base"])]:
+        git(root, "checkout", "--detach", parent)
+        (root / "feature.py").write_text("VALUE = 2\n")
+        git(root, "add", ".")
+        git(root, "commit", "-qm", "second feature")
+        ref = git(root, "rev-parse", "HEAD")
+        second["old_head" if label == "original" else "head"] = ref
+        repo = tmp_path / ("second-" + label)
+        subprocess.run(["git", "clone", "-q", str(root), str(repo)], check=True)
+        install(repo, tmp_path / "python3.14")
+        key = "full_result" if label == "original" else "focused_result"
+        result = json.loads(Path(first[key]["path"]).read_text())
+        result.update(head=ref, base=parent, tree=git(root, "rev-parse", "HEAD^{tree}"),
+                      checkout=str(repo), checkout_identity=gate.identity(repo),
+                      venv_identity=gate.identity(repo / ".venv"))
+        if label == "original":
+            log = tmp_path / "second-full.log"
+            old_repo = json.loads(Path(first[key]["path"]).read_text())["checkout"]
+            log.write_text(Path(first["full_log"]["path"]).read_text().replace(old_repo, str(repo)))
+            result.update(make_log_sha256=gate.sha256(log.read_bytes()),
+                          command=["make", f"PYTHON={repo}/.venv/bin/python",
+                                   f"BASE={parent}", "fast-feedback"])
+            second["full_log"] = bind(log)
+        else:
+            for binding in result["import_bindings"]:
+                binding.update(prefix=str(repo / ".venv"), package=str(repo / "graphify/__init__.py"),
+                               direct_url={"url": repo.as_uri(), "dir_info": {"editable": True}})
+            result["command"][0] = str(repo / ".venv/bin/python")
+        second[key] = save(tmp_path / ("second-" + key + ".json"), result)
+    second["delta_sha256"] = gate.sha256(gate.delta(root, second["old_head"], second["head"]))
+    second["parent_delta_sha256"] = gate.sha256(gate.delta(root, second["old_base"], second["base"]))
+    assert second["parent_delta_sha256"] != gate.sha256(b"")
+    data["rows"].append(second)
+    return case
+
+
+def test_two_prefix_stack_reuses_dependency_cache(stacked_case, monkeypatch):
+    real = gate.dependency_inventory
+    caches = []
+
+    def observe(repo, deadline, cache):
+        caches.append(cache)
+        return real(repo, deadline, cache)
+
+    monkeypatch.setattr(gate, "dependency_inventory", observe)
+    receipt = verify(stacked_case)
+    assert receipt["status"] == "complete"
+    assert [row["pr"] for row in receipt["prefixes"]] == [277, 278]
+    assert receipt["reused_test_executions"] == 14
+    assert receipt["executed_test_runs"] == receipt["full_gate_launches"] == 0
+    assert len(caches) == 8 and all(cache is caches[0] for cache in caches)
+    assert caches[0]
+
+
+@pytest.mark.parametrize("mutation", ["reordered", "parent-digest"])
+def test_two_prefix_stack_refuses_invalid_chain(stacked_case, mutation):
+    rows = stacked_case[2]["rows"]
+    if mutation == "reordered":
+        rows.reverse()
+    else:
+        rows[1]["parent_delta_sha256"] = "0" * 64
+    with pytest.raises(gate.ProofRefused, match="first prefix|unreviewed cleanup delta"):
+        verify(stacked_case)

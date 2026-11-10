@@ -58,22 +58,25 @@ def canonical(value: object) -> bytes:
 
 
 def git(root: Path, *args: str) -> bytes:
-    """Read physical Git state without optional locks or object replacements."""
+    """Read physical Git state with fsmonitor hooks, optional locks and replacements disabled."""
     env = git_environment()
     env["GIT_NO_REPLACE_OBJECTS"] = "1"
     return subprocess.check_output(
-        ["git", "--no-optional-locks", "--no-pager", "-C", str(root), *args],
+        ["git", "--no-optional-locks", "--no-pager", "-c", "core.fsmonitor=false",
+         "-C", str(root), *args],
         env=env, stderr=subprocess.PIPE, timeout=20,
     )
 
 
 def identity(path: Path) -> dict:
+    """Return device, inode and owner for a retained non-symlink directory."""
     info = path.stat()
     require(not path.is_symlink(), f"aliased retained directory: {path}")
     return {"device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid}
 
 
 def checked_file(binding: dict) -> bytes:
+    """Read an absolute, non-symlink evidence file and require its pinned digest."""
     path = Path(binding["path"])
     require(path.is_absolute() and not path.is_symlink(), f"invalid evidence path: {path}")
     data = path.read_bytes()
@@ -189,6 +192,10 @@ own unhashed entry carry no installed-payload assertion.
 
 
 def check_checkout(result: dict) -> Path:
+    """Require the recorded clean checkout, environment identity and editable origin.
+
+    Return its absolute path; read Git and metadata without running its Python.
+    Missing files or Git errors propagate; mismatched proof raises ProofRefused."""
     repo = Path(result["checkout"])
     require(repo.is_absolute() and repo.resolve() == repo, "aliased retained checkout")
     require(git(repo, "rev-parse", "--show-toplevel").decode().strip() == str(repo), "foreign Git root")
@@ -210,6 +217,7 @@ def check_checkout(result: dict) -> Path:
 
 
 def check_bindings(bindings: list, repo: Path) -> None:
+    """Require both recorded import observations to name the retained environment."""
     require(len(bindings) == 2, "normal and isolated import proof required")
     for binding in bindings:
         url = urlparse(binding["direct_url"]["url"])
@@ -230,6 +238,11 @@ def check_interpreter(row: dict, old_repo: Path, new_repo: Path) -> None:
 
 
 def check_row(root: Path, row: dict, deadline: float, cache: dict) -> dict:
+    """Verify one retained full baseline and reviewed cleanup; return prefix proof.
+
+    Read bound files, Git objects and installed payloads without running tests.
+    Reuse the caller's payload cache across rows until the monotonic deadline.
+    Refuse mismatched proof; file, parse and subprocess errors propagate."""
     full_raw = checked_file(row["full_result"])
     focused_raw = checked_file(row["focused_result"])
     full, focused = json.loads(full_raw), json.loads(focused_raw)
