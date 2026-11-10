@@ -386,6 +386,47 @@ def test_restart_cannot_erase_first_writer_history_or_reuse_a_release(operation,
         registry.restart(identity.controller)
 
 
+@pytest.mark.parametrize("controller_role", ["current", "former"])
+def test_grant_rejects_controller_incarnations_as_mutators(operation, identity, controller_role):
+    persisted = []
+    registry = registry_for(operation, identity, persisted.append)
+    if controller_role == "former":
+        handle = grant(registry, operation, identity)
+        retire(registry, handle)
+        registry.restart("controller-two")
+        candidate = replace(identity, controller="controller-two", epoch=2,
+                            mutator=identity.controller)
+    else:
+        candidate = replace(identity, mutator=identity.controller)
+    before = registry.snapshot
+    prior_persisted = list(persisted)
+
+    with pytest.raises(maintenance.MaintenanceContractError, match="incarnation"):
+        grant(registry, operation, candidate)
+
+    assert registry.snapshot is before
+    assert persisted == prior_persisted
+
+
+@pytest.mark.parametrize("mutator_role", ["active", "retired", "historical"])
+def test_restart_rejects_mutator_incarnations(operation, identity, mutator_role):
+    persisted = []
+    registry = registry_for(operation, identity, persisted.append)
+    handle = grant(registry, operation, identity)
+    if mutator_role != "active":
+        retire(registry, handle)
+    if mutator_role == "historical":
+        grant(registry, operation, replace(identity, epoch=2, mutator="mutator-two"))
+    before = registry.snapshot
+    prior_persisted = list(persisted)
+
+    with pytest.raises(maintenance.MaintenanceContractError, match="fresh controller"):
+        registry.restart(identity.mutator)
+
+    assert registry.snapshot is before
+    assert persisted == prior_persisted
+
+
 def test_retired_mutator_incarnation_cannot_be_reused(operation, identity):
     registry = registry_for(operation, identity, lambda _: None)
     handle = grant(registry, operation, identity)

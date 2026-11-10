@@ -487,6 +487,8 @@ class ModelRegistry:
 
         Require exact broker policy and explicit boundary witnesses. Unknown or
         still-live prior mutators refuse; each attempted incarnation is retained.
+        A mutator cannot reuse a controller or mutator incarnation, even after
+        exit. Incarnation reuse refuses before persistence or state changes.
         Contract errors raise MaintenanceContractError; persistence errors hold
         the attempted state and propagate without returning a handle.
         """
@@ -524,7 +526,9 @@ class ModelRegistry:
                              and operation.seal_sha256 == old.operation.seal_sha256,
                              "incomplete operation data selectors changed")
             self._require_namespace_enrollment(operation)
-            _require(identity.mutator not in old.mutator_incarnations, "mutator incarnation was already used")
+            _require(identity.mutator not in old.mutator_incarnations
+                     and identity.mutator not in old.controller_incarnations,
+                     "mutator incarnation was already used")
             candidate = ModelState(state="GRANTING", issuer_policies=old.issuer_policies,
                                    issuer_policy_sha256=old.issuer_policy_sha256, mutator_uid=old.mutator_uid,
                                    controller=old.controller,
@@ -551,11 +555,14 @@ class ModelRegistry:
         controller custody. Old operation, retirement and release evidence stays
         bound to its original incarnation; no boot identity is refreshed. This
         transition alone offers no post-restart service-release reconciliation.
+        A fresh controller cannot reuse any controller or mutator incarnation;
+        reuse refuses before persistence or state changes.
         """
         with self._lock:
             old = self._state
             _require(type(controller) is str and bool(controller)
-                     and controller not in old.controller_incarnations,
+                     and controller not in old.controller_incarnations
+                     and controller not in old.mutator_incarnations,
                      "fresh controller incarnation required")
             self._commit(replace(old, state="RECOVERY_HELD", controller=controller,
                                  controller_incarnations=(*old.controller_incarnations, controller)))
