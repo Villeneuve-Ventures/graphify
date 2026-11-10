@@ -645,6 +645,28 @@ def _guard_journal_payload(fd):
     return data
 
 
+def _admit_guard_journal_entry(fd, issuers, *, directory=False):
+    """Apply the shared reader/writer custody rule to one held journal entry."""
+    try:
+        from .hook_installation import _acl_safe
+    except ImportError as exc:
+        raise tx.PendingTransactionError("replacement guard journal ACL inspection unavailable") from exc
+    info = os.fstat(fd)
+    _require(all(hasattr(info, field) for field in ("st_uid", "st_gid", "st_nlink")),
+             "replacement guard journal identity inspection unavailable")
+    _require((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
+             and info.st_uid in issuers and not info.st_mode & 0o022
+             and (directory or (info.st_nlink == 1 and info.st_size <= MAX_BYTES)),
+             "unsafe replacement guard journal parent" if directory else
+             ("unsafe replacement guard journal (oversized)" if info.st_size > MAX_BYTES
+              else "unsafe replacement guard journal"))
+    try:
+        _require(_acl_safe(fd), "unsafe replacement guard journal ACL")
+    except (AttributeError, NotImplementedError) as exc:
+        raise tx.PendingTransactionError("replacement guard journal ACL inspection unavailable") from exc
+    return _guard_observation(info)
+
+
 @contextlib.contextmanager
 def _guard_journal(path, issuers):
     """Hold an authenticated journal observation through the guard decision.
@@ -664,38 +686,19 @@ def _guard_journal(path, issuers):
              and all(hasattr(os, flag) for flag in ("O_DIRECTORY", "O_NOFOLLOW", "O_NONBLOCK")),
              "safe replacement guard journal inspection unavailable")
     issuers = cast(frozenset[int], issuers)
-    try:
-        from .hook_installation import _acl_safe
-    except ImportError as exc:
-        raise tx.PendingTransactionError("replacement guard journal ACL inspection unavailable") from exc
-
     selected = Path(path)
     _require(selected.is_absolute() and str(selected) == path
              and selected.resolve(strict=True) == selected,
              "noncanonical replacement guard journal")
 
-    def admit(fd, *, directory=False):
-        info = os.fstat(fd)
-        _require(all(hasattr(info, field) for field in ("st_uid", "st_gid", "st_nlink")),
-                 "replacement guard journal identity inspection unavailable")
-        _require((stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode))
-                 and info.st_uid in issuers and not info.st_mode & 0o022
-                 and (directory or (info.st_nlink == 1 and info.st_size <= MAX_BYTES)),
-                 "unsafe replacement guard journal parent" if directory else "unsafe replacement guard journal")
-        try:
-            _require(_acl_safe(fd), "unsafe replacement guard journal ACL")
-        except (AttributeError, NotImplementedError) as exc:
-            raise tx.PendingTransactionError("replacement guard journal ACL inspection unavailable") from exc
-        return _guard_observation(info)
-
     with _guard_parent(selected.parent) as parent:
         _require(parent is not None, "replacement guard journal parent unavailable")
         parent = cast(tx.OutputCapability, parent)
-        parent_observation = admit(parent.fd, directory=True)
+        parent_observation = _admit_guard_journal_entry(parent.fd, issuers, directory=True)
         named = os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
         fd = os.open(selected.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent.fd)
         try:
-            observation = admit(fd)
+            observation = _admit_guard_journal_entry(fd, issuers)
             _require(observation == _guard_observation(named), "replacement guard journal replaced")
             data = _guard_journal_payload(fd)
 
@@ -703,10 +706,10 @@ def _guard_journal(path, issuers):
                 parent.validate()
                 _require(selected.parent.resolve(strict=True) == parent.path
                          and selected.resolve(strict=True) == selected
-                         and admit(parent.fd, directory=True) == parent_observation
+                         and _admit_guard_journal_entry(parent.fd, issuers, directory=True) == parent_observation
                          and _guard_observation(os.stat(selected.parent, follow_symlinks=False)) == parent_observation,
                          "replacement guard journal parent changed")
-                _require(admit(fd) == observation
+                _require(_admit_guard_journal_entry(fd, issuers) == observation
                          and _guard_observation(os.stat(selected.name, dir_fd=parent.fd,
                                                        follow_symlinks=False)) == observation,
                          "replacement guard journal changed")
@@ -1160,6 +1163,8 @@ def execute(raw, sealed, preview_sha256, *, failpoint=None):
     An unsupported state or malformed state-specific journal raises
     PendingTransactionError before guard registration or forward transitions.
     This admission follows the coordinator lock and does not authenticate history.
+    Journal custody is admitted before publishing guards. Pre-archive replay
+    pins the recorded allocation before advancing or moving the original tree.
     """
     return _execute("execute", raw, sealed, preview_sha256, failpoint=failpoint)
 
@@ -1224,6 +1229,41 @@ def _admit_forward_journal(journal):
              else owner is None, "malformed replacement owner")
 
 
+def _admit_journal_parent(request):
+    """Return issuers shared by both guard namespaces after control admission.
+
+    Reader custody rules apply before journal creation. Existing permissions
+    and ACLs are inspected, never repaired; uncertain or unsafe custody refuses.
+    """
+    from .replacement_guard_issuers import issuer_snapshot
+    issuers = None
+    with issuer_snapshot() as policy:
+        parents = {Path(request[name]).parent for name in ("output", "archive")}
+        for selected in sorted(parents, key=str):
+            with _guard_parent(selected) as cap:
+                _require(cap is not None, "replacement guard namespace parent unavailable")
+                cap = cast(tx.OutputCapability, cap)
+                admitted = policy.trusted_issuers(cap.path, (cap.identity.device, cap.identity.inode),
+                                                  selected_parent=selected)
+                issuers = admitted if issuers is None else issuers & admitted
+        _require(issuers is not None, "replacement guard issuers unavailable")
+        with tx.pin_output(Path(request["journal"]).parent) as control:
+            _require(control.identity.json() == request["parent_identities"]["control"],
+                     "replacement control parent changed")
+            _admit_guard_journal_entry(control.fd, issuers, directory=True)
+            control.validate()
+    return issuers
+
+
+def _validate_allocation_claim(capability, journal):
+    """Refuse a changed identity, claim or membership in a pinned allocation."""
+    _require(capability.identity.json() == journal["new_identity"], "replacement allocation identity changed")
+    _require(tx._list_entries(capability) == [".graphify_replacement_allocation.json"]
+             and tx._load_json(capability, ".graphify_replacement_allocation.json") == journal["allocation"],
+             "allocation claim changed")
+    capability.validate()
+
+
 def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
     import secrets
     request, _ = _request(raw)
@@ -1232,8 +1272,10 @@ def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
     _same_filesystem(request)
     with _maintenance(request), _operation(journal_path, digest) as binding, _coordinator_lock(request):
         _require(action != "resume" or journal_path.exists(), "existing replacement journal required")
+        journal_issuers = _admit_journal_parent(request)
         if journal_path.exists():
-            journal = _load(journal_path)
+            with _guard_journal(str(journal_path), journal_issuers) as recorded:
+                journal = recorded
             _require(isinstance(journal, dict), "replacement execution journal must be an object")
             _require(journal.get("request") == request and journal.get("request_digest") == digest
                      and journal.get("preview_sha256") == preview_sha256
@@ -1245,7 +1287,12 @@ def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
                        "container": None, "owner": None}
             data = _bounded_bytes(journal, reserve=_FORWARD_JOURNAL_RESERVE)
             with tx.pin_output(journal_path.parent) as journal_parent:
+                _require(journal_parent.identity.json() == request["parent_identities"]["control"],
+                         "replacement control parent changed")
+                _admit_guard_journal_entry(journal_parent.fd, journal_issuers, directory=True)
                 tx._create_bytes(journal_parent, journal_path.name, data)
+            with _guard_journal(str(journal_path), journal_issuers) as recorded:
+                _require(recorded == journal, "replacement execution journal changed")
         _admit_forward_journal(journal)
         if journal["state"] == "COMMITTED":
             _require(_identity_at(output) == journal["new_identity"] and _tree(archive) == journal["old_tree"],
@@ -1284,15 +1331,22 @@ def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
                 _bounded_bytes({**journal, "state": "ALLOCATED"},
                                reserve=tx._MAX_STATE_BYTES + _JOURNAL_TAIL_RESERVE)
                 _state(journal_path, journal, "ALLOCATED", failpoint)
-            if journal["state"] == "ALLOCATED":
-                _state(journal_path, journal, "ARCHIVE_INTENT", failpoint)
-            if journal["state"] == "ARCHIVE_INTENT":
-                _source_current(request, sealed)
-                if _identity_at(output) == journal["old_identity"] and not os.path.lexists(archive):
-                    _rename(output, archive)
-                _require(_identity_at(archive) == journal["old_identity"] and not os.path.lexists(output),
-                         "unknown archive transition")
-                _state(journal_path, journal, "OLD_ARCHIVED", failpoint)
+            if journal["state"] in {"ALLOCATED", "ARCHIVE_INTENT"}:
+                container = Path(journal["container"])
+                _require(_identity_at(container) == journal["new_identity"], "replacement allocation identity changed")
+                with _fd_locks([container], time.monotonic() + 30) as allocations:
+                    allocation_cap = allocations[0]
+                    _validate_allocation_claim(allocation_cap, journal)
+                    if journal["state"] == "ALLOCATED":
+                        _state(journal_path, journal, "ARCHIVE_INTENT", failpoint)
+                    _source_current(request, sealed)
+                    allocation_cap.validate()
+                    if _identity_at(output) == journal["old_identity"] and not os.path.lexists(archive):
+                        _rename(output, archive)
+                    _require(_identity_at(archive) == journal["old_identity"] and not os.path.lexists(output),
+                             "unknown archive transition")
+                    _state(journal_path, journal, "OLD_ARCHIVED", failpoint)
+                    allocation_cap.validate()
             if journal["state"] == "OLD_ARCHIVED":
                 _state(journal_path, journal, "INSTALL_INTENT", failpoint)
             if journal["state"] == "INSTALL_INTENT":
@@ -1365,6 +1419,11 @@ def _execute(action, raw, sealed, preview_sha256, *, failpoint=None):
 
 
 def validate_allocation(capability, binding):
+    """Admit the exact recorded allocation for generation-one transaction authority.
+
+    This read-only check requires the operation context and unchanged identity,
+    membership and claim; refusal grants no authority and repairs no state.
+    """
     context = _AUTHORITY.get()
     if context is None:
         raise tx.PendingTransactionError("allocation requires exact replacement owner")
@@ -1373,9 +1432,7 @@ def validate_allocation(capability, binding):
              and journal.get("state") == "NEW_INSTALLED"
              and capability.path == Path(journal["request"]["output"])
              and capability.identity.json() == journal["new_identity"], "allocation owner changed")
-    _require(tx._list_entries(capability) == [".graphify_replacement_allocation.json"]
-             and tx._load_json(capability, ".graphify_replacement_allocation.json") == journal["allocation"],
-             "allocation claim changed")
+    _validate_allocation_claim(capability, journal)
 
 
 def status(raw):

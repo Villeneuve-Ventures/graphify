@@ -116,6 +116,10 @@ existing safe-ACL policy. Admission is repeated after the binding read and after
 work; unsafe existing lock permissions or ACLs are refused, never repaired.
 Initial journal creation is exclusive under that lock. A different request cannot
 replace an existing winner, including a completed operation.
+Before journal creation, the control parent must satisfy the journal reader's
+owner, mode and ACL rules for both guard namespaces. The created or existing
+journal is authenticated before either target/archive guard is published;
+unsafe custody is refused without changing existing permissions.
 The control parent requires mutating admission before lock creation, so a
 registered retained archive cannot be used to create another operation's lock.
 
@@ -211,8 +215,10 @@ alone never removes issuer recognition for retained guards.
 Resume needs an existing journal under the coordinator lock, plus the exact
 request, preview, seal and state-specific physical objects. It never initializes
 a missing operation. Execute can create an operation or exactly retry one. It never
-searches for matching hashes or repairs substituted directories. Native
-publication interruption resumes under its exact recorded owner. Unknown or
+searches for matching hashes or repairs substituted directories.
+Pre-archive replay pins and locks the recorded allocation and validates its
+identity, claim and exclusive membership before advancing or moving the original.
+Native publication interruption resumes under its exact recorded owner. Unknown or
 unrecorded ownership is blocked rather than reconstructed from a token found
 on disk. Completed retries validate the native receipt and retained archive.
 After exact selector checks, forward dispatch admits the supported state and
