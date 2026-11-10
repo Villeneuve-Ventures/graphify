@@ -278,6 +278,9 @@ class ModelRegistry:
     as filesystem grants.
     A lock serializes transitions within this one model, including different
     journal slots; it does not supply cross-process or OS exclusion.
+    Persistence callbacks may read snapshots. Reentrant commits raise
+    ``MaintenanceContractError`` before the nested state is persisted or adopted;
+    if the callback propagates that refusal, the outer attempt stays held.
     """
 
     def __init__(self, target: str, enrollment: str, boot: str, runtime_sha256: str,
@@ -289,6 +292,7 @@ class ModelRegistry:
         self.target, self.enrollment, self.boot, self.runtime_sha256 = target, enrollment, boot, runtime_sha256
         self.target_binding = target_binding
         self._persist = persist
+        self._persisting = False
         self._lock = threading.RLock()
         self._state = ModelState()
         self._handle: ModelHandle | None = None
@@ -299,6 +303,9 @@ class ModelRegistry:
         return self._state
 
     def _commit(self, candidate: ModelState) -> None:
+        """Persist one transition without letting callbacks replace its attempted state."""
+        _require(not self._persisting, "reentrant maintenance persistence transition")
+        self._persisting = True
         try:
             self._persist(candidate)
         except BaseException:
@@ -306,7 +313,10 @@ class ModelRegistry:
             # attempted epoch and selection without acknowledging a grant.
             self._state = replace(candidate, state="RECOVERY_HELD")
             raise
-        self._state = candidate
+        else:
+            self._state = candidate
+        finally:
+            self._persisting = False
 
     def _current(self, handle: ModelHandle) -> ModelState:
         _require(handle is self._handle and self._state.operation == handle.operation

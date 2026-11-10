@@ -61,6 +61,80 @@ def current_for(terminal, generation=1):
                                            generation, terminal.receipt_sha256 if generation == 1 else "9" * 64)
 
 
+@pytest.mark.parametrize("catch_rejection", [True, False])
+def test_persistence_callback_cannot_grant_a_competing_journal(operation, identity, catch_rejection):
+    request = json.loads(operation.request_json)
+    request["journal"] += ".competing"
+    competing = maintenance.OperationDescriptor.from_request(
+        "execute", request, preview_sha256=operation.preview_sha256, seal_sha256=operation.seal_sha256)
+    persisted, observed, returned, rejections = [], [], [], []
+    attempted = False
+
+    def persist(candidate):
+        nonlocal attempted
+        observed.append(registry.snapshot)
+        if not attempted:
+            attempted = True
+            try:
+                returned.append(registry.grant(competing, identity))
+            except maintenance.MaintenanceContractError as error:
+                if not catch_rejection:
+                    raise
+                rejections.append(str(error))
+        persisted.append(candidate)
+
+    registry = registry_for(operation, identity, persist)
+    if catch_rejection:
+        handle = registry.grant(operation, identity)
+        assert handle.operation == operation
+        assert registry.snapshot.state == "ACTIVE"
+        assert [state.state for state in persisted] == ["GRANTING", "ACTIVE"]
+        assert all(state.operation == operation and state.epoch == identity.epoch for state in persisted)
+        assert len(rejections) == 1 and "reentrant" in rejections[0]
+        assert [state.state for state in observed] == ["HELD", "GRANTING"]
+    else:
+        with pytest.raises(maintenance.MaintenanceContractError, match="reentrant"):
+            registry.grant(operation, identity)
+        assert registry.snapshot.state == "RECOVERY_HELD"
+        assert not persisted
+        assert [state.state for state in observed] == ["HELD"]
+    assert not returned
+    assert registry.snapshot.operation == operation
+    assert registry.snapshot.identity == identity
+    assert registry.snapshot.epoch == identity.epoch
+    assert registry.snapshot.release is None
+    assert not registry.snapshot.writers_admitted
+
+
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+def test_failed_persistence_allows_a_later_exact_hold(operation, identity, failure):
+    persisted = []
+    fail_hold = True
+
+    def persist(candidate):
+        nonlocal fail_hold
+        if candidate.state == "RECOVERY_HELD" and fail_hold:
+            fail_hold = False
+            raise failure("uncertain hold acknowledgment")
+        persisted.append(candidate)
+
+    registry = registry_for(operation, identity, persist)
+    handle = registry.grant(operation, identity)
+    with pytest.raises(failure, match="uncertain hold"):
+        handle.close()
+    held = registry.snapshot
+    assert held.state == "RECOVERY_HELD"
+    assert held.operation == operation and held.identity == identity
+    assert held.epoch == identity.epoch and held.release is None
+    assert not held.writers_admitted
+
+    handle.close()
+
+    assert registry.snapshot == held
+    assert persisted[-1] == held
+    assert [state.state for state in persisted] == ["GRANTING", "ACTIVE", "RECOVERY_HELD"]
+
+
 def test_descriptor_freezes_nested_request_and_binds_every_selector(operation):
     request = json.loads(operation.request_json)
     copied = maintenance.OperationDescriptor.from_request(
