@@ -167,6 +167,68 @@ def test_failed_persistence_allows_a_later_exact_hold(operation, identity, failu
     assert [state.state for state in persisted] == ["GRANTING", "ACTIVE", "RECOVERY_HELD"]
 
 
+@pytest.mark.parametrize("trigger", ["restart", "policy-hold"])
+@pytest.mark.parametrize("nested", ["release", "admit-client"])
+@pytest.mark.parametrize("callback_fails", [False, True])
+def test_recovery_persistence_cannot_return_reentrant_approval(
+        operation, identity, trigger, nested, callback_fails):
+    armed = False
+    attempted, escaped, rejected, observed = [], [], [], []
+
+    def persist(candidate):
+        if not armed:
+            return
+        attempted.append(candidate)
+        observed.append(registry.snapshot)
+        try:
+            if nested == "release":
+                approval = registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
+            else:
+                approval = registry.admit_client(
+                    identity.runtime_sha256, current_for(terminal),
+                    current_issuer_policy_sha256=identity.issuer_policy_sha256)
+        except maintenance.MaintenanceContractError as error:
+            rejected.append(str(error))
+        else:
+            escaped.append(approval)
+        if callback_fails:
+            raise OSError("uncertain recovery acknowledgment")
+
+    registry = registry_for(operation, identity, persist)
+    handle = grant(registry, operation, identity)
+    terminal = prepare_release(registry, handle)
+    record = registry.release(handle, current_issuer_policy_sha256=identity.issuer_policy_sha256)
+    registry.admit_client(identity.runtime_sha256, current_for(terminal),
+                          current_issuer_policy_sha256=identity.issuer_policy_sha256)
+    before = registry.snapshot
+    armed = True
+
+    def request_hold():
+        if trigger == "restart":
+            registry.restart("controller-two")
+        else:
+            registry.release(handle, current_issuer_policy_sha256="8" * 64)
+
+    if callback_fails:
+        with pytest.raises(OSError, match="uncertain recovery"):
+            request_hold()
+    elif trigger == "policy-hold":
+        with pytest.raises(maintenance.MaintenanceContractError, match="issuer"):
+            request_hold()
+    else:
+        request_hold()
+    assert not escaped
+    assert len(rejected) == 1 and "reentrant" in rejected[0]
+    assert len(attempted) == 1 and attempted[0].state == "RECOVERY_HELD"
+    assert observed == [before]  # Reading the old immutable snapshot remains safe.
+    assert registry.snapshot.state == "RECOVERY_HELD"
+    assert registry.snapshot.writers_admitted
+    assert registry.snapshot.release == record
+    with pytest.raises(maintenance.MaintenanceContractError, match="not been acknowledged"):
+        registry.admit_client(identity.runtime_sha256, current_for(terminal),
+                              current_issuer_policy_sha256=identity.issuer_policy_sha256)
+
+
 def test_descriptor_freezes_nested_request_and_binds_every_selector(operation):
     request = json.loads(operation.request_json)
     copied = maintenance.OperationDescriptor.from_request(

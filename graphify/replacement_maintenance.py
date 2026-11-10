@@ -400,9 +400,10 @@ class ModelRegistry:
     simulates controller replacement without erasing its history.
     A lock serializes transitions within this one model, including different
     journal slots; it does not supply cross-process or OS exclusion.
-    Persistence callbacks may read snapshots. Reentrant commits raise
-    ``MaintenanceContractError`` before the nested state is persisted or adopted;
-    if the callback propagates that refusal, the outer attempt stays held.
+    Persistence callbacks may read snapshots. Reentrant commits, release and
+    client admission raise ``MaintenanceContractError``, including no-write
+    retries, before nested state or approval escapes. If the callback propagates
+    that refusal, the outer attempt stays held.
     """
 
     def __init__(self, target: str, enrollment: str, boot: str, runtime_sha256: str,
@@ -611,8 +612,10 @@ class ModelRegistry:
         Missing, stale or unknown complete fingerprints persist RECOVERY_HELD and
         raise MaintenanceContractError; source or receipt bytes cannot supply it.
         This call does not refresh policy or reconcile an existing hold.
+        Calls from persistence callbacks refuse even on an idempotent retry.
         """
         with self._lock:
+            _require(not self._persisting, "reentrant maintenance persistence transition")
             old = self._current(handle)
             _require(handle.identity.controller == old.controller, "retired controller cannot release service")
             self._require_current_issuers(current_issuer_policy_sha256, hold=True)
@@ -634,8 +637,11 @@ class ModelRegistry:
         custody proof. Later generations retain the released identity/origin but may
         have a new receipt. The first writer-admission bit is persisted before returning;
         a failed acknowledgment holds the target and grants no modeled launch.
+        Calls from persistence callbacks raise MaintenanceContractError even
+        when a previous client already set the writer-admission bit.
         """
         with self._lock:
+            _require(not self._persisting, "reentrant maintenance persistence transition")
             old = self._state
             _require(old.state == "RELEASED" and old.release is not None,
                      "service release has not been acknowledged")
