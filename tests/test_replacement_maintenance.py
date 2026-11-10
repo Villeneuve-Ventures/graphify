@@ -108,7 +108,7 @@ def test_persistence_callback_cannot_grant_a_competing_journal(operation, identi
         if not attempted:
             attempted = True
             try:
-                returned.append(registry.grant(competing, identity))
+                returned.append(grant(registry, competing, identity))
             except maintenance.MaintenanceContractError as error:
                 if not catch_rejection:
                     raise
@@ -117,7 +117,7 @@ def test_persistence_callback_cannot_grant_a_competing_journal(operation, identi
 
     registry = registry_for(operation, identity, persist)
     if catch_rejection:
-        handle = registry.grant(operation, identity)
+        handle = grant(registry, operation, identity)
         assert handle.operation == operation
         assert registry.snapshot.state == "ACTIVE"
         assert [state.state for state in persisted] == ["GRANTING", "ACTIVE"]
@@ -126,7 +126,7 @@ def test_persistence_callback_cannot_grant_a_competing_journal(operation, identi
         assert [state.state for state in observed] == ["HELD", "GRANTING"]
     else:
         with pytest.raises(maintenance.MaintenanceContractError, match="reentrant"):
-            registry.grant(operation, identity)
+            grant(registry, operation, identity)
         assert registry.snapshot.state == "RECOVERY_HELD"
         assert not persisted
         assert [state.state for state in observed] == ["HELD"]
@@ -151,7 +151,7 @@ def test_failed_persistence_allows_a_later_exact_hold(operation, identity, failu
         persisted.append(candidate)
 
     registry = registry_for(operation, identity, persist)
-    handle = registry.grant(operation, identity)
+    handle = grant(registry, operation, identity)
     with pytest.raises(failure, match="uncertain hold"):
         handle.close()
     held = registry.snapshot
