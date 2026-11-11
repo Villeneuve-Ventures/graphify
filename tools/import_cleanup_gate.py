@@ -27,7 +27,8 @@ import xml.etree.ElementTree as ET
 from tools.validation_environment import git_environment
 
 
-SCHEMA = "graphify-import-cleanup-approval-v1"
+SCHEMA = "graphify-import-cleanup-approval-v2"
+RECEIPT_SCHEMA = "graphify-import-cleanup-receipt-v2"
 TEST_PATHS = (
     "tests/test_replacement_boundary_repairs.py",
     "tests/test_replacement_record_and_lock_admission.py",
@@ -167,7 +168,8 @@ own unhashed entry carry no installed-payload assertion.
                     tree = ast.parse(path.read_bytes())
                     mappings = [node for node in tree.body if isinstance(node, ast.AnnAssign)
                                 and isinstance(node.target, ast.Name) and node.target.id == "MAPPING"]
-                    require(len(mappings) == 1 and ast.literal_eval(mappings[0].value)
+                    require(len(mappings) == 1 and mappings[0].value is not None
+                            and ast.literal_eval(mappings[0].value)
                             == {"graphify": str(repo / "graphify")}, "foreign editable finder")
                     mappings[0].value = ast.Constant(value="approved-checkout/graphify")
                     encoded = "sha256:" + sha256(ast.dump(tree).encode())
@@ -191,24 +193,102 @@ own unhashed entry carry no installed-payload assertion.
     return sha256(canonical(inventory))
 
 
-def check_checkout(result: dict) -> Path:
-    """Require the recorded clean checkout, environment identity and editable origin.
+def check_source(root: Path, tree: str) -> None:
+    """Compare index and physical source with a recorded SHA-1 Git tree.
 
-    Return its absolute path; read Git and metadata without running its Python.
-    Missing files or Git errors propagate; mismatched proof raises ProofRefused."""
+    Refuse staged/non-ignored untracked changes, hidden index flags, unsupported modes and
+    aliased parent directories. Hash regular bytes and symlink targets without
+    invoking Git working-tree filters or executing retained code. Filesystem and
+    Git errors propagate; mismatches raise ProofRefused. These are endpoint
+    observations, not isolation against concurrent hostile writers.
+    """
+    flags = git(root, "ls-files", "-v", "-z").split(b"\0")
+    require(all(row.startswith(b"H ") for row in flags if row),
+            "hidden, sparse or unmerged index flags are unsupported")
+    expected = {}
+    for row in git(root, "ls-tree", "-r", "-z", "--full-tree", tree).split(b"\0"):
+        if not row:
+            continue
+        metadata, path = row.split(b"\t", 1)
+        mode, kind, oid = metadata.split()
+        require(kind == b"blob" and mode in {b"100644", b"100755", b"120000"},
+                "unsupported retained Git tree mode")
+        expected[path] = (mode, oid)
+    indexed = {}
+    for row in git(root, "ls-files", "--stage", "-z").split(b"\0"):
+        if not row:
+            continue
+        metadata, path = row.split(b"\t", 1)
+        mode, oid, stage = metadata.split()
+        require(stage == b"0" and path not in indexed, "retained index is dirty or unmerged")
+        indexed[path] = (mode, oid)
+    require(indexed == expected, "retained index is dirty or differs from the recorded tree")
+    require(not git(root, "ls-files", "--others", "--exclude-standard", "-z"),
+            "retained non-ignored untracked snapshot is dirty")
+    for raw_path, (mode, oid) in expected.items():
+        relative = Path(os.fsdecode(raw_path))
+        require(not relative.is_absolute() and ".." not in relative.parts, "unsafe tracked path")
+        path = root / relative
+        require(path.parent.resolve() == path.parent, f"aliased retained source parent: {relative}")
+        info = path.lstat()
+        if mode == b"120000":
+            require(stat.S_ISLNK(info.st_mode), f"retained source mode is dirty: {relative}")
+            data = os.fsencode(os.readlink(path))
+        else:
+            require(stat.S_ISREG(info.st_mode) and bool(info.st_mode & stat.S_IXUSR) == (mode == b"100755"),
+                    f"retained source mode is dirty: {relative}")
+            data = path.read_bytes()
+        actual = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data,
+                              usedforsecurity=False).hexdigest().encode()
+        require(actual == oid, f"retained tracked source is dirty: {relative}")
+
+
+def check_environment_config(repo: Path, binding: dict) -> None:
+    """Require reviewed config bytes and unambiguous effective runtime settings.
+
+    The binding must name this retained checkout's pyvenv.cfg. Its digest is an
+    independent approval input, not a new interpretation of historical receipts.
+    Refuse executable-adjacent configs, which Python would prefer over the bound
+    parent config. Parse universal-newline file lines as Python does. Duplicate
+    keys or runtime/system-site mismatches raise ProofRefused; file, decoding and
+    malformed-binding errors propagate. No interpreter is run.
+    """
+    require(not os.path.lexists(repo / ".venv/bin/pyvenv.cfg"),
+            "executable-adjacent environment config is unsupported")
+    require(binding["path"] == str(repo / ".venv/pyvenv.cfg"),
+            "environment config binding names a different retained checkout")
+    values = {}
+    for line in io.StringIO(checked_file(binding).decode("utf-8"), newline=None):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key = key.strip().lower()
+        require(bool(separator and key) and key not in values,
+                "malformed or duplicate retained environment config key")
+        values[key] = value.strip()
+    require(values.get("version_info") == "3.14.10"
+            and values.get("include-system-site-packages", "").lower() == "false",
+            "pilot requires checkout-local CPython 3.14.10 without system packages")
+
+
+def check_checkout(result: dict, config_binding: dict) -> Path:
+    """Require bound physical source, environment config/identity and editable origin.
+
+    Return the retained absolute checkout path. Compare source with its recorded
+    tree and config with its separately reviewed per-checkout binding, without
+    status filters or historical Python. Missing inputs and Git errors propagate;
+    mismatched proof raises ProofRefused.
+    """
     repo = Path(result["checkout"])
     require(repo.is_absolute() and repo.resolve() == repo, "aliased retained checkout")
     require(git(repo, "rev-parse", "--show-toplevel").decode().strip() == str(repo), "foreign Git root")
     require(git(repo, "rev-parse", "HEAD", "HEAD^{tree}").decode().splitlines()
             == [result["head"], result["tree"]], "retained checkout head/tree changed")
-    require(not git(repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"),
-            "retained committed/staged/unstaged/untracked snapshot is dirty")
+    check_source(repo, result["tree"])
     require(identity(repo) == result["checkout_identity"], "retained checkout identity changed")
     require(identity(repo / ".venv") == result["venv_identity"], "retained environment identity changed")
     require(sha256((repo / "uv.lock").read_bytes()) == result["lock_sha256"], "retained lock changed")
-    cfg = (repo / ".venv/pyvenv.cfg").read_text()
-    require("version_info = 3.14.10\n" in cfg and "include-system-site-packages = false\n" in cfg,
-            "pilot requires checkout-local CPython 3.14.10 without system packages")
+    check_environment_config(repo, config_binding)
     direct = list((repo / ".venv/lib/python3.14/site-packages").glob("graphifyy-*.dist-info/direct_url.json"))
     require(len(direct) == 1, "missing or duplicate editable metadata")
     origin = json.loads(direct[0].read_text())
@@ -257,7 +337,11 @@ def check_row(root: Path, row: dict, deadline: float, cache: dict) -> dict:
     require(full["complete_full_route"] is True and full["postcheck_environment_admitted"] is True,
             "baseline is not a complete admitted full pass")
     require(focused["full_route"] is False, "focused proof has wrong route identity")
-    old_repo, new_repo = check_checkout(full), check_checkout(focused)
+    require("environment_configs" in row,
+            "missing reviewed per-checkout environment config bindings; historical evidence is not upgraded")
+    configs = row["environment_configs"]
+    require(set(configs) == {"full", "focused"}, "full and focused config bindings are required")
+    old_repo, new_repo = check_checkout(full, configs["full"]), check_checkout(focused, configs["focused"])
     full_log = checked_file(row["full_log"])
     require(sha256(full_log) == full["make_log_sha256"], "full log binding mismatch")
     require(b"validation_route_status=complete; selected_lane=full" in full_log,
@@ -289,7 +373,7 @@ def check_row(root: Path, row: dict, deadline: float, cache: dict) -> dict:
     expected_modules = {p.removesuffix(".py").replace("/", ".") for p in TEST_PATHS}
     require(set(focused["tested_modules"]) == expected_modules
             and {c[0] for c in identities} == expected_modules, "wrong test module selection")
-    require(cases and len(set(identities)) == len(identities), "empty or duplicate test identities")
+    require(bool(cases) and len(set(identities)) == len(identities), "empty or duplicate test identities")
     require(not junit.findall(".//failure") and not junit.findall(".//error")
             and not junit.findall(".//skipped"), "focused tests failed or skipped")
     totals = focused["junit_totals"]
@@ -306,6 +390,7 @@ def check_row(root: Path, row: dict, deadline: float, cache: dict) -> dict:
             "original_pr_diff_sha256": sha256(delta(root, row["old_base"], row["old_head"])),
             "cleanup_delta_sha256": row["delta_sha256"], "changed_import_modules": changed,
             "baseline": row["full_result"], "focused": row["focused_result"], "junit": row["junit"],
+            "environment_configs": configs,
             "dependency_fingerprint": row["dependency_fingerprint"],
             "collected_identities_sha256": sha256(canonical(identities)), "reused_test_executions": len(cases)}
 
@@ -313,10 +398,12 @@ def check_row(root: Path, row: dict, deadline: float, cache: dict) -> dict:
 def verify_approval(root: Path, approval: Path, expected: str, *, dry_run: bool = False) -> dict:
     """Verify an external, operator-pinned local case and return a bounded receipt.
 
-Raise ProofRefused for absent, stale, failed, mixed or unapproved evidence. A
+Raise ProofRefused for absent, stale, failed, mixed or unapproved v2 evidence. A
 caller must select the approval digest from reviewed evidence outside the
 candidate branch. This function supplies neither producer authentication nor CI
-skip authority. It observes endpoint stability; it does not isolate other chats.
+skip authority. V2 requires independent per-checkout environment config bindings;
+old approvals/receipts are never upgraded. Endpoint observations do not isolate
+other chats or protect against concurrent hostile writers.
 """
     require(not any(os.environ.get(k) for k in ("CI", "GITHUB_ACTIONS", "CIRCLECI")),
             "local approval cannot authorize hosted validation")
@@ -328,7 +415,8 @@ skip authority. It observes endpoint stability; it does not isolate other chats.
     require(len(raw) <= 2_000_000, "oversized approval manifest")
     data = json.loads(raw)
     require(data["schema"] == SCHEMA and data["scope"] == "local-only"
-            and data["repository"] == "Villeneuve-Ventures/graphify", "unaccepted approval profile")
+            and data["repository"] == "Villeneuve-Ventures/graphify",
+            "unaccepted approval profile; v2 requires reviewed per-checkout environment config bindings")
     require(data["enabled"] is True, "pilot route disabled; ordinary routing remains required")
     require(1 <= len(data["rows"]) <= 8, "invalid pilot prefix count")
     require(len({r["pr"] for r in data["rows"]}) == len(data["rows"]), "duplicate pilot prefix")
@@ -359,12 +447,13 @@ skip authority. It observes endpoint stability; it does not isolate other chats.
         for name in ("full_result", "focused_result", "full_log", "focused_log", "junit"):
             payload = checked_file(row[name])
             if name in {"full_result", "focused_result"}:
-                repo = check_checkout(json.loads(payload))
+                config = row["environment_configs"]["full" if name == "full_result" else "focused"]
+                repo = check_checkout(json.loads(payload), config)
                 retained[name] = repo
                 require(dependency_inventory(repo, deadline, cache) == row["dependency_fingerprint"],
                         "dependency inventory changed during verification")
         check_interpreter(row, retained["full_result"], retained["focused_result"])
-    return {"schema": "graphify-import-cleanup-receipt-v1", "route": "import-cleanup",
+    return {"schema": RECEIPT_SCHEMA, "route": "import-cleanup",
             "scope": "local-only", "status": "printed" if dry_run else "complete",
             "claim": "baseline-plus-reviewed-import-delta", "approval": binding,
             "verifier": verifier,
@@ -387,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         receipt = verify_approval(ROOT, args.approval, args.approval_sha256, dry_run=args.dry_run)
     except (OSError, ValueError, KeyError, TypeError, SyntaxError, subprocess.SubprocessError) as exc:
-        print(json.dumps({"schema": "graphify-import-cleanup-receipt-v1", "route": "import-cleanup",
+        print(json.dumps({"schema": RECEIPT_SCHEMA, "route": "import-cleanup",
                           "scope": "local-only", "status": "blocked", "reason": str(exc),
                           "executed_test_runs": 0, "full_gate_launches": 0}, sort_keys=True))
         return 2

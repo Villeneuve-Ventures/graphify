@@ -105,7 +105,7 @@ needed. It has no dependency setup or test subprocesses. It verifies retained
 evidence and reports `complete`, `printed` (CLI dry run), or `blocked` as JSON.
 Missing or invalid evidence never starts an automatic full suite.
 
-The external approval uses `graphify-import-cleanup-approval-v1`. It must name
+The external approval uses `graphify-import-cleanup-approval-v2`. It must name
 `Villeneuve-Ventures/graphify`, `scope=local-only`, `enabled=true`, reviewed full
 and focused producer file digests, and one to eight ordered prefix records.
 Each record binds the exact original head/base, candidate head/stack parent,
@@ -117,6 +117,15 @@ effects and first-consumer restoration; computing a digest is not that review.
 Candidate-supplied JSON alone is insufficient authority. This is an operator
 trust input, not independent producer authentication or a general receipt cache.
 
+Each prefix also requires `environment_configs`, with `full` and `focused`
+bindings naming the exact respective checkout's `.venv/pyvenv.cfg` path and
+SHA-256. These are separately reviewed approval inputs. Computing a hash of the
+current file does not prove its historical configuration. Missing adequate
+configuration evidence blocks the case; do not invent it, modify retained
+receipts or automatically re-pin the approval. V1 approvals and receipts keep
+their historical meaning and are not accepted or upgraded by this V2 verifier.
+New output uses `graphify-import-cleanup-receipt-v2`.
+
 The pilot admits only reviewed removal of top-level import bindings from its
 seven replacement test modules. Other test AST nodes, source, configuration,
 fixtures, dependency locks and modes must be unchanged against each original
@@ -125,6 +134,12 @@ commit or top-prefix pass cannot hide earlier unqualified work. Every prior
 prefix must qualify before its descendant. Reordered, incomplete, wildcard,
 new-import, mixed or dirty candidates are refused. Unlisted cases retain the
 ordinary router and any explicit stage requirements.
+
+At both observations, the verifier compares the recorded tree with the index and
+the actual tracked bytes, symlink targets and executable modes. Hidden/sparse
+index states and aliased source parents are refused. Git status is not used as
+source proof, and working-tree clean/process filters are not executed. Staged
+changes and non-ignored untracked files still block acceptance.
 
 Each original head needs its own complete admitted full-route receipt. Each
 candidate needs successful seven-module execution with nonempty, unique JUnit
@@ -135,6 +150,14 @@ name their respective private environments; launcher bodies must match. The
 verifier reads current RECORD payload hashes and compares retained physical,
 editable-source and interpreter bindings without executing historical Python.
 These local case requirements do not resolve general runtime selection (#275).
+The bound environment configuration is rechecked at both observations. Duplicate
+keys are refused; effective runtime and system-site settings must unambiguously
+select 3.14.10 without system packages. Configuration bindings are per checkout,
+so legitimate environment-specific paths need not have identical file hashes.
+An executable-adjacent `.venv/bin/pyvenv.cfg`, including an alias, is refused
+because Python can prefer it over the bound parent file. Parsing follows Python's
+universal-newline file iteration; other Unicode line separators cannot fabricate
+a setting that the interpreter would ignore.
 
 A complete receipt means **baseline plus reviewed import delta**, with original
 and reused evidence origins. It is not a new-head full-suite result, a validation

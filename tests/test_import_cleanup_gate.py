@@ -9,6 +9,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import time
 
@@ -137,6 +138,8 @@ def case(tmp_path, monkeypatch):
            "delta_sha256": gate.sha256(gate.delta(root, old, head)),
            "parent_delta_sha256": gate.sha256(b""),
            "interpreter_sha256": gate.sha256(interpreter.read_bytes()),
+           "environment_configs": {"full": bind(old_repo / ".venv/pyvenv.cfg"),
+                                   "focused": bind(new_repo / ".venv/pyvenv.cfg")},
            "dependency_fingerprint": gate.dependency_inventory(old_repo, time.monotonic() + 10, {})}
     data = {"schema": gate.SCHEMA, "repository": "Villeneuve-Ventures/graphify", "scope": "local-only",
             "enabled": True, "producers": {"full": bind(producer), "focused": bind(producer)}, "rows": [row]}
@@ -177,6 +180,8 @@ def test_complete_reuses_bound_test_identities_without_executing_children(case, 
     assert receipt["reused_test_executions"] == 7
     assert receipt["prefixes"][0]["changed_import_modules"] == [gate.TEST_PATHS[0]]
     assert receipt["prefixes"][0]["complete_pr_diff_sha256"]
+    assert receipt["schema"] == gate.RECEIPT_SCHEMA
+    assert receipt["prefixes"][0]["environment_configs"] == case[3]["environment_configs"]
     assert commands and before == git(case[0], "show-ref")
 
 
@@ -432,6 +437,8 @@ def stacked_case(case, tmp_path):
                                direct_url={"url": repo.as_uri(), "dir_info": {"editable": True}})
             result["command"][0] = str(repo / ".venv/bin/python")
         second[key] = save(tmp_path / ("second-" + key + ".json"), result)
+        second["environment_configs"]["full" if label == "original" else "focused"] = bind(
+            repo / ".venv/pyvenv.cfg")
     second["delta_sha256"] = gate.sha256(gate.delta(root, second["old_head"], second["head"]))
     second["parent_delta_sha256"] = gate.sha256(gate.delta(root, second["old_base"], second["base"]))
     assert second["parent_delta_sha256"] != gate.sha256(b"")
@@ -466,3 +473,195 @@ def test_two_prefix_stack_refuses_invalid_chain(stacked_case, mutation):
         rows[1]["parent_delta_sha256"] = "0" * 64
     with pytest.raises(gate.ProofRefused, match="first prefix|unreviewed cleanup delta"):
         verify(stacked_case)
+
+
+@pytest.mark.parametrize("source", ["full", "focused"])
+@pytest.mark.parametrize("phase", ["initial", "final"])
+@pytest.mark.parametrize("flag", ["--assume-unchanged", "--skip-worktree"])
+def test_hidden_tracked_source_is_refused(case, monkeypatch, source, phase, flag):
+    result = json.loads(Path(case[3][source + "_result"]["path"]).read_text())
+    repo = Path(result["checkout"])
+    expected = gate.sha256(case[1].read_bytes())
+
+    def mutate():
+        git(repo, "update-index", flag, "graphify/__init__.py")
+        (repo / "graphify/__init__.py").write_text("VALUE = 999\n")
+        assert git(repo, "status", "--porcelain=v1", "--untracked-files=all") == ""
+
+    if phase == "initial":
+        mutate()
+    else:
+        original = gate.check_row
+
+        def drift(*args, **kwargs):
+            checked = original(*args, **kwargs)
+            mutate()
+            return checked
+
+        monkeypatch.setattr(gate, "check_row", drift)
+    with pytest.raises(gate.ProofRefused):
+        gate.verify_approval(case[0], case[1], expected)
+    assert gate.sha256(case[1].read_bytes()) == expected
+
+
+@pytest.mark.parametrize("source", ["full", "focused"])
+def test_checkout_inspection_never_executes_clean_filters(case, source):
+    result = json.loads(Path(case[3][source + "_result"]["path"]).read_text())
+    repo = Path(result["checkout"])
+    marker = case[1].with_name("clean-filter-ran")
+    script = case[1].with_name("clean-filter.sh")
+    script.write_text("#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\ncat\n")
+    script.chmod(0o700)
+    git(repo, "config", "filter.sentinel.clean", shlex.quote(str(script)))
+    (repo / ".git/info/attributes").write_text("graphify/__init__.py filter=sentinel\n")
+    path = repo / "graphify/__init__.py"
+    path.write_bytes(path.read_bytes())
+    assert verify(case)["status"] == "complete"
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("source", ["full", "focused"])
+def test_physical_mode_change_is_refused_even_when_git_ignores_filemode(case, source):
+    result = json.loads(Path(case[3][source + "_result"]["path"]).read_text())
+    repo = Path(result["checkout"])
+    git(repo, "config", "core.filemode", "false")
+    (repo / "graphify/__init__.py").chmod(0o755)
+    assert git(repo, "status", "--porcelain=v1") == ""
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+@pytest.mark.parametrize("source", ["full", "focused"])
+@pytest.mark.parametrize("phase", ["initial", "final"])
+def test_config_drift_invalidates_original_approval(case, monkeypatch, source, phase):
+    binding = case[3]["environment_configs"][source]
+    config = Path(binding["path"])
+    expected = gate.sha256(case[1].read_bytes())
+
+    def mutate():
+        config.write_text(config.read_text() + "include-system-site-packages = true\n")
+
+    if phase == "initial":
+        mutate()
+    else:
+        original = gate.check_row
+
+        def drift(*args, **kwargs):
+            checked = original(*args, **kwargs)
+            mutate()
+            return checked
+
+        monkeypatch.setattr(gate, "check_row", drift)
+    with pytest.raises(gate.ProofRefused):
+        gate.verify_approval(case[0], case[1], expected)
+    assert gate.sha256(case[1].read_bytes()) == expected
+
+
+@pytest.mark.parametrize("extra", ["include-system-site-packages = true\n",
+                                  "INCLUDE-SYSTEM-SITE-PACKAGES = false\n",
+                                  "version_info = 3.14.9\n"])
+def test_duplicate_runtime_settings_refuse_even_with_a_new_binding(case, extra):
+    path = Path(case[3]["environment_configs"]["focused"]["path"])
+    path.write_text(path.read_text() + extra)
+    case[3]["environment_configs"]["focused"] = bind(path)
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+def test_environment_config_binding_must_name_the_retained_checkout(case):
+    case[3]["environment_configs"]["full"] = case[3]["environment_configs"]["focused"]
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+def test_missing_environment_config_bindings_block_without_upgrading_evidence(case):
+    del case[3]["environment_configs"]
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+def test_legacy_approval_profile_is_not_automatically_upgraded(case):
+    case[2]["schema"] = "graphify-import-cleanup-approval-v1"
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_historical_and_new_environment_receipt_fields_remain_compatible(case, version):
+    path = Path(case[3]["full_log"]["path"])
+    lines = path.read_text().splitlines()
+    receipt = json.loads(lines[0].split("=", 1)[1])
+    receipt["version"] = version
+    if version == 2:
+        receipt.update(requested_python="3.14.10", requested_pin_satisfied=True,
+                       ci_patch_parity=True, runtime_selection_source=".python-version")
+    path.write_text("validation_environment_receipt=" + json.dumps(receipt) + "\n" + lines[1] + "\n")
+    case[3]["full_log"] = bind(path)
+    change_result(case, "full_result", lambda row: row.update(make_log_sha256=gate.sha256(path.read_bytes())))
+    assert verify(case)["status"] == "complete"
+
+
+def test_version2_request_flags_do_not_override_the_pilots_fixed_runtime(case):
+    path = Path(case[3]["full_log"]["path"])
+    lines = path.read_text().splitlines()
+    receipt = json.loads(lines[0].split("=", 1)[1])
+    receipt.update(version=2, python_version=[3, 14, 9], requested_python="3.14.9",
+                   requested_pin_satisfied=True, ci_patch_parity=False,
+                   runtime_selection_source="explicit-override")
+    path.write_text("validation_environment_receipt=" + json.dumps(receipt) + "\n" + lines[1] + "\n")
+    case[3]["full_log"] = bind(path)
+    change_result(case, "full_result", lambda row: row.update(make_log_sha256=gate.sha256(path.read_bytes())))
+    with pytest.raises(gate.ProofRefused, match="baseline environment binding mismatch"):
+        verify(case)
+
+
+@pytest.mark.parametrize("source", ["full", "focused"])
+@pytest.mark.parametrize("phase", ["initial", "final"])
+@pytest.mark.parametrize("kind", ["regular", "symlink"])
+def test_executable_adjacent_config_is_refused(case, monkeypatch, source, phase, kind):
+    parent_config = Path(case[3]["environment_configs"][source]["path"])
+    adjacent = parent_config.parent / "bin/pyvenv.cfg"
+
+    def mutate():
+        if kind == "symlink":
+            adjacent.symlink_to(parent_config)
+        else:
+            adjacent.write_text("include-system-site-packages = true\n")
+
+    if phase == "initial":
+        mutate()
+    else:
+        original = gate.check_row
+
+        def drift(*args, **kwargs):
+            result = original(*args, **kwargs)
+            mutate()
+            return result
+
+        monkeypatch.setattr(gate, "check_row", drift)
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+@pytest.mark.parametrize("source", ["full", "focused"])
+@pytest.mark.parametrize("separator", ["\v", "\f", "\u2028"])
+def test_config_line_parser_matches_interpreter_file_iteration(case, source, separator):
+    path = Path(case[3]["environment_configs"][source]["path"])
+    path.write_text("version_info = 3.14.10\nextra = value" + separator
+                    + "include-system-site-packages = false\n")
+    case[3]["environment_configs"][source] = bind(path)
+    with pytest.raises(gate.ProofRefused):
+        verify(case)
+
+
+def test_source_mode_requires_the_owner_execute_bit_for_executable_blobs(case):
+    repo = case[0]
+    path = repo / "graphify/__init__.py"
+    path.chmod(0o755)
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "executable fixture")
+    tree = git(repo, "rev-parse", "HEAD^{tree}")
+    gate.check_source(repo, tree)
+    path.chmod(0o655)
+    with pytest.raises(gate.ProofRefused):
+        gate.check_source(repo, tree)
