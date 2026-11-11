@@ -95,6 +95,7 @@ def test_package_metadata_enforces_exact_python314_window():
 
 
 def test_workflows_run_executable_python_on_314_only():
+    assert (ROOT / ".python-version").read_text().strip() == "3.14.10"
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
     release = (ROOT / ".github/workflows/release-graph.yml").read_text()
     leiden_job = _workflow_job_body(ci, "leiden-binary-smoke")

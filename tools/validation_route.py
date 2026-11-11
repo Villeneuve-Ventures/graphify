@@ -678,11 +678,15 @@ def escalate_to_full(route: Classification, reason: str) -> Classification:
 
 
 def make_command(target: str, reason: str | None = None, base: str | None = BASE_UNSET,
-                 validation_environment: Path | None = None) -> Command:
+                 validation_environment: Path | None = None,
+                 validation_runtime: str | None = None) -> Command:
     """Select recursive Make's base explicitly while retaining policy context.
 
     BASE_UNSET leaves Make's default intact; None selects an empty base.
     The context environment remains available without overriding Make's BASE.
+    Explicit environment/runtime selections use Make arguments because inherited
+    action controls are removed. PYTHON remains the current bootstrap executable;
+    the test runtime is selected separately from the checkout pin or override.
     """
     argv = ["make", f"PYTHON={shlex.join(PYTHON_ARGV)}"]
     if base != BASE_UNSET:
@@ -690,6 +694,8 @@ def make_command(target: str, reason: str | None = None, base: str | None = BASE
     env = (("GRAPHIFY_VALIDATION_BASE", base or ""),) if base != BASE_UNSET else ()
     if validation_environment is not None:
         argv.append(f"VALIDATION_ENVIRONMENT={validation_environment}")
+    if validation_runtime is not None:
+        argv.append(f"VALIDATION_RUNTIME={validation_runtime}")
     argv.append(target)
     return Command(tuple(argv), reason or "", env)
 
@@ -738,11 +744,20 @@ def build_plan(
     durations: int | None,
     maxfail: int,
     validation_environment: Path | None = None,
+    validation_runtime: str | None = None,
 ) -> list[Command]:
+    """Select unchanged docs/full checks and forward explicit admission inputs.
+
+    The bootstrap executable and qualification runtime have separate ownership.
+    Full checks recurse through Make with explicit environment/runtime overrides;
+    docs checks use the caller's admitted environment for setup and pytest.
+    This function constructs commands without executing setup or tests.
+    """
     if full or route.lane == FULL:
         return [
             make_command("review-ready", "Run the full readiness gate, including complete-set preflight.",
-                         base=base, validation_environment=validation_environment),
+                         base=base, validation_environment=validation_environment,
+                         validation_runtime=validation_runtime),
         ]
 
     commands = [
@@ -1198,6 +1213,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--ci-plan", action="store_true", help="run eligible docs checks; delegate full validation to existing CI jobs")
     parser.add_argument("--validation-environment", type=Path,
                         help="explicit existing, owned environment bound to this checkout and running Python")
+    parser.add_argument("--validation-runtime", help="deliberate exact CPython X.Y.Z override of the checkout pin")
     parser.add_argument("--full-checks", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--github-output", type=Path, help="write successful CI routing outputs to this GitHub output file")
     parser.add_argument("--docs-check", action="store_true", help=argparse.SUPPRESS)
@@ -1223,7 +1239,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run admitted checks and return 3 if their repository snapshot changes."""
+    """Run admitted checks, using the checkout pin unless explicitly overridden.
+
+    Environment/runtime refusal returns 2; admission is rechecked before setup
+    and tests. Changed repository snapshots return 3. Dry-run and whitespace/docs
+    helpers do not create an admission or install dependencies.
+    """
     args = parse_args(argv)
     if args.check_change_set_whitespace:
         return check_change_set_whitespace(args.base or None)
@@ -1233,7 +1254,7 @@ def main(argv: list[str] | None = None) -> int:
     admission = None
     if not (args.docs_check or args.dry_run):
         try:
-            admission = ValidationEnvironment(ROOT, args.validation_environment)
+            admission = ValidationEnvironment(ROOT, args.validation_environment, args.validation_runtime)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             print(f"validation_route_status=failed; reason=validation-environment; {exc}", file=sys.stderr)
             return 2
@@ -1286,6 +1307,7 @@ def main(argv: list[str] | None = None) -> int:
             maxfail=args.maxfail,
             validation_environment=admission.path if admission is not None and args.validation_environment
             else args.validation_environment,
+            validation_runtime=args.validation_runtime,
         )
         print_receipt(route, commands)
 
