@@ -1,5 +1,8 @@
 """Malformed fragments and synthetic portability evidence use disposable inputs."""
 import os
+from pathlib import Path
+import runpy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +12,13 @@ from tests.test_canonical_replacement import case as case
 from tests.test_replacement_guard_issuers import protected_policy as protected_policy
 
 
+def test_lock_module_skips_if_fcntl_is_unavailable(monkeypatch):
+    # Both __import__ and importlib.import_module refuse this sentinel, even if
+    # an earlier test loaded fcntl. Monkeypatch restores the prior module entry.
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    with pytest.raises(pytest.skip.Exception) as error:
+        runpy.run_path(str(Path(__file__).with_name("test_replacement_lock.py")))
+    assert "fcntl" in str(error.value)
 
 
 @pytest.fixture

@@ -716,6 +716,7 @@ _SKIP_DIRS = {
 
 # Large generated files that are never useful to extract
 _SKIP_FILES = {
+    ".graphify_replacement_guard",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.lock", "poetry.lock", "Gemfile.lock",
     "composer.lock", "go.sum", "go.work.sum",
