@@ -701,7 +701,15 @@ def _hooks_dir(root: Path, *, create: bool = True) -> Path:
     resolves core.hooksPath, includeIf, and linked worktrees (where .git is a
     file, not a directory) correctly in one place. Genuinely corrupt configs
     are still surfaced: git itself fails on them, and its stderr is printed.
+    When creating the directory, retained archive paths and aliases refuse.
     """
+    def ensure_directory(selected: Path, directory: Path) -> None:
+        from .canonical_replacement import guard_output
+
+        for path in dict.fromkeys((selected, directory)):
+            guard_output(path, mutation=True)
+        directory.mkdir(parents=True, exist_ok=True)
+
     # NOTE: do NOT pass --path-format=absolute — added in git 2.31; older git
     # echoes it back as a literal argument, contaminating stdout and causing a
     # phantom directory to be created (#907). git -C <root> already returns an
@@ -731,9 +739,10 @@ def _hooks_dir(root: Path, *, create: bool = True) -> Path:
             # means git echoed an unrecognised flag back (old git behaviour).
             if raw and not any(c in raw for c in ("\n", "\r", "\x00")):
                 _reject_windows_path(raw, "git rev-parse --git-path hooks")
-                d = (root / raw).resolve()
+                selected = root / raw
+                d = selected.resolve()
                 if create:
-                    d.mkdir(parents=True, exist_ok=True)
+                    ensure_directory(selected, d)
                 return d
             if not create:
                 raise RuntimeError("Cannot inspect an invalid Git hooks path")
@@ -742,7 +751,7 @@ def _hooks_dir(root: Path, *, create: bool = True) -> Path:
             raise
     d = root / ".git" / "hooks"
     if create:
-        d.mkdir(parents=True, exist_ok=True)
+        ensure_directory(d, d)
     return d
 
 
@@ -1025,6 +1034,21 @@ def _has_exact_merge_attr(content: str, expected: str) -> bool:
     return managed == [expected]
 
 
+def _guard_merge_driver_config(root: Path) -> None:
+    """Admit Git's shared local config and lock before updating merge settings."""
+    import subprocess
+
+    from .canonical_replacement import guard_output
+
+    result = subprocess.run(["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+                            check=True, capture_output=True, text=True)
+    common = result.stdout.removesuffix("\n")
+    if not common or any(char in common for char in "\r\n\x00"):
+        raise OSError("git returned an invalid common config directory")
+    for name in ("config", "config.lock"):
+        guard_output(root / common / name, mutation=True)
+
+
 def _register_merge_driver(root: Path) -> str:
     """Register the graph.json union merge driver in git config + .gitattributes (#1902).
 
@@ -1036,6 +1060,9 @@ def _register_merge_driver(root: Path) -> str:
     launcher is not on PATH at merge time.
     """
     import subprocess as _sp
+
+    from .canonical_replacement import guard_output
+
     managed_graph = _quote_git_driver_literal(f"{_merge_output_path()}/graph.json")
     pinned = _pinned_python()
     if pinned:
@@ -1055,6 +1082,7 @@ def _register_merge_driver(root: Path) -> str:
             f"graphify merge-driver --managed-current {managed_graph} %O %A %B"
         )
     try:
+        _guard_merge_driver_config(root)
         for key, value in (
             ("merge.graphify.name", "graphify graph.json union merge"),
             ("merge.graphify.driver", driver),
@@ -1076,9 +1104,10 @@ def _register_merge_driver(root: Path) -> str:
         # Rebind stale Graphify selectors while preserving unrelated entries.
         kept = [raw for raw in content.splitlines() if not _is_merge_attr(raw)]
         kept.append(line)
-        attrs.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
     else:
-        attrs.write_text(line + "\n", encoding="utf-8", newline="\n")
+        kept = [line]
+    guard_output(attrs, mutation=True)
+    attrs.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
     return f"registered ({line})"
 
 
@@ -1092,11 +1121,17 @@ def _unregister_merge_driver(root: Path, *, strict: bool = False) -> str:
     propagate in either mode; earlier removals are not rolled back.
     """
     import subprocess as _sp
-    for key in (
-        "merge.graphify.name",
-        "merge.graphify.driver",
-        "merge.graphify.recursive",
-    ):
+
+    from .canonical_replacement import guard_output
+
+    keys: tuple[str, ...] = ("merge.graphify.name", "merge.graphify.driver", "merge.graphify.recursive")
+    try:
+        _guard_merge_driver_config(root)
+    except (OSError, _sp.CalledProcessError) as exc:
+        if strict:
+            raise RuntimeError(f"Hooks removed; cannot locate merge-driver config: {exc}") from exc
+        keys = ()
+    for key in keys:
         try:
             # --unset-all removes duplicate local values; an absent key is fine.
             result = _sp.run(
@@ -1120,6 +1155,7 @@ def _unregister_merge_driver(root: Path, *, strict: bool = False) -> str:
     ]
     if kept == content.splitlines():
         return "gitattributes entry not found - nothing to remove."
+    guard_output(attrs, mutation=True)
     if kept:
         # Other entries survive; the file stays.
         attrs.write_text("\n".join(kept) + "\n", encoding="utf-8", newline="\n")
