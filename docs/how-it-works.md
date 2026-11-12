@@ -26,6 +26,25 @@ Markdown sidecars under `graphify-out/converted/`. Office files (`.docx`,
 `.gsheet`, `.gslides`) are opt-in with `--google-workspace` or
 `GRAPHIFY_GOOGLE_WORKSPACE=1` and require an authenticated `gws` CLI.
 
+### Markdown-to-code references
+
+The deterministic resolver added in [#227](https://github.com/Villeneuve-Ventures/graphify/pull/227)
+can turn eligible Markdown code-span citations into `references` edges from a
+heading or page to a code symbol. This resolver runs locally without an LLM;
+resolution depends on the supplied code context and supported declarations.
+Ambiguous names remain unresolved.
+
+| Entry point | Current deterministic citation coverage |
+|-------------|-----------------------------------------|
+| [Library AST extraction](../graphify/extract.py) | Can resolve eligible citations when supplied both Markdown and relevant code inputs. |
+| [Ordinary watch rebuilds](../graphify/watch.py) | Refresh citations for eligible AST-capable Markdown documents. Documents already represented semantically are excluded from the AST quick scan and mention refresh to preserve their representation. |
+| [Public `graphify extract` CLI](../graphify/cli.py) | Still separates detected code AST inputs from semantic documents. Deterministic Markdown-to-code integration remains tracked by [#228](https://github.com/Villeneuve-Ventures/graphify/issues/228). |
+
+Semantic extraction may independently emit reference edges and still costs
+tokens. The local resolver does not make the full mixed CLI extraction run
+free or local. Coverage is bounded; complete support for all languages and MDX
+syntax is not provided.
+
 ---
 
 ## How community detection works
