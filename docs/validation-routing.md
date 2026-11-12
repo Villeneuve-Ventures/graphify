@@ -1,4 +1,4 @@
-# Documentation validation routing
+# Validation routing
 
 `make fast-feedback BASE=origin/v8` is the PR validation entry point. It inspects
 base-to-HEAD, index, working-tree and non-ignored untracked changes together.
@@ -94,6 +94,83 @@ replace the final routing receipt.
 Direct `make review-ready` also compares its initial and final repository snapshot
 and exits with status 3 if content, modes, HEAD or base identity changes while
 the checks run. Passing whitespace checks alone cannot admit changed inputs.
+
+## Local import-cleanup pilot
+
+An explicitly approved retained case can use `make import-cleanup-check
+APPROVAL=/absolute/external/approval.json APPROVAL_SHA256=<reviewed-sha256>`.
+This separate local route does not alter automatic docs/full selection, the
+explicit full command, or CI. Use a trusted installed Python as `PYTHON` when
+needed. It has no dependency setup or test subprocesses. It verifies retained
+evidence and reports `complete`, `printed` (CLI dry run), or `blocked` as JSON.
+Missing or invalid evidence never starts an automatic full suite.
+
+The external approval uses `graphify-import-cleanup-approval-v2`. It must name
+`Villeneuve-Ventures/graphify`, `scope=local-only`, `enabled=true`, reviewed full
+and focused producer file digests, and one to eight ordered prefix records.
+Each record binds the exact original head/base, candidate head/stack parent,
+reviewed cleanup and parent-delta digests, original full result/log, candidate
+focused result/log/JUnit, common interpreter digest and installed dependency
+fingerprint. Evidence files are absolute paths with SHA-256 bindings. Select
+the manifest digest from a separate review of those producers, import side
+effects and first-consumer restoration; computing a digest is not that review.
+Candidate-supplied JSON alone is insufficient authority. This is an operator
+trust input, not independent producer authentication or a general receipt cache.
+
+Each prefix also requires `environment_configs`, with `full` and `focused`
+bindings naming the exact respective checkout's `.venv/pyvenv.cfg` path and
+SHA-256. These are separately reviewed approval inputs. Computing a hash of the
+current file does not prove its historical configuration. Missing adequate
+configuration evidence blocks the case; do not invent it, modify retained
+receipts or automatically re-pin the approval. V1 approvals and receipts keep
+their historical meaning and are not accepted or upgraded by this V2 verifier.
+New output uses `graphify-import-cleanup-receipt-v2`.
+
+The pilot admits only reviewed removal of top-level import bindings from its
+seven replacement test modules. Other test AST nodes, source, configuration,
+fixtures, dependency locks and modes must be unchanged against each original
+head. Both complete PR diffs and the cleanup delta are recorded; the last
+commit or top-prefix pass cannot hide earlier unqualified work. Every prior
+prefix must qualify before its descendant. Reordered, incomplete, wildcard,
+new-import, mixed or dirty candidates are refused. Unlisted cases retain the
+ordinary router and any explicit stage requirements.
+
+At both observations, the verifier compares the recorded tree with the index and
+the actual tracked bytes, symlink targets and executable modes. Hidden/sparse
+index states and aliased source parents are refused. Git status is not used as
+source proof, and working-tree clean/process filters are not executed. Staged
+changes and non-ignored untracked files still block acceptance.
+
+Each original head needs its own complete admitted full-route receipt. Each
+candidate needs successful seven-module execution with nonempty, unique JUnit
+identities and no failures, errors or skips. Normal and isolated package origins
+must name that retained checkout. The pilot requires CPython 3.14.10 and equal
+frozen lock and installed dependency payloads. Installed launcher shebangs may
+name their respective private environments; launcher bodies must match. The
+verifier reads current RECORD payload hashes and compares retained physical,
+editable-source and interpreter bindings without executing historical Python.
+These local case requirements do not resolve general runtime selection (#275).
+The bound environment configuration is rechecked at both observations. Duplicate
+keys are refused; effective runtime and system-site settings must unambiguously
+select 3.14.10 without system packages. Configuration bindings are per checkout,
+so legitimate environment-specific paths need not have identical file hashes.
+An executable-adjacent `.venv/bin/pyvenv.cfg`, including an alias, is refused
+because Python can prefer it over the bound parent file. Parsing follows Python's
+universal-newline file iteration; other Unicode line separators cannot fabricate
+a setting that the interpreter would ignore.
+
+A complete receipt means **baseline plus reviewed import delta**, with original
+and reused evidence origins. It is not a new-head full-suite result, a validation
+of the verifier's own implementation diff, or hosted readiness. Independent
+implementation checks and review remain separate. Git/evidence endpoints are
+rechecked; this is not continuous isolation against concurrent hostile writers.
+No other chat's fixtures, runtime locks, processes, graph output or shared Git
+settings are modified. The verifier has a fifteen-minute observation budget and
+starts zero workers. Missing focused evidence is a blocked prerequisite, not a
+reason to expand execution silently. Turning off `enabled` refuses the pilot;
+omitting this explicit entry point keeps the existing automatic routing.
+
+## Hosted routing
 
 PR CI runs the same classifier against the event's base SHA, with complete Git
 history. Eligible docs run their selected checks in the routing job. Full changes

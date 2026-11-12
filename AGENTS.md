@@ -60,8 +60,18 @@ docs. Any mixed, unknown, unsafe, or incompletely inspected change requires the
 full `make review-ready` path. Missing base evidence cannot admit a docs lane.
 The full command retains complete pytest selection, with whitespace preflights;
 CI retains separate generated-skill, locked Ruff/Pyright, optimized-verifier,
-install and native smoke checks for full changes. Branch pushes and manual CI
-dispatch always run full.
+install and native smoke checks for full changes. Hosted pushes to configured
+integration branches and manual CI dispatch always run full.
+
+The explicitly approved, retained test-import cleanup pilot has a separate local
+`make import-cleanup-check APPROVAL=<external-manifest> APPROVAL_SHA256=<reviewed-digest>`
+entry point. It verifies each listed original full pass plus the exact reviewed
+import delta and retained focused execution. Its receipt applies only to those
+listed heads; it does not validate the checkout containing the new verifier or
+claim a fresh full-suite pass. Missing, stale or failed proof blocks this pilot
+without launching a full fallback. It grants no hosted skip. Automatic routing
+and all other readiness requirements above remain in force. See the local pilot
+contract in [validation routing](docs/validation-routing.md#local-import-cleanup-pilot).
 
 Use `BASE=<ref>` for a different PR base (default `origin/v8`). Preserve the
 complete receipt; changed inputs, modes, Git identity or environment invalidate
