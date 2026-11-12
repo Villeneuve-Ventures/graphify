@@ -1,3 +1,17 @@
+## Contract navigation
+
+Read only the section needed for the task before selecting changes or proof:
+
+| Before changing | Read |
+| --- | --- |
+| Graph construction, edge traversal, clustering, reports or serialization | [Graph representation](docs/agent-contracts.md#graph-representation) |
+| Extraction completion, incremental replacement or source ownership | [Source contributions](docs/agent-contracts.md#source-contributions) |
+| Platform skills, generated instructions or install/remove integration | [Instruction source ownership](docs/agent-contracts.md#instruction-source-ownership) |
+
+These sections route to owning source and existing tests; they grant no authority
+to implement outstanding work. Keep repository maintenance guidance outside the
+installer-owned `## graphify` section below. Global instructions still apply.
+
 ## Protected changes
 
 Use [the protected-change review policy](docs/protected-change-review.md) only when
@@ -58,6 +72,21 @@ external environment requires its Python plus explicit `VALIDATION_ENVIRONMENT`
 selection; ambient uv overrides cannot select it. See
 [validation routing](docs/validation-routing.md) for admission and setup rules.
 
+## Pull request bodies
+
+Use [.github/pull_request_template.md](.github/pull_request_template.md) as the
+canonical starting text when creating a PR or replacing its body, including
+CLI and connector writes. Follow the [body preparation procedure](README.md#pull-request-bodies)
+and run `python3 -I -S -B tools/pr_body.py --body-file <file>` on the completed
+text. Use `--draft` only to record explicitly pending local evidence.
+Preserve historical receipts when updating an existing description.
+
+The body check verifies structure, not truth, test passage or permission to skip
+a required gate. Keep validation evidence and justified omissions explicit.
+Dependabot's generated-body exception does not waive its separate CI admission
+or review. PR-Agent description commands publish suggestions in comments; do
+not override comment mode to replace the author-maintained body.
+
 ## Local resource retention
 
 Follow [the local resource retention rule](docs/local-resource-retention.md) when
@@ -110,6 +139,19 @@ and only where relevant.
   the caller's duty to declare only successfully completed sources, including
   successful empty extraction. Distinguish in-memory composition or
   serialization from filesystem admission and publication.
+
+## Skill examples
+
+Apply the shared global skill rules to these examples; they do not activate a
+workflow or designate a protected change.
+
+- For an explicitly requested `code-review`, check direction and parallel-edge
+  preservation, source contribution ownership, and generated-instruction
+  boundaries through the owners in [the agent contract map](docs/agent-contracts.md).
+- After focused checks and explicit opt-in, use `ultraqa` in scratch repositories
+  for successful-empty versus failed extraction, interrupted updates, and installer
+  preservation. Use [the agent contract map](docs/agent-contracts.md) to select the
+  owning contracts and tests.
 
 ## graphify
 

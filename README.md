@@ -928,6 +928,65 @@ reproducing those checks.
   [protected-change review policy](docs/protected-change-review.md).
 - Add a fixture file to `tests/fixtures/` and tests to `tests/test_languages.py` for any new language extractor.
 
+### Pull request bodies
+
+Use [the maintained template](.github/pull_request_template.md) for browser,
+CLI and agent-created PRs. GitHub supplies it in the browser from the default
+branch; explicit CLI/API bodies and commit-based `--fill` can bypass that prefill.
+Prepare one completed body from the canonical file:
+
+```bash
+pr_body_file=$(mktemp "${TMPDIR:-/tmp}/graphify-pr-body.XXXXXX")
+cp .github/pull_request_template.md "$pr_body_file"
+# Fill the body file with the actual change, evidence and applicable skip reasons.
+python3 -I -S -B tools/pr_body.py --body-file "$pr_body_file"
+```
+
+During authorized delivery, pass that completed file to `gh pr create --draft
+--body-file` or `gh pr edit --body-file`, with the intended repository, base and
+PR selected. Connectors must receive the same completed text as their explicit
+body. Template selection is a starting point; do not submit its untouched prompts.
+For an existing PR, read its current body first and preserve historical evidence
+and concurrent edits when preparing the replacement.
+
+Keep populated Description, Related Issues / Tickets, and How Has This Been
+Tested? sections. Leading heading emoji and case do not affect matching. Use
+`None` for no related issue. Record a validation-route outcome and its complete
+receipt, or the specific authorized exception and its reason. Included focused
+and manual testing fields need results or explained omissions; remove fields
+that do not apply. Screenshots and checklist items remain conditional. Drafts
+can record pending evidence with `--draft`; a ready body must resolve those
+pending fields. Start an unfinished outcome with `Pending`, optionally after a
+lane and separator, such as `full; Pending — run after editing`. The check does
+not scan arbitrary historical prose for pending work.
+Additional historical sections remain allowed after the current
+sections; they cannot fill an empty current section.
+
+The standalone [PR-body workflow](.github/workflows/pr-body.yml) reads live PR
+metadata on opens, edits, reopens, new commits and draft/ready transitions. It
+uses trusted default-branch code, covers forks and stacked PR targets, and does
+not start product validation. Only the verified Dependabot author on a
+same-repository `dependabot/` branch receives a generated-body exception. Its
+existing `run-ci`, draft, head and review requirements remain separate. Other
+bots follow the normal body policy. A stable closed PR gets an explicit
+not-applicable result.
+
+This check detects missing answers and known placeholders. It does not verify
+receipt authenticity, test passage, truthful claims or the authority for a skip.
+Reviewers still check that evidence. The workflow rechecks live state before its
+verdict, but it is not an atomic edit/merge lock. A body writer using
+`GITHUB_TOKEN` must arrange eligible revalidation because its edit event does not
+start another workflow; PR-Agent avoids that path by publishing comments.
+
+A check is merge-enforced only when the target branch's hosted rules require
+its exact check name and source. Shipping this workflow does not change those
+settings. Keep maintainer checks for targets without required-check enforcement;
+do not apply rules to every feature branch merely to cover stacked PRs, since
+those rules also affect ordinary branch pushes.
+Before a hosted canary or required-check enforcement, verify that the applicable
+[Actions event policy](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)
+allows `pull_request_target`. Changing that hosted policy needs separate authority.
+
 ### Manual PR-Agent commands
 
 PR-Agent runs only after a repository writer comments on a PR with a leading
@@ -940,6 +999,16 @@ PR-Agent. The [workflow](.github/workflows/pr-agent.yml) pins the corrected
 PR-Agent image in `ghcr.io/villeneuve-ventures/pr-agent-corrected` by digest
 and passes the Gemini secret. [`.pr_agent.toml`](.pr_agent.toml)
 selects Gemini 3.8 Flash with Gemini 3.5 Flash Lite as fallback.
+
+`/describe` and `/describe_pr` accept no arguments and publish generated
+suggestions as comments. The workflow forces comment mode after repository
+settings are loaded, so a command cannot switch back to replacing the PR body.
+Command recognition follows the pinned upstream lexer and slash normalization,
+including equivalent quoted or repeated-slash spellings of those aliases.
+Edit the canonical body manually when adopting a suggestion, then run the body
+check. Description command arguments are rejected before the event is changed
+or the upstream entrypoint runs. Other command options retain their existing
+behavior.
 
 ### What to contribute
 

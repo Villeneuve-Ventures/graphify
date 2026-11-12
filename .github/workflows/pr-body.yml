@@ -1,0 +1,34 @@
+name: Graphify — PR body validation
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review, converted_to_draft]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-body-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  body:
+    name: Graphify — PR body
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      # pull_request_target uses trusted default-branch code. Never use a PR
+      # head/merge ref here or install dependencies supplied by the contributor.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: |
+            tools/pr_body.py
+            .github/pull_request_template.md
+          sparse-checkout-cone-mode: false
+      - name: Validate current PR body without running contributor code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -S -B tools/pr_body.py --event-file "$GITHUB_EVENT_PATH"

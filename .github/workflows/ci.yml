@@ -1,4 +1,4 @@
-name: CI
+name: Graphify — Validation
 
 on:
   push:
@@ -9,12 +9,13 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  # Preserve cancellation keys independently of the display name.
+  group: ci-CI-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   validation-route:
-    name: Classify complete validation change set
+    name: Choose checks and validate documentation
     if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false) }}
     runs-on: ubuntu-latest
     outputs:
@@ -29,6 +30,8 @@ jobs:
         with:
           python-version: "3.14.10"
           prune-cache: true
+          # Full-route classification does not install dependencies or populate the cache.
+          ignore-nothing-to-cache: true
       - name: Classify and validate docs; retain full jobs for everything else
         id: route
         env:
@@ -41,6 +44,7 @@ jobs:
           python3 -I -S -B -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tools.validation_route",run_name="__main__")' "${args[@]}"
 
   skillgen-check:
+    name: Validate generated skills
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
@@ -82,7 +86,7 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
-    name: Pytest shard ${{ matrix.shard }}/4
+    name: Graphify — Python tests
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     runs-on: ubuntu-latest
@@ -126,6 +130,7 @@ jobs:
 
       # Hook authority checks include every ancestor. Hosted images can make
       # /opt world-writable, so allocate below / and admit the path before pytest.
+      # Keep pytest repositories on that same filesystem instead of ambient /tmp.
       - name: Prepare trusted hook test parent
         run: |
           set -euo pipefail
@@ -133,13 +138,22 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "$fixture_parent"
           stat -c '%a %u:%g %n' / /opt "$HOME" "$fixture_parent"
           .venv/bin/python - "$fixture_parent" <<'PY'
+          import os
           import sys
           from pathlib import Path
           from graphify.hook_installation import _authority
 
-          with _authority(Path(sys.argv[1]), False):
-              pass
-          print(f"Admitted hook test authority parent: {sys.argv[1]}")
+          parent = Path(sys.argv[1])
+          with _authority(parent, False) as (authority_fd, _):
+              repositories = parent / "pytest"
+              repositories.mkdir(mode=0o700)
+              with _authority(repositories, False) as (repositories_fd, _):
+                  authority = os.fstat(authority_fd)
+                  repository = os.fstat(repositories_fd)
+                  print(f"Hook test authority parent {parent}: device={authority.st_dev} inode={authority.st_ino}", flush=True)
+                  print(f"Hook test repository parent {repositories}: device={repository.st_dev} inode={repository.st_ino}", flush=True)
+                  if authority.st_dev != repository.st_dev:
+                      raise RuntimeError("Hook test authority and repositories require the same filesystem")
           PY
           echo "GRAPHIFY_TEST_AUTHORITY_PARENT=$fixture_parent" >> "$GITHUB_ENV"
 
@@ -150,6 +164,7 @@ jobs:
           uv run --frozen python -m pytest -p tools.pytest_partition -p tools.pytest_timings
           --ci-shard=${{ matrix.shard }}
           --ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json"
+          --basetemp "$GRAPHIFY_TEST_AUTHORITY_PARENT/pytest/run"
           tests/ -q --tb=short
 
       - name: Upload pytest timing diagnostics
@@ -263,6 +278,7 @@ jobs:
         run: exit 1
 
   security-scan:
+    name: Security scan — advisory
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
@@ -333,7 +349,7 @@ jobs:
   leiden-binary-smoke:
     needs: [validation-route]
     if: ${{ needs.validation-route.outputs.lane == 'full' && (github.event_name != 'pull_request' || (github.event.pull_request.user.login != 'dependabot[bot]' && github.event.pull_request.draft == false)) }}
-    name: Leiden binary smoke (macOS)
+    name: Check native graph clustering on macOS
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

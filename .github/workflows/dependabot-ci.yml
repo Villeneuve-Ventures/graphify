@@ -1,4 +1,4 @@
-name: Dependabot CI
+name: Graphify — Dependabot validation
 
 on:
   pull_request:
@@ -9,12 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: dependabot-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && format('-ignored-label-{0}', github.run_id) || '' }}
+  # Preserve cancellation keys independently of the display name.
+  group: dependabot-ci-Dependabot CI-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}${{ github.event_name == 'pull_request' && github.event.pull_request.user.login != 'dependabot[bot]' && (github.event.action == 'labeled' || github.event.action == 'unlabeled') && format('-ignored-label-{0}', github.run_id) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Approved Dependabot label events rerun CI so a skipped run cannot satisfy the gate.
 jobs:
   admission:
+    name: Check Dependabot approval
     # Reruns retain event data; query live approval for each full attempt.
     # Partial reruns cannot reuse admission from a previous attempt.
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]' }}
@@ -55,6 +57,7 @@ jobs:
           echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   skillgen-check:
+    name: Dependabot — Validate generated skills
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     # Fast lint-style guard: the skill files under graphify/ are generated from
@@ -96,7 +99,7 @@ jobs:
         run: uv run --frozen python -m tools.skillgen --always-on-roundtrip
 
   test:
-    name: Pytest shard ${{ matrix.shard }}/4
+    name: Graphify — Dependabot Python tests
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     runs-on: ubuntu-latest
@@ -140,6 +143,7 @@ jobs:
 
       # Hook authority checks include every ancestor. Hosted images can make
       # /opt world-writable, so allocate below / and admit the path before pytest.
+      # Keep pytest repositories on that same filesystem instead of ambient /tmp.
       - name: Prepare trusted hook test parent
         run: |
           set -euo pipefail
@@ -147,13 +151,22 @@ jobs:
           sudo chown "$(id -u):$(id -g)" "$fixture_parent"
           stat -c '%a %u:%g %n' / /opt "$HOME" "$fixture_parent"
           .venv/bin/python - "$fixture_parent" <<'PY'
+          import os
           import sys
           from pathlib import Path
           from graphify.hook_installation import _authority
 
-          with _authority(Path(sys.argv[1]), False):
-              pass
-          print(f"Admitted hook test authority parent: {sys.argv[1]}")
+          parent = Path(sys.argv[1])
+          with _authority(parent, False) as (authority_fd, _):
+              repositories = parent / "pytest"
+              repositories.mkdir(mode=0o700)
+              with _authority(repositories, False) as (repositories_fd, _):
+                  authority = os.fstat(authority_fd)
+                  repository = os.fstat(repositories_fd)
+                  print(f"Hook test authority parent {parent}: device={authority.st_dev} inode={authority.st_ino}", flush=True)
+                  print(f"Hook test repository parent {repositories}: device={repository.st_dev} inode={repository.st_ino}", flush=True)
+                  if authority.st_dev != repository.st_dev:
+                      raise RuntimeError("Hook test authority and repositories require the same filesystem")
           PY
           echo "GRAPHIFY_TEST_AUTHORITY_PARENT=$fixture_parent" >> "$GITHUB_ENV"
 
@@ -164,6 +177,7 @@ jobs:
           uv run --frozen python -m pytest -p tools.pytest_partition -p tools.pytest_timings
           --ci-shard=${{ matrix.shard }}
           --ci-timing-json "$RUNNER_TEMP/pytest-timings/timings.json"
+          --basetemp "$GRAPHIFY_TEST_AUTHORITY_PARENT/pytest/run"
           tests/ -q --tb=short
 
       - name: Upload pytest timing diagnostics
@@ -256,6 +270,7 @@ jobs:
         run: exit 1
 
   security-scan:
+    name: Dependabot — Security scan — advisory
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
     # Advisory policy: findings and scanner failures remain nonblocking, but
@@ -326,7 +341,7 @@ jobs:
   leiden-binary-smoke:
     needs: [admission]
     if: ${{ needs.admission.result == 'success' && needs.admission.outputs.attempt == github.run_attempt }}
-    name: Leiden binary smoke (macOS)
+    name: Dependabot — Check native graph clustering on macOS
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

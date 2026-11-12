@@ -1203,6 +1203,7 @@ def test_bsd_flags_survive_mode_repair_and_noop(repo):
 @pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
 def test_unsupported_bsd_flags_refuse_before_any_publication(repo, operation):
+    assert sys.platform == "darwin"  # Make the skip marker's platform contract explicit to static checks.
     if operation == "uninstall":
         hooks.install(repo)
     target = _hooks(repo) / "post-merge"
@@ -1247,6 +1248,7 @@ def test_bsd_flag_copy_failure_precedes_live_publication(repo, monkeypatch):
 @pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
 def test_unsupported_bsd_flags_keep_unchanged_noop_hooks(repo, operation):
+    assert sys.platform == "darwin"
     if operation == "install":
         hooks.install(repo)
     target = _hooks(repo) / "post-commit"
@@ -1263,6 +1265,7 @@ def test_unsupported_bsd_flags_keep_unchanged_noop_hooks(repo, operation):
 @pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
 @pytest.mark.parametrize("operation", ["install", "uninstall"])
 def test_changed_bsd_flags_refuse_pending_resume_and_exact_retry(repo, monkeypatch, operation):
+    assert sys.platform == "darwin"
     if operation == "uninstall":
         hooks.install(repo)
     _interrupt(repo, monkeypatch, operation)
@@ -1302,6 +1305,7 @@ def test_legacy_pending_batch_without_bsd_flag_binding_refuses(repo, monkeypatch
 @pytest.mark.skipif(sys.platform != "darwin", reason="BSD flags require native macOS")
 @pytest.mark.parametrize("name", ["2", "pre-2"])
 def test_changed_staged_bsd_flags_refuse_pending_resume(repo, monkeypatch, name):
+    assert sys.platform == "darwin"
     _interrupt(repo, monkeypatch)
     target = next(_hooks(repo).glob(".graphify-hook-batch-*")) / name
     os.chflags(target, stat.UF_NODUMP)

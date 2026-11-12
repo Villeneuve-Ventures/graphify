@@ -37,6 +37,7 @@ Record additional required checks and their results above. These examples do not
 - [ ] Followed existing Graphify helpers, code patterns, and repository instructions.
 - [ ] Performed a self-review of the complete change.
 - [ ] Explained non-obvious behavior in code comments where needed.
+- [ ] For Python changes, reviewed final changed interfaces and behavior for applicable contract docstrings (assumptions, returns, side effects and exceptions), including delegated work, and recorded the result; otherwise N/A.
 - [ ] Updated affected documentation; maintained README documentation remains English-only.
 - [ ] Added or updated relevant tests and recorded validation results above.
 - [ ] Reviewed warnings and disclosed any new or remaining warnings above.

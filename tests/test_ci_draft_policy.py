@@ -15,7 +15,7 @@ def test_draft_transition_cancels_only_the_same_pull_requests_ci():
     assert "ready_for_review" in workflow["on"]["pull_request"]["types"]
     assert workflow["concurrency"] == {
         "group": (
-            "ci-${{ github.workflow }}-${{ github.event_name }}-"
+            "ci-CI-${{ github.event_name }}-"
             "${{ github.event.pull_request.number || github.run_id }}"
         ),
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",

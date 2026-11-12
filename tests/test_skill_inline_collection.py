@@ -36,6 +36,12 @@ def _body(core: str, marker: str) -> str:
 
 @pytest.fixture(params=HOSTS)
 def inline_run(tmp_path, monkeypatch, request):
+    """Run one host's generated commands under a native prepared update token.
+
+    Return the corpus, publication baseline, private output, command runner,
+    rendered core, host and token. The runner restores the parent working
+    directory; no fixture command finalizes the transaction.
+    """
     monkeypatch.setattr(cache, "_stat_index", {})
     monkeypatch.setattr(cache, "_stat_index_root", None)
     monkeypatch.setattr(cache, "_stat_index_dirty", False)
@@ -74,7 +80,7 @@ def _payload(source: Path) -> dict:
             "input_tokens": 7, "output_tokens": 3}
 
 
-@pytest.mark.parametrize("kind", ["nonempty", "empty", "partial", "ownership-only", "incomplete", "empty-unattested"])
+@pytest.mark.parametrize("kind", ["nonempty", "empty", "partial", "result-partial", "unowned", "ownership-only", "incomplete", "empty-unattested"])
 def test_inline_cache_replay_preserves_completion_and_public_graph(inline_run, kind):
     root, source, out, baseline, prepared, run, core, _, _ = inline_run
     payload = _payload(source)
@@ -84,6 +90,10 @@ def test_inline_cache_replay_preserves_completion_and_public_graph(inline_run, k
             payload.pop("completed_sources")
     elif kind == "partial":
         payload["nodes"][0]["_partial"] = True
+    elif kind == "result-partial":
+        payload["_partial"] = True
+    elif kind == "unowned":
+        payload["nodes"][0].pop("source_file")
     elif kind == "ownership-only":
         payload.pop("completed_sources")
     elif kind == "incomplete":
@@ -108,7 +118,7 @@ def test_inline_cache_replay_preserves_completion_and_public_graph(inline_run, k
     assert root == Path.cwd(), "the native prepared runner must restore the parent cwd"
 
 
-@pytest.mark.parametrize("damage", ["error", "failed", "truncated", "bad-records", "bad-completion", "invalid-incomplete"])
+@pytest.mark.parametrize("damage", ["error", "failed", "truncated", "bad-records", "bad-completion", "invalid-incomplete", "invalid-json"])
 def test_inline_failed_result_stops_before_cache_or_merge(inline_run, damage):
     _, source, out, baseline, prepared, run, core, _, _ = inline_run
     payload = _payload(source)
@@ -122,9 +132,9 @@ def test_inline_failed_result_stops_before_cache_or_merge(inline_run, damage):
         payload["nodes"] = [None]
     elif damage == "bad-completion":
         payload["completed_sources"] = "note.md"
-    else:
+    elif damage == "invalid-incomplete":
         payload["incomplete_sources"] = ["", str(source)]
-    raw = json.dumps(payload)
+    raw = "{" if damage == "invalid-json" else json.dumps(payload)
     run("from pathlib import Path; Path('.graphify_semantic_new.json').write_text(" + repr(raw) + ")")
     with pytest.raises(ValueError):
         run(_body(core, "Merged {len(chunks)} chunks:"))
@@ -263,3 +273,49 @@ def test_inline_repair_leaves_other_hosts_declarations_and_monoliths_unchanged()
             baseline = subprocess.check_output(["git", "show", "HEAD:" + artifact.path],
                                                cwd=gen.REPO_ROOT, text=True)
             assert artifact.content == baseline, artifact.path
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("inline_run", ["opencode"], indirect=True)
+def test_serial_incomplete_source_veto_survives_sibling_completion(inline_run, reverse):
+    _, source, out, baseline, prepared, run, core, _, _ = inline_run
+    complete = _payload(source)
+    incomplete = {"nodes": [], "edges": [], "incomplete_sources": [str(source)]}
+    responses = [complete, incomplete]
+    if reverse:
+        responses.reverse()
+    paths = []
+    for number, response in enumerate(responses, 1):
+        path = prepared / f".graphify_chunk_{number:02}.json"
+        path.write_text(json.dumps(response), encoding="utf-8")
+        paths.append(str(path))
+    run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text("
+        + repr(json.dumps(paths)) + ")")
+    run(_body(core, "Merged {len(chunks)} chunks:"))
+    aggregate = json.loads((prepared / ".graphify_semantic_new.json").read_text())
+    assert aggregate["nodes"] == complete["nodes"]
+    assert aggregate["completed_sources"] == []
+    run(_body(core, "saved = save_semantic_cache("))
+    run(_body(core, "cached_nodes, cached_edges, cached_hyperedges, uncached ="))
+    assert (prepared / ".graphify_uncached.txt").read_text().splitlines() == [str(source)]
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+def test_successful_empty_direct_aggregate_precedes_registered_chunk(inline_run):
+    _, source, out, baseline, prepared, run, core, _, _ = inline_run
+    direct = _payload(source)
+    direct["nodes"] = []
+    chunk = prepared / ".graphify_chunk_01.json"
+    chunk.write_text(json.dumps(_payload(source)), encoding="utf-8")
+    (prepared / ".graphify_semantic_new.json").write_text(json.dumps(direct), encoding="utf-8")
+    run("from pathlib import Path; Path('.graphify_completed_chunks.json').write_text("
+        + repr(json.dumps([str(chunk)])) + ")")
+    run(_body(core, "Merged {len(chunks)} chunks:"))
+    assert json.loads((prepared / ".graphify_semantic_new.json").read_text()) == direct
+    run(_body(core, "saved = save_semantic_cache("))
+    run(_body(core, "cached_nodes, cached_edges, cached_hyperedges, uncached ="))
+    assert (prepared / ".graphify_uncached.txt").read_text() == ""
+    cached = json.loads((prepared / ".graphify_cached.json").read_text())
+    assert cached["nodes"] == []
+    assert cached["completed_sources"] == [str(source)]
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
