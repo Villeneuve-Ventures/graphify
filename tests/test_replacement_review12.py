@@ -1,4 +1,5 @@
 """Malformed fragments and synthetic portability evidence use disposable inputs."""
+import json
 import os
 from pathlib import Path
 import runpy
@@ -7,9 +8,68 @@ from types import SimpleNamespace
 
 import pytest
 
+from graphify import canonical_replacement as replacement
 from graphify import replacement_guard_issuers as issuers
 from tests.test_canonical_replacement import case as case
 from tests.test_replacement_guard_issuers import protected_policy as protected_policy
+
+
+@pytest.mark.parametrize("field", ["nodes", "edges", "hyperedges"])
+@pytest.mark.parametrize("value", [None, 5, {}, "records"])
+def test_fragment_containers_refuse_before_iteration(case, tmp_path, capsys, field, value):
+    request, fragments = case
+    fragments[0][field] = value
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+
+
+@pytest.mark.parametrize("value", [None, [], {}, 3, ""])
+def test_node_identity_refuses_before_hashing(case, tmp_path, capsys, value):
+    request, fragments = case
+    fragments[0]["nodes"][0]["id"] = value
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+
+
+@pytest.mark.parametrize("value", [None, [], 3, "node"])
+def test_semantic_node_records_must_be_objects(case, tmp_path, capsys, value):
+    request, fragments = case
+    fragments[0]["nodes"] = [value]
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+
+
+@pytest.mark.parametrize("field", ["source_file", "file_type", "edge_source", "edge_target",
+                                    "edge_owner", "edge_relation", "group_owner", "group_relation"])
+@pytest.mark.parametrize("value", [[], {}])
+def test_fragment_identifier_fields_refuse_before_membership(case, tmp_path, capsys, field, value):
+    request, fragments = case
+    fragment = fragments[0]
+    node = fragment["nodes"][0]
+    owner = node["source_file"]
+    fragment["nodes"].extend({**node, "id": identity} for identity in ("second", "third"))
+    edge = {"source": node["id"], "target": "second", "source_file": owner,
+            "relation": "references", "confidence": "EXTRACTED", "confidence_score": 1.0}
+    group = {"nodes": [node["id"], "second", "third"], "source_file": owner,
+             "relation": "participate_in", "confidence": "EXTRACTED", "confidence_score": 1.0}
+    fragment["edges"], fragment["hyperedges"] = [edge], [group]
+    if field in {"source_file", "file_type"}:
+        node[field] = value
+    else:
+        record = group if field.startswith("group_") else edge
+        record[field.split("_", 1)[1].replace("owner", "source_file")] = value
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+
+
+def _assert_cli_refusal(request, fragments, tmp_path, capsys):
+    before = replacement._tree(request["output"])
+    request_path, fragments_path = tmp_path / "request.json", tmp_path / "fragments.json"
+    request_path.write_text(json.dumps(request))
+    fragments_path.write_text(json.dumps(fragments))
+    result = replacement.main(["build-data", "--request", str(request_path),
+                               "--fragments", str(fragments_path)])
+    assert result == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "blocked"
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["stage"]).exists()
+    assert not Path(request["journal"]).exists()
 
 
 def test_lock_module_skips_if_fcntl_is_unavailable(monkeypatch):
