@@ -73,6 +73,16 @@ index is `replacement-guard-issuers.json`. Requests, environment variables and
 marker contents cannot choose this source or enroll an issuer. This slice ships
 no enrollment writer, installer, account changes or authority service.
 
+The index and its ancestors are pinned without following links. Every ancestor
+must be root-owned and disallow group/other writes; the existing deny-only ACL
+admission also applies. Files must be root-owned, regular, single-link and safe
+under that same permissions/ACL policy. Reads are bounded to 64 KiB per file and
+64 indexed namespaces, use canonical ASCII-escaped JSON without a trailing
+newline, reject duplicate fields and revalidate identity, metadata and bytes.
+These checks do not establish native custody, filesystem qualification or rollback
+resistance. Compatible clients must have read access to the index, referenced
+policy records, applicable markers and journals.
+
 The exact index schema is `graphify.guard-issuer-index.v1` with a `namespaces`
 list. Each entry contains `enrollment_id`, `namespace_path`,
 `namespace_identity` (`device` and `inode`), `policy_generation` and
@@ -99,6 +109,34 @@ POSIX creation assigns the effective UID; the coordinator's real-UID lock rule
 remains unchanged. See the official [open specification](https://pubs.opengroup.org/onlinepubs/9799919799.2024edition/functions/open.html).
 Windows retains the existing guard path without POSIX owner filtering; this
 does not qualify cross-identity Windows enrollment.
+
+No-follow owner metadata is classified before marker type or payload admission.
+Only a proved-foreign marker may be ignored without opening its payload. On POSIX,
+trusted markers must also disallow group/other writes before payload admission;
+registration applies the same mode check. Trusted malformed/nonregular/unavailable
+markers and unknown policy states still block. This mode check does not qualify
+native ACL custody or prevent same-UID/root writers.
+Parent, owner and entry bindings are rechecked. Registration refuses a foreign
+collision; ordinary preflight's ignore rule grants no overwrite/adoption right.
+An absent marker is published exclusively. Updating an existing marker binds its
+identity, owner, mode and exact previous bytes before and after quarantine, then
+publishes without replacing a concurrent winner. Restoration also uses no-replace
+publication. A refused restoration can retain the predecessor as recovery
+evidence; it is not authority to remove the winner or resume ordinary writers.
+Existing target/archive checks, aliases and exact-operation bypass requirements
+remain in force.
+
+Bootstrap absence is admitted only at a proved-missing entry beneath pinned safe
+ancestors. Every other unavailable/unsafe/changed index state refuses. A trusted
+administrator must install the permanent index before any cross-UID enrollment
+or marker publication and never remove enrollment evidence while its namespaces
+or guards survive. Missing referenced records then remain distinguishable from
+never-enrolled namespaces. Deletion or rollback of the entire protected index
+cannot be distinguished from bootstrap absence by this reader; the deployment
+contract must preserve that custody invariant or provide another independent
+anchor. No live deployment is qualified by this slice. Legacy issuer migration,
+policy changes and removal require controlled reconciliation; mutator retirement
+alone never removes issuer recognition for retained guards.
 
 The production maintenance capability, native legacy-client/restart exclusion,
 full namespace durability matrix, interrupted rollback and exhaustive concurrent
