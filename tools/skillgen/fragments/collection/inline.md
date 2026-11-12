@@ -26,11 +26,11 @@ fallback accepts only registered, regular files in this prepared directory.
 "$(cat graphify-out/.graphify_python)" -E -P -B -c "
 import json, os, re
 from pathlib import Path
-from graphify.build import _merge_source_file, _replacement_source_set
+from graphify.build import _hashable, _merge_source_file, _replacement_source_set
 from graphify.llm import _completed_source_paths
 from graphify.transaction import current_transaction, commit_prepared_bytes, pin_output, _read_managed_bytes
 
-root = Path('INPUT_PATH').resolve(strict=True)
+root = Path(current_transaction().root)
 allow_serial_fallback = @@INLINE_SERIAL_FALLBACK@@
 aggregate_name = '.graphify_semantic_new.json'
 chunks = []
@@ -81,13 +81,32 @@ for result in results:
                               _replacement_source_set(result.get('incomplete_sources', []), str(root)))
     complete = _completed_source_paths(result, root) & allowed
     partial = bool(result.get('_partial'))
+    owners, unowned = set(), False
     for key in ('nodes', 'edges', 'hyperedges'):
         for record in result.get(key, []):
+            if key == 'nodes' and not isinstance(record.get('id'), str):
+                raise ValueError('Inline node must have a string id')
+            if key == 'edges' and any(not isinstance(record.get(end, record.get(alias)), str)
+                                     for end, alias in (('source', 'from'), ('target', 'to'))):
+                raise ValueError('Inline edge must have string endpoints')
+            if key == 'hyperedges':
+                members = next((record[name] for name in ('nodes', 'members', 'node_ids')
+                                if isinstance(record.get(name), list)), None)
+                if (not _hashable(record.get('id')) or members is None
+                        or any(not isinstance(member, str) for member in members)):
+                    raise ValueError('Inline hyperedge must have a hashable id and string members')
             owner = record.get('source_file', record.get('source') if key == 'nodes' else None)
-            _merge_source_file(owner, str(root))
+            normalized = _merge_source_file(owner, str(root))
+            if owner:
+                owners.add(os.path.abspath(root / normalized))
+            else:
+                unowned = True
             partial = partial or bool(record.get('_partial')) or not owner
     if partial:
-        incomplete_sources.update(complete)
+        # Negative evidence applies even when this response declares no success.
+        incomplete_sources.update(complete | owners)
+        if unowned or not owners:
+            incomplete_sources.update(allowed)
         complete.clear()
     completed_sources.update(complete)
     all_nodes += result['nodes']

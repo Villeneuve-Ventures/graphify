@@ -118,7 +118,7 @@ def test_inline_cache_replay_preserves_completion_and_public_graph(inline_run, k
     assert root == Path.cwd(), "the native prepared runner must restore the parent cwd"
 
 
-@pytest.mark.parametrize("damage", ["error", "failed", "truncated", "bad-records", "bad-completion", "invalid-incomplete", "invalid-json"])
+@pytest.mark.parametrize("damage", ["error", "failed", "truncated", "bad-records", "bad-completion", "invalid-incomplete", "invalid-json", "missing-node-id", "bad-edge-endpoint", "bad-hyperedge-members"])
 def test_inline_failed_result_stops_before_cache_or_merge(inline_run, damage):
     _, source, out, baseline, prepared, run, core, _, _ = inline_run
     payload = _payload(source)
@@ -132,6 +132,12 @@ def test_inline_failed_result_stops_before_cache_or_merge(inline_run, damage):
         payload["nodes"] = [None]
     elif damage == "bad-completion":
         payload["completed_sources"] = "note.md"
+    elif damage == "missing-node-id":
+        payload["nodes"][0].pop("id")
+    elif damage == "bad-edge-endpoint":
+        payload["edges"] = [{"source": [], "target": "fact", "source_file": str(source)}]
+    elif damage == "bad-hyperedge-members":
+        payload["hyperedges"] = [{"id": "group", "nodes": [None], "source_file": str(source)}]
     elif damage == "invalid-incomplete":
         payload["incomplete_sources"] = ["", str(source)]
     raw = "{" if damage == "invalid-json" else json.dumps(payload)
@@ -276,11 +282,21 @@ def test_inline_repair_leaves_other_hosts_declarations_and_monoliths_unchanged()
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("veto", ["explicit", "record-partial", "unowned", "empty-partial"])
 @pytest.mark.parametrize("inline_run", ["opencode"], indirect=True)
-def test_serial_incomplete_source_veto_survives_sibling_completion(inline_run, reverse):
+def test_serial_incomplete_source_veto_survives_sibling_completion(inline_run, reverse, veto):
     _, source, out, baseline, prepared, run, core, _, _ = inline_run
     complete = _payload(source)
-    incomplete = {"nodes": [], "edges": [], "incomplete_sources": [str(source)]}
+    incomplete: dict = {"nodes": [], "edges": [], "incomplete_sources": [str(source)]}
+    if veto != "explicit":
+        incomplete = {"nodes": [], "edges": []}
+        if veto == "empty-partial":
+            incomplete["_partial"] = True
+        else:
+            record = {"id": "partial", "source_file": str(source), "_partial": True}
+            if veto == "unowned":
+                record.pop("source_file")
+            incomplete["nodes"] = [record]
     responses = [complete, incomplete]
     if reverse:
         responses.reverse()
@@ -293,7 +309,7 @@ def test_serial_incomplete_source_veto_survives_sibling_completion(inline_run, r
         + repr(json.dumps(paths)) + ")")
     run(_body(core, "Merged {len(chunks)} chunks:"))
     aggregate = json.loads((prepared / ".graphify_semantic_new.json").read_text())
-    assert aggregate["nodes"] == complete["nodes"]
+    assert aggregate["nodes"] == [node for response in responses for node in response["nodes"]]
     assert aggregate["completed_sources"] == []
     run(_body(core, "saved = save_semantic_cache("))
     run(_body(core, "cached_nodes, cached_edges, cached_hyperedges, uncached ="))
@@ -318,4 +334,28 @@ def test_successful_empty_direct_aggregate_precedes_registered_chunk(inline_run)
     cached = json.loads((prepared / ".graphify_cached.json").read_text())
     assert cached["nodes"] == []
     assert cached["completed_sources"] == [str(source)]
+    assert {name: (out / name).read_bytes() for name in baseline} == baseline
+
+
+@pytest.mark.parametrize("relative", [".", "corpus"])
+def test_shipped_inline_commands_bind_relative_scan_root_before_prepared_cwd(inline_run, relative):
+    root, source, out, baseline, prepared, _, core, _, _ = inline_run
+    cwd = root if relative == "." else root.parent
+    payload = _payload(source)
+    payload["nodes"][0]["source_file"] = source.name
+    payload["completed_sources"] = [source.name]
+    markers = ("cached_nodes, cached_edges, cached_hyperedges, uncached =",
+               "Merged {len(chunks)} chunks:", "saved = save_semantic_cache(",
+               "all_nodes = cached['nodes']")
+    for marker in markers:
+        if marker == "Merged {len(chunks)} chunks:":
+            (prepared / ".graphify_semantic_new.json").write_text(json.dumps(payload), encoding="utf-8")
+        block = re.sub(r"(?<![A-Z_])INPUT_PATH(?![A-Z_])", lambda _: relative, _block(core, marker))
+        result = subprocess.run(["/bin/bash", "-c", block], cwd=cwd, capture_output=True, text=True,
+                                env={**os.environ, "VIRTUAL_ENV": sys.prefix}, check=False)
+        assert result.returncode == 0, result.stderr
+    merged = json.loads((prepared / ".graphify_semantic.json").read_text())
+    assert merged["completed_sources"] == [str(source)]
+    from graphify.cache import check_semantic_cache
+    assert check_semantic_cache([str(source)], root=root, require_complete=True)[3] == []
     assert {name: (out / name).read_bytes() for name in baseline} == baseline

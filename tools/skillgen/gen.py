@@ -1450,6 +1450,22 @@ def _render_core(platform: Platform) -> str:
             "@@INLINE_SERIAL_FALLBACK@@", str(platform.dispatch == "opencode-mention")
         )
         body = body[:start] + collection + "\n" + body[end:]
+        # The exact token runner changes cwd before executing B0 and B3.
+        # Bind source ownership to its admitted corpus, not that private cwd.
+        start = body.index("**Step B0")
+        end = body.index("#### Part C", start)
+        inline_cache = body[start:end]
+        if inline_cache.count("root='INPUT_PATH'") != 2:
+            raise ValueError("inline cache routing requires exactly two scan-root bindings")
+        for cache_function in ("check_semantic_cache", "save_semantic_cache"):
+            inline_cache = inline_cache.replace(
+                f"from graphify.cache import {cache_function}\n",
+                f"from graphify.cache import {cache_function}\n"
+                "from graphify.transaction import current_transaction\n",
+                1,
+            )
+        inline_cache = inline_cache.replace("root='INPUT_PATH'", "root=current_transaction().root")
+        body = body[:start] + inline_cache + body[end:]
     if platform.dispatch in _DISK_DISPATCHES:
         prefix, collection = body.split("**Step B3 - Collect, cache, and merge**", 1)
         _, commands = collection.split("Save new results to cache:", 1)
