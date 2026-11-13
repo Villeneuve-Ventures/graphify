@@ -116,12 +116,13 @@ def offline_wheels(tmp_path_factory):
 
 @pytest.fixture
 def projects(tmp_path, offline_wheels):
-    """Create offline projects with caller-anchored cache paths and no foreign routing."""
+    """Create offline projects with anchored uv storage paths and no foreign routing."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
-    if "UV_CACHE_DIR" in os.environ:
-        env["UV_CACHE_DIR"] = os.path.join(os.getcwd(), os.environ["UV_CACHE_DIR"])
+    for key in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):
+        if key in os.environ:
+            env[key] = os.path.join(os.getcwd(), os.environ[key])
     env.update(UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
 
     def create(name, *, passing=False):
@@ -202,12 +203,16 @@ def test_fixture_sync_works_with_an_empty_offline_cache(projects, tmp_path):
     assert "1 passed" in output
 
 
-@pytest.mark.parametrize("relative_cache", [False, True])
-def test_projects_use_configured_cache_without_foreign_project_routing(
-        tmp_path, monkeypatch, request, relative_cache):
-    cache = tmp_path / "custom-cache"
+@pytest.mark.parametrize("relative_path", [False, True])
+@pytest.mark.parametrize("variable,command", [
+    ("UV_CACHE_DIR", ["cache", "dir"]),
+    ("UV_PYTHON_INSTALL_DIR", ["python", "dir"]),
+])
+def test_projects_use_configured_uv_storage_without_foreign_project_routing(
+        tmp_path, monkeypatch, request, relative_path, variable, command):
+    storage = tmp_path / "custom-storage"
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("UV_CACHE_DIR", cache.name if relative_cache else str(cache))
+    monkeypatch.setenv(variable, storage.name if relative_path else str(storage))
     monkeypatch.setenv("UV_PROJECT", str(tmp_path / "foreign"))
     monkeypatch.setenv("UV_OFFLINE", "0")
     _, env = request.getfixturevalue("projects")
@@ -216,23 +221,27 @@ def test_projects_use_configured_cache_without_foreign_project_routing(
     assert "UV_PROJECT" not in env
     child = tmp_path / "child"
     child.mkdir()
-    result = execute(["uv", "cache", "dir"], child, env)
+    result = execute(["uv", *command], child, env)
     assert result.returncode == 0, result.stderr
     reported = Path(result.stdout.strip())
-    assert (reported if reported.is_absolute() else child / reported) == cache
-    assert env["UV_CACHE_DIR"] == str(cache)
+    assert (reported if reported.is_absolute() else child / reported) == storage
+    assert env[variable] == str(storage)
 
 
-def test_admitted_child_uv_uses_configured_offline_cache(tmp_path, monkeypatch):
+@pytest.mark.parametrize("variable,command", [
+    ("UV_CACHE_DIR", ["cache", "dir"]),
+    ("UV_PYTHON_INSTALL_DIR", ["python", "dir"]),
+])
+def test_admitted_child_uv_uses_configured_offline_storage(tmp_path, monkeypatch, variable, command):
     (tmp_path / ".python-version").write_text("3.14.10\n")
-    cache = tmp_path / "custom-cache"
-    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+    storage = tmp_path / "custom-storage"
+    monkeypatch.setenv(variable, str(storage))
     monkeypatch.setenv("UV_OFFLINE", "1")
     admitted = ValidationEnvironment(tmp_path)
     child = admitted.child_environment()
-    result = execute(["uv", "cache", "dir"], tmp_path, child)
+    result = execute(["uv", *command], tmp_path, child)
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()) == cache
+    assert Path(result.stdout.strip()) == storage
     assert child["UV_OFFLINE"] == "1"
     assert child["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
 

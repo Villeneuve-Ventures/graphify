@@ -98,10 +98,13 @@ class ValidationEnvironment:
 
         Config discovery stays disabled, including uv's `.python-version`
         discovery. Only the admitted request is reintroduced as UV_PYTHON.
-        Offline, Python-download and cache settings retain their operator values.
+        Offline, Python-download, cache and Python-install directory settings
+        retain their operator values. The install directory locates available
+        interpreters; it does not override the admitted runtime or environment.
         """
         env = git_environment()
-        operational = {key: env[key] for key in ("UV_OFFLINE", "UV_PYTHON_DOWNLOADS", "UV_CACHE_DIR")
+        operational = {key: env[key] for key in ("UV_OFFLINE", "UV_PYTHON_DOWNLOADS", "UV_CACHE_DIR",
+                                               "UV_PYTHON_INSTALL_DIR")
                        if key in env}
         for key in list(env):
             if key.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_")) or key in {

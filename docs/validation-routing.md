@@ -66,8 +66,11 @@ checkout and admitted environment, discard competing uv routing/configuration
 and Python import controls, and disable dotenv loading. Ambient pytest plugin
 selection and autoload overrides are removed; installed plugins and tracked
 pytest configuration remain active. Operational `UV_OFFLINE`,
-`UV_PYTHON_DOWNLOADS` and `UV_CACHE_DIR` settings are retained; a custom cache
-does not select the checkout or environment. Documentation setup uses frozen
+`UV_PYTHON_DOWNLOADS`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` settings are
+retained. The install directory locates preinstalled interpreters, including
+setup-uv's CI inventory; it does not override the admitted exact runtime.
+Custom cache and install directories do not select the checkout or environment.
+Documentation setup uses frozen
 inexact sync to retain optional packages, then verifies the environment before
 running tests.
 The full setup still uses the existing frozen all-extras sync and complete suite.
