@@ -1,12 +1,29 @@
 # Graphify consolidation delivery status
 
-Status reconciled on 2026-10-12 against v8
-`da5df679dab18d2b8c150c01ebdfcaa55817ec7a`, with S1–S5 and S6 public rollback
-merged. The bounded S6 public repair transport is implemented in this candidate.
+Status reconciled on 2026-11-11 against v8
+`b86d18f02e25f924ce792116269b34c22230de6f`, with S1–S5 and S6 public rollback
+and bounded public repair merged.
 The [original consolidation plan](graphify-product-consolidation-2026-09-18.md)
 and [structural design](graphify-v8-structural-workspace-design.md) retain their
 historical planning claims. This status record does not authorize successor
 implementation, release, migration, installation, or consumer adoption.
+
+## November 11 delivery reconciliation
+
+The October 12 status snapshot used pre-repair v8
+`da5df679dab18d2b8c150c01ebdfcaa55817ec7a` and described public repair as
+implemented in its candidate. [PR #207](https://github.com/Villeneuve-Ventures/graphify/pull/207)
+subsequently merged on 2026-10-12 UTC at
+`a60c3eb67283f66f0f25d114455a5dcd30e2b190`, with head
+`a185bb9399c427f228bb71007ccde5b82d9e45a6`. That merge is an ancestor of the
+v8 revision above. Its bounded preview/approval repair transport remains present
+in [`cli.py`](../../graphify/workspace/cli.py) and
+[`repair.py`](../../graphify/workspace/repair.py).
+
+The [S6 repair result](graphify-v8-s6-repair-result.md) remains a historical
+candidate record with its original base and validation limits. This reconciliation
+corrects delivery bookkeeping only. It adds no runtime validation and does not
+extend historical receipts to current-head or S7 qualification.
 
 ## Delivered slices
 
@@ -18,6 +35,7 @@ implementation, release, migration, installation, or consumer adoption.
 | S4 — v8 adapter and structural library round trip | Delivered through [PR #167](https://github.com/Villeneuve-Ventures/graphify/pull/167) | `45c7529811006e6fe8dc6d3d3137a59ad8b589de` |
 | S5 — public structural commands and diagnostics | Delivered through [PR #175](https://github.com/Villeneuve-Ventures/graphify/pull/175) | `153fa8360488745e9633b3b54a25497e3500f1fd` |
 | S6 — public exact-last-good rollback | Delivered through [PR #204](https://github.com/Villeneuve-Ventures/graphify/pull/204) | `63323a63e78b827c0b10a67539f2b60975be204a` |
+| S6 — bounded public repair | Delivered through [PR #207](https://github.com/Villeneuve-Ventures/graphify/pull/207) | `a60c3eb67283f66f0f25d114455a5dcd30e2b190` |
 
 S3 provides lifecycle stores, pointer transitions and recovery, internal GC,
 structural-policy enforcement, and ordinary-write refusal for managed state.
@@ -37,14 +55,15 @@ The batch and capability IDs retain their meanings from the original plan.
 | B1 / T3f, T2a; preserve T6–T10 | S1 and S2 merged | Later exact-candidate and aggregate qualification belongs to S7; these merges do not establish release certification. |
 | B2 / T3a–c, T3f, T3j | S3 and S4 merged | B2 implementation delivered; later exact-candidate and aggregate release qualification belongs to S7. |
 | B3 / T3d–f, T2a | S5 merged; S7 incomplete | S7 exact-candidate aggregate proof and release compatibility statement. |
-| B4 / T3g–i, T11f | S3 core recovery and GC safety dependencies merged; S6 rollback merged; bounded public repair implemented in this candidate; offline GC incomplete | Public repair delivery and offline GC transport; an optional legacy reader only if D3 selects that option. |
+| B4 / T3g–i, T11f | S3 core recovery and GC safety dependencies merged; S6 rollback and bounded public repair merged; offline GC incomplete | Offline GC transport; an optional legacy reader only if D3 selects that option. |
 
 The [S4 result](graphify-v8-s4-result.md) and [S5 result](graphify-v8-s5-result.md)
 retain separate implementation and historical validation records.
 The [S6 rollback result](graphify-v8-s6-rollback-result.md) describes this
 merged bounded exact-last-good transport and its historical validation limits.
 PR #204 merged on 2026-10-11 UTC. The [S6 repair result](graphify-v8-s6-repair-result.md)
-records this candidate's preview/approval transport and validation boundary.
+records PR #207's preview/approval transport and historical validation boundary;
+PR #207 merged on 2026-10-12 UTC.
 Both reuse S3 pointer/lease/journal machinery and S5 dispatch. Offline GC remains
 incomplete and is not activated by this delivery.
 D3 governs only the optional legacy reader within S6; it does not block
@@ -107,7 +126,7 @@ D3 old certified-state access remains unresolved: it governs the optional S6
 legacy reader and S7 release compatibility promise, and does not block S4
 new-format work in disposable roots.
 
-S6 public repair delivery and offline GC transport, S7 aggregate candidate proof, and overall
+S6 offline GC transport, S7 aggregate candidate proof, and overall
 consolidation remain incomplete. Native power-loss and hostile
 concurrent-rename proof remain unestablished. Aletheia first-use acceptance,
 other repository enrollment, global installation changes, migration, and

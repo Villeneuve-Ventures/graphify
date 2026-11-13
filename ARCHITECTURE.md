@@ -101,12 +101,19 @@ before `commit_bytes()`. See [SECURITY.md](SECURITY.md) for the threat model.
 
 The suite under `tests/` includes unit, filesystem, CLI/subprocess, installer,
 and transaction/recovery coverage. With Python 3.14.2 or later in the 3.14
-series and the committed lockfile,
-run the canonical CI test gate:
+series and the committed lockfile, run tests directly:
 
 ```bash
 uv run --frozen pytest tests/ -q --tb=short
 ```
+
+Direct pytest runs the selected tests; it does not by itself establish full PR
+readiness. Before opening a PR or claiming readiness under ordinary policy,
+run `make fast-feedback` against the actual PR base (default `origin/v8`; set
+`BASE=<actual-base>` when different) and keep its complete routing receipt.
+For explicit full readiness, use `make review-ready` plus the applicable separate
+CI checks. See the [validation routing policy](docs/validation-routing.md) for
+lane selection, receipt requirements, and CI coverage.
 
 Use focused test files for narrow changes; installer and transaction tests use
 disposable environments and explicit test seams. See
