@@ -36,6 +36,7 @@ def repository(tmp_path, monkeypatch):
     (root / "docs/notes.md").write_text("Plain explanation.\n")
     (root / "README.md").write_text("Project overview.\n")
     (root / ".gitignore").write_text("ignored/\n")
+    (root / ".python-version").write_text("3.14.10\n")
     git(root, "add", ".")
     git(root, "commit", "-qm", "baseline")
     base = git(root, "rev-parse", "HEAD")
@@ -433,6 +434,12 @@ def test_recursive_make_passes_base_without_losing_policy_context(base):
     else:
         assert assignments == ["BASE=" + (base or "")]
         assert dict(command.env)["GRAPHIFY_VALIDATION_BASE"] == (base or "")
+
+
+def test_recursive_make_passes_explicit_runtime_and_bootstrap():
+    command = route.make_command("review-ready", validation_runtime="3.14.9")
+    assert "VALIDATION_RUNTIME=3.14.9" in command.argv
+    assert "PYTHON=" + shlex.join([sys.executable]) in command.argv
 
 
 @pytest.mark.parametrize("surface", ["committed", "staged", "unstaged"])

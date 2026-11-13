@@ -66,8 +66,11 @@ checkout and admitted environment, discard competing uv routing/configuration
 and Python import controls, and disable dotenv loading. Ambient pytest plugin
 selection and autoload overrides are removed; installed plugins and tracked
 pytest configuration remain active. Operational `UV_OFFLINE`,
-`UV_PYTHON_DOWNLOADS` and `UV_CACHE_DIR` settings are retained; a custom cache
-does not select the checkout or environment. Documentation setup uses frozen
+`UV_PYTHON_DOWNLOADS`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` settings are
+retained. The install directory locates preinstalled interpreters, including
+setup-uv's CI inventory; it does not override the admitted exact runtime.
+Custom cache and install directories do not select the checkout or environment.
+Documentation setup uses frozen
 inexact sync to retain optional packages, then verifies the environment before
 running tests.
 The full setup still uses the existing frozen all-extras sync and complete suite.
@@ -75,9 +78,39 @@ Make and CI bootstrap the router with isolated Python startup; recursive Make
 uses the same admitted selection through explicit arguments. Inherited Make
 flags, extra Makefiles and variable overrides cannot replace the selected checks.
 Local candidate version and site-packages come from that candidate's isolated
-interpreter and must satisfy this checkout's `requires-python`; the stdlib
-bootstrap may use a different minor. Explicit external selection deliberately
+interpreter and must satisfy this checkout's `requires-python`. Qualification
+defaults to the exact final CPython X.Y.Z version in the checkout's tracked
+`.python-version` (currently 3.14.10). The router reads that pin explicitly and
+supplies its own `UV_PYTHON` request while keeping uv configuration discovery
+disabled. A missing or malformed pin refuses validation. `PYTHON` selects the
+stdlib bootstrap and may use a different minor; it does not select the test
+runtime. Explicit external selection deliberately
 requires `PYTHON=/absolute/env/bin/python` as well as the environment flag.
+
+For a deliberate alternate-runtime check, pass `VALIDATION_RUNTIME=X.Y.Z` to
+Make or `--validation-runtime X.Y.Z` to the routing CLI. Only one exact final
+CPython version is accepted; package support remains `requires-python`, not this
+qualification pin. Recursive Make preserves an explicit override. Ambient
+`UV_PYTHON` and competing Make/environment controls cannot replace the selected
+request. Existing local and explicitly selected environments must match the
+request before any sync; mismatches are refused without replacing them. Select
+a matching environment or deliberately select its supported runtime. The gate
+does not delete or rebuild a mismatched environment for the operator.
+
+Version 2 environment receipts retain the existing candidate fields and add the
+bootstrap executable, implementation and version, declared pin, requested runtime
+and selection source (`.python-version` or `explicit-override`). They report
+`requested_pin_satisfied` and `ci_patch_parity`; both are null while a new local
+environment is absent. Parity compares the observed final CPython patch version
+with this checkout's declared pin. It does not establish hosted CI passage or
+operating-system/dependency parity. A deliberate override can satisfy the request
+while reporting false CI patch parity. Existing historical receipts stay valid
+under their original contracts; these new fields do not reinterpret old runs.
+The pin and candidate are checked again after setup and before tests. Offline
+and disabled-download settings remain effective: an unavailable requested Python
+stops setup with uv's diagnostic and cannot fall back to another patch or start
+pytest. Frozen dependencies, complete full-suite selection, docs inexact sync,
+checkout binding and ownership checks remain in force.
 
 Git inspection and selected children discard repository namespace/discovery
 selectors and require Git's physical top level to equal the inspected checkout.
