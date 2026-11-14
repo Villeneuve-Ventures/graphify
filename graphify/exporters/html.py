@@ -344,6 +344,10 @@ def to_html(
 
     If node_limit is set and the graph exceeds it, automatically builds an
     aggregated community-level meta-graph instead of raising ValueError.
+    If that aggregation has zero or one community, print a skip message and
+    return without writing or removing the destination. An existing HTML file
+    can therefore remain stale. Both this skip and a successful write return
+    None; the return value does not certify that an output file was created.
 
     Optional learning is admitted from graph_path, or the sibling graph.json
     when omitted. An explicit learning_overlay bypasses sidecar admission.
