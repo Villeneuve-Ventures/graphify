@@ -264,6 +264,20 @@ def write_json(G, communities, stream, *, built_at_commit=None, community_labels
 
 
 def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False, built_at_commit: str | None = None, community_labels: dict[int, str] | None = None) -> bool:
+    """Write graph JSON, returning True when the output has been written.
+
+    Unless force=True, compare existing contents when the size-cap check allows
+    reading them. Return False with a warning, leaving the destination unchanged,
+    if successfully read, nonblank text cannot be parsed as graph data, or if the
+    parsed existing graph has more nodes.
+
+    Read or UTF-8 decode failures are treated as empty content and can permit
+    replacement without force=True. Existing files rejected by the size-cap
+    check can be replaced without this comparison.
+
+    force=True skips these existing-content checks, not output admission.
+    Output-admission, serialization and write errors can propagate to the caller.
+    """
     require_ordinary_output(output_path)
     # Safety check: refuse to silently shrink an existing graph (#479)
     existing_path = Path(output_path)
@@ -478,13 +492,20 @@ def to_obsidian(
     community_labels: dict[int, str] | None = None,
     cohesion: dict[int, float] | None = None,
 ) -> int:
-    """Export graph as an Obsidian vault - one .md file per node with [[wikilinks]],
-    plus one _COMMUNITY_name.md overview note per community (sorted to top by underscore prefix).
+    """Export node and community notes to an Obsidian vault with [[wikilinks]].
 
     Open the output directory as a vault in Obsidian to get an interactive
     graph view with community colors and full-text search over node metadata.
 
-    Returns the number of node notes + community notes written.
+    .graphify_obsidian_manifest.json records managed files. Re-exporting can
+    overwrite these files and removes stale managed files on a best-effort basis;
+    manual edits to managed notes are not protected. Use a separate output
+    directory when exporting a subset that must not replace the existing vault.
+    Colliding existing files outside the manifest are skipped with a warning,
+    so the exported vault can be incomplete.
+
+    Return the number of node and community notes actually written, excluding
+    configuration, manifest writes and removed files.
     """
     out = Path(output_dir)
     require_ordinary_output(out)
@@ -818,7 +839,13 @@ def to_canvas(
     """Export graph as an Obsidian Canvas file - communities as groups, nodes as cards.
 
     Generates a structured layout: communities arranged in a grid, nodes within
-    each community arranged in rows. Edges shown between connected nodes.
+    each community arranged in rows. Include at most 200 edges between canvas
+    nodes, selected by descending weight (default 1.0). This display projection
+    can omit relationships present in the graph.
+
+    Node cards reference vault-relative Markdown filenames; this function writes
+    only the Canvas file. Generate the referenced notes separately with
+    to_obsidian, using matching filenames.
     Opens in Obsidian as an infinite canvas with community groupings visible.
     """
     require_ordinary_output(output_path)
