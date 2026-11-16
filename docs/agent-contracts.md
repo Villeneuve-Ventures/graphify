@@ -47,6 +47,15 @@ links are proof locations, not an additional universal test gate.
 
 ## Source contributions
 
+Extractor implementation dependencies follow
+[MIGRATION.md invariant 4](../graphify/extractors/MIGRATION.md#invariants-non-negotiable):
+the facade may re-export extractor objects, but extractors must not import the
+facade. `make extractor-import-check` checks this direction without importing
+source. [Guard regressions](../tests/test_extractor_import_guard.py) enforce it
+in complete pytest runs; [registry tests](../tests/test_extractors_registry.py)
+check that facade and registry re-exports preserve object identity. See the
+[guard's proof limits and owner-level repair](../graphify/extractors/MIGRATION.md#import-direction-enforcement).
+
 Before changing completion or replacement, read
 [semantic replacement](semantic-replacement.md) and, for scoped engine input,
 [engine input interfaces](engine-input-seams.md). Trace
