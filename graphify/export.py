@@ -266,6 +266,10 @@ def write_json(G, communities, stream, *, built_at_commit=None, community_labels
 def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False, built_at_commit: str | None = None, community_labels: dict[int, str] | None = None) -> bool:
     """Write graph JSON, returning True when the output has been written.
 
+    The output restores endpoint order where both saved endpoints are present,
+    preserves multigraph edge keys and graph hyperedges, and fills missing
+    edge confidence scores from the confidence label, falling back to 1.0.
+
     Unless force=True, compare existing contents when the size-cap check allows
     reading them. Return False with a warning, leaving the destination unchanged,
     if successfully read, nonblank text cannot be parsed as graph data, or if the
@@ -496,6 +500,8 @@ def to_obsidian(
 
     Open the output directory as a vault in Obsidian to get an interactive
     graph view with community colors and full-text search over node metadata.
+    Node notes show the first edge for each neighbor when parallel edges
+    exist. The vault does not render graph hyperedges.
 
     .graphify_obsidian_manifest.json records managed files. Re-exporting can
     overwrite these files and removes stale managed files on a best-effort basis;
@@ -839,9 +845,11 @@ def to_canvas(
     """Export graph as an Obsidian Canvas file - communities as groups, nodes as cards.
 
     Generates a structured layout: communities arranged in a grid, nodes within
-    each community arranged in rows. Include at most 200 edges between canvas
-    nodes, selected by descending weight (default 1.0). This display projection
-    can omit relationships present in the graph.
+    each community arranged in rows. Include up to 200 edges whose endpoints
+    belong to the displayed communities, in descending weight order (default
+    1.0). An edge can refer to a member whose card was omitted because its
+    filename was missing. Parallel edges can share an endpoint-derived ID.
+    Graph hyperedges are omitted.
 
     Node cards reference vault-relative Markdown filenames; this function writes
     only the Canvas file. Generate the referenced notes separately with
