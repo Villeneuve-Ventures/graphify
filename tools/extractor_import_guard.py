@@ -63,6 +63,13 @@ class _Scope:
             return None
         if name in self.bindings:
             targets = self.bindings[name]
+            if self.kind == "class" and not targets:
+                # A simple annotation marks a class local without storing it.
+                # LOAD_NAME then consults globals/builtins, skipping closures.
+                module = self
+                while module.parent is not None:
+                    module = module.parent
+                return module.resolve(name)
             return next(iter(targets)) if len(targets) == 1 else None
         if self.parent is not None:
             return self.parent.resolve(
@@ -132,9 +139,8 @@ class _Bindings(ast.NodeVisitor):
         if node.value is not None:
             self.generic_visit(node)
             return
-        # An annotation alone never stores a value. A function-local name
-        # still shadows outer scopes, even before its first assignment.
-        if isinstance(node.target, ast.Name) and self.scope.kind == "function":
+        # Only a bare name declares a local; parentheses suppress that effect.
+        if node.simple and isinstance(node.target, ast.Name) and self.scope.kind in {"function", "class"}:
             self.scope.bindings.setdefault(self.private.normalize(node.target.id), set())
         self.generic_visit(node.target)
         self.visit(node.annotation)
