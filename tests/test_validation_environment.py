@@ -30,6 +30,13 @@ def execute(argv, root, env):
     return subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
 
 
+def fixture_environment():
+    """Keep disposable Git writes independent of the caller's repository and config."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
 def inventory(root):
     return {str(p.relative_to(root)): (p.lstat().st_ino, p.lstat().st_mtime_ns,
             hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() else None)
@@ -119,7 +126,7 @@ def offline_wheels(tmp_path_factory):
 @pytest.fixture
 def projects(tmp_path, offline_wheels):
     """Create offline projects with anchored uv storage paths and no foreign routing."""
-    env = {k: v for k, v in git_environment().items()
+    env = {k: v for k, v in fixture_environment().items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
     for key in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):
@@ -165,8 +172,8 @@ def projects(tmp_path, offline_wheels):
             '[tool.pytest.ini_options]\naddopts="--strict-markers"\n'
         )
         _write_fixture_lock(root, offline_wheels)
-        for argv in (["git", "init", "-q"], ["git", "config", "user.email", "fixture@example.invalid"],
-                     ["git", "config", "user.name", "Fixture"], ["git", "add", "."],
+        for argv in (["git", "init", "-q"], ["git", "config", "--local", "user.email", "fixture@example.invalid"],
+                     ["git", "config", "--local", "user.name", "Fixture"], ["git", "add", "."],
                      ["git", "commit", "-qm", "fixture"]):
             result = execute(argv, root, env)
             assert result.returncode == 0, result.stdout + result.stderr
@@ -180,6 +187,18 @@ def projects(tmp_path, offline_wheels):
 def prepare(root, env):
     result = execute(["uv", "sync", "--all-extras", "--frozen"], root, env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_project_identity_is_configured_only_in_fixture(tmp_path, monkeypatch, request):
+    config = tmp_path / "caller.gitconfig"
+    original = b"[user]\n\tname = Original\n"
+    config.write_bytes(original)
+    monkeypatch.setenv("GIT_CONFIG", str(config))
+    create, env = request.getfixturevalue("projects")
+    project, _ = create("project")
+    assert config.read_bytes() == original
+    result = execute(["git", "config", "--local", "user.name"], project, env)
+    assert result.returncode == 0 and result.stdout.strip() == "Fixture"
 
 
 def test_fixture_build_backend_works_with_an_empty_offline_cache(projects, tmp_path):
@@ -231,7 +250,7 @@ def test_projects_use_configured_uv_storage_without_foreign_project_routing(
 
 
 def fixture_git(root, *args):
-    subprocess.run(["git", *args], cwd=root, env=git_environment(), check=True)
+    subprocess.run(["git", *args], cwd=root, env=fixture_environment(), check=True)
 
 
 @pytest.fixture
