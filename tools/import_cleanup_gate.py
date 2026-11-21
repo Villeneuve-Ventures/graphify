@@ -393,6 +393,8 @@ def check_row(root: Path, row: dict, deadline: float, cache: dict) -> dict:
     junit = ET.fromstring(checked_file(row["junit"]))
     cases = junit.findall(".//testcase")
     identities = [(case.get("classname"), case.get("name")) for case in cases]
+    require(all(name is not None and name.strip() for _, name in identities),
+            "missing or blank JUnit test name")
     expected_modules = {p.removesuffix(".py").replace("/", ".") for p in TEST_PATHS}
     require(set(focused["tested_modules"]) == expected_modules
             and {c[0] for c in identities} == expected_modules, "wrong test module selection")

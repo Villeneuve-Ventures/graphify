@@ -355,6 +355,15 @@ def test_collection_and_execution_proof_must_be_complete(case, mutation):
         verify(case)
 
 
+@pytest.mark.parametrize("attribute", ["", ' name=""', ' name="   "'])
+def test_each_junit_case_requires_a_nonblank_name(case, attribute):
+    path = Path(case[3]["junit"]["path"])
+    path.write_text(path.read_text().replace(' name="test_contract"', attribute, 1))
+    case[3]["junit"] = bind(path)
+    with pytest.raises(gate.ProofRefused, match="test name"):
+        verify(case)
+
+
 def test_lastfailed_selection_cannot_replace_reviewed_command(case):
     change_result(case, "focused_result", lambda result: result["command"].append("--lf"))
     with pytest.raises(gate.ProofRefused, match="command"):
