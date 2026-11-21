@@ -22,6 +22,8 @@ from tools.validation_environment import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNNING_VERSION = ".".join(map(str, sys.version_info[:3]))
+OTHER_PATCH = "3.14.9" if RUNNING_VERSION != "3.14.9" else "3.14.10"
 
 
 def execute(argv, root, env):
@@ -132,7 +134,7 @@ def projects(tmp_path, offline_wheels):
         for file in ("__init__.py", "validation_route.py", "validation_environment.py"):
             shutil.copyfile(ROOT / "tools" / file, root / "tools" / file)
         shutil.copyfile(ROOT / "Makefile", root / "Makefile")
-        shutil.copyfile(ROOT / ".python-version", root / ".python-version")
+        (root / ".python-version").write_text(RUNNING_VERSION + "\n")
         (root / "graphify").mkdir()
         (root / "graphify/__init__.py").write_text("")
         (root / "graphify/validation_plugin.py").write_text(
@@ -228,12 +230,20 @@ def test_projects_use_configured_uv_storage_without_foreign_project_routing(
     assert env[variable] == str(storage)
 
 
+@pytest.fixture
+def tracked_pin(tmp_path):
+    pin = tmp_path / ".python-version"
+    pin.write_text(RUNNING_VERSION + "\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", pin.name], cwd=tmp_path, check=True)
+    return pin
+
+
 @pytest.mark.parametrize("variable,command", [
     ("UV_CACHE_DIR", ["cache", "dir"]),
     ("UV_PYTHON_INSTALL_DIR", ["python", "dir"]),
 ])
-def test_admitted_child_uv_uses_configured_offline_storage(tmp_path, monkeypatch, variable, command):
-    (tmp_path / ".python-version").write_text("3.14.10\n")
+def test_admitted_child_uv_uses_configured_offline_storage(tmp_path, tracked_pin, monkeypatch, variable, command):
     storage = tmp_path / "custom-storage"
     monkeypatch.setenv(variable, str(storage))
     monkeypatch.setenv("UV_OFFLINE", "1")
@@ -394,8 +404,8 @@ def test_direct_cli_cannot_qualify_printed_full_make_instead_of_running_tests(pr
 
 @pytest.mark.parametrize("control", ["MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKEFILES",
                                       "GNUMAKEFLAGS", "VALIDATION_ENVIRONMENT", "VALIDATION_RUNTIME"])
-def test_child_environment_drops_make_action_controls_but_retains_policy_context(tmp_path, monkeypatch, control):
-    (tmp_path / ".python-version").write_text("3.14.10\n")
+def test_child_environment_drops_make_action_controls_but_retains_policy_context(
+        tmp_path, tracked_pin, monkeypatch, control):
     monkeypatch.setenv(control, "untrusted")
     monkeypatch.setenv("GRAPHIFY_VALIDATION_BASE", "explicit-policy-context")
     admitted = ValidationEnvironment(tmp_path)
@@ -538,8 +548,8 @@ def test_physical_git_top_level_must_match_inspected_root(projects, monkeypatch)
     assert "Git top-level does not match inspected root" in result.stderr
 
 
-def test_git_selectors_are_cleared_without_removing_transport_or_restrictive_controls(tmp_path, monkeypatch):
-    (tmp_path / ".python-version").write_text("3.14.10\n")
+def test_git_selectors_are_cleared_without_removing_transport_or_restrictive_controls(
+        tmp_path, tracked_pin, monkeypatch):
     for key in GIT_NAMESPACE_VARIABLES:
         monkeypatch.setenv(key, "foreign")
     retained = {"GIT_SSH_COMMAND": "ssh -i /retained/key", "GIT_ASKPASS": "/retained/askpass",
@@ -566,7 +576,7 @@ def test_runtime_pin_selects_fresh_environment_through_make(projects, mixed):
     # Both the local version file and setup-uv's ambient selector would be lost
     # under UV_NO_CONFIG unless the router supplies its own runtime request.
     result = execute(["make", "fast-feedback", f"PYTHON={sys.executable}", f"BASE={base}"],
-                     primary, {**env, "UV_PYTHON": "3.14.9"})
+                     primary, {**env, "UV_PYTHON": OTHER_PATCH})
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
     receipts = environment_receipts(output)
@@ -576,9 +586,9 @@ def test_runtime_pin_selects_fresh_environment_through_make(projects, mixed):
     assert absent["ci_patch_parity"] is None
     assert absent["requested_pin_satisfied"] is None
     for row in tested:
-        assert row["python_version"] == [3, 14, 10]
-        assert row["requested_python"] == "3.14.10"
-        assert row["declared_python_pin"] == "3.14.10"
+        assert row["python_version"] == list(sys.version_info[:3])
+        assert row["requested_python"] == RUNNING_VERSION
+        assert row["declared_python_pin"] == RUNNING_VERSION
         assert row["runtime_selection_source"] == ".python-version"
         assert row["bootstrap_python_version"] == list(sys.version_info[:3])
         assert row["requested_pin_satisfied"] is True
@@ -612,10 +622,10 @@ def test_runtime_existing_mismatch_refuses_or_explicitly_reports_override(projec
     # exercise refusal on every host without requiring a second installed Python.
     prepare(primary, env)
     if override:
-        (primary / ".python-version").write_text("3.14.9\n")
-        argv = ["VALIDATION_RUNTIME=3.14.10"]
+        (primary / ".python-version").write_text(OTHER_PATCH + "\n")
+        argv = [f"VALIDATION_RUNTIME={RUNNING_VERSION}"]
     else:
-        argv = ["VALIDATION_RUNTIME=3.14.9"]
+        argv = [f"VALIDATION_RUNTIME={OTHER_PATCH}"]
     before = inventory(primary / ".venv")
     result = execute(["make", "fast-feedback", f"BASE={base}", *argv], primary, env)
     output = result.stdout + result.stderr
@@ -629,7 +639,7 @@ def test_runtime_existing_mismatch_refuses_or_explicitly_reports_override(projec
         assert all(row["requested_pin_satisfied"] is True for row in tested)
     else:
         assert result.returncode != 0
-        assert "does not match requested validation runtime 3.14.9" in result.stderr
+        assert f"does not match requested validation runtime {OTHER_PATCH}" in result.stderr
         assert "$ uv " not in output
         assert inventory(primary / ".venv") == before
 
@@ -653,23 +663,47 @@ def test_runtime_unavailable_offline_never_falls_back_or_starts_tests(projects, 
     assert not (primary / ".venv").exists()
 
 
-def test_runtime_pin_change_is_refused_before_setup_or_tests(tmp_path):
-    pin = tmp_path / ".python-version"
-    pin.write_text("3.14.10\n")
+def test_runtime_pin_change_is_refused_before_setup_or_tests(tmp_path, tracked_pin):
     admitted = ValidationEnvironment(tmp_path)
-    pin.write_text("3.14.9\n")
+    tracked_pin.write_text(OTHER_PATCH + "\n")
     with pytest.raises(EnvironmentRefused, match="declared Python pin changed"):
         admitted.verify(allow_absent=True)
     assert not (tmp_path / ".venv").exists()
 
 
+@pytest.mark.parametrize("changed_after_admission", [False, True])
+@pytest.mark.parametrize("kind", ["untracked", "symlink", "indexed-symlink", "hidden", "fifo"])
+def test_runtime_pin_requires_visible_tracked_regular_file(tmp_path, tracked_pin, kind, changed_after_admission):
+    admission = ValidationEnvironment(tmp_path) if changed_after_admission else None
+    if kind == "untracked":
+        subprocess.run(["git", "rm", "--cached", tracked_pin.name], cwd=tmp_path, check=True)
+    elif kind == "hidden":
+        subprocess.run(["git", "update-index", "--assume-unchanged", tracked_pin.name], cwd=tmp_path, check=True)
+    elif kind == "fifo":
+        tracked_pin.unlink()
+        os.mkfifo(tracked_pin)
+    else:
+        target = tmp_path / "same-version"
+        tracked_pin.rename(target)
+        tracked_pin.symlink_to(target)
+        if kind == "indexed-symlink":
+            subprocess.run(["git", "add", tracked_pin.name], cwd=tmp_path, check=True)
+            tracked_pin.unlink()
+            target.rename(tracked_pin)
+    with pytest.raises(EnvironmentRefused, match=r"\.python-version"):
+        if admission is None:
+            ValidationEnvironment(tmp_path)
+        else:
+            admission.verify(allow_absent=True)
+
+
 @pytest.fixture
 def alternate_runtime_python(projects):
     _, env = projects
-    result = execute(["uv", "python", "find", "--system", "--no-python-downloads", "cpython@3.14.9"],
+    result = execute(["uv", "python", "find", "--system", "--no-python-downloads", f"cpython@{OTHER_PATCH}"],
                      ROOT, {**env, "UV_NO_CONFIG": "1"})
     if result.returncode:
-        pytest.skip("optional real CPython 3.14.9 mismatch proof requires a preinstalled interpreter")
+        pytest.skip(f"optional mismatch proof needs preinstalled CPython {OTHER_PATCH}")
     return Path(result.stdout.strip())
 
 
@@ -689,7 +723,7 @@ def test_runtime_real_alternate_environment_refusal_and_override(
     else:
         argv.append(f"PYTHON={sys.executable}")
     if override:
-        argv.append("VALIDATION_RUNTIME=3.14.9")
+        argv.append(f"VALIDATION_RUNTIME={OTHER_PATCH}")
         (primary / "runtime.py").write_text("value = 1\n")
     before = inventory(selected)
     result = execute(["make", "fast-feedback", f"BASE={base}", *argv], primary, env)
@@ -699,8 +733,8 @@ def test_runtime_real_alternate_environment_refusal_and_override(
         tested = [row for row in environment_receipts(output)
                   if row["stage"] == "postsetup-before-test"]
         assert tested
-        assert all(row["python_version"] == [3, 14, 9] for row in tested)
-        assert all(row["requested_python"] == "3.14.9" for row in tested)
+        assert all(row["python_version"] == list(map(int, OTHER_PATCH.split("."))) for row in tested)
+        assert all(row["requested_python"] == OTHER_PATCH for row in tested)
         assert all(row["runtime_selection_source"] == "explicit-override" for row in tested)
         assert all(row["ci_patch_parity"] is False for row in tested)
         assert all(row["requested_pin_satisfied"] is True for row in tested)
@@ -708,11 +742,11 @@ def test_runtime_real_alternate_environment_refusal_and_override(
         assert "1 passed" in output
     else:
         assert result.returncode != 0
-        assert "does not match requested validation runtime 3.14.10" in result.stderr
+        assert f"does not match requested validation runtime {RUNNING_VERSION}" in result.stderr
         refused = environment_receipts(output)
         assert refused[-1]["stage"] == "runtime-refused"
         assert refused[-1]["ci_patch_parity"] is False
-        assert refused[-1]["bootstrap_python_version"] == ([3, 14, 9] if external
+        assert refused[-1]["bootstrap_python_version"] == (list(map(int, OTHER_PATCH.split("."))) if external
                                                             else list(sys.version_info[:3]))
         assert "$ uv " not in output
         assert inventory(selected) == before

@@ -82,7 +82,9 @@ interpreter and must satisfy this checkout's `requires-python`. Qualification
 defaults to the exact final CPython X.Y.Z version in the checkout's tracked
 `.python-version` (currently 3.14.10). The router reads that pin explicitly and
 supplies its own `UV_PYTHON` request while keeping uv configuration discovery
-disabled. A missing or malformed pin refuses validation. `PYTHON` selects the
+disabled. Each admission checks the index for a visible, stage-zero regular file
+and reads the working pin without following symlinks. Regular tracked edits
+are valid inputs. Missing, hidden, unmerged or malformed pins refuse validation. `PYTHON` selects the
 stdlib bootstrap and may use a different minor; it does not select the test
 runtime. Explicit external selection deliberately
 requires `PYTHON=/absolute/env/bin/python` as well as the environment flag.
@@ -96,6 +98,9 @@ request. Existing local and explicitly selected environments must match the
 request before any sync; mismatches are refused without replacing them. Select
 a matching environment or deliberately select its supported runtime. The gate
 does not delete or rebuild a mismatched environment for the operator.
+
+Offline validation fixtures use the executing CPython patch. The optional real
+two-interpreter tests skip when the alternate patch is unavailable.
 
 Version 2 environment receipts retain the existing candidate fields and add the
 bootstrap executable, implementation and version, declared pin, requested runtime

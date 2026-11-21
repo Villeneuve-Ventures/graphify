@@ -59,7 +59,7 @@ def _owned(path: Path, *, directory: bool) -> os.stat_result:
 class ValidationEnvironment:
     """Admit one owned environment and one exact CPython qualification runtime.
 
-    The checkout's single X.Y.Z `.python-version` is mandatory. An explicit
+    The checkout's tracked, regular `.python-version` must contain one X.Y.Z pin. An explicit
     runtime overrides test selection, not the package support range or the pin
     used to report CI patch parity. Construction probes existing environments
     and prints a receipt; it never installs packages or replaces an environment.
@@ -73,10 +73,7 @@ class ValidationEnvironment:
         if os.environ.get("PYTEST_ADDOPTS"):
             raise EnvironmentRefused("ambient-pytest-addopts; unset PYTEST_ADDOPTS")
         self.pin_path = self.root / ".python-version"
-        try:
-            self.pin_text = self.pin_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise EnvironmentRefused("validation requires a readable checkout .python-version pin") from exc
+        self.pin_text = self._read_pin()
         self.declared_pin = self._exact_runtime(self.pin_text.strip(), ".python-version")
         self.runtime = self._exact_runtime(runtime, "--validation-runtime") if runtime is not None else self.declared_pin
         self.runtime_source = "explicit-override" if runtime is not None else ".python-version"
@@ -92,6 +89,28 @@ class ValidationEnvironment:
         self.identity = None
         self.proof = self.verify(allow_absent=not self.explicit)
         self.record("prewrite")
+
+    def _read_pin(self) -> str:
+        """Read the visible stage-zero pin from this checkout's regular working file."""
+        entry = subprocess.run(
+            ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "ls-files",
+             "--stage", "-v", "--full-name", "-z", "--", ".python-version"],
+            cwd=self.root, env=git_environment(), capture_output=True, check=False,
+        )
+        if entry.returncode or not re.fullmatch(
+                rb"H (?:100644|100755) [0-9a-f]+ 0\t\.python-version\x00", entry.stdout):
+            raise EnvironmentRefused(".python-version must be a visible, tracked regular checkout file")
+
+        def open_pin(path: str, flags: int) -> int:
+            return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+
+        try:
+            with open(self.pin_path, encoding="utf-8", opener=open_pin) as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise EnvironmentRefused(".python-version must be a regular file")
+                return stream.read()
+        except (OSError, UnicodeError) as exc:
+            raise EnvironmentRefused("validation requires a readable regular checkout .python-version") from exc
 
     def child_environment(self) -> dict[str, str]:
         """Pin checkout, environment and CPython request after removing ambient selectors.
@@ -136,7 +155,7 @@ class ValidationEnvironment:
         final CPython runtime and the package support range. Refusals never
         authorize uv to rebuild or replace the candidate.
         """
-        if self.pin_path.read_text(encoding="utf-8") != self.pin_text:
+        if self._read_pin() != self.pin_text:
             raise EnvironmentRefused("declared Python pin changed during validation; restart validation")
         if not self.path.exists():
             if self.path.is_symlink() or not allow_absent or self.path != self.root / ".venv":
