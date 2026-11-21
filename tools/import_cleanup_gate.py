@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import ast
 import base64
-from collections import Counter
 import csv
 import hashlib
 import io
@@ -90,12 +89,48 @@ def delta(root: Path, before: str, after: str) -> bytes:
                "--binary", "--full-index", before, after, "--")
 
 
+def _retains_import(original: ast.Import | ast.ImportFrom, candidate: ast.Import | ast.ImportFrom) -> bool:
+    """Match one import statement after deleting zero or more of its aliases."""
+    if isinstance(original, ast.ImportFrom):
+        if not isinstance(candidate, ast.ImportFrom):
+            return False
+        if (original.level, original.module) != (candidate.level, candidate.module):
+            return False
+    elif not isinstance(candidate, ast.Import):
+        return False
+    remaining = iter((alias.name, alias.asname) for alias in original.names)
+    return all((alias.name, alias.asname) in remaining for alias in candidate.names)
+
+
+def _check_module_cleanup(before: ast.Module, after: ast.Module, path: str) -> None:
+    """Match the candidate body in order, permitting only import binding deletions."""
+    remaining = iter(after.body)
+    candidate = next(remaining, None)
+    removed = False
+    for node in before.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            require(all(alias.name != "*" for alias in node.names), f"wildcard import: {path}")
+            if not isinstance(candidate, (ast.Import, ast.ImportFrom)) or not _retains_import(node, candidate):
+                removed = True
+                continue
+            if len(candidate.names) < len(node.names):
+                removed = True
+        else:
+            require(candidate is not None and ast.dump(node) == ast.dump(candidate),
+                    f"statement changed or moved: {path}")
+        candidate = next(remaining, None)
+    require(candidate is None, f"unexpected statement or import: {path}")
+    require(removed, f"no import binding removed: {path}")
+
+
 def check_import_delta(root: Path, before: str, after: str, expected: str) -> list[str]:
     """Allow only the exact reviewed removal of top-level test imports.
 
-All other AST nodes, files and modes must match. Whole PR changes remain bound
-separately; this comparison is against the original fully validated head.
-"""
+    Each changed module must lose at least one binding. Retained statements and
+    aliases keep their original order and grouping. Other AST nodes, files and
+    modes must match. An unchanged pair returns an empty list. Whole PR changes
+    remain bound separately against the original fully validated head.
+    """
     require(sha256(delta(root, before, after)) == expected, "unreviewed cleanup delta")
     raw = git(root, "diff", "--raw", "-z", "--no-renames", before, after, "--")
     parts = raw.split(b"\0")
@@ -106,20 +141,8 @@ separately; this comparison is against the original fully validated head.
         require(fields[0] == ":100644" and fields[1] == "100644" and fields[-1] == "M",
                 f"unsupported cleanup mode or status: {path}")
         require(path in TEST_PATHS, f"non-pilot path changed: {path}")
-        trees = [ast.parse(git(root, "show", f"{ref}:{path}")) for ref in (before, after)]
-        imports = []
-        for tree in trees:
-            entries = Counter()
-            for node in tree.body:
-                if isinstance(node, (ast.Import, ast.ImportFrom)):
-                    for alias in node.names:
-                        require(alias.name != "*", f"wildcard import: {path}")
-                        entries[(type(node).__name__, getattr(node, "module", None),
-                                 getattr(node, "level", 0), alias.name, alias.asname)] += 1
-            imports.append(entries)
-            tree.body = [n for n in tree.body if not isinstance(n, (ast.Import, ast.ImportFrom))]
-        require(not (imports[1] - imports[0]), f"new import binding: {path}")
-        require(ast.dump(trees[0]) == ast.dump(trees[1]), f"non-import test behavior changed: {path}")
+        original, candidate = (ast.parse(git(root, "show", f"{ref}:{path}")) for ref in (before, after))
+        _check_module_cleanup(original, candidate, path)
         changed.append(path)
     return changed
 

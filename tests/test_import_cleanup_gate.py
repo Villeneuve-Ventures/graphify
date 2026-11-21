@@ -260,6 +260,35 @@ def test_approved_delta_hash_does_not_admit_changed_bodies_or_new_imports(case, 
         gate.check_import_delta(root, row["old_head"], head, digest)
 
 
+@pytest.mark.parametrize(("original", "candidate", "admitted"), [
+    ("import os\nimport sys\nvalue = 1", "value = 1\nimport sys", False),
+    ("import os\nimport sys\nimport math", "import math\nimport sys", False),
+    ("from .m import a, b, c", "from .m import c, a", False),
+    ("from .m import a, b", "from .m import a\nfrom .m import b", False),
+    ("from .m import a\nfrom .m import b", "from .m import a, b", False),
+    ("from .m import a, b", "from m import a", False),
+    ("import os, sys as s", "import sys", False),
+    ("import os\nvalue = 1", "import os\nvalue = 1\n# comment", False),
+    ("from .m import a, b, c as z\nvalue = 1", "from .m import a, c as z\nvalue = 1", True),
+    ("import os\nvalue = 1\nimport os", "value = 1\nimport os", True),
+    ("import os, sys\nimport os", "import os", True),
+])
+def test_delta_preserves_statement_and_alias_order(case, original, candidate, admitted):
+    root = case[0]
+    path = root / gate.TEST_PATHS[0]
+    for content in (original, candidate):
+        path.write_text(content + "\n")
+        git(root, "add", gate.TEST_PATHS[0])
+        git(root, "commit", "-qm", "fixture import order")
+    before, after = git(root, "rev-parse", "HEAD^", "HEAD").splitlines()
+    digest = gate.sha256(gate.delta(root, before, after))
+    if admitted:
+        assert gate.check_import_delta(root, before, after, digest) == [gate.TEST_PATHS[0]]
+    else:
+        with pytest.raises(gate.ProofRefused):
+            gate.check_import_delta(root, before, after, digest)
+
+
 @pytest.mark.parametrize("kind", ["product", "executable", "symlink"])
 def test_product_or_mode_changes_refuse_even_with_a_new_pin(case, kind):
     root, _, _, row = case

@@ -127,7 +127,10 @@ their historical meaning and are not accepted or upgraded by this V2 verifier.
 New output uses `graphify-import-cleanup-receipt-v2`.
 
 The pilot admits only reviewed removal of top-level import bindings from its
-seven replacement test modules. Other test AST nodes, source, configuration,
+seven replacement test modules. Each changed module must lose at least one
+binding. Retained statements keep their order relative to every other statement.
+Surviving aliases stay in their original statement and order.
+Other test AST nodes, source, configuration,
 fixtures, dependency locks and modes must be unchanged against each original
 head. Both complete PR diffs and the cleanup delta are recorded; the last
 commit or top-prefix pass cannot hide earlier unqualified work. Every prior
