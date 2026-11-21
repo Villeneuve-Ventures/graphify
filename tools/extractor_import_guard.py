@@ -52,6 +52,7 @@ class _Scope:
     kind: str = "module"
     bindings: dict[str, set[str | None]] = field(default_factory=dict)
     wildcard: bool = False
+    declared_globals: set[str] = field(default_factory=set)
 
     def bind(self, name: str, target: str | None = None) -> None:
         self.bindings.setdefault(name, set()).add(target)
@@ -68,6 +69,8 @@ class _Scope:
                 # LOAD_NAME then consults globals/builtins, skipping closures.
                 module = self
                 while module.parent is not None:
+                    if name in module.declared_globals:
+                        return None
                     module = module.parent
                 return module.resolve(name)
             return next(iter(targets)) if len(targets) == 1 else None
@@ -116,11 +119,9 @@ class _Bindings(ast.NodeVisitor):
 
     def _body(self, nodes: list[ast.AST], kind: str, args: ast.arguments | None = None) -> None:
         previous = self.scope
-        parent = previous
-        # Class namespaces are not enclosing lexical scopes for nested bodies.
-        while parent.kind == "class" and parent.parent is not None:
-            parent = parent.parent
-        self.scope = _Scope(parent, kind)
+        # Keep the nesting chain for global declarations. resolve() skips
+        # enclosing class namespaces when looking up ordinary bindings.
+        self.scope = _Scope(previous, kind)
         if args is not None:
             for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs):
                 self._bind(arg.arg)
@@ -236,11 +237,15 @@ class _Bindings(ast.NodeVisitor):
         self.visit(node.value)
         self.scope = previous
 
-    def visit_Global(self, node: ast.Global | ast.Nonlocal) -> None:
+    def visit_Global(self, node: ast.Global) -> None:
+        for name in node.names:
+            self.scope.declared_globals.add(self.private.normalize(name))
+            self._bind(name)
+
+    def visit_Nonlocal(self, node: ast.Nonlocal) -> None:
         for name in node.names:
             self._bind(name)
 
-    visit_Nonlocal = visit_Global
 
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
         if node.name is not None:

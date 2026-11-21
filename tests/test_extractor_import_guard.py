@@ -104,6 +104,12 @@ def test_permitted_or_unresolved_dependencies(tmp_path, source, name):
     ("def f(load):\n    class C:\n        (load): object\n        load('graphify.extract')", 0),
     ("load = custom\ndef f():\n    from importlib import import_module as load\n"
      "    class C:\n        load: object\n        load('graphify.extract')", 0),
+    ("def f():\n    global load\n    load = custom\n"
+     "    class C:\n        load: object\n        load('graphify.extract')", 0),
+    ("class Outer:\n    global load\n    load = custom\n"
+     "    class Inner:\n        load: object\n        load('graphify.extract')", 0),
+    ("def other():\n    global load\n    load = custom\n"
+     "class C:\n    load: object\n    load('graphify.extract')", 1),
     ("load: object = custom\nload('graphify.extract')", 0),
     ("load.attribute: object\nload('graphify.extract')", 1),
     ("table[load('graphify.extract')]: object", 1),
