@@ -119,7 +119,7 @@ def offline_wheels(tmp_path_factory):
 @pytest.fixture
 def projects(tmp_path, offline_wheels):
     """Create offline projects with anchored uv storage paths and no foreign routing."""
-    env = {k: v for k, v in os.environ.items()
+    env = {k: v for k, v in git_environment().items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
     for key in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):
@@ -230,13 +230,23 @@ def test_projects_use_configured_uv_storage_without_foreign_project_routing(
     assert env[variable] == str(storage)
 
 
+def fixture_git(root, *args):
+    subprocess.run(["git", *args], cwd=root, env=git_environment(), check=True)
+
+
 @pytest.fixture
 def tracked_pin(tmp_path):
     pin = tmp_path / ".python-version"
     pin.write_text(RUNNING_VERSION + "\n")
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "add", pin.name], cwd=tmp_path, check=True)
+    fixture_git(tmp_path, "init", "-q")
+    fixture_git(tmp_path, "add", pin.name)
     return pin
+
+
+def test_tracked_pin_uses_its_own_index(tmp_path, monkeypatch, request):
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "absent-parent" / "index"))
+    pin = request.getfixturevalue("tracked_pin")
+    assert ValidationEnvironment(pin.parent).declared_pin == RUNNING_VERSION
 
 
 @pytest.mark.parametrize("variable,command", [
@@ -676,9 +686,9 @@ def test_runtime_pin_change_is_refused_before_setup_or_tests(tmp_path, tracked_p
 def test_runtime_pin_requires_visible_tracked_regular_file(tmp_path, tracked_pin, kind, changed_after_admission):
     admission = ValidationEnvironment(tmp_path) if changed_after_admission else None
     if kind == "untracked":
-        subprocess.run(["git", "rm", "--cached", tracked_pin.name], cwd=tmp_path, check=True)
+        fixture_git(tmp_path, "rm", "--cached", tracked_pin.name)
     elif kind == "hidden":
-        subprocess.run(["git", "update-index", "--assume-unchanged", tracked_pin.name], cwd=tmp_path, check=True)
+        fixture_git(tmp_path, "update-index", "--assume-unchanged", tracked_pin.name)
     elif kind == "fifo":
         tracked_pin.unlink()
         os.mkfifo(tracked_pin)
@@ -687,7 +697,7 @@ def test_runtime_pin_requires_visible_tracked_regular_file(tmp_path, tracked_pin
         tracked_pin.rename(target)
         tracked_pin.symlink_to(target)
         if kind == "indexed-symlink":
-            subprocess.run(["git", "add", tracked_pin.name], cwd=tmp_path, check=True)
+            fixture_git(tmp_path, "add", tracked_pin.name)
             tracked_pin.unlink()
             target.rename(tracked_pin)
     with pytest.raises(EnvironmentRefused, match=r"\.python-version"):
