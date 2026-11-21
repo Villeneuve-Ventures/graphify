@@ -128,6 +128,17 @@ class _Bindings(ast.NodeVisitor):
         if isinstance(node.ctx, (ast.Store, ast.Del)):
             self._bind(node.id)
 
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self.generic_visit(node)
+            return
+        # An annotation alone never stores a value. A function-local name
+        # still shadows outer scopes, even before its first assignment.
+        if isinstance(node.target, ast.Name) and self.scope.kind == "function":
+            self.scope.bindings.setdefault(self.private.normalize(node.target.id), set())
+        self.generic_visit(node.target)
+        self.visit(node.annotation)
+
     def visit_Attribute(self, node: ast.Attribute) -> None:
         if isinstance(node.ctx, (ast.Store, ast.Del)):
             root = node.value

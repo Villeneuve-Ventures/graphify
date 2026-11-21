@@ -94,6 +94,20 @@ def test_permitted_or_unresolved_dependencies(tmp_path, source, name):
     assert check_repository(_repository(tmp_path, source, name)) == []
 
 
+@pytest.mark.parametrize(("body", "expected"), [
+    ("load: object\nload('graphify.extract')", 1),
+    ("class C:\n    load: object\n    load('graphify.extract')", 1),
+    ("def f():\n    load: object\n    load('graphify.extract')", 0),
+    ("def f():\n    from importlib import import_module as load\n    load: object\n    load('graphify.extract')", 1),
+    ("load: object = custom\nload('graphify.extract')", 0),
+    ("load.attribute: object\nload('graphify.extract')", 1),
+    ("table[load('graphify.extract')]: object", 1),
+])
+def test_annotated_loader_binding(tmp_path, body, expected):
+    source = "from importlib import import_module as load\n" + body
+    assert len(check_repository(_repository(tmp_path, source))) == expected
+
+
 @pytest.mark.parametrize("name", ["sample.py", "sample.pyi"])
 @pytest.mark.parametrize("source,expected", [
     ("__import__('graphify.extract')", 1),
