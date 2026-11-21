@@ -2,6 +2,9 @@
 
 ## 📝 Description
 
+<!-- Add one merge-risk line. Choose easy to reverse, hard to reverse, or
+uncertain. Name what could break and the first recovery step. -->
+
 <!-- Explain the problem, the resulting behavior, and any material limitations. -->
 - <!-- Add details here. -->
 
@@ -11,6 +14,11 @@
 - <!-- Add details here. -->
 
 ## 🧪 How Has This Been Tested?
+
+<!-- When behavior changes, show the before-and-after result for the same
+input or scenario. Use screenshots for visible changes, observed results
+from the same regression test, or a short output diff. If there is no
+comparable before result, state the expected and observed result. -->
 
 <!-- List the exact commands, results, and relevant environment. Disclose skipped checks and known warnings. Select checks appropriate to the change and follow applicable repository requirements. -->
 - [ ] **Validation route:** `make fast-feedback` — selected lane, complete receipt and result:
