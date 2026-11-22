@@ -57,6 +57,40 @@ wrapper/configuration migration requires a separately coordinated batch.
 5. **Zero test edits** outside `tests/test_extractors_registry.py`. The
    untouched language tests passing IS the proof of behavior preservation.
 
+### Import-direction enforcement
+
+`make extractor-import-check` runs the stdlib AST guard `GRA-IMPORT-001` over
+every `.py` and `.pyi` file under `graphify/extractors/`, without importing the
+scanned code. `tests/test_extractor_import_guard.py` also scans the real source
+tree in the existing complete pytest suite, so local full validation and CI's
+pytest shards enforce invariant 4. The dedicated command is a cheap focused
+check; it does not establish PR readiness or replace validation routing.
+
+The guard rejects absolute and resolved relative facade imports, including
+aliases, function-local imports and `TYPE_CHECKING` branches. Literal calls to
+`importlib.import_module` and builtin `__import__` are checked when their lexical
+callee binding is unambiguous, including import aliases. Relative
+`import_module` targets need a literal package argument. Builtin `__import__`
+targets need a proven omitted or literal zero level; a literal `graphify` target
+with `extract` in a list/tuple `fromlist` is also checked. Unpacking is not
+evaluated: a positional slot after `*args`, or a missing argument that `*args` or
+`**kwargs` could supply, is unknown. Explicit keywords and positional arguments
+before `*args` remain fixed when call argument binding succeeds.
+
+Dynamic values such as the engine's `import_module(config.ts_module)` are outside
+this proof. So are assignment-created callable aliases, runtime namespace or
+attribute mutation, and interprocedural rebinding. Reassignment, wildcard imports
+and `global`/`nonlocal` declarations make a callee binding unknown; the guard does
+not infer execution order. Unknown calls are not a blanket dynamic-import ban.
+Read, traversal, parse, missing-scope or empty-scope failures are checker errors,
+never clean scans. Exit codes are 0 clean, 1 violations and 2 checker errors.
+
+Repair a violation at the helper's owner: classify and move the helper to a
+shared or private extractor module, then import it directly. Preserve the facade
+re-export and the same function objects in the facade and registry. Run the guard,
+the facade/registry identity tests and a direct-module import regression for the
+affected owner. Moving the facade import into a function does not fix the direction.
+
 ## Helper classification
 
 For every `_name` your function references that is defined OUTSIDE it:
