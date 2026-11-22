@@ -22,10 +22,19 @@ from tools.validation_environment import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+RUNNING_VERSION = ".".join(map(str, sys.version_info[:3]))
+OTHER_PATCH = "3.14.9" if RUNNING_VERSION != "3.14.9" else "3.14.10"
 
 
 def execute(argv, root, env):
     return subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
+
+
+def fixture_environment():
+    """Keep disposable Git writes independent of the caller's repository and config."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
 
 
 def inventory(root):
@@ -116,12 +125,13 @@ def offline_wheels(tmp_path_factory):
 
 @pytest.fixture
 def projects(tmp_path, offline_wheels):
-    """Create offline projects with caller-anchored cache paths and no foreign routing."""
-    env = {k: v for k, v in os.environ.items()
+    """Create offline projects with anchored uv storage paths and no foreign routing."""
+    env = {k: v for k, v in fixture_environment().items()
            if not k.startswith(("UV_", "PYTHON", "PYTEST_", "CONDA_"))
            and k not in {"VIRTUAL_ENV", "__PYVENV_LAUNCHER__", "GRAPHIFY_VALIDATION_BASE"}}
-    if "UV_CACHE_DIR" in os.environ:
-        env["UV_CACHE_DIR"] = os.path.join(os.getcwd(), os.environ["UV_CACHE_DIR"])
+    for key in ("UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"):
+        if key in os.environ:
+            env[key] = os.path.join(os.getcwd(), os.environ[key])
     env.update(UV_OFFLINE="1", UV_PYTHON_DOWNLOADS="never")
 
     def create(name, *, passing=False):
@@ -131,6 +141,7 @@ def projects(tmp_path, offline_wheels):
         for file in ("__init__.py", "validation_route.py", "validation_environment.py"):
             shutil.copyfile(ROOT / "tools" / file, root / "tools" / file)
         shutil.copyfile(ROOT / "Makefile", root / "Makefile")
+        (root / ".python-version").write_text(RUNNING_VERSION + "\n")
         (root / "graphify").mkdir()
         (root / "graphify/__init__.py").write_text("")
         (root / "graphify/validation_plugin.py").write_text(
@@ -161,8 +172,8 @@ def projects(tmp_path, offline_wheels):
             '[tool.pytest.ini_options]\naddopts="--strict-markers"\n'
         )
         _write_fixture_lock(root, offline_wheels)
-        for argv in (["git", "init", "-q"], ["git", "config", "user.email", "fixture@example.invalid"],
-                     ["git", "config", "user.name", "Fixture"], ["git", "add", "."],
+        for argv in (["git", "init", "-q"], ["git", "config", "--local", "user.email", "fixture@example.invalid"],
+                     ["git", "config", "--local", "user.name", "Fixture"], ["git", "add", "."],
                      ["git", "commit", "-qm", "fixture"]):
             result = execute(argv, root, env)
             assert result.returncode == 0, result.stdout + result.stderr
@@ -176,6 +187,18 @@ def projects(tmp_path, offline_wheels):
 def prepare(root, env):
     result = execute(["uv", "sync", "--all-extras", "--frozen"], root, env)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_project_identity_is_configured_only_in_fixture(tmp_path, monkeypatch, request):
+    config = tmp_path / "caller.gitconfig"
+    original = b"[user]\n\tname = Original\n"
+    config.write_bytes(original)
+    monkeypatch.setenv("GIT_CONFIG", str(config))
+    create, env = request.getfixturevalue("projects")
+    project, _ = create("project")
+    assert config.read_bytes() == original
+    result = execute(["git", "config", "--local", "user.name"], project, env)
+    assert result.returncode == 0 and result.stdout.strip() == "Fixture"
 
 
 def test_fixture_build_backend_works_with_an_empty_offline_cache(projects, tmp_path):
@@ -201,12 +224,16 @@ def test_fixture_sync_works_with_an_empty_offline_cache(projects, tmp_path):
     assert "1 passed" in output
 
 
-@pytest.mark.parametrize("relative_cache", [False, True])
-def test_projects_use_configured_cache_without_foreign_project_routing(
-        tmp_path, monkeypatch, request, relative_cache):
-    cache = tmp_path / "custom-cache"
+@pytest.mark.parametrize("relative_path", [False, True])
+@pytest.mark.parametrize("variable,command", [
+    ("UV_CACHE_DIR", ["cache", "dir"]),
+    ("UV_PYTHON_INSTALL_DIR", ["python", "dir"]),
+])
+def test_projects_use_configured_uv_storage_without_foreign_project_routing(
+        tmp_path, monkeypatch, request, relative_path, variable, command):
+    storage = tmp_path / "custom-storage"
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("UV_CACHE_DIR", cache.name if relative_cache else str(cache))
+    monkeypatch.setenv(variable, storage.name if relative_path else str(storage))
     monkeypatch.setenv("UV_PROJECT", str(tmp_path / "foreign"))
     monkeypatch.setenv("UV_OFFLINE", "0")
     _, env = request.getfixturevalue("projects")
@@ -215,22 +242,45 @@ def test_projects_use_configured_cache_without_foreign_project_routing(
     assert "UV_PROJECT" not in env
     child = tmp_path / "child"
     child.mkdir()
-    result = execute(["uv", "cache", "dir"], child, env)
+    result = execute(["uv", *command], child, env)
     assert result.returncode == 0, result.stderr
     reported = Path(result.stdout.strip())
-    assert (reported if reported.is_absolute() else child / reported) == cache
-    assert env["UV_CACHE_DIR"] == str(cache)
+    assert (reported if reported.is_absolute() else child / reported) == storage
+    assert env[variable] == str(storage)
 
 
-def test_admitted_child_uv_uses_configured_offline_cache(tmp_path, monkeypatch):
-    cache = tmp_path / "custom-cache"
-    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+def fixture_git(root, *args):
+    subprocess.run(["git", *args], cwd=root, env=fixture_environment(), check=True)
+
+
+@pytest.fixture
+def tracked_pin(tmp_path):
+    pin = tmp_path / ".python-version"
+    pin.write_text(RUNNING_VERSION + "\n")
+    fixture_git(tmp_path, "init", "-q")
+    fixture_git(tmp_path, "add", pin.name)
+    return pin
+
+
+def test_tracked_pin_uses_its_own_index(tmp_path, monkeypatch, request):
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "absent-parent" / "index"))
+    pin = request.getfixturevalue("tracked_pin")
+    assert ValidationEnvironment(pin.parent).declared_pin == RUNNING_VERSION
+
+
+@pytest.mark.parametrize("variable,command", [
+    ("UV_CACHE_DIR", ["cache", "dir"]),
+    ("UV_PYTHON_INSTALL_DIR", ["python", "dir"]),
+])
+def test_admitted_child_uv_uses_configured_offline_storage(tmp_path, tracked_pin, monkeypatch, variable, command):
+    storage = tmp_path / "custom-storage"
+    monkeypatch.setenv(variable, str(storage))
     monkeypatch.setenv("UV_OFFLINE", "1")
     admitted = ValidationEnvironment(tmp_path)
     child = admitted.child_environment()
-    result = execute(["uv", "cache", "dir"], tmp_path, child)
+    result = execute(["uv", *command], tmp_path, child)
     assert result.returncode == 0, result.stderr
-    assert Path(result.stdout.strip()) == cache
+    assert Path(result.stdout.strip()) == storage
     assert child["UV_OFFLINE"] == "1"
     assert child["UV_PROJECT_ENVIRONMENT"] == str(tmp_path / ".venv")
 
@@ -382,8 +432,9 @@ def test_direct_cli_cannot_qualify_printed_full_make_instead_of_running_tests(pr
 
 
 @pytest.mark.parametrize("control", ["MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKEFILES",
-                                      "GNUMAKEFLAGS", "VALIDATION_ENVIRONMENT"])
-def test_child_environment_drops_make_action_controls_but_retains_policy_context(tmp_path, monkeypatch, control):
+                                      "GNUMAKEFLAGS", "VALIDATION_ENVIRONMENT", "VALIDATION_RUNTIME"])
+def test_child_environment_drops_make_action_controls_but_retains_policy_context(
+        tmp_path, tracked_pin, monkeypatch, control):
     monkeypatch.setenv(control, "untrusted")
     monkeypatch.setenv("GRAPHIFY_VALIDATION_BASE", "explicit-policy-context")
     admitted = ValidationEnvironment(tmp_path)
@@ -526,7 +577,8 @@ def test_physical_git_top_level_must_match_inspected_root(projects, monkeypatch)
     assert "Git top-level does not match inspected root" in result.stderr
 
 
-def test_git_selectors_are_cleared_without_removing_transport_or_restrictive_controls(tmp_path, monkeypatch):
+def test_git_selectors_are_cleared_without_removing_transport_or_restrictive_controls(
+        tmp_path, tracked_pin, monkeypatch):
     for key in GIT_NAMESPACE_VARIABLES:
         monkeypatch.setenv(key, "foreign")
     retained = {"GIT_SSH_COMMAND": "ssh -i /retained/key", "GIT_ASKPASS": "/retained/askpass",
@@ -537,3 +589,206 @@ def test_git_selectors_are_cleared_without_removing_transport_or_restrictive_con
     for clean in (git_environment(), ValidationEnvironment(tmp_path).child_environment()):
         assert not GIT_NAMESPACE_VARIABLES.intersection(clean)
         assert {key: clean[key] for key in retained} == retained
+
+
+def environment_receipts(output):
+    return [json.loads(line.split("=", 1)[1]) for line in output.splitlines()
+            if line.startswith("validation_environment_receipt=")]
+
+
+@pytest.mark.parametrize("mixed", [False, True])
+def test_runtime_pin_selects_fresh_environment_through_make(projects, mixed):
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    if mixed:
+        (primary / "runtime.py").write_text("value = 1\n")
+    # Both the local version file and setup-uv's ambient selector would be lost
+    # under UV_NO_CONFIG unless the router supplies its own runtime request.
+    result = execute(["make", "fast-feedback", f"PYTHON={sys.executable}", f"BASE={base}"],
+                     primary, {**env, "UV_PYTHON": OTHER_PATCH})
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    receipts = environment_receipts(output)
+    tested = [row for row in receipts if row["stage"] == "postsetup-before-test"]
+    assert tested
+    absent = next(row for row in receipts if row["state"] == "new-local")
+    assert absent["ci_patch_parity"] is None
+    assert absent["requested_pin_satisfied"] is None
+    for row in tested:
+        assert row["python_version"] == list(sys.version_info[:3])
+        assert row["requested_python"] == RUNNING_VERSION
+        assert row["declared_python_pin"] == RUNNING_VERSION
+        assert row["runtime_selection_source"] == ".python-version"
+        assert row["bootstrap_python_version"] == list(sys.version_info[:3])
+        assert row["requested_pin_satisfied"] is True
+        assert row["ci_patch_parity"] is True
+        assert row["version"] == 2
+    assert "1 passed" in output
+    assert "selected_lane=" + ("full" if mixed else "editorial-docs") in output
+
+
+@pytest.mark.parametrize("pin", [None, "3.14", "3.14.10\n3.14.9", "pypy@3.14.10"])
+def test_runtime_pin_missing_or_invalid_refuses_before_setup(projects, pin):
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    path = primary / ".python-version"
+    if pin is None:
+        path.unlink()
+    else:
+        path.write_text(pin)
+    result = execute(["make", "review-ready", f"BASE={base}"], primary, env)
+    assert result.returncode != 0
+    assert ".python-version" in result.stderr
+    assert "$ uv " not in result.stdout
+    assert not (primary / ".venv").exists()
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_runtime_existing_mismatch_refuses_or_explicitly_reports_override(projects, override):
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    # Keep the real environment unchanged; request a different exact patch to
+    # exercise refusal on every host without requiring a second installed Python.
+    prepare(primary, env)
+    if override:
+        (primary / ".python-version").write_text(OTHER_PATCH + "\n")
+        argv = [f"VALIDATION_RUNTIME={RUNNING_VERSION}"]
+    else:
+        argv = [f"VALIDATION_RUNTIME={OTHER_PATCH}"]
+    before = inventory(primary / ".venv")
+    result = execute(["make", "fast-feedback", f"BASE={base}", *argv], primary, env)
+    output = result.stdout + result.stderr
+    if override:
+        assert result.returncode == 0, output
+        tested = [row for row in environment_receipts(output)
+                  if row["stage"] == "postsetup-before-test"]
+        assert tested
+        assert all(row["runtime_selection_source"] == "explicit-override" for row in tested)
+        assert all(row["ci_patch_parity"] is False for row in tested)
+        assert all(row["requested_pin_satisfied"] is True for row in tested)
+    else:
+        assert result.returncode != 0
+        assert f"does not match requested validation runtime {OTHER_PATCH}" in result.stderr
+        assert "$ uv " not in output
+        assert inventory(primary / ".venv") == before
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_runtime_unavailable_offline_never_falls_back_or_starts_tests(projects, explicit):
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    if not explicit:
+        (primary / ".python-version").write_text("3.14.999\n")
+    result = execute(["make", "fast-feedback", f"BASE={base}",
+                      *(["VALIDATION_RUNTIME=3.14.999"] if explicit else [])],
+                     primary, env)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "3.14.999" in output
+    assert "requested_python" in output
+    assert "$ uv run " not in output
+    assert "postsetup-before-test" not in output
+    assert "validation_route_status=complete" not in output
+    assert not (primary / ".venv").exists()
+
+
+def test_runtime_pin_change_is_refused_before_setup_or_tests(tmp_path, tracked_pin):
+    admitted = ValidationEnvironment(tmp_path)
+    tracked_pin.write_text(OTHER_PATCH + "\n")
+    with pytest.raises(EnvironmentRefused, match="declared Python pin changed"):
+        admitted.verify(allow_absent=True)
+    assert not (tmp_path / ".venv").exists()
+
+
+@pytest.mark.parametrize("changed_after_admission", [False, True])
+@pytest.mark.parametrize("kind", ["untracked", "symlink", "indexed-symlink", "hidden", "fifo"])
+def test_runtime_pin_requires_visible_tracked_regular_file(tmp_path, tracked_pin, kind, changed_after_admission):
+    admission = ValidationEnvironment(tmp_path) if changed_after_admission else None
+    if kind == "untracked":
+        fixture_git(tmp_path, "rm", "--cached", tracked_pin.name)
+    elif kind == "hidden":
+        fixture_git(tmp_path, "update-index", "--assume-unchanged", tracked_pin.name)
+    elif kind == "fifo":
+        tracked_pin.unlink()
+        os.mkfifo(tracked_pin)
+    else:
+        target = tmp_path / "same-version"
+        tracked_pin.rename(target)
+        tracked_pin.symlink_to(target)
+        if kind == "indexed-symlink":
+            fixture_git(tmp_path, "add", tracked_pin.name)
+            tracked_pin.unlink()
+            target.rename(tracked_pin)
+    with pytest.raises(EnvironmentRefused, match=r"\.python-version"):
+        if admission is None:
+            ValidationEnvironment(tmp_path)
+        else:
+            admission.verify(allow_absent=True)
+
+
+@pytest.fixture
+def alternate_runtime_python(projects):
+    _, env = projects
+    result = execute(["uv", "python", "find", "--system", "--no-python-downloads", f"cpython@{OTHER_PATCH}"],
+                     ROOT, {**env, "UV_NO_CONFIG": "1"})
+    if result.returncode:
+        pytest.skip(f"optional mismatch proof needs preinstalled CPython {OTHER_PATCH}")
+    return Path(result.stdout.strip())
+
+
+@pytest.mark.parametrize("external", [False, True])
+@pytest.mark.parametrize("override", [False, True])
+def test_runtime_real_alternate_environment_refusal_and_override(
+        projects, alternate_runtime_python, external, override, tmp_path):
+    create, env = projects
+    primary, base = create("primary", passing=True)
+    prepare(primary, {**env, "UV_PYTHON": str(alternate_runtime_python)})
+    selected = primary / ".venv"
+    argv = []
+    if external:
+        selected = tmp_path / "external"
+        (primary / ".venv").rename(selected)
+        argv.extend((f"PYTHON={selected / 'bin/python'}", f"VALIDATION_ENVIRONMENT={selected}"))
+    else:
+        argv.append(f"PYTHON={sys.executable}")
+    if override:
+        argv.append(f"VALIDATION_RUNTIME={OTHER_PATCH}")
+        (primary / "runtime.py").write_text("value = 1\n")
+    before = inventory(selected)
+    result = execute(["make", "fast-feedback", f"BASE={base}", *argv], primary, env)
+    output = result.stdout + result.stderr
+    if override:
+        assert result.returncode == 0, output
+        tested = [row for row in environment_receipts(output)
+                  if row["stage"] == "postsetup-before-test"]
+        assert tested
+        assert all(row["python_version"] == list(map(int, OTHER_PATCH.split("."))) for row in tested)
+        assert all(row["requested_python"] == OTHER_PATCH for row in tested)
+        assert all(row["runtime_selection_source"] == "explicit-override" for row in tested)
+        assert all(row["ci_patch_parity"] is False for row in tested)
+        assert all(row["requested_pin_satisfied"] is True for row in tested)
+        assert "selected_lane=full" in output
+        assert "1 passed" in output
+    else:
+        assert result.returncode != 0
+        assert f"does not match requested validation runtime {RUNNING_VERSION}" in result.stderr
+        refused = environment_receipts(output)
+        assert refused[-1]["stage"] == "runtime-refused"
+        assert refused[-1]["ci_patch_parity"] is False
+        assert refused[-1]["bootstrap_python_version"] == (list(map(int, OTHER_PATCH.split("."))) if external
+                                                            else list(sys.version_info[:3]))
+        assert "$ uv " not in output
+        assert inventory(selected) == before
+
+
+def test_runtime_retarget_is_refused_before_tests(projects, alternate_runtime_python):
+    create, env = projects
+    primary, _ = create("primary", passing=True)
+    prepare(primary, env)
+    admitted = ValidationEnvironment(primary)
+    python = primary / ".venv/bin/python"
+    assert python.is_symlink()
+    python.unlink()
+    python.symlink_to(alternate_runtime_python)
+    with pytest.raises(EnvironmentRefused, match="does not match requested validation runtime"):
+        admitted.before_tests()
