@@ -463,6 +463,7 @@ def test_rendered_cache_check_resets_completion_manifest_in_prepared_output(tmp_
     code = _rendered_semantic_stage(platform_key, 'cached_nodes, cached_edges, cached_hyperedges, uncached = check_semantic_cache(')
     code = code.replace('INPUT_PATH', str(fixture.root))
     merge_code = _rendered_semantic_stage(platform_key, 'chunks = json.loads(')
+    merge_code = merge_code.replace('INPUT_PATH', str(fixture.root))
     _run(fixture, f"""
 Path('.graphify_detect.json').write_text(json.dumps({{'files': {{'document': [str(root / 'changed.md')]}}}}))
 Path('.graphify_completed_chunks.json').write_text('["stale-chunk.json"]')
@@ -474,7 +475,11 @@ assert Path.cwd() != output
 chunk = Path.cwd() / '.graphify_chunk_01.json'
 chunk.write_text(json.dumps({{'nodes': [{{'id': 'fresh', 'source_file': 'changed.md'}}],
     'edges': [], 'hyperedges': [], 'completed_sources': [str(root / 'changed.md')]}}))
-Path('.graphify_completed_chunks.json').write_text(json.dumps([str(chunk)]))
+if {platform_key == 'codex'!r}:
+    # Codex collects inline; only OpenCode supports the serial file fallback.
+    Path('.graphify_semantic_new.json').write_bytes(chunk.read_bytes())
+else:
+    Path('.graphify_completed_chunks.json').write_text(json.dumps([str(chunk)]))
 if {platform_key == 'claude'!r}:
     # Disk B3 requires a plan from this exact prepared owner and B0 batch.
     Path('.graphify_intake_plan_01.json').write_text(json.dumps({{
@@ -495,10 +500,12 @@ def test_rendered_chunk_merge_preserves_current_direct_aggregate(tmp_path, monke
     fixture = _prepare(_baseline(tmp_path, monkeypatch))
     before = _published_bytes(fixture.output)
     code = _rendered_semantic_stage(platform_key, 'chunks = json.loads(')
+    code = code.replace('INPUT_PATH', str(fixture.root))
     direct = {'nodes': [{'id': 'fact', 'source_file': 'changed.md'}], 'edges': [], 'hyperedges': [],
               'completed_sources': [str(fixture.root / 'changed.md')], 'input_tokens': 1, 'output_tokens': 2}
     _run(fixture, f"""
 Path('.graphify_completed_chunks.json').write_text('[]')
+Path('.graphify_uncached.txt').write_text(str(root / 'changed.md'))
 Path('.graphify_semantic_new.json').write_text(json.dumps({direct!r}))
 exec({code!r})
 assert json.loads(Path('.graphify_semantic_new.json').read_text()) == {direct!r}
