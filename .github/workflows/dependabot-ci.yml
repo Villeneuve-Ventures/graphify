@@ -183,7 +183,7 @@ jobs:
       - name: Upload pytest timing diagnostics
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-timings-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/pytest-timings/
@@ -202,7 +202,7 @@ jobs:
 
       - name: Upload shard execution outcome
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-result-${{ github.run_id }}-${{ github.run_attempt }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/pytest-result/result.json
@@ -324,7 +324,7 @@ jobs:
         id: security_artifact
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v7.0.2
+        uses: actions/upload-artifact@v7
         with:
           name: security-receipts-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/security-receipts/
