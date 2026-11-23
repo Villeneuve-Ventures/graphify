@@ -41,6 +41,20 @@ def test_new_guard_retains_owner_access_under_restrictive_umask(tmp_path, issuer
     assert json.loads(marker.read_text())["entries"]["Archive"]["role"] == "archive"
 
 
+def test_new_coordinator_lock_remains_reopenable_under_restrictive_umask(case):
+    request, _ = case
+    mask = os.umask(0o777)
+    try:
+        with replacement._coordinator_lock(request):
+            pass
+    finally:
+        os.umask(mask)
+    lock = replacement._coordinator_lock_path(Path(request["journal"]))
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    with replacement._coordinator_lock(request):
+        pass
+
+
 def archive_registration(registration):
     parent, marker, journal = registration
     record = json.loads(marker.read_text())
@@ -125,3 +139,14 @@ def test_actual_case_insensitive_archive_alias(registration):
     assert os.path.samefile(archive, alternate)
     with pytest.raises(tx.PendingTransactionError, match="archive"):
         replacement.guard_output(alternate / "new.txt")
+
+
+def test_existing_coordinator_lock_is_not_chmodded(case):
+    request, _ = case
+    lock = replacement._coordinator_lock_path(Path(request["journal"]))
+    with replacement._coordinator_lock(request):
+        pass
+    lock.chmod(0o640)
+    with replacement._coordinator_lock(request):
+        pass
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o640

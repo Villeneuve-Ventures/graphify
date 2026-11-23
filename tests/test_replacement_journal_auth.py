@@ -31,6 +31,20 @@ def target(guarded_parent):
     return parent / "archive", marker, journal
 
 
+@pytest.mark.parametrize("authority", [False, True])
+@pytest.mark.parametrize("damage", ["foreign_file", "foreign_parent", "file_mode", "parent_mode", "file_acl", "parent_acl"])
+def test_unsafe_journal_cannot_admit_terminal_target(protected_policy, target, monkeypatch, damage, authority):
+    path, _, journal = target
+    if damage.startswith("foreign"):
+        protected_policy.owner(journal if damage.endswith("file") else journal.parent, 765432)
+    elif damage.endswith("mode"):
+        protected_policy.mode(journal if damage.startswith("file") else journal.parent, 0o777)
+    else:
+        identity = os.stat(journal if damage.startswith("file") else journal.parent).st_ino
+        monkeypatch.setattr(hook_installation, "_acl_safe", lambda fd: os.fstat(fd).st_ino != identity)
+    with replacement._operation(journal, "exact") if authority else replacement.contextlib.nullcontext():
+        with pytest.raises(tx.PendingTransactionError):
+            replacement.guard_output(path)
 
 
 @pytest.mark.parametrize("state", ["COMMITTED", "ROLLED_BACK_UNRECOVERED"])
@@ -40,6 +54,19 @@ def test_safe_terminal_journal_allows_target(protected_policy, target, state):
     replacement.guard_output(path)
 
 
+def test_safe_incomplete_journal_and_archive_keep_existing_fences(protected_policy, target):
+    path, marker, journal = target
+    journal.write_text(json.dumps({"request_digest": "exact", "state": "PREPARED"}))
+    with pytest.raises(tx.PendingTransactionError, match="incomplete"):
+        replacement.guard_output(path)
+    with replacement._operation(journal, "exact"):
+        replacement.guard_output(path)
+    record = json.loads(marker.read_bytes())
+    record["entries"]["archive"]["role"] = "archive"
+    marker.write_text(json.dumps(record))
+    replacement.guard_output(path, mutation=False)
+    with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
+        replacement.guard_output(path)
 
 
 @pytest.mark.parametrize("marker_owner,journal_owner", [(987654, "caller"), (876543, 0), (0, 987654)])

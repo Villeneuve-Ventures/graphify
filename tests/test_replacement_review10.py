@@ -116,3 +116,67 @@ def test_successful_guard_update_leaves_no_recovery_hold(guarded_parent):
     replacement.guard_output(parent / "ordinary")
     with pytest.raises(tx.PendingTransactionError, match="archive is read-only"):
         replacement.guard_output(parent / "archive" / "new")
+
+
+@pytest.mark.parametrize("selector", [None, "0" * 64])
+def test_wrong_rollback_selector_does_not_register_quarantine(case, modeled, selector):
+    request, fragments = case
+    seal = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, seal)
+    replacement.execute(request, seal, plan["preview_sha256"])
+    journal_path = Path(request["journal"])
+    journal_before = journal_path.read_bytes()
+    marker = journal_path.parent / replacement.GUARD
+    marker_before = marker.read_bytes()
+    old_tree, new_tree = replacement._tree(request["archive"]), replacement._tree(request["output"])
+    quarantine = journal_path.parent / "unused-quarantine"
+
+    with pytest.raises(tx.PendingTransactionError, match="new-graph selector"):
+        replacement.rollback(request, replacement._sha(journal_before), quarantine,
+                             expected_new_tree=selector)
+
+    assert marker.read_bytes() == marker_before
+    assert journal_path.read_bytes() == journal_before
+    assert not quarantine.exists()
+    assert replacement._tree(request["archive"]) == old_tree
+    assert replacement._tree(request["output"]) == new_tree
+    replacement.guard_output(quarantine / "ordinary", mutation=True)
+
+
+@pytest.mark.parametrize("failure", ["short", "zero", "corrupt"])
+def test_new_lock_is_complete_and_verified_before_yield(case, monkeypatch, failure):
+    request, _ = case
+    slot = Path(request["journal"]).name
+    payload = ("replacement-lock-v1:" + replacement._sha(os.fsencode(slot))).encode()
+    path = Path(request["journal"]).parent / (".replacement-lock-" + replacement._sha(os.fsencode(slot)))
+    real_write, real_fsync = os.write, os.fsync
+    calls = []
+
+    def selected(fd):
+        return path.exists() and os.fstat(fd).st_ino == path.stat().st_ino
+
+    def write(fd, data):
+        if selected(fd):
+            calls.append(len(data))
+            if failure == "zero":
+                return 0
+            if failure == "short":
+                return real_write(fd, data[:max(1, len(data) // 2)])
+        return real_write(fd, data)
+
+    def fsync(fd):
+        real_fsync(fd)
+        if failure == "corrupt" and selected(fd):
+            os.pwrite(fd, b"X", 0)
+
+    monkeypatch.setattr(os, "write", write)
+    monkeypatch.setattr(os, "fsync", fsync)
+    if failure == "short":
+        with replacement._coordinator_lock(request):
+            assert path.read_bytes() == payload
+        assert len(calls) > 1
+    else:
+        with pytest.raises(tx.PendingTransactionError, match="lock.*(progress|binding)"):
+            with replacement._coordinator_lock(request):
+                pytest.fail("incomplete or corrupt lock must not admit operation work")
+    assert not Path(request["journal"]).exists()

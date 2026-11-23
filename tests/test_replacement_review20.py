@@ -21,6 +21,20 @@ def test_preservation_inventory_includes_root_mode(tmp_path):
     assert replacement._tree(output) != inventory
 
 
+def test_root_mode_drift_refuses_before_operation_effects(case, modeled):
+    request, fragments = case
+    seal = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, seal)
+    output = Path(request["output"])
+    output.chmod(0o700 if stat.S_IMODE(output.stat().st_mode) != 0o700 else 0o755)
+    before = (output / "graph.json").read_bytes()
+    with pytest.raises(tx.PendingTransactionError, match="preview changed"):
+        replacement.execute(request, seal, plan["preview_sha256"])
+    assert not Path(request["archive"]).exists()
+    assert not Path(request["journal"]).exists()
+    assert (output / "graph.json").read_bytes() == before
+
+
 @pytest.mark.parametrize("overflow_pass", [1, 2])
 def test_preservation_enumeration_refuses_at_remaining_budget(tmp_path, monkeypatch, overflow_pass):
     output = tmp_path / "output"
