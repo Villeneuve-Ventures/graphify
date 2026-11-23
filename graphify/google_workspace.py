@@ -92,6 +92,8 @@ def read_google_shortcut(path: Path) -> dict[str, str | None]:
 
 
 def _run_gws_export(file_id: str, mime_type: str, output: Path, resource_key: str | None = None) -> None:
+    from .canonical_replacement import guard_output
+    guard_output(output)
     exe = shutil.which("gws")
     if not exe:
         raise RuntimeError(
@@ -104,9 +106,12 @@ def _run_gws_export(file_id: str, mime_type: str, output: Path, resource_key: st
     # gws export command has no custom-header flag, so do not pass resourceKey
     # as an unsupported query parameter.
     _ = resource_key
+    guard_output(output)
     output = output.resolve()
+    guard_output(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     timeout = int(os.environ.get("GRAPHIFY_GOOGLE_WORKSPACE_TIMEOUT", "120"))
+    guard_output(output)
     result = subprocess.run(
         [exe, "drive", "files", "export", "--params", json.dumps(params), "-o", output.name],
         capture_output=True,
@@ -156,48 +161,68 @@ def convert_google_workspace_file(
     """Export a Google Workspace shortcut to a Markdown sidecar.
 
     Returns the converted Markdown path, or None when conversion is unsupported
-    or produced no readable content.
+    or produced no readable content. Registered replacement archives, including
+    aliases and absent registered slots, raise PendingTransactionError before
+    directory, export, sidecar or cleanup mutation. If registration appears
+    during export, temporary files are retained rather than deleted. Admission
+    is rechecked at writes; it does not fence arbitrary concurrent writers.
     """
     ext = path.suffix.lower()
     if ext not in GOOGLE_WORKSPACE_EXTENSIONS:
         return None
 
+    from .canonical_replacement import guard_output
+    guard_output(out_dir)
     shortcut = read_google_shortcut(path)
+    guard_output(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = _sidecar_path(path, out_dir)
+    guard_output(out_path)
 
     if ext == ".gdoc":
+        guard_output(out_dir)
         with tempfile.NamedTemporaryFile("w+b", suffix=".md", delete=False, dir=out_dir) as tmp:
             tmp_path = Path(tmp.name)
         try:
+            guard_output(tmp_path)
             _run_gws_export(shortcut["file_id"] or "", "text/markdown", tmp_path, shortcut.get("resource_key"))
             body = tmp_path.read_text(encoding="utf-8", errors="replace")
         finally:
+            guard_output(tmp_path)
             tmp_path.unlink(missing_ok=True)
         if not body.strip():
             return None
-        out_path.write_text(_with_frontmatter(path, shortcut, body, "text/markdown"), encoding="utf-8")
+        content = _with_frontmatter(path, shortcut, body, "text/markdown")
+        guard_output(out_path)
+        out_path.write_text(content, encoding="utf-8")
         return out_path
 
     if ext == ".gslides":
+        guard_output(out_dir)
         with tempfile.NamedTemporaryFile("w+b", suffix=".txt", delete=False, dir=out_dir) as tmp:
             tmp_path = Path(tmp.name)
         try:
+            guard_output(tmp_path)
             _run_gws_export(shortcut["file_id"] or "", "text/plain", tmp_path, shortcut.get("resource_key"))
             body = tmp_path.read_text(encoding="utf-8", errors="replace")
         finally:
+            guard_output(tmp_path)
             tmp_path.unlink(missing_ok=True)
         if not body.strip():
             return None
-        out_path.write_text(_with_frontmatter(path, shortcut, body, "text/plain"), encoding="utf-8")
+        content = _with_frontmatter(path, shortcut, body, "text/plain")
+        guard_output(out_path)
+        out_path.write_text(content, encoding="utf-8")
         return out_path
 
     if ext == ".gsheet":
         if xlsx_to_markdown is None:
             raise RuntimeError("Google Sheets export requires the office extra: pip install graphifyy[office,google]")
+        guard_output(out_dir)
         with tempfile.NamedTemporaryFile("w+b", suffix=".xlsx", delete=False, dir=out_dir) as tmp:
             tmp_path = Path(tmp.name)
         try:
+            guard_output(tmp_path)
             _run_gws_export(
                 shortcut["file_id"] or "",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -206,18 +231,18 @@ def convert_google_workspace_file(
             )
             body = xlsx_to_markdown(tmp_path)
         finally:
+            guard_output(tmp_path)
             tmp_path.unlink(missing_ok=True)
         if not body.strip():
             return None
-        out_path.write_text(
-            _with_frontmatter(
-                path,
-                shortcut,
-                body,
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            ),
-            encoding="utf-8",
+        content = _with_frontmatter(
+            path,
+            shortcut,
+            body,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+        guard_output(out_path)
+        out_path.write_text(content, encoding="utf-8")
         return out_path
 
     return None

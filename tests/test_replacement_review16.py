@@ -5,9 +5,42 @@ import json
 
 import pytest
 
+from graphify import build
 from graphify import canonical_replacement as replacement
 from tests.test_canonical_replacement import case as case
+from tests.test_replacement_review12 import _assert_cli_refusal
 from tests.test_replacement_review14 import _group
+
+
+@pytest.mark.parametrize("identity", [[], {}])
+@pytest.mark.parametrize("valid_sibling", [False, True])
+def test_profile_refuses_unhashable_group_identity(case, tmp_path, capsys, identity, valid_sibling):
+    request, fragments = case
+    _group(fragments[0], ["guide_one", "guide_two", "guide_three"])
+    groups = fragments[0]["hyperedges"]
+    if valid_sibling:
+        groups.append(copy.deepcopy(groups[0]))
+    groups[0]["id"] = identity
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+
+
+@pytest.mark.parametrize("valid_sibling", [False, True])
+def test_profile_refuses_group_loss_from_composition(case, tmp_path, capsys, monkeypatch, valid_sibling):
+    request, fragments = case
+    _group(fragments[0], ["guide_one", "guide_two", "guide_three"])
+    if valid_sibling:
+        fragments[0]["hyperedges"].append(copy.deepcopy(fragments[0]["hyperedges"][0]))
+    original = build.build_from_json
+    removed = []
+
+    def lose_group(*args, **kwargs):
+        graph = original(*args, **kwargs)
+        removed.append(graph.graph["hyperedges"].pop())
+        return graph
+
+    monkeypatch.setattr(build, "build_from_json", lose_group)
+    _assert_cli_refusal(request, fragments, tmp_path, capsys)
+    assert len(removed) == 1
 
 
 @pytest.mark.parametrize("has_identity, identity", [

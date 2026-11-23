@@ -632,9 +632,16 @@ def convert_office_file(path: Path, out_dir: Path) -> Path | None:
     """Convert a .docx or .xlsx to a markdown sidecar in out_dir.
 
     Returns the path of the converted .md file, or None if conversion failed
-    or the required library is not installed.
+    or the required library is not installed. Registered replacement archives,
+    including sidecar aliases and absent registered slots, raise
+    PendingTransactionError before mutation. Admission is rechecked after
+    conversion; it does not fence arbitrary concurrent filesystem writers.
     """
     ext = path.suffix.lower()
+    if ext not in OFFICE_EXTENSIONS:
+        return None
+    from .canonical_replacement import guard_output
+    guard_output(out_dir)
     if ext == ".docx":
         text = docx_to_markdown(path)
     elif ext == ".xlsx":
@@ -645,6 +652,7 @@ def convert_office_file(path: Path, out_dir: Path) -> Path | None:
     if not text.strip():
         return None
 
+    guard_output(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     # Use a stable name derived from the original path to avoid collisions.
     # Normalize the resolved path to NFC before hashing: on macOS (HFS+/APFS)
@@ -657,6 +665,7 @@ def convert_office_file(path: Path, out_dir: Path) -> Path | None:
     normalized_path = unicodedata.normalize("NFC", str(path.resolve()))
     name_hash = hashlib.sha256(normalized_path.encode()).hexdigest()[:8]
     out_path = out_dir / f"{path.stem}_{name_hash}.md"
+    guard_output(out_path)
     # Skip re-writing only when the sidecar is present AND at least as new as the
     # source. detect_incremental tracks the SIDECAR (not the Office source), so a
     # sidecar that is never rewritten after the source changes leaves the doc
@@ -670,6 +679,7 @@ def convert_office_file(path: Path, out_dir: Path) -> Path | None:
     except OSError:
         if out_path.exists():
             return out_path
+    guard_output(out_path)
     out_path.write_text(
         f"<!-- converted from {path.name} -->\n\n{text}",
         encoding="utf-8",
@@ -1152,6 +1162,8 @@ def detect(root, *, follow_symlinks=None, google_workspace=None, extra_excludes=
     are unavailable (zero) there; no converter, provider or persistent cache runs.
     Policy ancestor searches stop at the declared source root. External Git
     routing requires explicit extra_roots; it never widens authority itself.
+    Conversion archive-admission errors propagate as PendingTransactionError;
+    ordinary Google Workspace export failures remain skipped-input notes.
     """
     with engine_inputs(source_io, quiet=quiet):
         scope = current_source_io()
@@ -1229,7 +1241,7 @@ def _detect_impl(root: Path, *, follow_symlinks: bool | None = None, google_work
     # silently partial graph.json. Record and surface every skipped directory
     # so an incomplete enumeration is visible rather than silent.
     walk_errors: list[str] = []
-    from graphify.transaction import _OperationalCorpusScan
+    from graphify.transaction import _OperationalCorpusScan, PendingTransactionError
     operational_scan = _OperationalCorpusScan(root, output_name, source_io=current_source_io(), ambient_output=ambient_output)
 
     def _on_walk_error(err: OSError) -> None:
@@ -1350,6 +1362,8 @@ def _detect_impl(root: Path, *, follow_symlinks: bool | None = None, google_work
                     continue
                 try:
                     md_path = convert_google_workspace_file(p, converted_dir, xlsx_to_markdown=xlsx_to_markdown)
+                except PendingTransactionError:
+                    raise
                 except Exception as exc:
                     skipped_sensitive.append(str(p) + f" [Google Workspace export failed: {exc}]")
                     continue
@@ -1569,6 +1583,10 @@ def save_manifest(
     supplied ``files``. Existing entries are still consulted for complementary
     hash fields on supplied rows, but no untouched row is seeded into the new
     manifest. The default preserves the historical subset/full-scan behavior.
+
+    Replacement mutation admission precedes parent creation and the final write.
+    Refusal raises PendingTransactionError and leaves the selected manifest
+    unchanged. This is a preflight check, not concurrent-writer exclusion.
     """
     existing = load_manifest(manifest_path, root=root)
 
@@ -1664,7 +1682,10 @@ def save_manifest(
         # their absolute form so the manifest round-trips on the saving
         # machine even when not every entry can be portably encoded.
         manifest = {_to_relative_for_storage(k, root): v for k, v in manifest.items()}
+    from .canonical_replacement import guard_output
+    guard_output(manifest_path, mutation=True)
     Path(manifest_path).parent.mkdir(parents=True, exist_ok=True)
+    guard_output(manifest_path, mutation=True)
     Path(manifest_path).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
 

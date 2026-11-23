@@ -1,5 +1,3 @@
-> Local split preparation: library contracts only. The replacement command and complete client integration are withheld until slice 5. Remaining later-layer statements describe the target candidate contract, not available entry points or validation of this prefix. Live replacement remains disabled; keep #147 open.
-
 # Canonical replacement candidate (#147)
 
 This local candidate builds fresh corpus-derived data and models publication of a
@@ -110,6 +108,14 @@ without these fields are not automatically upgraded or admitted.
 The profile's exact guard namespace is excluded from
 source selection; it is never graph input.
 
+## Candidate lifecycle
+
+The interface is `graphify replacement bind-request|build-data|preview|execute|resume|status|rollback`.
+These commands require an explicit request. Data preparation and preview do not
+modify the selected output. Preview binds the full opaque old-tree inventory,
+current observed old-directory identity, both parents, source and payload seal.
+The historical mismatched identity is not approval.
+
 A stable no-follow operation lock is keyed by the journal slot, not the request.
 It must belong to the caller's real UID, forbid group/other writes and pass the
 existing safe-ACL policy. Admission is repeated after the binding read and after
@@ -137,6 +143,80 @@ it is not a bootstrap or checkpoint binding. Normal publication and closure
 produce generation one. The parent completion record is written last.
 This derived profile is ineligible for ordinary checkpoint capture; it does not
 extend checkpoint-store semantics.
+
+Parent guards fence absent creation as well as existing readers and writers.
+Guard markers are read relative to pinned ancestor directories and checked for
+entry and parent substitution. Both lexical and resolved aliases are checked;
+a changed physical target refuses admission. These checks perform no mutation
+and do not enable the maintenance backend.
+Before interpreting a selected guard's journal, POSIX admission authenticates its
+owner against that marker namespace's issuer snapshot. The directly pinned
+journal parent and the bounded regular, single-link journal must have trusted
+owners, no group/other writes and safe ACLs under the existing installer policy.
+The canonical path, parent mapping, file identity, metadata and ACL observations
+are revalidated through the admission decision, including operation-authority
+shortcuts. Mixed retained legacy/mutator issuers are allowed within their enrolled
+namespace; journal contents cannot add trusted issuers. Unsupported journal
+authentication refuses selected guard admission.
+These checks reject foreign forged contents. They do not authenticate a trusted
+stale journal or parent mapping substituted before observation, provide an
+independent rollback anchor, or enforce custody of every higher ancestor. Native
+enrollment/control custody and same-UID/root exclusion remain prerequisites.
+Guard registration requires mutating admission on its locked parent, so a prior
+retained archive cannot become another registration parent. Before publishing a
+marker, registration checks recovery backups inside that parent and refuses
+changed or trusted recovery evidence.
+On POSIX, displaced guard predecessors remain recovery evidence when publication
+loses to another entry or fails before restoration. Ordinary admission recognizes
+the exact `..graphify_replacement_guard.graphify-merge-backup.<32 lowercase hex>`
+names independently of a missing or foreign public marker. A trusted backup,
+including a nonregular one, blocks reads and writes until explicit reconciliation;
+it is never automatically adopted or cleared. Only proved-foreign backups are
+ignored. Successful updates remove their predecessor through the existing writer.
+POSIX admission normally enumerates each existing ancestor twice with a
+100,000-name limit per pass. Overflow, unavailable enumeration or changed
+evidence blocks. Public-marker metadata is rechecked after the final recovery
+check, including initially missing or foreign markers. The wiki export exception
+below still applies the entry limit. These checks do not exclude arbitrary
+namespace writers. Windows retains its marker-only route.
+Archive registration is outside the preserved tree; new clients reject explicit
+archive mutations and aliases, including `save-result` directory and selected-file
+writes. Integration install and removal check selected skill, configuration and
+hook directory paths before mutating them. Recursive installer cleanup preserves
+subtrees that contain replacement markers or recovery evidence. Older strict
+readers reject the new binding.
+Case-insensitive parents match registered spellings through the pinned marker's
+uppercase alias. Existing distinct objects remain distinct; absent slots with
+the same normalized Unicode case-fold spelling remain reserved. Ambiguous older
+registrations refuse admission. Case-sensitive parents retain exact-name lookup.
+New guard markers and coordinator locks receive owner-readable mode 0600 on
+their exclusively created descriptors before use. Existing lock modes are not
+changed during admission.
+Advisory interpreter-pointer publication checks its parent, temporary and final
+paths before mutation and checks cleanup before unlinking. A late registration
+retains the temporary rather than modifying a newly protected tree.
+Direct `to_wiki` exports apply mutation admission before directory creation,
+each stale-article deletion and each article or index write after rendering.
+On POSIX, direct article changes can reuse an empty recovery scan of the wiki
+directory under its guard registration lock. Other ancestors and aliases are
+checked as usual. Directory metadata changes between operations trigger a new
+scan, and the entry limit still applies. Refused mutations preserve the
+selected retained bytes.
+Lessons reflection (`reflect`) applies mutation admission before parent creation
+and again before opening the selected output, including file and directory aliases.
+Office and Google Workspace conversion applies mutation admission before output
+directory creation, temporary export allocation and delegation, final sidecar
+writes, and temporary cleanup. A late registration refuses cleanup and retains
+the temporary file. Detection propagates these admission refusals; ordinary
+Google export failures remain skipped-input notes.
+Audio publication admits staging writes, the staging hard-link source and final
+destination, and staging cleanup. Refused cleanup retains the staged audio;
+it cannot unlink a path that became a retained archive during copying.
+Global graph and manifest saves apply the same mutation admission before
+directory creation and final writing. Corrupt global-manifest backup checks
+both rename paths; replacement refusal cannot become a backup-error fallback.
+Maintenance exclusion, including legacy restart inhibition, remains essential:
+advisory inode locks cannot fence arbitrary same-UID or root writers.
 
 ### Guard issuer policy
 
@@ -246,6 +326,14 @@ complete intent and terminal journal, including the current new-tree inventory,
 before registering quarantine or moving either tree. Its metadata can exceed
 the bound even when forward preview passed; refusal preserves the prior journal
 and namespace.
+
+## Proof and remaining qualification
+
+Focused tests use disposable fixture roots only. They exercise fresh code and
+Codex-document data, source/payload drift, provider-route refusal, opaque archive
+preservation, aliases, occupied paths, allocation orphans, modeled publication,
+exact completion, process interruption and rollback. No existing user graph is
+a fixture. Process-kill/restart proof does not establish power-loss durability.
 
 The production maintenance capability, native legacy-client/restart exclusion,
 full namespace durability matrix, interrupted rollback and exhaustive concurrent

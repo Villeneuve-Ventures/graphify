@@ -13,6 +13,12 @@ _GLOBAL_MANIFEST = _GLOBAL_DIR / "global-manifest.json"
 
 
 def _load_manifest() -> dict:
+    """Read global membership, preserving corrupt bytes through an admitted backup.
+
+    Valid reads do not mutate storage. Corrupt-manifest recovery checks mutating
+    replacement admission on both rename paths, including aliases. Admission
+    refusal propagates; it cannot become the ordinary backup-error fallback.
+    """
     if _GLOBAL_MANIFEST.exists():
         try:
             return json.loads(_GLOBAL_MANIFEST.read_text(encoding="utf-8"))
@@ -23,6 +29,10 @@ def _load_manifest() -> dict:
             backup = _GLOBAL_MANIFEST.with_suffix(
                 _GLOBAL_MANIFEST.suffix + f".corrupt.{int(datetime.now(timezone.utc).timestamp())}"
             )
+            from graphify.canonical_replacement import guard_output
+
+            guard_output(_GLOBAL_MANIFEST, mutation=True)
+            guard_output(backup, mutation=True)
             try:
                 _GLOBAL_MANIFEST.rename(backup)
                 print(
@@ -41,8 +51,18 @@ def _load_manifest() -> dict:
 
 
 def _save_manifest(manifest: dict) -> None:
+    """Write membership only after directory and selected-file mutation admission.
+
+    Serialize before the final check so registration added during serialization
+    refuses before writing. Admission is a preflight, not a concurrent-writer fence.
+    """
+    from graphify.canonical_replacement import guard_output
+
+    guard_output(_GLOBAL_DIR, mutation=True)
     _GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
-    _GLOBAL_MANIFEST.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    content = json.dumps(manifest, indent=2)
+    guard_output(_GLOBAL_MANIFEST, mutation=True)
+    _GLOBAL_MANIFEST.write_text(content, encoding="utf-8")
 
 
 def _load_global_graph() -> nx.Graph:
@@ -60,12 +80,22 @@ def _load_global_graph() -> nx.Graph:
 
 
 def _save_global_graph(G: nx.Graph) -> None:
+    """Serialize the graph unchanged, with mutation admission before mkdir and write.
+
+    The final selected-path check follows serialization and covers resolved aliases
+    and late registrations. Refusal propagates without writing the selected file.
+    """
+    from graphify.canonical_replacement import guard_output
+
+    guard_output(_GLOBAL_DIR, mutation=True)
     _GLOBAL_DIR.mkdir(parents=True, exist_ok=True)
     try:
         data = _jg.node_link_data(G, edges="links")
     except TypeError:
         data = _jg.node_link_data(G)
-    _GLOBAL_GRAPH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    content = json.dumps(data, indent=2)
+    guard_output(_GLOBAL_GRAPH, mutation=True)
+    _GLOBAL_GRAPH.write_text(content, encoding="utf-8")
 
 
 def _file_hash(path: Path) -> str:

@@ -117,6 +117,28 @@ def test_installed_rollback_keeps_actual_quarantine_readonly(case, modeled, boun
         replacement.guard_output(quarantine / "new.json", mutation=True)
 
 
+@pytest.mark.parametrize("field", ["edges", "hyperedges"])
+@pytest.mark.parametrize("value", [None, 3, "record", []])
+def test_malformed_semantic_relationship_returns_structured_cli_refusal(case, tmp_path, capsys, field, value):
+    request, fragments = case
+    fragments[0][field] = [value]
+    request_path, fragments_path = tmp_path / "request.json", tmp_path / "fragments.json"
+    request_path.write_text(json.dumps(request))
+    fragments_path.write_text(json.dumps(fragments))
+    before = replacement._tree(request["output"])
+
+    assert replacement.main(["build-data", "--request", str(request_path),
+                             "--fragments", str(fragments_path)]) == 1
+
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "semantic relationship must be an object" in response["error"]
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["stage"]).exists()
+    assert not Path(request["journal"]).exists()
+    assert not Path(request["archive"]).exists()
+
+
 @pytest.mark.parametrize("depth", [128, 129])
 def test_preservation_depth_boundary_closes_opened_directories(tmp_path, monkeypatch, depth):
     root = tmp_path / "inventory"
@@ -148,3 +170,51 @@ def test_preservation_depth_boundary_closes_opened_directories(tmp_path, monkeyp
         with pytest.raises(tx.PendingTransactionError, match="preservation directory depth bound exceeded"):
             replacement._tree(root)
     assert not opened
+
+
+def test_cli_resume_without_journal_refuses_under_coordinator_lock(case, modeled, tmp_path, monkeypatch, capsys):
+    request, fragments = case
+    sealed = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, sealed)
+    Path(request["stage"]).write_text(json.dumps(sealed))
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+    before = replacement._tree(request["output"])
+    entered = []
+    real_lock = replacement._coordinator_lock
+
+    @contextmanager
+    def tracked_lock(selected):
+        with real_lock(selected):
+            entered.append(True)
+            yield
+
+    monkeypatch.setattr(replacement, "_coordinator_lock", tracked_lock)
+    assert replacement.main(["resume", "--request", str(request_path),
+                             "--preview-sha256", plan["preview_sha256"]]) == 1
+    response = json.loads(capsys.readouterr().out)
+    assert entered == [True]
+    assert response["status"] == "blocked"
+    assert "existing replacement journal required" in response["error"]
+    assert replacement._tree(request["output"]) == before
+    assert not Path(request["journal"]).exists()
+    assert not Path(request["archive"]).exists()
+    assert not list(Path(request["journal"]).parent.glob(".replacement-container-*"))
+
+
+def test_cli_resume_replays_existing_prepared_operation(case, modeled, tmp_path, capsys):
+    request, fragments = case
+    sealed = replacement.build_data(request, fragments)
+    plan = replacement.preview(request, sealed)
+    journal = {**plan, "request_digest": replacement._sha(replacement._bytes(request)),
+               "state": "PREPARED", "new_identity": None, "container": None, "owner": None}
+    replacement._persist(Path(request["journal"]), journal)
+    Path(request["stage"]).write_text(json.dumps(sealed))
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+
+    assert replacement.main(["resume", "--request", str(request_path),
+                             "--preview-sha256", plan["preview_sha256"]]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "complete"
+    assert replacement.execute(request, sealed, plan["preview_sha256"]) == result

@@ -1,5 +1,6 @@
 """Bounded regressions for replacement review findings, using modeled fixtures."""
 import copy
+import json
 from pathlib import Path
 import shutil
 
@@ -45,6 +46,23 @@ def test_relationship_kind_retains_valid_host_records(case, field, relation, con
     request, fragments = case
     _relationship(fragments[0], field, relation, confidence, score)
     assert replacement.build_data(request, fragments)["request_sha256"] == replacement._sha(replacement._bytes(request))
+
+
+@pytest.mark.parametrize("journal", [None, [], "journal", 1])
+def test_status_nonobject_journal_is_structured_and_readonly(case, tmp_path, capsys, journal):
+    request, _ = case
+    path = Path(request["journal"])
+    path.write_text(json.dumps(journal))
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request))
+    before = replacement._tree(request["output"])
+    control_before = {p.name: p.read_bytes() for p in path.parent.iterdir()}
+    assert replacement.main(["status", "--request", str(request_path)]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "blocked"
+    assert "journal must be an object" in result["error"]
+    assert replacement._tree(request["output"]) == before
+    assert {p.name: p.read_bytes() for p in path.parent.iterdir()} == control_before
 
 
 @pytest.mark.parametrize("field", ["archive", "stage", "journal"])
