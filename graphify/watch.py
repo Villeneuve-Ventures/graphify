@@ -1426,6 +1426,10 @@ def _rebuild_code(
         rebuilt_sources |= set(deleted_paths)
         out.mkdir(exist_ok=True)
 
+        # Rebuilds preserve the saved traversal direction. Falling back to the
+        # builder default silently collapses reciprocal calls in directed graphs.
+        directed = existing_graph_data.get("directed", False)
+
         if no_cluster:
             # Normalise to "links" key so schema is consistent with the full clustered path.
             # Dedupe parallel edges (the clustered path's DiGraph collapses them implicitly);
@@ -1437,6 +1441,13 @@ def _rebuild_code(
                 "nodes": _dedupe_nodes(result.get("nodes", [])),
                 "links": _dedupe_edges(result.get("edges", [])),
             }
+            if "directed" in existing_graph_data:
+                candidate_graph_data.update(
+                    directed=directed,
+                    multigraph=existing_graph_data.get("multigraph", False),
+                    graph={**existing_graph_data.get("graph", {}),
+                           "hyperedges": candidate_graph_data.get("hyperedges", [])},
+                )
             candidate_graph_text = _json_text(candidate_graph_data)
             same_graph = False
             if existing_graph.exists():
@@ -1497,7 +1508,7 @@ def _rebuild_code(
             "total_words": detected.get("total_words", 0),
         }
 
-        G = build_from_json(result)
+        G = build_from_json(result, directed=directed)
         candidate_topology = _topology_from_graph(G)
         if existing_graph_data:
             try:
@@ -1507,7 +1518,7 @@ def _rebuild_code(
                 )
             except Exception:
                 same_topology = False
-            if same_topology:
+            if same_topology and (out / "GRAPH_REPORT.md").is_file():
                 try:
                     from graphify.detect import save_manifest
                     # Full-scan save: prune excluded-but-alive rows (#1908).
@@ -1527,7 +1538,9 @@ def _rebuild_code(
         previous_node_community = _node_community_map(existing_graph_data)
         if previous_node_community:
             communities = remap_communities_to_previous(communities, previous_node_community)
-        cohesion = score_all(G, communities)
+        # Cohesion uses the same undirected relationships as clustering.
+        cohesion_graph = G.to_undirected(as_view=True) if G.is_directed() else G
+        cohesion = score_all(cohesion_graph, communities)
         gods = god_nodes(G)
         surprises = surprising_connections(G, communities)
         labels_file = out / ".graphify_labels.json"
