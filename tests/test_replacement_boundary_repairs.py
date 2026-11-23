@@ -191,7 +191,8 @@ def test_cli_resume_without_journal_refuses_under_coordinator_lock(case, modeled
 
     monkeypatch.setattr(replacement, "_coordinator_lock", tracked_lock)
     assert replacement.main(["resume", "--request", str(request_path),
-                             "--preview-sha256", plan["preview_sha256"]]) == 1
+                             "--preview-sha256", plan["preview_sha256"],
+                             "--journal-sha256", "0" * 64]) == 1
     response = json.loads(capsys.readouterr().out)
     assert entered == [True]
     assert response["status"] == "blocked"
@@ -214,7 +215,8 @@ def test_cli_resume_replays_existing_prepared_operation(case, modeled, tmp_path,
     request_path.write_text(json.dumps(request))
 
     assert replacement.main(["resume", "--request", str(request_path),
-                             "--preview-sha256", plan["preview_sha256"]]) == 0
+                             "--preview-sha256", plan["preview_sha256"],
+                             "--journal-sha256", replacement._sha(replacement._bytes(journal))]) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["status"] == "complete"
     assert replacement.execute(request, sealed, plan["preview_sha256"]) == result

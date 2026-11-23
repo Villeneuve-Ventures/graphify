@@ -88,6 +88,8 @@ def test_invalid_stage_refuses_before_seal_read(request_case, tmp_path, capsys, 
     args = [command, "--request", str(path)]
     if command != "preview":
         args += ["--preview-sha256", "unused"]
+    if command == "resume":
+        args += ["--journal-sha256", "unused"]
     assert replacement.main(args) == 1
     response = json.loads(capsys.readouterr().out)
     assert response["status"] == "blocked"
