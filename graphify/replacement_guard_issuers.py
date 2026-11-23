@@ -6,6 +6,8 @@ policy. Bootstrap absence permits legacy issuers only under the administrator
 invariant that the index is never removed while enrolled namespaces/guards live.
 Loss or rollback of the entire index is not detectable here. Native custody and
 deployment qualification remain separate from these metadata checks.
+Policy records remain importable without Unix helpers; POSIX admission loads
+its ACL checker on demand and never treats its unavailability as safe custody.
 """
 from __future__ import annotations
 
@@ -18,8 +20,6 @@ from pathlib import Path, PurePosixPath
 import stat
 import sys
 from typing import cast
-
-from .hook_installation import _acl_safe
 
 _DIRECTORY = Path("/private/etc/graphify" if sys.platform == "darwin" else "/etc/graphify")
 _INDEX = "replacement-guard-issuers.json"
@@ -141,6 +141,12 @@ def _policy(value):
 def _signature(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
             info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _acl_safe(fd):
+    """Load the Unix custody helper only for actual descriptor admission."""
+    from .hook_installation import _acl_safe as check_acl
+    return check_acl(fd)
 
 
 def _admit(fd, *, directory):

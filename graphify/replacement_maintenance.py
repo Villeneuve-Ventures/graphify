@@ -15,6 +15,8 @@ from pathlib import PurePosixPath
 import threading
 from typing import Callable, Literal, Mapping, Protocol
 
+from graphify.replacement_guard_issuers import NamespaceIssuerPolicy
+
 Action = Literal["execute", "resume", "rollback"]
 State = Literal["HELD", "GRANTING", "ACTIVE", "RECOVERY_HELD", "RELEASE_READY", "RELEASED"]
 Identity = tuple[int, int]
@@ -43,9 +45,28 @@ def _canonical(value: object) -> str:
                       separators=(",", ":")) + "\n"
 
 
-def _identity(value: Identity) -> bool:
+def _identity(value: object) -> bool:
     return (type(value) is tuple and len(value) == 2
             and all(type(item) is int and item >= 0 for item in value))
+
+
+def issuer_policy_set_sha256(policies: tuple[NamespaceIssuerPolicy, ...]) -> str:
+    """Digest complete immutable namespace enrollment records, independent of epoch.
+
+    Record order has no meaning; duplicate namespace paths or physical identities
+    and non-tuple input
+    refuse. This models a protected registry fingerprint, without reading an
+    index or granting issuer trust on a filesystem.
+    """
+    _require(type(policies) is tuple
+             and all(isinstance(policy, NamespaceIssuerPolicy) for policy in policies),
+             "immutable issuer policy records required")
+    _require(len({policy.namespace_path for policy in policies}) == len(policies),
+             "duplicate issuer namespace enrollment")
+    _require(len({policy.namespace_identity for policy in policies}) == len(policies),
+             "duplicate physical issuer namespace enrollment")
+    return _digest(_canonical([policy.to_record() for policy in sorted(
+        policies, key=lambda policy: policy.namespace_path)]))
 
 
 @dataclass(frozen=True)
@@ -111,26 +132,60 @@ class OperationDescriptor:
         return json.loads(self.request_json)["output"]
 
     @property
+    def namespace_parents(self) -> tuple[tuple[str, Identity], ...]:
+        """Return exact modeled parent scopes, including rollback quarantine.
+
+        Frozen path and device/inode pairs must be complete and canonical. No
+        ancestor enrollment covers a nested parent; this performs no disk reads.
+        """
+        request = json.loads(self.request_json)
+        parents = request["parent_identities"]
+        fields = {"canonical": "output", "archive": "archive", "control": "journal", "stage": "stage"}
+        _require(set(parents) == set(fields), "complete issuer namespace parents required")
+        scopes = []
+        for name, field in fields.items():
+            value = request.get(field)
+            _require(type(value) is str and bool(value) and "\x00" not in value,
+                     "canonical issuer namespace path required")
+            path = PurePosixPath(value)
+            _require(path.is_absolute() and str(path) == value and ".." not in path.parts,
+                     "canonical issuer namespace path required")
+            frozen = parents[name]
+            _require(type(frozen) is dict and set(frozen) == {"device", "inode"},
+                     "frozen issuer namespace identity required")
+            identity = (frozen["device"], frozen["inode"])
+            _require(_identity(identity), "frozen issuer namespace identity required")
+            scopes.append((str(path.parent), identity))
+        if self.action == "rollback":
+            assert self.quarantine is not None and self.quarantine_parent is not None
+            path = PurePosixPath(self.quarantine)
+            _require(str(path) == self.quarantine and ".." not in path.parts
+                     and "\x00" not in self.quarantine, "canonical issuer quarantine path required")
+            scopes.append((str(path.parent), self.quarantine_parent))
+        return tuple(scopes)
+
+    @property
     def sha256(self) -> str:
         """Bind every action selector; this integrity value is not an authority token."""
         return _digest(_canonical(asdict(self)))
 
 
-class MaintenanceHandle(Protocol):
-    """A future backend's operation handle; closing it must retain launch exclusion."""
+class MaintenanceBroker(Protocol):
+    """Future whole-operation transport; no server or registration ships here.
 
-    operation: OperationDescriptor
+    Workers receive no filesystem capability. Implementations must validate the
+    exact operation and data at the trusted mutator, rather than yield authority
+    for caller-side mutation. This protocol defines no serialization or IPC.
+    """
 
-    def close(self) -> None:
-        """Stop using the handle without authorizing service restart."""
-        ...
+    def submit(self, operation: OperationDescriptor, sealed_data: bytes) -> None:
+        """Submit bounded data for the selected action; acknowledgment cannot release service.
 
-
-class MaintenanceBackend(Protocol):
-    """Native adapter boundary; no implementation or backend registration ships here."""
-
-    def acquire(self, operation: OperationDescriptor) -> AbstractContextManager[MaintenanceHandle]:
-        """Require independent custody and exclusion before yielding an exact handle."""
+        A forward action must bind the sealed bytes to its descriptor. Rollback
+        supplies no forward payload. A native implementation must authenticate
+        each request, reject resource attachments and independently admit every
+        selector. There is no generic open, rename or handle-returning operation.
+        """
         ...
 
 
@@ -154,28 +209,76 @@ class TargetBinding:
 
 @dataclass(frozen=True)
 class GrantIdentity:
-    """Modeled enrollment, lifetime and process-incarnation bindings, not OS attestation."""
+    """Modeled broker-only bindings, never OS attestation or a worker grant.
+
+    ``runtime_sha256`` binds the complete trusted mutator runtime and dependencies;
+    ``policy_sha256`` binds its launch, identity, namespace and transport policy.
+    ``issuer_policy_sha256`` separately binds the complete enrolled namespace
+    records, including each generation, identity and retained legacy issuer UID.
+    ``mutator_uid`` is the simulated actual dedicated UID, not a login-shell label.
+    Controller and one-shot mutator incarnations are distinct from reusable PIDs.
+    """
 
     enrollment: str
     boot: str
     epoch: int
-    coordinator: str
+    mutator: str
     runtime_sha256: str
     target_binding: TargetBinding
+    controller: str
+    policy_sha256: str
+    issuer_policy_sha256: str
+    mutator_uid: int
 
     def __post_init__(self) -> None:
-        _require(all(type(item) is str and bool(item) for item in (self.enrollment, self.boot, self.coordinator))
+        _require(all(type(item) is str and bool(item)
+                     for item in (self.enrollment, self.boot, self.mutator, self.controller))
                  and type(self.epoch) is int and self.epoch > 0 and _sha(self.runtime_sha256)
+                 and _sha(self.policy_sha256) and _sha(self.issuer_policy_sha256)
+                 and type(self.mutator_uid) is int and 0 < self.mutator_uid < 2**32
                  and isinstance(self.target_binding, TargetBinding),
                  "complete grant identity required")
 
 
 @dataclass(frozen=True)
-class CohortExit:
-    """Simulation witness that the exact coordinator family and exported handles are gone."""
+class BrokerAdmission:
+    """Caller-supplied simulation evidence for one exact broker-only operation.
+
+    These flags represent independently required native facts; setting them does
+    not establish any of those facts. Protected capabilities include metadata and
+    namespace mutation, even through descriptors opened read-only. The initial
+    profile allows one trusted mutator without child processes. The current
+    complete issuer fingerprint is separate from source/payload integrity.
+    """
 
     operation_sha256: str
     identity: GrantIdentity
+    exclusive_mutator: bool
+    trusted_runtime: bool
+    protected_namespace: bool
+    authenticated_peer: bool
+    data_only_transport: bool
+    workers_without_capabilities: bool
+    no_children: bool
+    current_issuer_policy_sha256: str | None = None
+
+
+@dataclass(frozen=True)
+class BrokerRetirement:
+    """Simulation evidence for mutator exit and complete operation quiescence.
+
+    A reap alone is insufficient: queued requests and in-flight effects must be
+    reconciled, protected handles/mappings closed, and worker capability absence
+    established. Permanent registry and launch authority remains with the trusted
+    controller; this witness does not claim that authority has been revoked.
+    """
+
+    operation_sha256: str
+    identity: GrantIdentity
+    mutator_exited: bool
+    requests_quiesced: bool
+    capabilities_closed: bool
+    workers_without_capabilities: bool
 
 
 @dataclass(frozen=True)
@@ -231,17 +334,26 @@ class CurrentPublication:
 class ModelState:
     """Immutable simulation state passed to an injected persistence acknowledgment.
 
-    It is not a protected store, a resumable native journal or an enrollment
+    Retained immutable issuer records and their complete fingerprint model the
+    controller's enrollment snapshot; restart never refreshes or retires them.
+    It is not a protected store, a resumable native journal or a native enrollment
     record. In particular, deserializing or copying it grants no live authority.
     ``writers_admitted`` retains attempted admission history even when a durable
     write's acknowledgment fails; ``RECOVERY_HELD`` still denies client admission.
     """
 
+    issuer_policies: tuple[NamespaceIssuerPolicy, ...] = ()
+    issuer_policy_sha256: str | None = None
+    mutator_uid: int | None = None
     state: State = "HELD"
+    controller: str = ""
+    controller_incarnations: tuple[str, ...] = ()
+    mutator_incarnations: tuple[str, ...] = ()
     epoch: int = 0
     operation: OperationDescriptor | None = None
     identity: GrantIdentity | None = None
-    cohort_exited: bool = False
+    admission: BrokerAdmission | None = None
+    retirement: BrokerRetirement | None = None
     access_withdrawn: bool = False
     writers_admitted: bool = False
     terminal: TerminalValidation | None = None
@@ -249,7 +361,11 @@ class ModelState:
 
 
 class ModelHandle(AbstractContextManager["ModelHandle"]):
-    """Object-bound simulation handle; context exit holds service rather than releasing it."""
+    """Controller-internal simulation handle, never returned to a worker by IPC.
+
+    Context exit holds service rather than releasing it. It authorizes no
+    caller-side filesystem operation, even when the modeled state is ACTIVE.
+    """
 
     def __init__(self, registry: ModelRegistry, operation: OperationDescriptor, identity: GrantIdentity):
         self._registry = registry
@@ -270,37 +386,79 @@ class ModelHandle(AbstractContextManager["ModelHandle"]):
 class ModelRegistry:
     """One-target lifecycle simulation, never a production maintenance backend.
 
+    The issuer policy tuple is copied into immutable simulation state and must
+    match one enrollment and dedicated mutator UID. Every selected exact parent
+    must match a retained record. Omitted records permit construction only; grants
+    refuse. No policy rotation, record removal or identity refresh is modeled.
     Construction assumes a cold-start-enrolled target with no admitted writers;
     it does not prove that assumption. ``persist`` must return only after the
     simulated state is durable. Its exceptions retain the attempted selection
     and epoch in an in-memory recovery hold and propagate; they do not prove
     that no durable write occurred. The caller may not treat returned records
-    as filesystem grants.
+    as filesystem grants. Creating another registry does not restore or replace
+    native enrollment/history; only the existing model's restart transition
+    simulates controller replacement without erasing its history.
     A lock serializes transitions within this one model, including different
     journal slots; it does not supply cross-process or OS exclusion.
-    Persistence callbacks may read snapshots. Reentrant commits raise
-    ``MaintenanceContractError`` before the nested state is persisted or adopted;
-    if the callback propagates that refusal, the outer attempt stays held.
+    Persistence callbacks may read snapshots. Reentrant commits, release and
+    client admission raise ``MaintenanceContractError``, including no-write
+    retries, before nested state or approval escapes. If the callback propagates
+    that refusal, the outer attempt stays held.
     """
 
     def __init__(self, target: str, enrollment: str, boot: str, runtime_sha256: str,
                  target_binding: TargetBinding,
-                 persist: Callable[[ModelState], None]):
+                 persist: Callable[[ModelState], None], *, controller: str, policy_sha256: str,
+                 issuer_policies: tuple[NamespaceIssuerPolicy, ...] = (), mutator_uid: int | None = None):
         _require(PurePosixPath(target).is_absolute() and PurePosixPath(target).name == "graphify-out"
                  and bool(enrollment) and bool(boot) and _sha(runtime_sha256)
-                 and isinstance(target_binding, TargetBinding), "model enrollment required")
+                 and isinstance(target_binding, TargetBinding) and _sha(policy_sha256)
+                 and type(controller) is str and bool(controller), "model enrollment required")
+        fingerprint = issuer_policy_set_sha256(issuer_policies)
+        _require((not issuer_policies and mutator_uid is None)
+                 or (type(mutator_uid) is int and mutator_uid > 0 and all(
+                     policy.enrollment_id == enrollment and policy.mutator_uid == mutator_uid
+                     for policy in issuer_policies)), "matching dedicated issuer enrollment required")
         self.target, self.enrollment, self.boot, self.runtime_sha256 = target, enrollment, boot, runtime_sha256
         self.target_binding = target_binding
+        self.policy_sha256 = policy_sha256
         self._persist = persist
         self._persisting = False
         self._lock = threading.RLock()
-        self._state = ModelState()
+        self._state = ModelState(controller=controller, controller_incarnations=(controller,),
+                                 issuer_policies=issuer_policies,
+                                 issuer_policy_sha256=fingerprint if issuer_policies else None,
+                                 mutator_uid=mutator_uid)
         self._handle: ModelHandle | None = None
 
     @property
     def snapshot(self) -> ModelState:
         """Return immutable modeled state, with no authority or serialization side effects."""
         return self._state
+
+    @property
+    def issuer_policies(self) -> tuple[NamespaceIssuerPolicy, ...]:
+        """Return the immutable retained issuer records; no rotation is modeled."""
+        return self._state.issuer_policies
+
+    @property
+    def issuer_policy_sha256(self) -> str | None:
+        """Return the complete pinned policy fingerprint, independent of operation epoch."""
+        return self._state.issuer_policy_sha256
+
+    def _require_current_issuers(self, fingerprint: str | None, *, hold: bool) -> None:
+        if (not self.issuer_policies or fingerprint != self.issuer_policy_sha256
+                or not _sha(fingerprint)):
+            if hold:
+                self._commit(replace(self._state, state="RECOVERY_HELD"))
+            raise MaintenanceContractError("exact current issuer policy evidence required")
+
+    def _require_namespace_enrollment(self, operation: OperationDescriptor) -> None:
+        policies = {policy.namespace_path: policy for policy in self.issuer_policies}
+        for path, identity in operation.namespace_parents:
+            policy = policies.get(path)
+            _require(policy is not None and policy.namespace_identity == identity,
+                     "exact issuer namespace enrollment required")
 
     def _commit(self, candidate: ModelState) -> None:
         """Persist one transition without letting callbacks replace its attempted state."""
@@ -310,7 +468,7 @@ class ModelRegistry:
             self._persist(candidate)
         except BaseException:
             # A failed acknowledgment can follow a durable write. Retain the
-            # attempted epoch and selection without acknowledging a grant.
+            # attempted epoch, incarnation and writer-admission latch as uncertain.
             self._state = replace(candidate, state="RECOVERY_HELD")
             raise
         else:
@@ -323,18 +481,42 @@ class ModelRegistry:
                  and self._state.identity == handle.identity, "stale or copied maintenance handle")
         return self._state
 
-    def grant(self, operation: OperationDescriptor, identity: GrantIdentity) -> ModelHandle:
-        """Model one exact grant after persistence; reject unknown or still-live prior cohorts."""
+    def grant(self, operation: OperationDescriptor, identity: GrantIdentity,
+              admission: BrokerAdmission) -> ModelHandle:
+        """Model internal mutator admission after persistence, never a worker capability.
+
+        Require exact broker policy and explicit boundary witnesses. Unknown or
+        still-live prior mutators refuse; each attempted incarnation is retained.
+        A mutator cannot reuse a controller or mutator incarnation, even after
+        exit. Incarnation reuse refuses before persistence or state changes.
+        Contract errors raise MaintenanceContractError; persistence errors hold
+        the attempted state and propagate without returning a handle.
+        """
         with self._lock:
             old = self._state
             _require(operation.target == self.target and identity.enrollment == self.enrollment
                      and identity.boot == self.boot and identity.runtime_sha256 == self.runtime_sha256
+                     and identity.controller == old.controller and identity.policy_sha256 == self.policy_sha256
                      and identity.target_binding == self.target_binding
                      and identity.epoch == old.epoch + 1, "grant binding or epoch changed")
+            _require(identity.issuer_policy_sha256 == old.issuer_policy_sha256
+                     and identity.mutator_uid == old.mutator_uid,
+                     "grant issuer policy or mutator UID changed")
+            self._require_current_issuers(
+                admission.current_issuer_policy_sha256 if isinstance(admission, BrokerAdmission) else None,
+                hold=False)
+            _require(isinstance(admission, BrokerAdmission)
+                     and admission.operation_sha256 == operation.sha256 and admission.identity == identity
+                     and all(value is True for value in (
+                         admission.exclusive_mutator, admission.trusted_runtime, admission.protected_namespace,
+                         admission.authenticated_peer, admission.data_only_transport,
+                         admission.workers_without_capabilities, admission.no_children)),
+                     "exact broker-only admission evidence required")
             _require(old.state in {"HELD", "RECOVERY_HELD"} and not old.writers_admitted
                      and old.terminal is None, "target is not eligible for cold-start maintenance")
             if old.operation is not None:
-                _require(old.cohort_exited and old.access_withdrawn, "prior coordinator cohort is not retired")
+                _require(old.retirement is not None and old.access_withdrawn,
+                         "prior mutator cohort is not retired")
                 _require(operation.request_sha256 == old.operation.request_sha256,
                          "incomplete operation request changed")
                 if old.operation.action == "rollback":
@@ -343,34 +525,71 @@ class ModelRegistry:
                     _require(operation.preview_sha256 == old.operation.preview_sha256
                              and operation.seal_sha256 == old.operation.seal_sha256,
                              "incomplete operation data selectors changed")
-            candidate = ModelState(state="GRANTING", epoch=identity.epoch,
-                                   operation=operation, identity=identity)
+            self._require_namespace_enrollment(operation)
+            _require(identity.mutator not in old.mutator_incarnations
+                     and identity.mutator not in old.controller_incarnations,
+                     "mutator incarnation was already used")
+            candidate = ModelState(state="GRANTING", issuer_policies=old.issuer_policies,
+                                   issuer_policy_sha256=old.issuer_policy_sha256, mutator_uid=old.mutator_uid,
+                                   controller=old.controller,
+                                   controller_incarnations=old.controller_incarnations,
+                                   mutator_incarnations=(*old.mutator_incarnations, identity.mutator),
+                                   epoch=identity.epoch, operation=operation, identity=identity, admission=admission)
             self._commit(candidate)
             self._commit(replace(candidate, state="ACTIVE"))
             self._handle = ModelHandle(self, operation, identity)
             return self._handle
 
     def hold(self, handle: ModelHandle) -> None:
-        """Retain exclusion after handle closure, timeout or supervisor/coordinator failure."""
+        """Retain exclusion after handle closure, timeout or controller/mutator failure."""
         with self._lock:
             old = self._current(handle)
             if old.state != "RELEASED":
                 self._commit(replace(old, state="RECOVERY_HELD"))
 
-    def confirm_exit(self, handle: ModelHandle, witness: CohortExit) -> None:
-        """Accept only an exact simulation witness; PID age or epoch alone cannot retire a cohort."""
+    def restart(self, controller: str) -> None:
+        """Simulate a proven controller replacement while retaining denial and history.
+
+        This is an in-memory contract transition, not native state restoration or
+        process retirement. The caller must independently establish exclusive
+        controller custody. Old operation, retirement and release evidence stays
+        bound to its original incarnation; no boot identity is refreshed. This
+        transition alone offers no post-restart service-release reconciliation.
+        A fresh controller cannot reuse any controller or mutator incarnation;
+        reuse refuses before persistence or state changes.
+        """
+        with self._lock:
+            old = self._state
+            _require(type(controller) is str and bool(controller)
+                     and controller not in old.controller_incarnations
+                     and controller not in old.mutator_incarnations,
+                     "fresh controller incarnation required")
+            self._commit(replace(old, state="RECOVERY_HELD", controller=controller,
+                                 controller_incarnations=(*old.controller_incarnations, controller)))
+
+    def confirm_retirement(self, handle: ModelHandle, witness: BrokerRetirement) -> None:
+        """Require exact exit, quiescence and capability evidence; uncertainty keeps a hold.
+
+        A mismatched witness refuses without adopting it. An exact but incomplete
+        witness persists RECOVERY_HELD and raises MaintenanceContractError. No
+        simulated witness establishes an OS fact.
+        """
         with self._lock:
             old = self._current(handle)
             _require(old.state in {"ACTIVE", "RECOVERY_HELD"}
                      and witness.operation_sha256 == handle.operation.sha256
-                     and witness.identity == handle.identity, "exact cohort exit witness required")
-            self._commit(replace(old, state="RECOVERY_HELD", cohort_exited=True))
+                     and witness.identity == handle.identity, "exact cohort retirement witness required")
+            if not all(value is True for value in (witness.mutator_exited, witness.requests_quiesced,
+                                                  witness.capabilities_closed, witness.workers_without_capabilities)):
+                self._commit(replace(old, state="RECOVERY_HELD", retirement=None))
+                raise MaintenanceContractError("complete broker retirement evidence required")
+            self._commit(replace(old, state="RECOVERY_HELD", retirement=witness))
 
     def withdraw_access(self, handle: ModelHandle) -> None:
         """Model removal of temporary archive access only after all old writable handles are gone."""
         with self._lock:
             old = self._current(handle)
-            _require(old.state == "RECOVERY_HELD" and old.cohort_exited,
+            _require(old.state == "RECOVERY_HELD" and old.retirement is not None,
                      "cohort exit must precede access withdrawal")
             self._commit(replace(old, access_withdrawn=True))
 
@@ -378,7 +597,7 @@ class ModelRegistry:
         """Model independent verification after exit/access withdrawal; rollback remains held."""
         with self._lock:
             old = self._current(handle)
-            _require(old.state == "RECOVERY_HELD" and old.cohort_exited and old.access_withdrawn
+            _require(old.state == "RECOVERY_HELD" and old.retirement is not None and old.access_withdrawn
                      and terminal.operation_sha256 == handle.operation.sha256
                      and terminal.archive_sha256 == self.target_binding.old_inventory_sha256,
                      "post-exit independent terminal validation required")
@@ -394,10 +613,19 @@ class ModelRegistry:
             state: State = "RELEASE_READY" if terminal.outcome == "committed" else "HELD"
             self._commit(replace(old, state=state, terminal=terminal))
 
-    def release(self, handle: ModelHandle) -> ReleaseRecord:
-        """Persist explicit release before admitting clients; exact retries return its own record."""
+    def release(self, handle: ModelHandle, *, current_issuer_policy_sha256: str | None = None) -> ReleaseRecord:
+        """Persist release only with current policy evidence, including on exact retry.
+
+        Missing, stale or unknown complete fingerprints persist RECOVERY_HELD and
+        raise MaintenanceContractError; source or receipt bytes cannot supply it.
+        This call does not refresh policy or reconcile an existing hold.
+        Calls from persistence callbacks refuse even on an idempotent retry.
+        """
         with self._lock:
+            _require(not self._persisting, "reentrant maintenance persistence transition")
             old = self._current(handle)
+            _require(handle.identity.controller == old.controller, "retired controller cannot release service")
+            self._require_current_issuers(current_issuer_policy_sha256, hold=True)
             if old.state == "RELEASED" and old.release is not None:
                 return old.release
             _require(old.state == "RELEASE_READY" and old.terminal is not None
@@ -407,18 +635,25 @@ class ModelRegistry:
             self._commit(replace(old, state="RELEASED", release=record))
             return record
 
-    def admit_client(self, runtime_sha256: str, publication: CurrentPublication) -> ReleaseRecord:
+    def admit_client(self, runtime_sha256: str, publication: CurrentPublication, *,
+                     current_issuer_policy_sha256: str | None = None) -> ReleaseRecord:
         """Model compatible startup after durable release and normal receipt/origin validation.
 
-        Later generations retain the released identity/origin but may have a new
-        receipt. The first writer-admission bit is persisted before returning;
+        Missing, stale or unknown issuer fingerprints persist RECOVERY_HELD before
+        refusal. Fingerprints are explicit simulation evidence, never native
+        custody proof. Later generations retain the released identity/origin but may
+        have a new receipt. The first writer-admission bit is persisted before returning;
         a failed acknowledgment holds the target and grants no modeled launch.
+        Calls from persistence callbacks raise MaintenanceContractError even
+        when a previous client already set the writer-admission bit.
         """
         with self._lock:
+            _require(not self._persisting, "reentrant maintenance persistence transition")
             old = self._state
             _require(old.state == "RELEASED" and old.release is not None,
                      "service release has not been acknowledged")
             assert old.release is not None
+            self._require_current_issuers(current_issuer_policy_sha256, hold=True)
             terminal = old.release.terminal
             _require(runtime_sha256 == self.runtime_sha256
                      and publication.output_identity == terminal.output_identity

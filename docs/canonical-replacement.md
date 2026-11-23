@@ -13,8 +13,11 @@ not native qualification or proof that legacy clients cannot restart. There is
 no environment variable, confirmation flag, or request field that enables it.
 
 The [maintenance contract and qualification plan](replacement-maintenance.md)
-defines exact operation selection, modeled authority holds and explicit service
-release. It adds no native broker or production authority. Contract/model tests
+defines the broker-only design candidate, exact operation selection, modeled
+authority holds and explicit service release. Workers submit data; a future
+trusted mutator must own the whole filesystem operation. The current private
+context-manager hook is not that transport and remains disabled. The model adds
+no native broker or production authority. Contract/model tests
 do not qualify process containment, legacy restart exclusion or live execution.
 
 ## Data profile
