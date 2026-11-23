@@ -141,6 +141,18 @@ def _write_all(file_descriptor: int, payload: bytes) -> None:
         view = view[written:]
 
 
+def _guard_pointer_paths(*paths: Path) -> None:
+    """Translate replacement refusal into the pointer writer's public error."""
+    from .canonical_replacement import guard_output
+    from .transaction import PendingTransactionError
+
+    try:
+        for path in paths:
+            guard_output(path, mutation=True)
+    except PendingTransactionError as exc:
+        raise InterpreterPointerError(f"replacement admission refused pointer publication: {exc}") from exc
+
+
 def _write_posix(pointer: Path, payload: bytes) -> None:
     parent = pointer.parent
     try:
@@ -148,6 +160,7 @@ def _write_posix(pointer: Path, payload: bytes) -> None:
     except OSError as exc:
         raise InterpreterPointerError("pointer parent is unavailable") from exc
     _validate_parent_info(parent_before)
+    _guard_pointer_paths(parent, pointer)
     directory_fd = _open_parent_directory(parent)
 
     temp_name = _temp_name(pointer.name)
@@ -161,12 +174,15 @@ def _write_posix(pointer: Path, payload: bytes) -> None:
 
         temp_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         temp_flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        temporary = parent / temp_name
+        _guard_pointer_paths(temporary, pointer)
         file_descriptor = os.open(temp_name, temp_flags, 0o600, dir_fd=directory_fd)
         temp_created = True
         try:
             temp_info = os.fstat(file_descriptor)
             if not stat.S_ISREG(temp_info.st_mode):
                 raise InterpreterPointerError("temporary pointer is not a regular file")
+            _guard_pointer_paths(temporary)
             os.fchmod(file_descriptor, 0o600)
             _write_all(file_descriptor, payload)
             os.fsync(file_descriptor)
@@ -179,6 +195,7 @@ def _write_posix(pointer: Path, payload: bytes) -> None:
             raise InterpreterPointerError("pointer parent changed before publication")
         _validate_parent_info(os.fstat(directory_fd))
         _validate_destination_info(_lstat_at(pointer.name, directory_fd))
+        _guard_pointer_paths(temporary, pointer)
         os.replace(temp_name, pointer.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         temp_created = False
 
@@ -200,7 +217,8 @@ def _write_posix(pointer: Path, payload: bytes) -> None:
     finally:
         if temp_created:
             # Temporary-file removal is best-effort and must not mask the publication failure.
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(OSError, InterpreterPointerError):
+                _guard_pointer_paths(parent / temp_name)
                 os.unlink(temp_name, dir_fd=directory_fd)
         os.close(directory_fd)
 
@@ -210,7 +228,12 @@ def write_interpreter_pointer(
     *,
     interpreter: Path | str | None = None,
 ) -> Path:
-    """Safely publish an absolute executable path and return its lexical form."""
+    """Publish the selected executable and return its lexical interpreter path.
+
+    Parent, temporary and final paths must pass replacement mutation admission.
+    Unsafe paths or blocked admission raise InterpreterPointerError. A late
+    registration can retain a temporary file to preserve the protected tree.
+    """
     interpreter_path, interpreter_text = _validate_interpreter(interpreter)
     pointer = Path(pointer_path)
     if pointer.name in {"", ".", ".."}:

@@ -129,6 +129,42 @@ def test_ambiguous_legacy_registration_refuses_even_exact_spelling(registration,
         replacement.guard_output(parent / "Archive" / "new.txt")
 
 
+def test_pointer_publication_preserves_registered_archive(registration):
+    parent, marker, journal = archive_registration(registration)
+    archive = parent / "Archive"
+    archive.mkdir(mode=0o700)
+    pointer = archive / ".graphify_python"
+    pointer.write_text("original")
+    before = marker.read_bytes(), journal.read_bytes(), pointer.read_bytes()
+    with pytest.raises(interpreter_pointer.InterpreterPointerError, match="replacement"):
+        interpreter_pointer.write_interpreter_pointer(pointer, interpreter=sys.executable)
+    assert (marker.read_bytes(), journal.read_bytes(), pointer.read_bytes()) == before
+    assert list(archive.iterdir()) == [pointer]
+
+
+def test_pointer_late_registration_preserves_temporary_and_destination(registration, monkeypatch):
+    parent, marker, _ = registration
+    output = parent / "graphify-out"
+    output.mkdir(mode=0o700)
+    pointer = output / ".graphify_python"
+    pointer.write_text("original")
+    write = interpreter_pointer._write_all
+
+    def write_then_register(fd, payload):
+        write(fd, payload)
+        record = json.loads(marker.read_text())
+        record["entries"]["graphify-out"]["role"] = "archive"
+        marker.write_text(json.dumps(record))
+
+    monkeypatch.setattr(interpreter_pointer, "_write_all", write_then_register)
+    with pytest.raises(interpreter_pointer.InterpreterPointerError, match="replacement"):
+        interpreter_pointer.write_interpreter_pointer(pointer, interpreter=sys.executable)
+    assert pointer.read_text() == "original"
+    temporary = list(output.glob("*.tmp"))
+    assert len(temporary) == 1
+    assert temporary[0].read_text() == sys.executable
+
+
 def test_actual_case_insensitive_archive_alias(registration):
     parent, _, _ = archive_registration(registration)
     archive = parent / "Archive"
@@ -150,3 +186,15 @@ def test_existing_coordinator_lock_is_not_chmodded(case):
     with replacement._coordinator_lock(request):
         pass
     assert stat.S_IMODE(lock.stat().st_mode) == 0o640
+
+
+def test_pointer_refuses_registered_temporary_slot(registration, monkeypatch):
+    parent, marker, _ = archive_registration(registration)
+    pointer = parent / ".graphify_python"
+    before = marker.read_bytes()
+    monkeypatch.setattr(interpreter_pointer, "_temp_name", lambda _: "Archive")
+    with pytest.raises(interpreter_pointer.InterpreterPointerError, match="replacement"):
+        interpreter_pointer.write_interpreter_pointer(pointer, interpreter=sys.executable)
+    assert marker.read_bytes() == before
+    assert not pointer.exists()
+    assert not (parent / "Archive").exists()

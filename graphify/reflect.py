@@ -600,6 +600,9 @@ def reflect(memory_dir: Path, out_path: Path,
 
     If ``graph_path`` is given lessons are grouped by community and source nodes no
     longer in the graph are dropped; otherwise the doc is a single flat section.
+    Replacement/archive mutation admission precedes parent creation and the final
+    file open. Refusal raises PendingTransactionError before that write; these
+    preflight checks do not exclude concurrent writers.
     """
     docs = load_memory_docs(memory_dir)
 
@@ -631,8 +634,12 @@ def reflect(memory_dir: Path, out_path: Path,
                             half_life_days=half_life_days,
                             min_corroboration=min_corroboration,
                             known_nodes=known_nodes)
+    from graphify.canonical_replacement import guard_output
+
     out_path = Path(out_path)
+    guard_output(out_path.parent, mutation=True)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    guard_output(out_path, mutation=True)
     with out_path.open("w", encoding="utf-8") as lessons:
         lessons.write(render_lessons_md(agg))
         lessons.flush()
