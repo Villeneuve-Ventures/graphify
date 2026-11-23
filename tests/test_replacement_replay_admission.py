@@ -42,3 +42,29 @@ def test_preview_complete_journal_budget_exact_boundary(case, monkeypatch, remai
         with pytest.raises(tx.PendingTransactionError, match="bound"):
             replacement.preview(request, sealed)
     assert not Path(request["journal"]).exists()
+
+
+def test_guard_growth_refuses_without_rewriting_held_guard(tmp_path, monkeypatch):
+    slot = tmp_path / "archive"
+    journal = tmp_path / "journal.json"
+    replacement._register(slot, journal, "digest", "archive")
+    marker = tmp_path / replacement.GUARD
+    before = marker.read_bytes()
+    monkeypatch.setattr(replacement, "MAX_BYTES", len(before))
+
+    with pytest.raises(tx.PendingTransactionError, match="bound"):
+        replacement._register(tmp_path / "second", journal, "digest", "archive")
+
+    assert marker.read_bytes() == before
+
+
+def test_unreadable_guard_is_not_rewritten(tmp_path, monkeypatch):
+    marker = tmp_path / replacement.GUARD
+    before = replacement._bytes({"schema": 1, "entries": {"held": {"note": "x" * 256}}})
+    marker.write_bytes(before)
+    monkeypatch.setattr(replacement, "MAX_BYTES", 128)
+
+    with pytest.raises(tx.PendingTransactionError, match="oversized"):
+        replacement._register(tmp_path / "next", tmp_path / "journal.json", "digest", "archive")
+
+    assert marker.read_bytes() == before

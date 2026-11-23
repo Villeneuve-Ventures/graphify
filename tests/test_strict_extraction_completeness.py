@@ -134,7 +134,8 @@ def install():
                 record("partial_yield", path=str(target), name=entry.name)
                 return entry
         def scan(path):
-            if fail and Path(path) == target and in_stack(helper) and scheduled():
+            if (fail and isinstance(path, (str, os.PathLike)) and Path(path) == target
+                    and in_stack(helper) and scheduled()):
                 return PartialScan(path)
             return SCANDIR(path)
         os.scandir = scan

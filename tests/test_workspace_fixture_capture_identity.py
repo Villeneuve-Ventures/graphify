@@ -87,17 +87,31 @@ class StagingIdentityTests(unittest.TestCase):
         self.assertEqual(len(list(self.root.glob('.graphify-fixture-*'))), 1)
 
     def test_foreign_owned_stage_is_refused_before_writes(self):
+        original_open = os.open
         original_fstat = os.fstat
+        stage_identity = None
+        injected = []
+
+        def capture_stage(path, flags, *args, **kwargs):
+            nonlocal stage_identity
+            fd = original_open(path, flags, *args, **kwargs)
+            if flags & os.O_DIRECTORY and str(path).startswith('.graphify-fixture-'):
+                info = original_fstat(fd)
+                stage_identity = (info.st_dev, info.st_ino)
+            return fd
 
         def foreign_owner(fd):
             info = original_fstat(fd)
-            if stat.S_ISDIR(info.st_mode):
-                return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino,
-                                       st_mode=info.st_mode, st_uid=os.geteuid() + 1)
+            if (info.st_dev, info.st_ino) == stage_identity:
+                injected.append(fd)
+                fields = {name: getattr(info, name) for name in dir(info) if name.startswith('st_')}
+                fields['st_uid'] = os.geteuid() + 1
+                return SimpleNamespace(**fields)
             return info
 
-        with patch.object(os, 'fstat', foreign_owner), patch.object(candidate, '_write_fixture_members') as writer, self.assertRaises(ContractError):
+        with patch.object(os, 'open', capture_stage), patch.object(os, 'fstat', foreign_owner), patch.object(candidate, '_write_fixture_members') as writer, self.assertRaises(ContractError):
             candidate._write_fixture(self.output, self.bundle, b'{}')
+        self.assertTrue(injected, 'ownership fault must reach the exact fixture stage')
         writer.assert_not_called()
         self.assertFalse(self.output.exists())
         self.assertEqual(len(list(self.root.glob('.graphify-fixture-*'))), 1)

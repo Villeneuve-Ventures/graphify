@@ -98,6 +98,8 @@ def require_ordinary_output(path: str | os.PathLike[str]) -> None:
     its target; callers must repeat admission at their final write boundary.
     Unknown or racing ancestry refuses instead of granting a writable path.
     """
+    from .canonical_replacement import guard_output
+    guard_output(path, mutation=True)
     supplied = Path(path).expanduser().absolute()
     resolved = Path(os.path.realpath(supplied))
     if os.name == "nt":
@@ -189,7 +191,11 @@ def _raise_unsafe_path(exc: OSError) -> None:
 def ordinary_directory(
     path: str | os.PathLike[str], *, create: bool = False,
 ) -> Iterator[tuple[Path, int]]:
-    """Pin an admitted directory; optional creation stays descriptor-relative."""
+    """Pin an admitted directory; optional creation stays descriptor-relative.
+
+    Recheck the selected path before creating each missing component, so a
+    replacement registration refuses before that creation, including absent slots.
+    """
 
     resolved = Path(os.path.realpath(Path(path).expanduser().absolute()))
     if os.name == "nt":
@@ -216,6 +222,7 @@ def ordinary_directory(
                     raise
                 # Recheck all ancestors before the traversal itself mutates disk.
                 _require_directory_binding(current, descriptor)
+                require_ordinary_output(resolved)
                 try:
                     os.mkdir(part, dir_fd=descriptor)
                 except FileExistsError:
@@ -334,7 +341,11 @@ def ordinary_open(
 def ordinary_open(
     path: str | os.PathLike[str], mode: str, *, encoding: str | None = None,
 ) -> Iterator[IO[str] | IO[bytes]]:
-    """Open a regular output relative to a held, inspected parent directory."""
+    """Open a regular output relative to a held, inspected parent directory.
+
+    Admit the selected slot before creation and again before truncating or
+    yielding the stream. Replacement registrations raise PendingTransactionError.
+    """
 
     if mode not in {"w", "a", "wb", "ab"}:
         raise ValueError("unsupported ordinary output mode")
@@ -373,6 +384,7 @@ def ordinary_open(
         return
     with ordinary_directory(resolved.parent) as (_parent, parent_descriptor):
         _require_directory_binding(resolved.parent, parent_descriptor)
+        require_ordinary_output(resolved)
         flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
         if "a" in mode:
             flags |= os.O_APPEND
@@ -398,6 +410,7 @@ def ordinary_open(
             details = os.fstat(descriptor)
             if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
                 raise ManagedWorkspaceOutputError("ordinary output is not a singular regular file")
+            require_ordinary_output(resolved)
             admitted = True
             if "w" in mode:
                 os.ftruncate(descriptor, 0)
@@ -470,7 +483,11 @@ def ordinary_temporary_file(
 
 
 def ordinary_replace(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
-    """Replace one ordinary file using pinned source and destination parents."""
+    """Replace one ordinary file using pinned source and destination parents.
+
+    Admit both selected slots before moving either entry; replacement
+    registrations raise PendingTransactionError without performing the rename.
+    """
 
     src = Path(source).expanduser().absolute()
     dst = Path(destination).expanduser().absolute()
@@ -483,6 +500,8 @@ def ordinary_replace(source: str | os.PathLike[str], destination: str | os.PathL
         with ordinary_directory(dst.parent) as (dst_parent, dst_fd):
             _require_directory_binding(src_parent, src_fd)
             _require_directory_binding(dst_parent, dst_fd)
+            require_ordinary_output(src)
+            require_ordinary_output(dst)
             os.replace(src.name, dst.name, src_dir_fd=src_fd, dst_dir_fd=dst_fd)
 
 
@@ -582,6 +601,7 @@ def _windows_unlink(path: Path) -> None:
         require_ordinary_output(parent)
         if not same_path(physical_path(target_handle), opened_path):
             raise ManagedWorkspaceOutputError("ordinary unlink binding changed")
+        require_ordinary_output(opened_path)
         _delete_opened_windows_handle(target_handle, unlink_on_close=True)
     finally:
         # Close the delete handle while all ancestor pins are still held.
@@ -592,7 +612,11 @@ def _windows_unlink(path: Path) -> None:
 
 
 def ordinary_unlink(path: str | os.PathLike[str]) -> None:
-    """Remove one file through an inspected parent; never follow its final link."""
+    """Remove one file through an inspected parent; never follow its final link.
+
+    Admit the selected slot before unlinking. Replacement registrations raise
+    PendingTransactionError without removing the entry.
+    """
 
     target = Path(path).expanduser().absolute()
     if os.name == "nt":
@@ -600,17 +624,22 @@ def ordinary_unlink(path: str | os.PathLike[str]) -> None:
         return
     with ordinary_directory(target.parent) as (parent, parent_fd):
         _require_directory_binding(parent, parent_fd)
+        require_ordinary_output(target)
         os.unlink(target.name, dir_fd=parent_fd)
 
 
 def ordinary_atomic_bytes(path: str | os.PathLike[str], payload: bytes) -> None:
-    """Write and replace a regular file under one held ordinary directory."""
+    """Write and replace a regular file under one held ordinary directory.
+
+    Admit the selected slot before creating parents or staging bytes and again
+    before replacement. A refused replacement removes its temporary file.
+    """
 
     target = Path(path).expanduser().absolute()
+    require_ordinary_output(target)
     if os.name == "nt":
         import tempfile
 
-        require_ordinary_output(target)
         ordinary_mkdir(target.parent)
         temp = None
         try:
@@ -644,6 +673,7 @@ def ordinary_atomic_bytes(path: str | os.PathLike[str], payload: bytes) -> None:
             finally:
                 os.close(fd)
             _require_directory_binding(parent, parent_fd)
+            require_ordinary_output(target)
             os.replace(temporary, target.name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         finally:
             try:
