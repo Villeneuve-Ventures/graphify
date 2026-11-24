@@ -12,7 +12,7 @@ override Make's base selection.
 | Lane | Checks |
 | --- | --- |
 | `editorial-docs` | Complete-set whitespace and conflict checks, plus `tests/test_readme_policy.py` |
-| `contract-docs` | Editorial checks plus tests directly mapped to changed policy/template paths |
+| `contract-docs` | Editorial checks plus any additional tests mapped to the changed paths |
 | `full` | `make review-ready`: whitespace checks, frozen all-extras setup, complete `pytest tests/`, whitespace checks again |
 
 The full local gate runs `uv sync --all-extras --frozen`, matching the existing
@@ -30,6 +30,8 @@ tests; the routing job does not supply that prerequisite. Local full validation
 also requires that Git version. README changes also run the existing Python
 installation/runtime policy tests. PR template changes run the routing tests and
 a content check of the maintained template's validation-route receipt field.
+In the `contract-docs` lane, an `AGENTS.md`-only change runs only the common
+README naming test.
 Instruction filenames qualify only at the root or in maintained docs and template
 directories; they do not bypass excluded or unknown path ownership.
 An explicitly designated protected change still
